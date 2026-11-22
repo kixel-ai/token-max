@@ -4,17 +4,12 @@ A Rust CLI that reads this host's Claude Code and Codex transcripts and
 settings and tells a person which settings to change. Most advice about agent
 configuration is asserted, not measured; this tool shows its evidence.
 
-Every recommendation is one of three kinds, and its line says which:
-
-- **Measured**: replayed from the user's own transcripts at public API prices.
-  Name what the replay holds constant and what it could not measure.
-- **Official**: the provider's own guidance, cited, beside whatever the
-  transcripts show.
-- **Opinion**: the maintainer's preference, such as avoiding auto memory in
-  repositories that have an AGENTS.md. Label it as one, and show the
-  measurement that makes it apply to this user.
-
-Never present one kind as another. Say plainly when a cost can't be measured
+Every line is measured: replayed from the user's own transcripts at public API
+prices, naming what the replay holds constant and what it could not measure.
+The maintainer's preferences never become a verdict. A provider's guidance
+that the transcripts can't price, such as Claude Code's 200-line CLAUDE.md
+advice, is a cited warning apart from the lines, with no verdict and no effect
+on the exit code. Say plainly when a cost can't be measured
 rather than hiding the setting or guessing a number. A cost measured on only some
 requests is extrapolated to the rest, marked with `~` and its margin of error,
 and states its assumption that the unpriced requests resemble the priced ones.

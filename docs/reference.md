@@ -38,14 +38,14 @@ monthly saving first. Each change is a card. Its first line is a counter, such
 as `[1/4]`, and the setting's name, with its saving per 30 days in dollars and
 as a percent of this host's spend over the window (the base the report's
 percents use) at the right. Next comes the current value and the offered one,
-such as `5m -> 1h`, with whether it is recommended or worth considering and
-its kind of claim. Then `What` gives one plain sentence on what the setting or
+such as `5m -> 1h`, with whether it is recommended or worth considering.
+Then `What` gives one plain sentence on what the setting or
 feature does (see [What each line does](#what-each-line-does)), and `Why`
 gives what was measured, such as the requests a replay covered or a tool's
 uses and what each cost, and why the change makes sense. A card leaves out the
 edit, which repeats the value change; the confirm shows every accepted edit
-once, as a diff. A change whose saving was not measured, such as raising an
-effort, comes after the measured ones and says so.
+once, as a diff. A change whose saving was not measured, such as lowering a
+Bash timeout cap, comes after the measured ones and says so.
 
 A change saving $5/mo or more is its own question. A smaller one joins a group
 of its kind and reason, such as never-used skills or MCP servers over $1 per
@@ -292,8 +292,8 @@ What the providers document, checked 2026-11-14:
   settings would have cost, replayed over the same sessions.
 
 Where a provider documents a rule that API prices alone don't show, the line's
-evidence under `--details` adds an `Official:` sentence before the setting that
-changes it, and the list ends with the source:
+evidence under `--details` states it before the setting that changes it, and
+the list ends with the source:
 
 | Line | On a plan |
 | --- | --- |
@@ -375,23 +375,25 @@ The default report says what was read and what it cost at API prices, then
 gives every setting and feature one line. Each line names its verdict, the
 setting or feature, its current value (and the value to change to, for a
 change), what it saves per 30 days or costs over the window, that figure's
-share of this host's spend, the kind of claim it rests on, the profile when
-several were read, and the setting that changes it. For a change `doctor` offers,
+share of this host's spend, the profile when several were read, and the
+setting that changes it. For a change `doctor` offers,
 that last column is the exact edit and file, or the step to take by hand.
 
-The kinds of claim are:
+Every line is measured: replayed or priced from your own transcripts at public
+API prices, or marked unknown where they can't price it. No verdict rests on
+anyone's preference or on a provider's advice alone.
 
-- **Measured**: replayed from your own transcripts at public API prices: the
-  cache TTL, compaction window, idle compaction (native and T3), the Bash cap,
-  keepalive pings, background generation, tool output caps, and every tool,
-  skill and MCP server, with subagent types and context no setting turns off.
-- **Official**: the provider's own guidance beside what the transcripts show:
-  CLAUDE.md length and the AGENTS.md byte budget, MCP tool loading,
-  main-session effort, and Fable's weekly use beside the plan rule. A Claude
-  subagent type's evidence also cites Anthropic's model guide.
-- **Opinion**: the maintainer's preference, beside whatever was measured: fast
-  mode off, auto memory off, raising a `low` effort, and lowering a Codex
-  `max` effort.
+A provider's guidance that the transcripts can't price comes after the lines,
+under **Warnings**, each naming its line, saying what the provider advises
+beside what was measured, and citing the page. A warning has no verdict, never
+changes the exit code, and `doctor` never asks about it:
+
+| Warning | When |
+| --- | --- |
+| Main-session effort | The default level is above `high`: Anthropic's [model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/) and [model configuration docs](https://code.claude.com/docs/en/model-config#choose-an-effort-level) for Claude, OpenAI's [reasoning guide](https://developers.openai.com/api/docs/guides/reasoning) for Codex. |
+| An instruction file | A CLAUDE.md of 200 lines or more, past Claude Code's [guidance](https://code.claude.com/docs/en/memory#write-effective-instructions), or an AGENTS.md at or above the byte budget Codex [loads](https://learn.chatgpt.com/docs/agent-configuration/agents-md), with what each 100 lines of it costs. |
+| Explore subagent | Claude's built-in Explore ran off Haiku: what it cost, the same tokens on the cheapest model, and the model guide's tip. |
+| Fable weekly use | Any Fable request in the window: what they cost, and Anthropic's [plan rule](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan). |
 
 The lines come in two groups. **Changes** come first: every line recommended
 (red, exit 1) or worth considering (yellow, exit 0), ranked together by what
@@ -469,17 +471,18 @@ prices, with one copy retained. Repeated discovery of the same path needs the
 redundant source removed. Zero observations do not prove nonuse, and listing
 cost is not promised savings: Codex can backfill the freed catalog space.
 Auto memory, Claude Code's `MEMORY.md` and system prompt section or Codex's
-memory summary, is worth considering off while it is on, or may be on because
-a Codex setting such as a `--profile` selection is not recorded, on the maintainer's
-opinion rather than a measurement: notes the agent writes for itself skip
-review and encourage slop, so durable guidance belongs in a reviewed,
-checked-in CLAUDE.md or AGENTS.md. Its line shows the total cost of the loaded
-memory, the memory files read back and the writes, and how often it was read or
-written, but `--max-cost-per-use` does not apply and it does not cause exit 1. A
-profile with memory off shows it as kept.
+memory summary, is judged as a skill is, with each memory file read back or
+written as a use: on and never used is recommended off, and above
+`--max-cost-per-use` per use worth considering off. Its line shows the total
+cost of the loaded memory, the memory files read back and the writes, and how
+often it was read or written. A total that leaves out what could not be priced,
+such as Codex's extraction and consolidation, proves neither that memory was
+free nor that it stayed under the limit per use, so those lines and one that
+may be on because a Codex setting such as a `--profile` selection is not
+recorded give no verdict. A profile with memory off shows it as kept.
 Claude plugin skills, which `skillOverrides` does not reach, and the system
 prompt, core tools such as Bash and Read, and the skill and subagent lists have
-no switch, so their Measured lines give no verdict.
+no switch, so their lines give no verdict.
 A switch is an edit such as `"enableArtifact": false` or a bare tool name added
 to `permissions.deny`, which `doctor` offers to make (see
 [Applying changes](#applying-changes)). `--details` lists every piece,
@@ -505,8 +508,7 @@ Each saving is priced like its line's own comparison, holding every other
 setting at its current value, so the sum adds savings that may count the same
 requests and says that overlapping settings may save less. A saving that
 holds only for one of two possible defaults is summed apart as "up to", and
-one that cannot be measured is counted, never priced at zero. A line keeps
-its kind of claim: auto memory's note sits on an Opinion line.
+one that cannot be measured is counted, never priced at zero.
 
 | Setting | Default | What the current value saves |
 | --- | --- | --- |
@@ -611,20 +613,23 @@ App controls require the actual app id, which these transcripts do not map to
 the exposed app namespaces; the report names the supported controls without
 inventing per-app costs or a settings patch.
 
-Instruction files are Official lines. A CLAUDE.md is worth considering
-shorter at 200 recorded lines or more, Claude Code's documented guidance, and
-kept below that. A Codex AGENTS.md is compared with the selected profiles'
-`project_doc_max_bytes` from the system and user configuration (32 KiB by
-default): the recorded rendered bytes include headers and wrappers, so under
-the budget it is kept, and at or above it Codex may have truncated it, which is
-worth considering. The evidence names the file that sets the budget, or says
-it is the default. A project `.codex/config.toml` at a recorded directory or a named
-profile that sets it gives no verdict, since the transcripts do not record
-which applied; neither do profiles with different or unreadable budgets, or
-records with no rendered text. Command-line overrides and original file sizes
-are unavailable.
-Length alone is not a quality score. Other instruction files Claude loads have
-no size guidance and get a Measured line with their cost. Output-cap lines
+Each instruction file Claude Code or Codex loads gets a line with what it cost
+over the window, its recorded length, and what each 100 lines of it cost per 30
+days, which is what shortening it by that much saves, assuming the rest of the
+work is unchanged. What a line of instructions is worth is not recorded, so the
+line gives no verdict and `doctor` offers no change.
+
+A CLAUDE.md of 200 recorded lines or more, past Claude Code's documented
+guidance, gets a warning. So does a Codex AGENTS.md at or above the selected
+profiles' `project_doc_max_bytes` from the system and user configuration (32
+KiB by default), where Codex may have cut it short: the recorded rendered bytes
+include headers and wrappers, so only reaching the budget can mean truncation.
+The warning names the file that sets the budget, or says it is the default. A
+project `.codex/config.toml` at a recorded directory or a named profile that
+sets it gives no warning, since the transcripts do not record which applied;
+neither do profiles with different or unreadable budgets, or records with no
+rendered text. Command-line overrides and original file sizes are unavailable.
+Output-cap lines
 still recommend no value because truncation-related read-back cannot be priced
 from these transcripts.
 
@@ -1049,13 +1054,16 @@ activity, and their metadata does not establish whether they are keepalive pings
 
 ## Fast mode
 
-The maintainer's cost preference is fast mode off for both harnesses. The
-`fast-mode` check names the current effective local preference, its owner and
-the standard-speed replacement: Claude `fastMode: false`, or Codex
-`service_tier = "default"`, which `doctor` offers to make when the profile's
-own file owns the setting. Use `/fast off` for an active session. A justified current premium preference causes exit 1 even without
-historical usage or prices. Standard current settings never receive a change
-because of historical premium sessions.
+The `fast-mode` check names the current effective local preference, its owner
+and the standard-speed replacement: Claude `fastMode: false`, or Codex
+`service_tier = "default"`. When the current setting's premium over the
+recorded usage is above zero, turning it off is worth considering (yellow, exit
+0), and `doctor` offers it when the profile's own file owns the setting: the
+premium is measured, but the speed it buys is not valued. A premium measured at
+nothing keeps the setting, and one that can't be priced, such as with no
+recorded usage, gives no verdict. Use `/fast off` for an active session.
+Standard current settings never receive a change because of historical premium
+sessions.
 
 Claude resolution includes `fastModePerSessionOptIn`, managed `fastMode: false`,
 project/local files at recorded working directories, model support and the active
@@ -1092,8 +1100,7 @@ conditionally priced parts, preserving recorded tiers and all context/cache
 categories. Unsupported scenarios, including Flex and Scale without verified
 rates, remain unknown. These are sensitivity examples, not bounds on actual
 charges. Context keep/off, compaction and keepalive winners that depend on missing tiers stay
-advisory because tier sensitivity could reverse them. The explicit preference to
-disable premium speed still applies. SSH reports use the same pricing and evidence.
+advisory because tier sensitivity could reverse them. SSH reports use the same pricing and evidence.
 
 ## Background generation
 
@@ -1151,29 +1158,20 @@ T3 instance its own: the reasoning effort its main
 session defaults to, the level it runs at, what each recorded model and effort
 pair cost over the window and how many requests it ran, and the setting that
 changes the default. A different effort changes the output tokens, so no cost
-is repriced and no saving is claimed.
+is repriced, no saving is claimed, and the line gives no verdict; `doctor`
+never offers to change it. A default token-max cannot resolve, such as a T3
+thread's selection, is unknown.
 
-- `max` is a recommended change to `xhigh`, or to `high` on a model without
-  `xhigh`, and exits 1. For Claude it is Official, citing Anthropic's
-  [model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/)
-  (past `high`, test the next model up at a lower effort) and the
-  [model configuration docs](https://code.claude.com/docs/en/model-config#choose-an-effort-level)
-  (`max` is prone to overthinking; test it before adopting it broadly). For
-  Codex the same advice is Opinion, beside OpenAI's
-  [reasoning guide](https://developers.openai.com/api/docs/guides/reasoning).
-- `low` is worth considering raising to `medium`, as Opinion.
-- `xhigh` cites the same guidance under Official, with no verdict; so do
-  `medium` and `high`, with the guidance for those levels.
-- A default token-max cannot resolve, such as a T3 thread's selection, is
-  unknown and never a change.
-
-On a terminal, `doctor` offers the change in the profile's own file: for Claude
-the `env.CLAUDE_CODE_EFFORT_LEVEL` that sets it, or else the model's
-`modelSettings.<model>.effortLevel`, or the `maxEffortLevel` that holds a `low`
-level down; for Codex `model_reasoning_effort`. The target is the next level
-the model accepts, by Claude Code's effort table or Codex's model catalog. A
-shell variable, a project or managed file, or a named Codex profile that sets
-it is listed to change by hand. See
+A default above `high` gets a warning citing the provider's own guidance. For
+Claude, `xhigh` and `max` cite Anthropic's
+[model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/)
+(past `high`, test the next model up at a lower effort), and `max` also the
+[model configuration docs](https://code.claude.com/docs/en/model-config#choose-an-effort-level)
+(`max` is prone to overthinking; test it before adopting it broadly). For
+Codex, `xhigh` and `max` cite OpenAI's
+[reasoning guide](https://developers.openai.com/api/docs/guides/reasoning)
+(`xhigh` only where evals show a benefit; `max` for the most complex tasks,
+evaluated against `xhigh`). See
 [default effort](semantics.md#main-session-effort) for how the default
 resolves.
 
@@ -1198,32 +1196,23 @@ attributed. The reprice assumes the same turns, and a lower effort's cost
 cannot be measured. The source is unknown when today's settings and agent
 files do not explain the recorded model, for example after a file changed.
 
-Each Claude subagent type's evidence also gives an `Official:` sentence citing
-Anthropic's
+When Claude's built-in Explore ran off Haiku, a warning gives what it cost,
+the same tokens on the cheapest model, and the tip from Anthropic's
 [model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/):
-subagents that search files, read logs or summarize can start on Haiku or
-Sonnet at the model's default effort, and code edits and judgment calls stay
-on the main model. Explore's line adds the guide's tip, a user agent named
-`Explore` with `model: haiku`, unless every request already ran on Haiku. The
-transcripts don't record whether a type searched or edited, so the sentence cannot
-say which half applies. The guide also measured an Opus 5.5 lead over Sonnet 5.5
-workers at about a third less cost than Opus 5.5 alone at its default effort,
-scoring about the same, on one internal benchmark; the report doesn't quote it,
-since that pattern splits work too big for one context window rather than
-side tasks. Codex roles get no such sentence, nor do forks, which always run on
-the main model.
+a user agent named `Explore` with `model: haiku`. Other types get no warning:
+the guide splits subagents by whether they search or edit, which the
+transcripts don't record.
 See [subagent models](semantics.md#subagent-models).
 
 ## Fable weekly use
 
 The report gives every Claude settings file whose profiles sign in to
-Anthropic its own Official Fable line, shared by native Claude Code and the T3
+Anthropic its own Fable line, shared by native Claude Code and the T3
 instances that use it: what its Fable requests cost at API prices in each 7-day span
-of the window, counted back from the report, beside the plan rule Anthropic
-documents on its [pricing](https://claude.com/pricing) page and in
+of the window, counted back from the report. With any Fable request, a warning
+gives their cost beside the plan rule Anthropic documents in
 [Fable models on your plan](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan),
-given as an `Official:` sentence before the model setting, as
-[Plans and API prices](#plans-and-api-prices) describes: on a Claude Max or
+as [Plans and API prices](#plans-and-api-prices) describes: on a Claude Max or
 Ultra plan or a Team or seat-based Enterprise premium seat, Fable models can
 use up to half the weekly usage limit and use it faster than other models; on
 Pro or a Team or seat-based Enterprise standard seat they run on usage credits;

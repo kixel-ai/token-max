@@ -1906,11 +1906,14 @@ fn codex_skills_and_mcp_details_keep_independent_evidence_controls_and_prices() 
         );
         assert!(output.contains("1 requested; 1 confirmed SKILL.md loads"));
         assert!(output.contains("Codex MCP loading:"));
-        assert!(
-            report_line(&output, "AGENTS.md")
-                .evidence
-                .starts_with("Under the 32,768 bytes Codex loads")
+        // Under the byte budget, the file is a cost with no warning.
+        let agents = report_line(&output, "AGENTS.md");
+        assert_eq!(
+            (agents.mark.as_str(), agents.head.as_str()),
+            ("info", "AGENTS.md 2 lines costs <$0.01 <1%")
         );
+        assert!(output.contains("AGENTS.md: 2 recorded lines"), "{output}");
+        assert!(!output.contains("WARNINGS"));
         assert!(output.contains("Duplicate skill same"));
         assert!(!leaks(&report, &["SYNTHETIC_PRIVATE"]));
     }
@@ -2374,7 +2377,7 @@ fn memory_check(report: &Report, harness: Harness) -> &crate::model::MemoryCheck
 }
 
 #[test]
-fn claude_auto_memory_is_priced_apart_from_the_system_prompt_and_advised_off() {
+fn claude_auto_memory_is_priced_apart_from_the_system_prompt_and_judged_by_its_cost_per_use() {
     let w = Workspace::new();
     let root = std::fs::canonicalize(&w.claude).unwrap();
     let root = root.to_string_lossy();
@@ -2421,8 +2424,9 @@ fn claude_auto_memory_is_priced_apart_from_the_system_prompt_and_advised_off() {
         control_text(memory.control.as_ref().unwrap(), Harness::Claude),
         r#""autoMemoryEnabled": false"#
     );
+    // Read back and written, it is judged as a skill is: kept within the cost per use.
     let check = memory_check(&report, Harness::Claude);
-    assert_eq!(check.base.action, crate::model::Action::Advisory);
+    assert_eq!(check.base.action, crate::model::Action::Keep);
     assert_eq!(check.base.current, Some(true));
     assert_eq!((check.reads, check.writes), (1, 1));
     assert!(check.writes_usd.unwrap() > 0.0);
@@ -2430,34 +2434,43 @@ fn claude_auto_memory_is_priced_apart_from_the_system_prompt_and_advised_off() {
         check.base.savings_usd,
         Some(memory.estimated_usd.unwrap() + check.writes_usd.unwrap())
     );
-    let text = format_report(
-        &report,
-        ReportOptions {
-            width: None,
-            color: false,
-            unicode: false,
-            details: true,
-            host: None,
-        },
-    );
+    let details = ReportOptions {
+        width: None,
+        color: false,
+        unicode: false,
+        details: true,
+        host: None,
+    };
+    let text = format_report(&report, details);
     assert!(shows(
         &text,
-        "consider",
-        "Auto memory on -> off saves ",
+        "keep",
+        "Auto memory on costs ",
         &[
-            "Opinion: ",
-            "used 2 times (1 read, 1 write). Set \"autoMemoryEnabled\": false in "
+            "Its cost per read or write is within --max-cost-per-use. Measured: used 2 times (1 read, 1 write)."
         ]
     ));
     assert!(!text.contains("MEMORY.md"));
-    // Advice is not a change, so it leaves the exit code alone.
+    assert!(!leaks(&report, &["SYNTHETIC_PRIVATE"]));
+    // Above the limit per use it is worth considering off, which leaves the exit code alone.
+    let costly = self::report(&data, 0.0001);
+    let check = memory_check(&costly, Harness::Claude);
+    assert_eq!(check.base.action, crate::model::Action::Advisory);
+    assert_eq!(check.base.recommended, Some(false));
+    assert!(shows(
+        &format_report(&costly, details),
+        "consider",
+        "Auto memory on -> off saves ",
+        &[
+            "It cost more than --max-cost-per-use per read or write. Measured: used 2 times (1 read, 1 write). Set \"autoMemoryEnabled\": false in "
+        ]
+    ));
     assert!(
-        !report
+        !costly
             .checks
             .iter()
             .any(|c| c.action() == crate::model::Action::Change)
     );
-    assert!(!leaks(&report, &["SYNTHETIC_PRIVATE"]));
 }
 
 /// The note auto memory's check gives when recorded sessions disagree with the setting.
@@ -2759,8 +2772,8 @@ fn claude_auto_memory_without_recorded_context_has_an_unknown_cost() {
     let both = text(&both);
     assert!(shows(
         &both,
-        "consider",
-        "Auto memory on -> off saves ~",
+        "keep",
+        "Auto memory on costs ~",
         &["; extrapolated from the 66.6% of requests that recorded their context."]
     ));
 }
@@ -2865,17 +2878,21 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
     ));
     assert!(!leaks(&r, &["SYNTHETIC_PRIVATE"]));
 
-    // Turned on in settings, it is advised off.
+    // Turned on in settings, it has no verdict while its writes go unpriced.
     std::fs::write(w.codex.join("config.toml"), "[features]\nmemories = true\n").unwrap();
     let on = report(&scan(&options(&w, None)).unwrap(), 1.0);
     let check = memory_check(&on, Harness::Codex);
     assert_eq!(check.base.current, Some(true));
+    assert_eq!(check.base.recommended, None);
     assert_eq!(memory_note(check), None);
     assert!(shows(
         &text(&on),
-        "consider",
-        "Codex memories on",
-        &["Opinion: ", "Set features.memories = false in "]
+        "unknown",
+        "Codex memories on costs unknown",
+        &[
+            "What it costs could not be measured. Measured: ",
+            "Set features.memories = false in "
+        ]
     ));
     std::fs::remove_file(w.codex.join("config.toml")).unwrap();
 
@@ -3002,10 +3019,10 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
     );
     assert!(shows(
         &rendered,
-        "consider",
+        "unknown",
         "Codex memories may be on",
         &[
-            "Unknown whether it is on: a project .codex/config.toml sets memories, but the project's trust is not recorded. Opinion: ",
+            "Unknown whether it is on: a project .codex/config.toml sets memories, but the project's trust is not recorded. Measured: ",
             "Set features.memories = false in "
         ]
     ));

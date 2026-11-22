@@ -860,8 +860,9 @@ Controls checked against authoritative documentation on 2026-11-08:
   guidance only and never enter the automatic settings patch.
 - [Claude instruction guidance](https://code.claude.com/docs/en/memory#write-effective-instructions)
   targets under 200 lines per CLAUDE.md. A recorded file reaching that length
-  gets a note naming it, without judging quality or estimating savings.
-  Path-scoped rules can narrow loading; imports still load together.
+  gets a warning naming it beside what each 100 of its lines cost, without
+  judging quality. Path-scoped rules can narrow loading; imports still load
+  together.
 - [Codex instruction loading](https://learn.chatgpt.com/docs/agent-configuration/agents-md)
   caps the combined chain at `project_doc_max_bytes`, 32768 UTF-8 bytes by
   default. The report shows the selected profile value beside recorded rendered
@@ -912,12 +913,16 @@ documents provided tool definitions. All guidance was checked on 2026-11-07.
 
 `auto-memory` checks each line once, over the memory context its own
 profiles' requests carried, even when the context row is shared with
-profiles whose memory switch differs. It is advisory while memory is on and
-keep once it is off, and never exits 1: notes the agent writes for itself skip
-the review that checked-in `CLAUDE.md` or `AGENTS.md` gets, which encourages
-slop, so the maintainer advises it off whatever it cost, as an opinion. `--max-cost-per-use` does not
-apply. The check reports the total cost, the reads and writes, and the setting
-that turns it off; its `savings_usd` is that total. Once memory is off, the line
+profiles whose memory switch differs. It judges memory as the context check
+judges a skill, counting each memory file read back or written as a use: on and
+never used is a change (exit 1), above `--max-cost-per-use` per use an
+advisory, and otherwise, or once it is off, keep. Loading the memory index into
+every request is not a use. A total that leaves out what could not be priced,
+Codex's extraction and consolidation or unpriced reads, can show neither that
+memory was free nor that it stayed under the limit per use, so it gives no
+verdict there, as does an unknown total or an unresolved switch. The check
+reports the total cost, the reads and writes, and the setting that turns it
+off; its `savings_usd` is that total. Once memory is off, the line
 still shows what it cost and how often it was used earlier in the window.
 Requests that recorded no context keep the memory files they were measured to
 read back, and are assumed to have loaded memory as often as those that did, so
@@ -1098,9 +1103,11 @@ evidence, action and exit policy as the other checks. Its `current` and
 window's rate-only premium at present API rates, with known subtotal and unknown
 total kept separate. `current_estimate.premium` applies the current effective
 speed preference to those tokens. Only the latter supplies this check's
-`savings_usd` when it recommends a change. It is a rate-only comparison, not net
-of cache switching. A standard current preference keeps, regardless of old
-premium usage. No records means unknown dollars, not zero.
+`savings_usd`, and decides it: above zero, standard speed is an advisory, since
+the speed the premium buys is not valued; zero keeps the setting; unknown gives
+no verdict. It is a rate-only comparison, not net of cache switching. A
+standard current preference keeps, regardless of old premium usage. No records
+means unknown dollars, not zero.
 
 Claude's default is off; per-session opt-in suppresses a saved true preference
 at startup. Managed false, environment disable, unsupported selected models and
@@ -1330,9 +1337,9 @@ recorded tokens on the provider's cheapest current model. The lines are
 evidence only. They never recommend a model, offer no change
 and never change the exit code: a cheaper model or lower effort trades
 capability, and the main agent's extra work after a weaker subagent lands in
-its own requests, where transcripts cannot attribute it. Each Claude type's
-Official line, citing Anthropic's model guide (checked 2026-11-14), is equally
-verdict-free. When runs in
+its own requests, where transcripts cannot attribute it. Claude's built-in
+Explore, when it ran off Haiku, gets a warning citing Anthropic's model guide
+(checked 2026-11-14), equally verdict-free. When runs in
 different projects are set by different files, the model and effort settings
 name each.
 
@@ -1429,13 +1436,14 @@ by profiles of several files, as when two homes read the same transcripts,
 counts in each, since each line describes one file's sessions; the line says
 how many were shared, since whose they were is unknown.
 
-The line is Official evidence with no verdict. Anthropic documents the cap as
+The line is evidence with no verdict. Anthropic documents the cap as
 a share of a weekly limit it publishes in neither tokens nor dollars, and says
 Fable draws that limit faster than other models without a rate, so neither the
 share of the cap used nor whether it was reached can be derived. Requests made
 after the cap, paid with usage credits, are not marked in transcripts and stay
 in the figures. token-max never reads which plan a profile is signed in to, so
-the rule is an `Official:` sentence stated for each plan, as
+the rule is a warning stated for each plan, given whenever the window has a
+Fable request, as
 [Plans and API prices](reference.md#plans-and-api-prices) describes.
 `--details` gives each line's spans with their unknown costs, the caveats
 and the sources.

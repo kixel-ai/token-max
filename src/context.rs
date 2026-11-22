@@ -1623,7 +1623,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 .estimated_usd
                 .zip(c.calls.filter(|&calls| calls > 0))
                 .map(|(usd, calls)| usd / calls as f64);
-            // Auto memory is advised off by policy, never by its cost per use.
+            // Auto memory's own check judges it by its reads and writes.
             if let (Some(_), true, Some(usd), Some(calls)) =
                 (&c.control, c.current, c.estimated_usd, c.calls)
                 && c.tier_unknown_requests == 0

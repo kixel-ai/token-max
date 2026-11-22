@@ -381,55 +381,48 @@ fn codex_unmeasured(c: &MemoryCheck) -> bool {
     c.unmeasured_generation
 }
 
-/// Why auto memory is not recommended, whatever it cost.
-const MEMORY_ADVICE: &str = "Opinion: notes the agent writes for itself skip review and encourage slop, so keep durable guidance in reviewed, checked-in CLAUDE.md or AGENTS.md";
-
-/// Whether an effort line rests on the maintainer's opinion: a `low` level, or Anthropic's
-/// guidance against `max` applied to an OpenAI model.
-fn effort_opinion(e: &EffortCheck) -> bool {
-    match e.base.current.as_deref() {
-        Some("low") => true,
-        Some("max") => e.harness == Harness::Codex,
-        _ => false,
-    }
-}
-
 /// Anthropic's guidance on raising effort past `high`.
 const PAST_HIGH: &str = "Anthropic's model guide says that past high, one more level can cost as much as a bigger model, so test the next model up at a lower effort";
+/// Anthropic's model guide, which the effort and subagent warnings cite.
+const CLAUDE_MODEL_GUIDE: &str =
+    "https://claude.dev/blog/which-claude-model-should-you-build-with/";
+/// Claude Code's page on choosing an effort level.
+const CLAUDE_EFFORT_DOCS: &str =
+    "https://code.claude.com/docs/en/model-config#choose-an-effort-level";
+/// OpenAI's reasoning guide, which the Codex effort warnings cite.
+const OPENAI_REASONING: &str = "https://developers.openai.com/api/docs/guides/reasoning";
 
-/// The guidance an effort line cites, labeled by the kind of claim each part is.
-fn effort_guidance(e: &EffortCheck) -> String {
-    let codex = e.harness == Harness::Codex;
-    let level = e.base.current.as_deref();
-    match (level, codex) {
-        (Some("max"), false) => format!(
-            "Official: {PAST_HIGH}, and Claude Code's docs call max prone to overthinking and say to test it before adopting it broadly"
-        ),
-        (Some("max"), true) => format!(
-            "Opinion: Anthropic's guidance against max, applied to an OpenAI model: {}. Official: OpenAI's reasoning guide keeps max for your most complex tasks, evaluated against xhigh",
-            decapitalize(PAST_HIGH)
-        ),
-        (Some("low"), _) => {
-            let mut text = "Opinion: worth considering raising, since low trades capability for cost; Anthropic measured Opus 5.5 at low about 8 points below high on SWE-bench Pro, for about a third of the cost".to_string();
-            if codex {
-                text += ". Official: OpenAI's reasoning guide calls low ideal for execution-oriented coding and medium the default for most workloads";
-            }
-            text
-        }
-        (Some("xhigh"), false) => format!(
-            "Official: {PAST_HIGH}; on SWE-bench Pro, Opus 5.5 at xhigh scored about 1.4 points above high for 2.5 times the cost"
-        ),
-        (Some("xhigh"), true) => "Official: OpenAI's reasoning guide says to use xhigh only when your evals show a clear benefit that justifies the extra latency and cost".into(),
-        (Some("auto"), _) => "Claude Code sends no effort level, so the API's default applies".into(),
-        (Some("medium" | "high"), false) => "Official: Claude Code's docs fit medium to day-to-day engineering with a clear scope, and high to work where verification matters".into(),
-        (Some("medium" | "high"), true) => "Official: OpenAI's reasoning guide calls medium the default for most workloads and recommends high for complex workflows and agentic tasks".into(),
-        // Codex levels the guide gives no advice for, such as ultra; Claude has none left.
-        (Some(level), _) => format!("OpenAI's reasoning guide gives no advice for {level}, so there is no verdict"),
-        (None, _) => match (&e.control.lowered, &e.control.unresolved) {
-            (Some(why), None) => capitalize(why),
-            _ => "The current level is unknown".into(),
-        },
+/// The provider's own guidance on a default effort above `high`, which no transcript can
+/// price, and the pages it comes from.
+fn effort_warning(e: &EffortCheck) -> Option<(String, Vec<&'static str>)> {
+    if e.base.action != Action::Keep {
+        return None;
     }
+    let level = e.base.current.as_deref()?;
+    let (text, sources) = match (level, e.harness) {
+        ("max", Harness::Claude) => (
+            format!(
+                "{PAST_HIGH}, and Claude Code's docs call max prone to overthinking and say to test it before adopting it broadly."
+            ),
+            vec![CLAUDE_MODEL_GUIDE, CLAUDE_EFFORT_DOCS],
+        ),
+        ("xhigh", Harness::Claude) => (
+            format!(
+                "{PAST_HIGH}; on SWE-bench Pro, Opus 5.5 at xhigh scored about 1.4 points above high for 2.5 times the cost."
+            ),
+            vec![CLAUDE_MODEL_GUIDE],
+        ),
+        ("max", Harness::Codex) => (
+            "OpenAI's reasoning guide keeps max for your most complex tasks, evaluated against xhigh.".into(),
+            vec![OPENAI_REASONING],
+        ),
+        ("xhigh", Harness::Codex) => (
+            "OpenAI's reasoning guide says to use xhigh only when your evals show a clear benefit that justifies the extra latency and cost.".into(),
+            vec![OPENAI_REASONING],
+        ),
+        _ => return None,
+    };
+    Some((format!("Runs at {level}. {text}"), sources))
 }
 
 /// A model and effort pair as a line names it, such as `claude-opus-5-5 at high`.
@@ -441,6 +434,9 @@ fn effort_pair(run: &EffortRun) -> String {
     )
 }
 
+/// Why an effort line has no verdict.
+const EFFORT_UNPRICED: &str = "A different effort changes the output tokens, so its cost is not repriced and there is no verdict.";
+
 /// The pairs shown on a summary line before the rest are counted.
 const EFFORT_PAIRS: usize = 3;
 
@@ -451,8 +447,6 @@ fn effort_evidence(e: &EffortCheck, mark: Mark, out: &Out<'_>) -> String {
     let mut parts = vec![];
     if mark == Mark::Unknown {
         parts.push(not_enough(&e.control.unresolved.clone().unwrap_or_default()) + ".");
-    } else {
-        parts.push(effort_guidance(e) + ".");
     }
     if let (Some(model), Some(level)) = (&c.model, &c.level) {
         let mut text = if level == "auto" {
@@ -499,30 +493,22 @@ fn effort_evidence(e: &EffortCheck, mark: Mark, out: &Out<'_>) -> String {
         }
         parts.push(format!("Ran {}.", runs.join("; ")));
     }
-    parts.push("A different effort changes the output tokens, so its cost is not repriced.".into());
+    parts.push(EFFORT_UNPRICED.into());
     if e.enterprise && c.level.is_some() {
         parts.push(
             "A Claude Enterprise per-role cap, which no local file records, could lower it.".into(),
         );
     }
-    let owners: Vec<String> = std::iter::once(&e.base.owner)
-        .chain(&e.also)
-        .map(|o| out.home(o))
-        .collect();
-    parts.push(format!("Set in {}.", owners.join(" and ")));
+    parts.push(format!("Set in {}.", out.home(&e.base.owner)));
     parts.join(" ")
 }
-
-/// Why fast mode is recommended off, whatever it cost.
-const FAST_ADVICE: &str =
-    "Opinion: standard speed is enough, and fast mode bills a premium for the same work";
 
 /// What the report's dollars mean, for a reader on a Claude or ChatGPT plan or paying for API use.
 const PRICES_MEAN: &str = "Dollars are public API prices, not an invoice: the closest public measure of what a request uses of a Claude or ChatGPT plan's limits, and what Claude's usage credits bill past them.";
 
 /// What a check's line means on a Claude or ChatGPT plan, where the provider documents a
-/// rule that API prices alone don't show, as an "Official:" sentence and the page that
-/// documents it. A plan is stated conditionally: token-max never reads a profile's plan.
+/// rule that API prices alone don't show, as a sentence and the page that documents it.
+/// A plan is stated conditionally: token-max never reads a profile's plan.
 fn plan_note(
     result: &CheckResult,
     r: &Common<'_>,
@@ -607,6 +593,34 @@ fn memory_unresolved(c: &MemoryCheck) -> String {
         "Unknown whether it is on: {}",
         c.unresolved.as_deref().unwrap_or_default()
     )
+}
+
+/// Why auto memory's line reads as it does, judged as a skill is by its cost per use.
+fn memory_reason(m: &MemoryCheck, r: &Common<'_>) -> String {
+    let on = r.current == Some(Setting::Toggle(true));
+    match r.action {
+        Action::Keep if !on && memory_free(m) && !m.lower_bound() => "Off; it costs nothing.".into(),
+        Action::Keep if !on => {
+            "Off now; its cost and uses earlier in the window are shown for reference.".into()
+        }
+        Action::Keep if r.savings_usd.is_some_and(|usd| usd <= 0.0) => {
+            "On, and it costs nothing.".into()
+        }
+        Action::Keep => {
+            "Its cost per read or write is within --max-cost-per-use.".into()
+        }
+        Action::Change => "On, and never read back or written in the window.".into(),
+        Action::Advisory if r.recommended.is_some() => {
+            "It cost more than --max-cost-per-use per read or write.".into()
+        }
+        Action::Advisory if m.unresolved.is_some() => format!("{}.", memory_unresolved(m)),
+        Action::Advisory if r.savings_usd.is_none() => {
+            "What it costs could not be measured.".into()
+        }
+        // A total that leaves out what could not be priced shows neither nothing nor a
+        // cost per use within the limit.
+        Action::Advisory => "Its total leaves out what could not be priced, so it may cost more per use than measured.".into(),
+    }
 }
 
 /// Whether auto memory cost nothing and was never used in the window.
@@ -1556,10 +1570,6 @@ fn details(report: &Report, out: &mut Out<'_>) {
             }
             out.field("Model setting", &out.home_in(&c.model_setting));
             out.field("Effort setting", &out.home_in(&c.effort_setting));
-            if let Some(text) = subagent_guidance(c) {
-                out.field("Official", &text);
-                out.field("Source", CLAUDE_MODEL_GUIDE);
-            }
         }
     }
 
@@ -1584,9 +1594,8 @@ fn details(report: &Report, out: &mut Out<'_>) {
             if !caveats.is_empty() {
                 out.field("Attribution", caveats.trim_start());
             }
-            out.field("Official", FABLE_RULE);
             out.field("Model setting", FABLE_MODEL);
-            out.field("Sources", &format!("{CLAUDE_PRICING} {FABLE_PLANS}"));
+            out.field("Prices", CLAUDE_PRICING);
         }
     }
 
@@ -1732,23 +1741,22 @@ fn details(report: &Report, out: &mut Out<'_>) {
 /// Why the subagent lines never recommend a change.
 const SUBAGENT_EVIDENCE: &str = "Subagent lines are evidence, not recommendations: a cheaper model or lower effort trades capability, and the main agent's extra work after a weaker subagent cannot be attributed, so no saving is claimed. A lower effort changes the output tokens, so its cost cannot be measured.";
 
-/// Anthropic's guide to picking a model, which covers subagents.
-const CLAUDE_MODEL_GUIDE: &str =
-    "https://claude.dev/blog/which-claude-model-should-you-build-with/";
-
-/// What Anthropic's model guide says about a Claude subagent type, or None for Codex and
-/// forks, whose model no setting changes. It is guidance only: whether a type searches or
-/// edits is not recorded, so no verdict is given.
-fn subagent_guidance(c: &SubagentCost) -> Option<String> {
-    if c.harness != Harness::Claude || c.fork {
+/// Anthropic's tip for Claude's built-in Explore subagent when it ran off Haiku, beside what
+/// it cost and what the same tokens would cost on the cheapest model; None otherwise.
+fn explore_warning(c: &SubagentCost) -> Option<String> {
+    if c.harness != Harness::Claude
+        || c.kind != "Explore"
+        || c.runs == 0
+        || c.models.iter().all(|m| m.name.contains("haiku"))
+    {
         return None;
     }
-    let mut text = "Anthropic's model guide starts subagents that search files, read logs or summarize on Haiku or Sonnet at the model's default effort, and keeps code edits and judgment calls on the main model.".to_string();
-    let on_haiku = c.models.iter().all(|m| m.name.contains("haiku"));
-    if c.kind == "Explore" && !on_haiku {
-        text.push_str(" It notes that the built-in Explore runs on the session's model in current Claude Code, and suggests a user agent named Explore with model: haiku to keep exploration cheap.");
-    }
-    Some(text)
+    Some(format!(
+        "Ran on {} and cost {}. {} Anthropic's model guide notes that the built-in Explore runs on the session's model, and suggests a user agent named Explore with model: haiku to keep exploration cheap.",
+        shares(&c.models, c.requests),
+        figure(c.estimate),
+        reprice_text(c)
+    ))
 }
 
 /// A subagent type by harness: a Claude agent type, a Codex role or other Codex subagent.
@@ -1908,20 +1916,19 @@ fn fable_span(w: &FableWeek) -> String {
     format!("{span}to {}", date(&iso(w.end)))
 }
 
-/// A profile's weekly Fable spend beside the plan rule, with no share of a limit and no verdict.
+/// A profile's weekly Fable spend, with no share of a limit and no verdict.
 fn fable_row(u: &FableUse) -> Row {
     let mut row = Row::new(
-        Claim::Official,
         Mark::Info,
         "Fable weekly use".into(),
         "What Fable models cost each week, which a Claude plan may limit apart from other models."
             .into(),
     );
-    row.sources = vec![CLAUDE_PRICING, FABLE_PLANS];
+    row.sources = vec![CLAUDE_PRICING];
     let caveats = fable_caveats(u);
-    let official = format!("Official: {FABLE_RULE} {FABLE_SETTING}");
     if u.requests == 0 {
-        row.evidence = format!("No Fable requests recorded in the window.{caveats} {official}");
+        row.evidence =
+            format!("No Fable requests recorded in the window.{caveats} {FABLE_SETTING}");
         return row;
     }
     let weeks: Vec<String> = u
@@ -1938,7 +1945,7 @@ fn fable_row(u: &FableUse) -> Row {
         .collect();
     row.amount = Some(("costs", figure(u.estimate)));
     row.evidence = format!(
-        "{} at API prices, per 7 days back from this report: {}. {FABLE_PARTIAL}{caveats} {official}",
+        "{} at API prices, per 7 days back from this report: {}. {FABLE_PARTIAL}{caveats} {FABLE_SETTING}",
         plural(u.requests, "Fable request"),
         weeks.join(", ")
     );
@@ -1961,7 +1968,6 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
         0,
         tier(action),
     );
-    out.field("Claim", Claim::of(result).name());
     if r.profiles.len() > 1 {
         out.field("Profiles", &out.profile_names(r.profiles));
     } else {
@@ -1972,7 +1978,7 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
     out.field("Suggested", &setting(r.recommended));
     out.field("Reason", &reason(result, &r));
     if let Some((note, source)) = plan_note(result, &r, out) {
-        out.field("Official", &format!("{note} {source}"));
+        out.field("Plan", &format!("{} {source}", capitalize(note)));
     }
     out.field("Baseline", r.baseline);
     out.field(
@@ -2285,7 +2291,7 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
             );
             out.field(
                 "Speed limits",
-                "Recorded cache categories held constant; Claude cache-switch effects excluded. API-price premium, which a plan can count differently (see Official). Work held constant; latency value excluded.",
+                "Recorded cache categories held constant; Claude cache-switch effects excluded. API-price premium, which a plan can count differently (see Plan). Work held constant; latency value excluded.",
             );
         }
         CheckResult::Compaction(c) => {
@@ -2682,22 +2688,8 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
 fn reason(result: &CheckResult, r: &Common<'_>) -> String {
     match result {
         CheckResult::Speed(s) => return s.reason.clone(),
-        CheckResult::Effort(e) => return effort_guidance(e),
-        CheckResult::Memory(m)
-            if r.action == Action::Keep && memory_free(m) && !m.lower_bound() =>
-        {
-            return "Off; it costs nothing.".into();
-        }
-        CheckResult::Memory(_) if r.action == Action::Keep => {
-            return "Off now; its cost and uses earlier in the window are shown for reference.".into();
-        }
-        CheckResult::Memory(m) if m.unresolved.is_some() => {
-            return format!(
-                "{}. {MEMORY_ADVICE}. Its cost and uses are shown for reference, not weighed against --max-cost-per-use.",
-                memory_unresolved(m)
-            );
-        }
-        CheckResult::Memory(_) => return format!("{MEMORY_ADVICE}. Its cost and uses are shown for reference, not weighed against --max-cost-per-use."),
+        CheckResult::Effort(_) => return EFFORT_UNPRICED.into(),
+        CheckResult::Memory(m) => return memory_reason(m, r),
         CheckResult::Background(b) => {
             return match r.action {
                 Action::Advisory if r.savings_usd.is_some() => {
@@ -3463,46 +3455,29 @@ fn context_guidance(c: &ContextCost, profiles: &[Profile], name: &str) -> Vec<St
     if c.kind != ContextKind::Instructions {
         return vec![];
     }
-    let claude_file = c
-        .name
-        .rsplit(['/', '\\'])
-        .next()
-        .is_some_and(|n| n == "CLAUDE.md" || n == "CLAUDE.local.md");
-    if c.harness == Harness::Claude && !claude_file {
-        return vec![];
-    }
     let Some(size) = c.instruction_size else {
         return vec![
-            "Instruction budget unknown: this record has no rendered instruction text to measure."
-                .into(),
+            "Size unknown: this record has no rendered instruction text to measure.".into(),
         ];
     };
-    match c.harness {
-        Harness::Claude => {
-            vec![format!(
-                "{}: {} recorded lines, {} UTF-8 bytes; {}Claude recommends under 200 lines per CLAUDE.md. This is guidance, not a quality score or a savings estimate. Prefer path-scoped rules for scoped instructions; imports still load together. https://code.claude.com/docs/en/memory#write-effective-instructions",
-                name,
-                size.lines,
-                size.bytes,
-                if size.lines >= 200 {
-                    "at or above the recommended length. "
-                } else {
-                    ""
-                }
-            )]
+    let budget = match (c.harness, agents_budget(c, profiles)) {
+        (Harness::Codex, Ok(n)) => format!(
+            " Codex loads up to {} bytes of it (project_doc_max_bytes).",
+            count(n as u64)
+        ),
+        (Harness::Codex, Err(reason)) => format!(" {reason}"),
+        (Harness::Claude, _) => String::new(),
+    };
+    vec![format!(
+        "{name}: {}, {} UTF-8 bytes{}.{budget}",
+        plural(size.lines as u64, "recorded line"),
+        count(size.bytes as u64),
+        if c.harness == Harness::Codex {
+            ", including any headers or wrappers"
+        } else {
+            ""
         }
-        Harness::Codex => {
-            let budget = agents_budget(c, profiles);
-            vec![format!(
-                "Recorded rendered AGENTS.md: {} UTF-8 bytes, including any headers or wrappers. {}The project_doc_max_bytes default is 32768 bytes across the source instruction chain. Rendered bytes cannot establish whether that source chain exceeded its budget. Command-line overrides and original source-file sizes are unavailable; loaded text may already be truncated. Trim or scope guidance to preserve important instructions. Length alone does not establish quality. https://learn.chatgpt.com/docs/agent-configuration/agents-md",
-                size.bytes,
-                budget.map_or_else(
-                    |reason| format!("{reason} "),
-                    |n| format!("Selected profile budget: {n} bytes. ")
-                )
-            )]
-        }
-    }
+    )]
 }
 
 /// A setting that caps how much of a tool's output stays in context.
@@ -3722,37 +3697,6 @@ fn first_profile(c: &ContextCost) -> &str {
     c.profiles.first().map_or("", String::as_str)
 }
 
-/// The kind of claim a line's recommendation rests on, in report order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Claim {
-    /// Replayed from the user's own transcripts at public API prices.
-    Measured,
-    /// The provider's own guidance, cited.
-    Official,
-    /// The maintainer's preference, beside whatever was measured.
-    Opinion,
-}
-
-impl Claim {
-    fn name(self) -> &'static str {
-        match self {
-            Claim::Measured => "Measured",
-            Claim::Official => "Official",
-            Claim::Opinion => "Opinion",
-        }
-    }
-
-    /// The kind of claim a check's recommendation rests on.
-    fn of(result: &CheckResult) -> Claim {
-        match result {
-            CheckResult::Speed(_) | CheckResult::Memory(_) => Claim::Opinion,
-            CheckResult::Effort(e) if effort_opinion(e) => Claim::Opinion,
-            CheckResult::Effort(_) => Claim::Official,
-            _ => Claim::Measured,
-        }
-    }
-}
-
 /// A line's verdict, in the order lines are listed within a section.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Mark {
@@ -3804,7 +3748,6 @@ const FIGURE_CELLS: usize = 10;
 /// its evidence on a second line under `--details`.
 #[derive(Clone)]
 struct Row {
-    claim: Claim,
     mark: Mark,
     name: String,
     /// One plain sentence saying what the setting or feature does.
@@ -3820,7 +3763,7 @@ struct Row {
     /// The setting that changes it, or the edit `doctor` offers for a change.
     setting: String,
     evidence: String,
-    /// The provider guidance an Official line cites.
+    /// The pages the evidence cites, such as a plan's billing rule.
     sources: Vec<&'static str>,
     /// Where it was found, shown only when another line would read the same.
     location: Option<String>,
@@ -3840,9 +3783,8 @@ struct Row {
 }
 
 impl Row {
-    fn new(claim: Claim, mark: Mark, name: String, what: String) -> Self {
+    fn new(mark: Mark, name: String, what: String) -> Self {
         Row {
-            claim,
             mark,
             name,
             what,
@@ -4061,13 +4003,12 @@ fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
     );
     let shares = |r: &Row| r.share.map_or_else(String::new, share_text);
     let share_cells = all().map(|r| cells(&shares(r))).max().unwrap_or(0);
-    let claim_cells = all().map(|r| cells(r.claim.name())).max().unwrap_or(0);
     let tag_cells = column(all().map(|r| cells(&r.profile)), TAG_CELLS);
     let mut name_cells = column(all().map(|r| cells(&terminal_text(&r.name))), NAME_CELLS);
-    // On a narrow terminal, the name column gives way so the columns up to the claim still
+    // On a narrow terminal, the name column gives way so the columns up to the share still
     // fit on one row; the file and setting after them wrap to the next.
     if let Some(width) = out.options.width {
-        let rest = MARGIN + indent + value_cells + amount_cells + share_cells + claim_cells + 8;
+        let rest = MARGIN + indent + value_cells + amount_cells + share_cells + 6;
         name_cells = name_cells.min(width.saturating_sub(rest));
     }
     let mut groups: Vec<(Vec<&Row>, &str)> = match review {
@@ -4118,7 +4059,6 @@ fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
                 (pad(&terminal_text(&row.value), value_cells), bright),
                 (pad(&amount(row), amount_cells), saving),
                 (pad_left(&shares(row), share_cells), DIM),
-                (pad(row.claim.name(), claim_cells), DIM),
             ];
             if all().any(|r| !r.profile.is_empty()) {
                 columns.push((pad(&row.profile, tag_cells), DIM));
@@ -4158,15 +4098,6 @@ fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
     }
 }
 
-/// What a context piece costs over the window, as a row's amount.
-fn cost_amount(c: &ContextCost) -> Option<(&'static str, String)> {
-    Some((
-        "costs",
-        c.estimate()
-            .map_or_else(|| "unknown".into(), |e| approx(e.usd, e.margin, "")),
-    ))
-}
-
 /// A setting's value in tokens, shortened to thousands or millions when exact.
 pub(crate) fn tokens(n: i64) -> String {
     match n {
@@ -4183,109 +4114,125 @@ const CLAUDE_MEMORY_DOCS: &str =
 /// The documented page behind Codex's AGENTS.md byte budget.
 const CODEX_AGENTS_DOCS: &str = "https://learn.chatgpt.com/docs/agent-configuration/agents-md";
 
-/// An instruction file's row: Claude's line guidance or Codex's byte budget, where one applies.
-fn instruction_row(c: &ContextCost, profiles: &[Profile], out: &Out<'_>) -> Row {
-    let name = out.home(&c.name);
-    let what = instructions_what(c);
+/// An instruction file's row: what it cost over the window, its size, and what each 100
+/// lines of it cost every 30 days, which is what shortening it saves. No verdict: what a
+/// line of instructions is worth is not recorded.
+fn instruction_row(c: &ContextCost, out: &Out<'_>) -> Row {
+    let mut row = Row::new(Mark::Info, out.home(&c.name), instructions_what(c));
+    let per = c
+        .instruction_size
+        .filter(|size| size.lines > 0)
+        .and_then(|size| {
+            row.value = plural(size.lines as u64, "line");
+            let usd = piece_saving(c, &out.spend)? * 100.0 / size.lines as f64;
+            let margin = piece_margin(c, &out.spend).map(|m| m.scale(100.0 / size.lines as f64));
+            Some(approx(usd, margin, "/mo"))
+        });
+    row.evidence = match per {
+        Some(per) => format!(
+            "Each 100 lines costs about {per}, which shortening it saves, assuming the rest of the work is unchanged. No setting turns it off."
+        ),
+        None => "No setting turns it off.".into(),
+    };
+    row.setting = "the file itself".into();
+    row
+}
+
+/// The provider's size guidance an instruction file is over, with what each 100 lines of it
+/// costs: Claude Code's 200 lines per CLAUDE.md, or the byte budget Codex cuts AGENTS.md at.
+fn instruction_warning(c: &ContextCost, profiles: &[Profile], out: &Out<'_>) -> Option<Warning> {
+    let size = c.instruction_size?;
     let claude_file = c
         .name
         .rsplit(['/', '\\'])
         .next()
         .is_some_and(|n| n == "CLAUDE.md" || n == "CLAUDE.local.md");
-    let advice = "Shorten it, or move parts into path-scoped rules or skills.";
-    if c.harness == Harness::Claude && !claude_file {
-        let mut row = Row::new(Claim::Measured, Mark::Info, name, what);
-        row.amount = cost_amount(c);
-        row.evidence =
-            format!("No provider size guidance covers it, and no setting turns it off. {advice}");
-        return row;
-    }
-    let Some(size) = c.instruction_size else {
-        let mut row = Row::new(Claim::Official, Mark::Unknown, name, what);
-        row.amount = cost_amount(c);
-        row.evidence = not_enough(
-            "This record has no rendered instruction text to measure against the provider's guidance.",
-        );
-        return row;
-    };
-    let mut row = match c.harness {
-        Harness::Claude => {
-            let over = size.lines >= 200;
-            let mut row = Row::new(
-                Claim::Official,
-                if over { Mark::Consider } else { Mark::Keep },
-                name,
-                what,
-            );
-            row.value = plural(size.lines as u64, "line");
-            row.sources = vec![CLAUDE_MEMORY_DOCS];
-            row.evidence = if over {
-                format!(
-                    "Claude Code suggests under 200 lines per CLAUDE.md; length alone is not a quality score. {advice} Imports still load together."
-                )
-            } else {
-                "Under the 200 lines Claude Code suggests per CLAUDE.md.".into()
-            };
-            row
-        }
+    let per = instruction_row(c, out).evidence;
+    let per = per
+        .strip_suffix(" No setting turns it off.")
+        .unwrap_or_default();
+    let (text, source) = match c.harness {
+        Harness::Claude if claude_file && size.lines >= 200 => (
+            format!(
+                "{} lines; Claude Code suggests under 200 per CLAUDE.md, and path-scoped rules or skills for instructions only some work needs. {per}",
+                count(size.lines as u64)
+            ),
+            CLAUDE_MEMORY_DOCS,
+        ),
+        // Rendered bytes include headers and wrappers, so only reaching the budget can mean
+        // Codex truncated the source files.
         Harness::Codex => {
-            // The system and user configuration are read, and projects or named
-            // profiles that set it leave it unresolved; command-line overrides are unseen.
+            let budget = agents_budget(c, profiles)
+                .ok()
+                .filter(|&budget| size.bytes >= budget)?;
             // A resolved budget is shared by the selected profiles; name every source of it.
             let mut sources: Vec<String> = vec![];
             for p in profiles.iter().filter(|p| c.profiles.contains(&p.id)) {
                 let source = match &p.instruction_budget_file {
-                    Some(file) => format!("{file} sets"),
+                    Some(file) => format!("{} sets", out.home(file)),
                     None => "Codex loads by default".into(),
                 };
                 if !sources.contains(&source) {
                     sources.push(source);
                 }
             }
-            let limit = |budget: usize| {
+            (
                 format!(
-                    "the {} bytes {} (project_doc_max_bytes), counting headers and wrappers",
+                    "{} bytes rendered, counting headers and wrappers, at or above the {} bytes {} (project_doc_max_bytes), so Codex may have cut it short. A command-line override is not recorded. {per}",
+                    count(size.bytes as u64),
                     count(budget as u64),
                     sources.join(" and ")
-                )
-            };
-            let unseen = "A command-line override is not recorded.";
-            let mut row = match agents_budget(c, profiles) {
-                Err(reason) => {
-                    let mut row = Row::new(Claim::Official, Mark::Unknown, name, what);
-                    row.evidence = not_enough(&reason);
-                    row
-                }
-                // Rendered bytes include headers and wrappers, so only reaching the
-                // budget can mean Codex truncated the source files.
-                Ok(budget) if size.bytes >= budget => {
-                    let mut row = Row::new(Claim::Official, Mark::Consider, name, what);
-                    row.evidence = format!(
-                        "At or above {}, so Codex may have cut it short. Trim or scope it to keep the important instructions. {unseen}",
-                        limit(budget)
-                    );
-                    row
-                }
-                Ok(budget) => {
-                    let mut row = Row::new(Claim::Official, Mark::Keep, name, what);
-                    row.evidence = format!("Under {}. {unseen}", limit(budget));
-                    row
-                }
-            };
-            row.value = format!("{} bytes", count(size.bytes as u64));
-            row.sources = vec![CODEX_AGENTS_DOCS];
-            row
+                ),
+                CODEX_AGENTS_DOCS,
+            )
         }
+        _ => return None,
     };
-    row.amount = cost_amount(c);
-    row
+    Some(Warning {
+        name: out.home(&c.name),
+        profile: String::new(),
+        text: text.trim_end().into(),
+        sources: vec![source],
+    })
+}
+
+/// Provider guidance that bears on a line but that the transcripts cannot price: listed
+/// apart from the measured lines, cited, with no verdict and no effect on the exit code.
+struct Warning {
+    /// The line it concerns, such as "Main-session effort".
+    name: String,
+    /// The profile tag, when the report covers several.
+    profile: String,
+    /// What the provider says, and what was measured beside it.
+    text: String,
+    /// The provider's pages it cites.
+    sources: Vec<&'static str>,
+}
+
+/// The warnings, after the lines, each naming its line, then the guidance and its sources.
+fn warnings_section(warnings: &[Warning], out: &mut Out<'_>) {
+    if warnings.is_empty() {
+        return;
+    }
+    out.section("WARNINGS  provider guidance the transcripts cannot price");
+    for w in warnings {
+        let name = match w.profile.as_str() {
+            "" => format!("{}: ", w.name),
+            tag => format!("{} {tag}: ", w.name),
+        };
+        let sources = format!(" {}", w.sources.join(" "));
+        out.spans(
+            &[(&name, BOLD), (&w.text, PLAIN), (&sources, DIM)],
+            0,
+            Some(2),
+        );
+    }
 }
 
 /// A check's verdict before its line is drawn.
 ///
 /// A comparison with no requests is not a verdict, whatever the tie-break said. Window
-/// coverage counts only changed parts, so zero there can still be a keep. Fast mode warns
-/// from current settings alone, so it never needs requests.
+/// coverage counts only changed parts, so zero there can still be a keep.
 fn check_action(result: &CheckResult, r: &Common<'_>) -> Action {
     let empty =
         matches!(result, CheckResult::Ttl(_) | CheckResult::Compaction(_)) && r.requests == 0;
@@ -4293,18 +4240,20 @@ fn check_action(result: &CheckResult, r: &Common<'_>) -> Action {
 }
 
 /// A check line's mark. A measured background generation over the limit is advisory only
-/// because its uses are not recorded, and auto memory is advised off on the maintainer's
-/// opinion whatever it cost, so both are worth considering off. Other advisories lack evidence.
+/// because its uses are not recorded, auto memory over the limit per use is advisory as a
+/// skill is, and fast mode's premium buys speed no transcript values, so each is worth
+/// considering off. Other advisories lack evidence.
 fn check_mark(result: &CheckResult, r: &Common<'_>) -> Mark {
     match check_action(result, r) {
         Action::Change => Mark::Change,
-        // An effort with no verdict is evidence beside its guidance.
+        // An effort is a cost with no verdict.
         Action::Keep if matches!(result, CheckResult::Effort(_)) => Mark::Info,
         Action::Keep => Mark::Keep,
         Action::Advisory => match result {
-            CheckResult::Effort(_) if r.recommended.is_some() => Mark::Consider,
             CheckResult::Background(_) if r.savings_usd.is_some() => Mark::Consider,
-            CheckResult::Memory(_) => Mark::Consider,
+            CheckResult::Memory(_) | CheckResult::Speed(_) if r.recommended.is_some() => {
+                Mark::Consider
+            }
             _ => Mark::Unknown,
         },
     }
@@ -4312,8 +4261,6 @@ fn check_mark(result: &CheckResult, r: &Common<'_>) -> Mark {
 
 /// A line the report asks the person to act on.
 pub(crate) struct Recommendation<'a> {
-    /// The kind of claim it rests on: Measured, Official or Opinion.
-    pub claim: &'static str,
     /// Worth considering, rather than a recommended change.
     pub suggested: bool,
     /// The line's name, such as "Main-agent prompt cache TTL".
@@ -4339,10 +4286,10 @@ pub(crate) enum Source<'a> {
 }
 
 /// The value a recommended or suggested check changes to: a suggestion turns a feature
-/// off, or raises an effort.
+/// off, or sets fast mode's standard speed.
 fn check_target(result: &CheckResult, r: &Common<'_>, mark: Mark) -> String {
     match (mark, result) {
-        (Mark::Change, _) | (_, CheckResult::Effort(_)) => match r.recommended {
+        (Mark::Change, _) | (_, CheckResult::Speed(_)) => match r.recommended {
             Some(Setting::Window(n)) => tokens(n),
             other => setting_value(other),
         },
@@ -4393,7 +4340,6 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
         }
         let saving = check_saving(result, &r, &out);
         lines.push(Recommendation {
-            claim: Claim::of(result).name(),
             suggested: mark == Mark::Consider,
             name: setting_name(result),
             value: format!("{current} {arrow} {target}"),
@@ -4406,28 +4352,6 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
         });
     }
     for (index, c) in setting_rows(&report.context).enumerate() {
-        if c.kind == ContextKind::Instructions {
-            // A file over the provider's size guidance is worth shortening by hand.
-            if !c.current {
-                continue;
-            }
-            let row = instruction_row(c, &report.scan.profiles, &out);
-            if row.mark == Mark::Consider {
-                lines.push(Recommendation {
-                    claim: row.claim.name(),
-                    suggested: true,
-                    name: row.name,
-                    value: format!("{} {arrow} shorter", row.value),
-                    saving: None,
-                    margin: None,
-                    verb: "saves",
-                    share: None,
-                    source: Source::Piece(c),
-                    origin: Origin::Context(index),
-                });
-            }
-            continue;
-        }
         let mark = match c.verdict {
             // A switch the file already sets is a change made before any request showed it.
             _ if crate::defaults::applied(report, c).is_some() => continue,
@@ -4442,7 +4366,6 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
         };
         let saving = piece_saving(c, &out.spend);
         lines.push(Recommendation {
-            claim: Claim::Measured.name(),
             suggested: mark == Mark::Consider,
             name: short_label(c, &out),
             value: format!("on {arrow} {target}"),
@@ -4832,7 +4755,6 @@ fn summary(
         let (index, result, r) = c;
         let mark = check_mark(result, r);
         let mut row = Row::new(
-            Claim::of(result),
             mark,
             setting_name(result),
             crate::descriptions::check(result).into(),
@@ -4865,7 +4787,7 @@ fn summary(
         let official = match plan_note(result, r, out) {
             Some((note, source)) => {
                 row.sources.push(source);
-                format!("Official: {note} ")
+                format!("{} ", capitalize(note))
             }
             None => String::new(),
         };
@@ -5118,26 +5040,25 @@ fn summary(
                     memory_uses(m)
                 };
                 notes.insert(0, measured);
-                let mut text = format!("{MEMORY_ADVICE}. Measured: {}.", notes.join("; "));
+                let mut text = format!("{} Measured: {}.", memory_reason(m, r), notes.join("; "));
+                if m.unresolved.is_some() {
+                    row.value = "may be on".into();
+                }
                 if mark != Mark::Keep {
-                    if m.unresolved.is_some() {
-                        row.value = "may be on".into();
-                        text = format!("{}. {text}", memory_unresolved(m));
-                    }
                     let _ = write!(text, " {}.", memory_off(m, out));
                 }
                 text
             }
-            CheckResult::Speed(s) => {
+            CheckResult::Speed(_) => {
                 let measured = match mark {
-                    Mark::Change if r.savings_usd.is_some() => {
-                        "The premium is measured at API rates for the same work.".to_string()
+                    Mark::Consider => {
+                        "The premium is measured at API rates for the same work; the speed it buys is not valued, so turning it off is only worth considering.".to_string()
                     }
-                    Mark::Change => capitalize(&s.reason) + ".",
-                    Mark::Keep => String::new(),
+                    Mark::Keep if r.current == Some(Setting::Speed("standard")) => String::new(),
+                    Mark::Keep => "Its premium over the recorded usage came to nothing.".into(),
                     _ => not_enough(&unresolved(result, r)),
                 };
-                [format!("{FAST_ADVICE}."), measured, set_in]
+                [measured, set_in]
                     .into_iter()
                     .filter(|t| !t.is_empty())
                     .collect::<Vec<_>>()
@@ -5209,7 +5130,7 @@ fn summary(
             Verdict::Consider => Mark::Consider,
             Verdict::Keep => Mark::Keep,
         };
-        let mut row = Row::new(Claim::Measured, mark, short_label(c, out), piece_what(c));
+        let mut row = Row::new(mark, short_label(c, out), piece_what(c));
         row.origin = Some(Origin::Context(*index));
         row.profile = tag(&c.profiles, &switch, out);
         row.location = skill_location(c, out);
@@ -5290,6 +5211,19 @@ fn summary(
         row
     };
     let mut rows: Vec<Row> = checks.iter().map(|c| check_row(c, out)).collect();
+    let mut warnings: Vec<Warning> = vec![];
+    for (_, result, r) in &checks {
+        if let CheckResult::Effort(e) = result
+            && let Some((text, sources)) = effort_warning(e)
+        {
+            warnings.push(Warning {
+                name: setting_name(result),
+                profile: tag(r.profiles, &|_| r.owner.to_string(), out),
+                text,
+                sources,
+            });
+        }
+    }
     // Lines of one setting that split only because the controls they replay differ name the
     // same file; name their profiles as well, so no two read alike.
     let clashing: Vec<usize> = (0..rows.len())
@@ -5331,12 +5265,7 @@ fn summary(
             && !applied(c)
             && !matches!(c.kind, ContextKind::Memory | ContextKind::McpDiscovery)
     }) {
-        let mut row = Row::new(
-            Claim::Measured,
-            Mark::Unknown,
-            short_label(c, out),
-            piece_what(c),
-        );
+        let mut row = Row::new(Mark::Unknown, short_label(c, out), piece_what(c));
         row.profile = tag(&c.profiles, &switch, out);
         row.location = skill_location(c, out);
         row.value = "on".into();
@@ -5463,7 +5392,7 @@ fn summary(
                     ),
                 ),
             };
-            let mut row = Row::new(Claim::Measured, Mark::Info, name, what);
+            let mut row = Row::new(Mark::Info, name, what);
             row.profile = tag(&ids, &switch, out);
             row.value = crate::defaults::switch_value(control);
             row.setting = format!("{shown}:{}", control.path.join("."));
@@ -5517,7 +5446,6 @@ fn summary(
                 .collect();
             let shown = out.home(file);
             let mut row = Row::new(
-                Claim::Measured,
                 Mark::Unknown,
                 crate::defaults::switch_name(control),
                 crate::defaults::switch_what(control),
@@ -5559,7 +5487,6 @@ fn summary(
             let shown = out.home(file);
             let allowlist = control.path.last().is_some_and(|k| k == "enabled_tools");
             let mut row = Row::new(
-                Claim::Measured,
                 Mark::Info,
                 crate::defaults::switch_name(control),
                 crate::defaults::switch_what(control),
@@ -5587,9 +5514,7 @@ fn summary(
         .iter()
         .filter_map(|s| s.text_generation.as_ref())
     {
-        let mut row = Row::new(
-            Claim::Measured,
-            Mark::Unknown,
+        let mut row = Row::new(Mark::Unknown,
             "T3 text generation".into(),
             "The model T3 Code uses to write thread titles, branch names, PR text and other generated text.".into(),
         );
@@ -5611,27 +5536,19 @@ fn summary(
         .enumerate()
         .filter(|(_, c)| c.current && c.kind == ContextKind::Instructions);
     for (index, c) in instructions {
-        let mut row = instruction_row(c, &report.scan.profiles, out);
+        let mut row = instruction_row(c, out);
         row.origin = Some(Origin::Context(index));
         row.profile = tag(&c.profiles, &switch, out);
-        if row.offered() {
-            row.value = format!("{} {arrow} shorter", row.value);
-            // Shortening a file saves an unknown part of what it cost.
-            row.saves("saves", None, None, &spend);
-        } else {
-            row.costs(c.estimate(), false, &spend);
-        }
-        row.setting = match offer(Origin::Context(index), out) {
-            Some(setting) if row.offered() => setting,
-            _ => "the file itself".into(),
-        };
+        row.costs(c.estimate(), false, &spend);
         rows.push(row);
+        if let Some(mut warning) = instruction_warning(c, &report.scan.profiles, out) {
+            warning.profile = tag(&c.profiles, &switch, out);
+            warnings.push(warning);
+        }
     }
     let loading = mcp_guidance(report.context.iter().filter(|c| c.current));
     if !loading.is_empty() {
-        let mut row = Row::new(
-            Claim::Official,
-            Mark::Info,
+        let mut row = Row::new(Mark::Info,
             "MCP tool loading".into(),
             "Whether each MCP tool's full definition is sent with every request, or only its name until the model loads it.".into(),
         );
@@ -5674,12 +5591,7 @@ fn summary(
         let mut row = match &key.1 {
             // A cap is a setting whose cost transcripts cannot weigh.
             Some(cap) => {
-                let mut row = Row::new(
-                    Claim::Measured,
-                    Mark::Unknown,
-                    cap.label.into(),
-                    cap.what.into(),
-                );
+                let mut row = Row::new(Mark::Unknown, cap.label.into(), cap.what.into());
                 row.value = cap.value.clone();
                 // Transcripts can't price a different cap, so what this one saves is unknown.
                 row.baseline = cap.default.map(|default| crate::defaults::Baseline {
@@ -5706,7 +5618,6 @@ fn summary(
                     String::new()
                 };
                 let mut row = Row::new(
-                    Claim::Measured,
                     Mark::Info,
                     "Other tool output".into(),
                     "Tool results kept in the conversation from tools no checked cap limits."
@@ -5724,10 +5635,9 @@ fn summary(
         row.profile = tag(key.0, &switch, out);
         rows.push(row);
     }
-    // One line for each subagent type, whose guidance is evidence beside its cost.
+    // One line for each subagent type: what it cost, with no verdict.
     for c in &report.subagents {
         let mut row = Row::new(
-            Claim::Measured,
             Mark::Info,
             subagent_name(c),
             crate::descriptions::subagent(c).into(),
@@ -5735,9 +5645,13 @@ fn summary(
         row.profile = tag(&c.profiles, &switch, out);
         row.costs(c.estimate, false, &spend);
         row.evidence = subagent_line(c, out);
-        if let Some(text) = subagent_guidance(c) {
-            let _ = write!(row.evidence, " Official: {text}");
-            row.sources = vec![CLAUDE_MODEL_GUIDE];
+        if let Some(text) = explore_warning(c) {
+            warnings.push(Warning {
+                name: subagent_name(c),
+                profile: row.profile.clone(),
+                text,
+                sources: vec![CLAUDE_MODEL_GUIDE],
+            });
         }
         // The setting, without why it is the one.
         row.setting = out
@@ -5755,6 +5669,19 @@ fn summary(
             row.costs(u.estimate, false, &spend);
         }
         row.setting = FABLE_MODEL.into();
+        if u.requests > 0 {
+            warnings.push(Warning {
+                name: row.name.clone(),
+                profile: row.profile.clone(),
+                text: format!(
+                    "Cost {} over {}. {}",
+                    figure(u.estimate),
+                    plural(u.requests, "Fable request"),
+                    capitalize(FABLE_RULE)
+                ),
+                sources: vec![FABLE_PLANS],
+            });
+        }
         rows.push(row);
     }
     // Context with no switch: worth seeing, but not a setting to change.
@@ -5772,12 +5699,7 @@ fn summary(
         .iter()
         .filter(|c| matches!(c.kind, ContextKind::Skill | ContextKind::McpServer))
     {
-        let mut row = Row::new(
-            Claim::Measured,
-            Mark::Info,
-            short_label(c, out),
-            piece_what(c),
-        );
+        let mut row = Row::new(Mark::Info, short_label(c, out), piece_what(c));
         row.profile = tag(&c.profiles, &switch, out);
         row.location = skill_location(c, out);
         row.costs(c.estimate(), false, &spend);
@@ -5811,9 +5733,7 @@ fn summary(
         .copied()
         .collect();
     if !core.is_empty() {
-        let mut row = Row::new(
-            Claim::Measured,
-            Mark::Info,
+        let mut row = Row::new(Mark::Info,
             "System prompt and core tools".into(),
             "The harness's own instructions and the tools it cannot work without, such as Bash and Read, sent with every request.".into(),
         );
@@ -5874,7 +5794,7 @@ fn summary(
     };
     out.line(
         &format!(
-            "Savings are per 30 days at the window's rate, and costs are totals over the window; each percent is of {base}.{tilde} A tool, skill or MCP server that was never used is recommended off, and one that cost more than {} per use (--max-cost-per-use) is worth considering off.",
+            "Savings are per 30 days at the window's rate, and costs are totals over the window; each percent is of {base}.{tilde} A tool, skill, MCP server or auto memory that was never used is recommended off, and one that cost more than {} per use (--max-cost-per-use) is worth considering off.",
             about(report.max_cost_per_use_usd)
         ),
         0,
@@ -5905,6 +5825,7 @@ fn summary(
             DIM,
         );
     }
+    warnings_section(&warnings, out);
     out.blank();
     let fetched = report
         .prices
@@ -7132,14 +7053,12 @@ mod tests {
                     effective: Some(effective.into()),
                     lowered: None,
                     caps: vec![],
-                    supported: vec![],
                     default: Some("medium".into()),
                     unresolved: None,
                 },
                 enterprise: false,
                 runs: vec![],
                 estimate: None,
-                also: vec![],
             })
         };
         let set = format!("{ROOT}/settings.json:effortLevel");
@@ -7438,23 +7357,17 @@ mod tests {
         ] {
             assert_eq!(line(head).what, want, "{head}");
         }
-        let has = |head: &str, mark: &str, claim: &str, evidence: &str| {
+        let has = |head: &str, mark: &str, evidence: &str| {
             let row = line(head);
             assert_eq!(
-                (
-                    row.head.as_str(),
-                    row.mark.as_str(),
-                    row.claim.as_str(),
-                    row.evidence.as_str()
-                ),
-                (head, mark, claim, evidence)
+                (row.head.as_str(), row.mark.as_str(), row.evidence.as_str()),
+                (head, mark, evidence)
             );
         };
         assert!(text.contains("\n  2 changes recommended and 4 worth considering.\n"));
         has(
             "Main-agent prompt cache TTL 5m -> 1h saves ~$25/mo ± $1.25 2%",
             "change",
-            "Measured",
             "Replayed at 5m and 1h, assuming the same sessions, extrapolated from the 99.5% of requests with measured usage to the rest, assuming they resemble each other; 1h costs less. Set in /synthetic/home/.claude/settings.json:promptCacheTtl.",
         );
         // A change names the edit `doctor` offers for it.
@@ -7465,33 +7378,28 @@ mod tests {
         has(
             "Artifact tool on -> off saves $90/mo 6%",
             "change",
-            "Measured",
             "Never used; it cost $90 over the window. Turn off: \"enableArtifact\": false.",
         );
         // Used, but above the limit per use: worth considering off, with the setting inline.
         has(
             "Skill example on -> typed only saves $12/mo 1%",
             "consider",
-            "Measured",
             "The model used it 2 times, $6 each; it cost $12 over the window. Hide it from the model: \"skillOverrides\": {\"example\": \"user-invocable-only\"}.",
         );
         // Turning syncing off removes typed uses too, so every use counts.
         has(
             "Skills synced from claude.ai on -> off saves $30/mo 2%",
             "consider",
-            "Measured",
             "Used 2 times, $15 each; it cost $30 over the window. Turn off: \"syncClaudeAiSkills\": false.",
         );
         has(
             "Skill tools:deploy costs $6 <1%",
             "info",
-            "Measured",
             "Never used. No setting turns it off: turn off its plugin with /plugin, or remove the skill from the added directory.",
         );
         has(
             "Agent tool on costs $40 3%",
             "keep",
-            "Measured",
             "Used 310 times, $0.13 each; it cost $40 over the window. Turn off: \"permissions\": {\"deny\": [\"Agent\"]}.",
         );
         // One use's share would repeat the total, so it is left out.
@@ -7507,19 +7415,16 @@ mod tests {
         has(
             "Subagent prompt cache TTL 1h saves $4.20/mo <1%",
             "keep",
-            "Measured",
             "Replayed at 5m and 1h, assuming the same sessions; 1h costs less than 5m. Set in /synthetic/home/.claude/settings.json:promptCacheTtl.",
         );
         has(
             "Workflow tool on",
             "unknown",
-            "Measured",
             "Not enough evidence: none of its requests could be priced; never used. Turn off: \"enableWorkflows\": false.",
         );
         has(
             "Idle compaction on",
             "unknown",
-            "Measured",
             "Not enough evidence: on and off cost the same on recorded idle gaps, so neither is cheaper. Set in /synthetic/home/.claude/settings.json:idleCompaction.",
         );
         assert!(text.contains(
@@ -7527,30 +7432,26 @@ mod tests {
         ));
         has(
             "/repo/CLAUDE.md costs unknown",
-            "unknown",
-            "Official",
-            "Not enough evidence: this record has no rendered instruction text to measure against the provider's guidance.",
+            "info",
+            "No setting turns it off.",
         );
         // A zero-cost fixed piece is hidden; the system prompt and Bash are summed.
         has(
             "System prompt and core tools costs $213 14%",
             "info",
-            "Measured",
             "Includes core tools such as Bash and Read, and the skill and subagent lists. No setting turns these off.",
         );
-        // Auto memory and fast mode rest on the maintainer's preference; memory is
-        // advised off whatever it cost, without changing the exit code.
+        // Auto memory over the limit per use is worth considering off, as a skill is,
+        // without changing the exit code.
         has(
             "Auto memory on -> off saves $150/mo 10%",
             "consider",
-            "Opinion",
-            "Opinion: notes the agent writes for itself skip review and encourage slop, so keep durable guidance in reviewed, checked-in CLAUDE.md or AGENTS.md. Measured: used 3 times (1 read, 2 writes). Set \"autoMemoryEnabled\": false in /synthetic/home/.claude/settings.json.",
+            "It cost more than --max-cost-per-use per read or write. Measured: used 3 times (1 read, 2 writes). Set \"autoMemoryEnabled\": false in /synthetic/home/.claude/settings.json.",
         );
         has(
             "Fast mode off",
             "keep",
-            "Opinion",
-            "Opinion: standard speed is enough, and fast mode bills a premium for the same work. Official: on a Claude plan, fast mode is paid only from usage credits, at its API rates, even with plan usage left. Set in /synthetic/home/.claude/settings.json:fastMode.",
+            "On a Claude plan, fast mode is paid only from usage credits, at its API rates, even with plan usage left. Set in /synthetic/home/.claude/settings.json:fastMode.",
         );
         // Sources cite the guidance the evidence quotes, so only details list them.
         assert!(
@@ -7582,7 +7483,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_rules_are_official_and_precede_the_setting() {
+    fn plan_rules_precede_the_setting() {
         let mut report = two_profiles();
         // An unset main TTL, which Claude Code resolves by how the request is paid for.
         report.scan.profiles[0].ttl.main = TtlControl {
@@ -7639,21 +7540,21 @@ mod tests {
         };
         // Each rule sits before the setting that changes the line, so the line still ends with it.
         assert!(evidence("Main-agent prompt cache TTL").ends_with(
-            " Official: while it is unset, Claude Code gives the main conversation 1h on a Claude plan within its included usage, and 5m once usage credits or an API key pay for it. Set in /synthetic/home/.claude/settings.json:promptCacheTtl."
+            " While it is unset, Claude Code gives the main conversation 1h on a Claude plan within its included usage, and 5m once usage credits or an API key pay for it. Set in /synthetic/home/.claude/settings.json:promptCacheTtl."
         ));
         // A set TTL is the same on any plan.
-        assert!(!evidence("Subagent prompt cache TTL").contains("Official"));
+        assert!(!evidence("Subagent prompt cache TTL").contains("plan"));
         assert!(evidence("Fast mode fast -> off").contains(
-            " Official: on a ChatGPT plan, Fast uses included usage 2.5 times as fast as Standard and Ultrafast 8 times, which can exceed the API premium priced here. Set in /synthetic/second-profile/config.toml:service_tier."
+            " On a ChatGPT plan, Fast uses included usage 2.5 times as fast as Standard and Ultrafast 8 times, which can exceed the API premium priced here. Set in /synthetic/second-profile/config.toml:service_tier."
         ));
         assert!(
             evidence("Fast mode off")
-                .contains(" Official: on a Claude plan, fast mode is paid only from usage credits")
+                .starts_with("On a Claude plan, fast mode is paid only from usage credits")
         );
         assert!(evidence("Prompt suggestions").ends_with(
-            " Official: Claude Code skips suggestions while a plan is near its usage limit, which this estimate cannot see. Set \"promptSuggestionEnabled\": false in /synthetic/home/.claude/settings.json to turn it off."
+            " Claude Code skips suggestions while a plan is near its usage limit, which this estimate cannot see. Set \"promptSuggestionEnabled\": false in /synthetic/home/.claude/settings.json to turn it off."
         ));
-        assert!(!evidence("Session recaps").contains("Official"));
+        assert!(!evidence("Session recaps").contains("plan"));
         let codex_window: Vec<&str> = rows
             .iter()
             .filter(|r| {
@@ -7662,7 +7563,7 @@ mod tests {
             .map(|r| r.evidence.as_str())
             .collect();
         assert_eq!(codex_window.len(), 1, "{summary}");
-        assert!(codex_window[0].contains(" Official: ChatGPT credits charge cache writes as ordinary input, below the API write rate priced here on GPT-5.6 and later. Set in "));
+        assert!(codex_window[0].contains(" ChatGPT credits charge cache writes as ordinary input, below the API write rate priced here on GPT-5.6 and later. Set in "));
         // No Claude window carries the ChatGPT rule.
         assert_eq!(
             rows.iter()
@@ -7689,7 +7590,7 @@ mod tests {
             details.contains(&format!("\n  {PRICES_MEAN} Nothing was changed.\n")),
             "{details}"
         );
-        assert!(details.contains("\n    Official: on a ChatGPT plan, Fast uses included usage 2.5 times as fast as Standard and Ultrafast 8 times, which can exceed the API premium priced here. https://learn.chatgpt.com/docs/pricing\n"), "{details}");
+        assert!(details.contains("\n    Plan: On a ChatGPT plan, Fast uses included usage 2.5 times as fast as Standard and Ultrafast 8 times, which can exceed the API premium priced here. https://learn.chatgpt.com/docs/pricing\n"), "{details}");
         assert!(!details.contains("subscription"));
         assert!(!summary.contains("subscription"));
     }
@@ -8022,11 +7923,12 @@ mod tests {
     }
 
     #[test]
-    fn effort_lines_carry_their_claim_and_change_the_owning_setting() {
-        use crate::doctor::{Edit, How, Patch, fixes};
+    fn effort_lines_are_costs_with_the_providers_guidance_past_high_as_warnings() {
+        use crate::doctor::fixes;
         use crate::effort::{EffortInput, effort_checks};
         let file = format!("{ROOT}/settings.json");
-        // One profile's line for a control, beside the recorded pairs, and its fix if any.
+        // One profile's line for a control beside the recorded pairs, its warning if any, and
+        // whether `doctor` offers anything.
         let line = |harness: Harness, control: EffortControl| {
             let mut report = synthetic();
             report.checks.clear();
@@ -8040,9 +7942,13 @@ mod tests {
                 now: NOV1 + DAY_MS,
             });
             report.checks = checks.into_iter().map(CheckResult::Effort).collect();
-            let line = report_line(&text(&report, None, true), "Main-session effort");
-            let fix = fixes(&report, false).into_iter().next();
-            (line, fix)
+            let text = text(&report, None, true);
+            let warning = text
+                .lines()
+                .find(|l| l.starts_with("  Main-session effort: "))
+                .map(String::from);
+            let line = report_line(&text, "Main-session effort");
+            (line, warning, fixes(&report, false).is_empty())
         };
         let control = |model: &str, level: &str, owner: &str| EffortControl {
             model: Some(model.into()),
@@ -8052,194 +7958,91 @@ mod tests {
             effective: Some(level.into()),
             lowered: None,
             caps: vec![],
-            supported: vec![],
             default: None,
             unresolved: None,
         };
-        let set = |path: &[&str], value: &str| {
-            How::Edit(Patch {
-                file: file.clone(),
-                harness: Harness::Claude,
-                edits: vec![Edit {
-                    path: path.iter().map(|p| p.to_string()).collect(),
-                    value: value.into(),
-                    op: crate::doctor::Op::Set,
-                }],
-            })
-        };
-
-        // max is a change to xhigh, or high where the model has no xhigh, in the user file's env.
         let owner = format!("{file}:env.CLAUDE_CODE_EFFORT_LEVEL");
-        let (row, fix) = line(Harness::Claude, control("claude-opus-5-5", "max", &owner));
-        assert_eq!(
-            (row.claim.as_str(), row.mark.as_str()),
-            ("Official", "change")
-        );
-        assert!(row.head.contains("max -> xhigh"), "{}", row.head);
-        assert!(row.evidence.contains("prone to overthinking"));
-        assert!(
-            row.evidence
-                .contains("claude-opus-5-5 at an unrecorded effort 4 times")
-        );
-        assert!(row.evidence.contains("so its cost is not repriced"));
-        assert!(row.evidence.contains("Enterprise per-role cap"));
-        let fix = fix.unwrap();
-        assert_eq!(fix.how, set(&["env", "CLAUDE_CODE_EFFORT_LEVEL"], "xhigh"));
-        assert!(!fix.suggested);
-        let (row, fix) = line(
-            Harness::Claude,
-            EffortControl {
-                supported: ["low", "medium", "high", "max"].map(String::from).into(),
-                ..control("claude-opus-4-6", "max", "CLAUDE_CODE_EFFORT_LEVEL")
-            },
-        );
-        assert!(row.head.contains("max -> high"), "{}", row.head);
-        assert!(
-            matches!(fix.unwrap().how, How::Manual { reason, .. } if reason.contains("environment variable"))
-        );
-
-        // low is worth considering raising, saved for the model in the user file.
-        let (row, fix) = line(
-            Harness::Claude,
-            control("claude-opus-5", "low", &format!("{file}:effortLevel")),
-        );
-        assert_eq!(
-            (row.claim.as_str(), row.mark.as_str()),
-            ("Opinion", "consider")
-        );
-        let fix = fix.unwrap();
-        assert!(fix.suggested && fix.value == "low -> medium", "{fix:?}");
-        assert_eq!(
-            fix.how,
-            set(&["modelSettings", "claude-opus-5", "effortLevel"], "medium")
-        );
-
-        // xhigh cites the guidance without a verdict, as do the levels between.
-        let (row, fix) = line(Harness::Claude, control("claude-opus-5-5", "xhigh", &owner));
-        assert_eq!(
-            (row.claim.as_str(), row.mark.as_str()),
-            ("Official", "info")
-        );
-        assert!(row.evidence.contains("test the next model up"));
-        assert!(fix.is_none());
-        let (row, _) = line(
-            Harness::Claude,
-            control("claude-opus-5-5", "medium", &owner),
-        );
-        assert_eq!(row.mark, "info");
-
-        // A Codex max rests on Anthropic's guidance, so it is an opinion beside OpenAI's.
         let toml = "/synthetic/home/.codex/config.toml";
-        let (row, _) = line(
-            Harness::Codex,
-            control(
-                "gpt-6.1-sol",
-                "max",
-                &format!("{toml}:model_reasoning_effort"),
-            ),
+
+        // Every known level is a cost with no verdict, never offered.
+        for (harness, model, level) in [
+            (Harness::Claude, "claude-opus-5-5", "max"),
+            (Harness::Claude, "claude-opus-5-5", "xhigh"),
+            (Harness::Claude, "claude-opus-5-5", "medium"),
+            (Harness::Claude, "claude-opus-5", "low"),
+            (Harness::Codex, "gpt-6.1-sol", "max"),
+            (Harness::Codex, "gpt-6.1-sol", "ultra"),
+        ] {
+            let (row, _, none) = line(harness, control(model, level, &owner));
+            assert_eq!(row.mark, "info", "{level}");
+            assert!(
+                row.evidence.contains("there is no verdict"),
+                "{}",
+                row.evidence
+            );
+            assert!(none, "{level} is offered");
+        }
+        let (row, warning, _) = line(Harness::Claude, control("claude-opus-5-5", "max", &owner));
+        assert!(
+            row.evidence
+                .contains("claude-opus-5-5 at an unrecorded effort 4 times"),
+            "{}",
+            row.evidence
         );
-        assert_eq!(
-            (row.claim.as_str(), row.mark.as_str()),
-            ("Opinion", "change")
+        assert!(row.evidence.contains("Enterprise per-role cap"));
+        // Past high, each provider's own guidance is a cited warning.
+        let warning = warning.expect("max warns");
+        assert!(
+            warning.contains("Runs at max. Anthropic's model guide says"),
+            "{warning}"
         );
-        assert!(row.evidence.contains("Official: OpenAI's reasoning guide"));
+        assert!(warning.contains("prone to overthinking"));
+        assert!(warning.contains(CLAUDE_EFFORT_DOCS));
+        let (_, warning, _) = line(Harness::Claude, control("claude-opus-5-5", "xhigh", &owner));
+        assert!(
+            warning
+                .expect("xhigh warns")
+                .contains("test the next model up")
+        );
+        let (_, warning, _) = line(Harness::Claude, control("claude-opus-5-5", "high", &owner));
+        assert_eq!(warning, None);
+        let (_, warning, _) = line(Harness::Claude, control("claude-opus-5", "low", &owner));
+        assert_eq!(warning, None);
+        // Codex cites OpenAI's guide, never Anthropic's.
+        let (row, warning, _) = line(Harness::Codex, control("gpt-6.1-sol", "max", toml));
+        let warning = warning.expect("Codex max warns");
+        assert!(
+            warning.contains("OpenAI's reasoning guide keeps max"),
+            "{warning}"
+        );
+        assert!(!warning.contains("Anthropic"));
         assert!(!row.evidence.contains("Enterprise"));
-        let (row, _) = line(Harness::Codex, control("gpt-6.1-sol", "xhigh", toml));
-        assert_eq!(
-            (row.claim.as_str(), row.mark.as_str()),
-            ("Official", "info")
-        );
-        // A level the guide does not cover says so instead of borrowing another level's advice.
-        let (row, fix) = line(Harness::Codex, control("gpt-6.1-sol", "ultra", toml));
-        assert_eq!(row.mark, "info");
-        assert!(
-            row.evidence
-                .starts_with("OpenAI's reasoning guide gives no advice for ultra"),
-            "{}",
-            row.evidence
-        );
-        assert!(fix.is_none());
+        let (_, warning, _) = line(Harness::Codex, control("gpt-6.1-sol", "ultra", toml));
+        assert_eq!(warning, None);
 
-        // A level a cap lowered is raised by raising the cap, not the default.
-        let cap = |value: &str, owner: String| Owned {
-            value: value.into(),
-            owner,
-        };
-        let capped = |caps: Vec<Owned>| EffortControl {
-            level: Some("high".into()),
-            effective: Some("low".into()),
-            caps,
-            ..control("claude-opus-5-5", "low", &format!("{file}:effortLevel"))
-        };
-        let (row, fix) = line(
-            Harness::Claude,
-            capped(vec![cap("low", format!("{file}:maxEffortLevel"))]),
-        );
-        assert!(
-            row.evidence
-                .ends_with(&format!("Set in {file}:maxEffortLevel.")),
-            "{}",
-            row.evidence
-        );
-        assert_eq!(fix.unwrap().how, set(&["maxEffortLevel"], "medium"));
-        // Every cap in the way, and a default below the target, is changed by hand together.
-        // Model-specific owners are never read as one model key.
-        let user_cap = format!("{file}:modelSettings.claude-opus-5-5.maxEffortLevel");
-        let managed =
-            "/etc/claude-code/managed-settings.json:modelSettings.claude-opus-5-5.maxEffortLevel";
-        let (row, fix) = line(
-            Harness::Claude,
-            capped(vec![
-                cap("low", user_cap.clone()),
-                cap("low", managed.into()),
-            ]),
-        );
-        assert!(
-            row.evidence
-                .ends_with(&format!("Set in {user_cap} and {managed}.")),
-            "{}",
-            row.evidence
-        );
-        match fix.unwrap().how {
-            How::Manual { step, reason } => {
-                assert_eq!(step, format!("set {user_cap} and {managed} to medium"));
-                assert_eq!(
-                    reason,
-                    "2 settings keep it below medium, so they change together"
-                );
-            }
-            how => panic!("expected a step by hand, got {how:?}"),
-        }
-        let (_, fix) = line(
+        // A level a cap lowered names the cap's owner when the cap owns it.
+        let (row, _, _) = line(
             Harness::Claude,
             EffortControl {
-                level: Some("low".into()),
-                owner: format!("{file}:modelSettings.claude-opus-5-5.effortLevel"),
-                ..capped(vec![cap("low", user_cap.clone())])
-            },
-        );
-        match fix.unwrap().how {
-            How::Manual { step, .. } => assert_eq!(
-                step,
-                format!(
-                    "set {file}:modelSettings.claude-opus-5-5.effortLevel and {user_cap} to medium"
+                level: Some("high".into()),
+                effective: Some("low".into()),
+                ..control(
+                    "claude-opus-5-5",
+                    "low",
+                    &format!("{file}:modelSettings.claude-opus-5-5.maxEffortLevel"),
                 )
-            ),
-            how => panic!("expected a step by hand, got {how:?}"),
-        }
-
-        // A target the model does not accept is skipped for the next one down.
-        let (row, _) = line(
-            Harness::Codex,
-            EffortControl {
-                supported: ["low", "medium", "high", "max"].map(String::from).into(),
-                ..control("gpt-6-luna", "max", toml)
             },
         );
-        assert!(row.head.contains("max -> high"), "{}", row.head);
+        assert!(
+            row.evidence.ends_with(&format!(
+                "Set in {file}:modelSettings.claude-opus-5-5.maxEffortLevel."
+            )),
+            "{}",
+            row.evidence
+        );
 
         // An unresolved default is unknown, and never a change.
-        let (row, fix) = line(
+        let (row, warning, none) = line(
             Harness::Claude,
             EffortControl {
                 effective: None,
@@ -8254,7 +8057,7 @@ mod tests {
             "{}",
             row.evidence
         );
-        assert!(fix.is_none());
+        assert!(none && warning.is_none());
     }
 
     #[test]
@@ -8534,7 +8337,7 @@ mod tests {
     }
 
     #[test]
-    fn instruction_files_are_official_against_the_providers_size_guidance() {
+    fn instruction_files_cost_per_line_and_warn_over_the_providers_size_guidance() {
         let out = Out {
             text: String::new(),
             options: ReportOptions::default(),
@@ -8547,63 +8350,48 @@ mod tests {
                 margin: None,
                 floor: 0.0,
                 partial: false,
-                since: None,
-                until: 0,
+                since: Some(0),
+                until: 30 * DAY as Millis,
             },
         };
         let file = |harness, name: &str, bytes, lines| {
-            let mut c = context_piece(ContextKind::Instructions, name, None, Some(1.0), None);
+            let mut c = context_piece(ContextKind::Instructions, name, None, Some(4.0), None);
             c.harness = harness;
             c.instruction_size = Some(crate::model::InstructionSize { bytes, lines });
             c
         };
-        let verdict = |c: &ContextCost, profiles: &[Profile]| {
-            let row = instruction_row(c, profiles, &out);
-            (row.claim, row.mark, row.value)
-        };
+        // Every file is a measured line with no verdict, priced per 100 lines.
         let claude = |lines| file(Harness::Claude, "/repo/CLAUDE.md", 100, lines);
-        assert_eq!(
-            verdict(&claude(200), &[]),
-            (Claim::Official, Mark::Consider, "200 lines".into())
+        let row = instruction_row(&claude(200), &out);
+        assert_eq!((row.mark, row.value.as_str()), (Mark::Info, "200 lines"));
+        assert!(
+            row.evidence.starts_with("Each 100 lines costs about $2/mo"),
+            "{}",
+            row.evidence
         );
-        assert_eq!(
-            verdict(&claude(199), &[]),
-            (Claim::Official, Mark::Keep, "199 lines".into())
+        // Claude's guidance is per CLAUDE.md, from 200 lines; other files it loads have none.
+        let warning = instruction_warning(&claude(200), &[], &out).unwrap();
+        assert!(
+            warning
+                .text
+                .starts_with("200 lines; Claude Code suggests under 200"),
+            "{}",
+            warning.text
         );
-        // Claude's guidance is per CLAUDE.md; other files it loads have none.
+        assert!(warning.text.contains("Each 100 lines costs about $2/mo"));
+        assert!(instruction_warning(&claude(199), &[], &out).is_none());
         let other = file(Harness::Claude, "/repo/AGENTS.md", 100, 900);
-        assert_eq!(instruction_row(&other, &[], &out).claim, Claim::Measured);
-        assert_eq!(instruction_row(&other, &[], &out).mark, Mark::Info);
+        assert_eq!(instruction_row(&other, &out).mark, Mark::Info);
+        assert!(instruction_warning(&other, &[], &out).is_none());
         // Rendered bytes count headers and wrappers, so only reaching the budget can mean truncation.
         let mut profile = crate::test_support::make_profile("profile", "/codex");
         let agents = |bytes| file(Harness::Codex, "AGENTS.md", bytes, 1);
+        let warn = |c: &ContextCost, profiles: &[Profile], out: &Out<'_>| {
+            instruction_warning(c, profiles, out).map(|w| w.text)
+        };
         let profiles = std::slice::from_ref(&profile);
-        assert_eq!(verdict(&agents(32_767), profiles).1, Mark::Keep);
-        assert_eq!(verdict(&agents(32_768), profiles).1, Mark::Consider);
-        let mut other = profile.clone();
-        other.id = "other".into();
-        other
-            .settings
-            .insert("project_doc_max_bytes".into(), Scalar::Number(65536.0));
-        let mut both = agents(100);
-        both.profiles.push("other".into());
-        assert_eq!(
-            verdict(&both, &[profile.clone(), other.clone()]).1,
-            Mark::Unknown
-        );
-        // The same budget from different sources names each of them.
-        other
-            .settings
-            .insert("project_doc_max_bytes".into(), Scalar::Number(32768.0));
-        other.instruction_budget_file = Some("/other/config.toml".into());
-        let mixed = instruction_row(&both, &[profile.clone(), other], &out).evidence;
-        assert!(
-            mixed.contains("Codex loads by default and /other/config.toml sets"),
-            "{mixed}"
-        );
-        let evidence =
-            |c: &ContextCost, profiles: &[Profile]| instruction_row(c, profiles, &out).evidence;
-        let default = evidence(&agents(32_768), std::slice::from_ref(&profile));
+        assert_eq!(warn(&agents(32_767), profiles, &out), None);
+        let default = warn(&agents(32_768), profiles, &out).unwrap();
         assert!(
             default.contains("32,768 bytes Codex loads by default"),
             "{default}"
@@ -8612,27 +8400,49 @@ mod tests {
             default.contains("command-line override is not recorded"),
             "{default}"
         );
+        // Profiles with different budgets give no warning.
+        let mut other = profile.clone();
+        other.id = "other".into();
+        other
+            .settings
+            .insert("project_doc_max_bytes".into(), Scalar::Number(65536.0));
+        let mut both = agents(40_000);
+        both.profiles.push("other".into());
+        assert_eq!(warn(&both, &[profile.clone(), other.clone()], &out), None);
+        // The same budget from different sources names each of them.
+        other
+            .settings
+            .insert("project_doc_max_bytes".into(), Scalar::Number(32768.0));
+        other.instruction_budget_file = Some("/other/config.toml".into());
+        let mixed = warn(&both, &[profile.clone(), other], &out).unwrap();
+        assert!(
+            mixed.contains("Codex loads by default and /other/config.toml sets"),
+            "{mixed}"
+        );
+        // A configured budget names the file that sets it, not the default.
         profile
             .settings
             .insert("project_doc_max_bytes".into(), Scalar::Number(65536.0));
         profile.instruction_budget_file = Some("/etc/codex/config.toml".into());
         let profiles = std::slice::from_ref(&profile);
-        assert_eq!(verdict(&agents(40_000), profiles).1, Mark::Keep);
-        // A configured budget names the file that sets it, not the default.
-        let set = evidence(&agents(70_000), profiles);
+        assert_eq!(warn(&agents(40_000), profiles, &out), None);
+        let set = warn(&agents(70_000), profiles, &out).unwrap();
         assert!(
             set.contains("65,536 bytes /etc/codex/config.toml sets"),
             "{set}"
         );
         assert!(!set.contains("default"), "{set}");
-        // A project or named profile that can set it leaves no verdict.
+        // A project or named profile that can set it leaves no warning.
         profile.instruction_budget_unresolved =
             Some("/repo/.codex/config.toml can set project_doc_max_bytes for some runs".into());
         let profiles = std::slice::from_ref(&profile);
-        assert_eq!(verdict(&agents(100), profiles).1, Mark::Unknown);
-        assert!(
-            evidence(&agents(100), profiles)
-                .starts_with("Not enough evidence: /repo/.codex/config.toml can set")
+        assert_eq!(warn(&agents(70_000), profiles, &out), None);
+        // With nothing priced, the line says only that no setting turns it off.
+        let mut unpriced = claude(200);
+        unpriced.estimated_usd = None;
+        assert_eq!(
+            instruction_row(&unpriced, &out).evidence,
+            "No setting turns it off."
         );
     }
 
@@ -8650,9 +8460,7 @@ mod tests {
             lines: 200,
         });
         let notes = context_guidance(&c, &[], "~/CLAUDE.md");
-        assert!(notes[0].contains("~/CLAUDE.md: 200 recorded lines, 401 UTF-8 bytes; at or above"));
-        assert!(!notes[0].contains("/repo/CLAUDE.md"));
-        assert!(notes[0].contains("imports still load together"));
+        assert_eq!(notes, ["~/CLAUDE.md: 200 recorded lines, 401 UTF-8 bytes."]);
         c.harness = Harness::Codex;
         c.instruction_size = Some(crate::model::InstructionSize {
             bytes: 32_769,
@@ -8660,16 +8468,19 @@ mod tests {
         });
         let mut profile = crate::test_support::make_profile("profile", "/codex");
         let notes = context_guidance(&c, std::slice::from_ref(&profile), "AGENTS.md");
-        assert!(notes[0].contains("including any headers or wrappers"));
-        assert!(notes[0].contains(
-            "Rendered bytes cannot establish whether that source chain exceeded its budget"
-        ));
-        assert!(notes[0].contains("Selected profile budget: 32768 bytes"));
+        assert_eq!(
+            notes,
+            [
+                "AGENTS.md: 1 recorded line, 32,769 UTF-8 bytes, including any headers or wrappers. Codex loads up to 32,768 bytes of it (project_doc_max_bytes)."
+            ]
+        );
         profile
             .settings
             .insert("project_doc_max_bytes".into(), Scalar::Number(65536.0));
         let notes = context_guidance(&c, &[profile], "AGENTS.md");
-        assert!(notes[0].contains("Selected profile budget: 65536 bytes"));
+        assert!(
+            notes[0].ends_with("Codex loads up to 65,536 bytes of it (project_doc_max_bytes).")
+        );
     }
 
     #[test]
@@ -9071,22 +8882,15 @@ mod tests {
             assert!(line.contains(part), "{part} in {line}");
         }
         assert!(summary.contains(SUBAGENT_EVIDENCE));
-        // The model guide is Official evidence beside the measured cost, on the same line.
-        let (_, official) = line.split_once(" Official: ").expect("Official guidance");
-        assert!(official.contains(
-            "search files, read logs or summarize on Haiku or Sonnet at the model's default effort"
-        ));
-        assert!(official.contains("user agent named Explore with model: haiku"));
+        // The model guide's tip is a cited warning apart from the measured line.
+        assert!(!line.contains("Anthropic"), "{line}");
         assert!(
-            summary
-                .lines()
-                .any(|l| l.trim_start().starts_with("Sources: ") && l.contains(CLAUDE_MODEL_GUIDE))
+            summary.contains(&format!(
+                "\n  Explore subagent: Ran on claude-opus-5-5 (90%), claude-haiku-4-5 (10%) and cost ~$2.20 ± $0.30. On claude-haiku-5-5 the same recorded tokens would cost $0.50, assuming the same turns. Anthropic's model guide notes that the built-in Explore runs on the session's model, and suggests a user agent named Explore with model: haiku to keep exploration cheap. {CLAUDE_MODEL_GUIDE}\n"
+            )),
+            "{summary}"
         );
         let details = text(&report, None, true);
-        assert!(
-            details.contains(&format!("Source: {CLAUDE_MODEL_GUIDE}")),
-            "{details}"
-        );
         assert!(
             details.contains("Same tokens on claude-haiku-5-5: $0.50"),
             "{details}"
@@ -9099,7 +8903,7 @@ mod tests {
     }
 
     #[test]
-    fn fable_lines_cite_the_plan_rule_beside_weekly_spend_without_a_verdict() {
+    fn fable_lines_show_weekly_spend_and_warn_with_the_plan_rule() {
         let mut report = synthetic();
         let before = text(&report, None, false);
         let cost = |known: f64, total: Option<f64>| Cost {
@@ -9148,12 +8952,11 @@ mod tests {
         assert_eq!(first(&summary), first(&before));
         let row = report_line(&summary, "Fable weekly use");
         assert_eq!(
-            (row.claim.as_str(), row.mark.as_str(), row.head.as_str()),
-            ("Official", "info", "Fable weekly use costs ~$516 ± $40 34%")
+            (row.mark.as_str(), row.head.as_str()),
+            ("info", "Fable weekly use costs ~$516 ± $40 34%")
         );
         for part in [
             "5 Fable requests at API prices, per 7 days back from this report: $412 (4 requests, to 2026-12-01), an unknown amount (1 request, 3 days to 2026-11-24).",
-            "can use up to half the weekly usage limit",
             "no share of it is shown",
             "they cover only this profile's recorded sessions",
             "paid with usage credits after the cap was reached",
@@ -9162,15 +8965,20 @@ mod tests {
         ] {
             assert!(row.evidence.contains(part), "{part} in {}", row.evidence);
         }
-        // The plan rule is an Official sentence before the setting, which ends the line.
+        // The plan rule is a cited warning apart from the line, which ends with its setting.
         assert!(
-            row.evidence.ends_with(
-                " Official: on a Claude Max or Ultra plan or a Team or seat-based Enterprise premium seat, Fable models can use up to half the weekly usage limit, and use it faster than other models; on Pro or a Team or seat-based Enterprise standard seat, they run on usage credits; on usage-based Enterprise, they bill at API rates. Model setting: /model, or model in settings.json."
-            ),
+            row.evidence
+                .ends_with("reached. The weekly reset time is not recorded, and the limit is not published in tokens or dollars, so no share of it is shown. 1 of them is also attributed to another Claude profile that signs in to Anthropic and reads the same transcripts, so whose they were is unknown. 2 requests recorded no model and may have run on Fable. Model setting: /model, or model in settings.json."),
             "{}",
             row.evidence
         );
-        assert!(summary.contains(FABLE_PLANS), "{summary}");
+        assert!(!row.evidence.contains("half the weekly usage limit"));
+        assert!(
+            summary.contains(&format!(
+                "\n  Fable weekly use: Cost ~$516 ± $40 over 5 Fable requests. On a Claude Max or Ultra plan or a Team or seat-based Enterprise premium seat, Fable models can use up to half the weekly usage limit, and use it faster than other models; on Pro or a Team or seat-based Enterprise standard seat, they run on usage credits; on usage-based Enterprise, they bill at API rates. {FABLE_PLANS}\n"
+            )),
+            "{summary}"
+        );
         // --details keeps each span's cost with its unknowns, the caveats and the sources.
         let details = text(&report, None, true);
         for part in [
@@ -9179,8 +8987,7 @@ mod tests {
             "3 days to 2026-11-24, 1 request",
             "they cover only this profile's recorded sessions",
             "1 of them is also attributed to another Claude profile",
-            FABLE_RULE,
-            FABLE_PLANS,
+            CLAUDE_PRICING,
         ] {
             assert!(details.contains(part), "{part} in {details}");
         }
@@ -9188,18 +8995,19 @@ mod tests {
         report.fable[0].unrecorded = 0;
         report.fable[0].shared = 0;
         report.fable[0].weeks.clear();
-        let row = report_line(&text(&report, None, true), "Fable weekly use");
+        let summary = text(&report, None, true);
+        let row = report_line(&summary, "Fable weekly use");
         assert_eq!(row.head, "Fable weekly use");
-        assert!(
-            row.evidence
-                .starts_with("No Fable requests recorded in the window. Official: on a Claude Max"),
-            "{}",
-            row.evidence
+        assert_eq!(
+            row.evidence,
+            "No Fable requests recorded in the window. Model setting: /model, or model in settings.json."
         );
+        // With no Fable use, there is nothing for the plan rule to warn about.
+        assert!(!summary.contains("WARNINGS"), "{summary}");
     }
 
     #[test]
-    fn subagent_guidance_covers_claude_types_and_explore_off_haiku() {
+    fn only_an_explore_subagent_off_haiku_warns() {
         let line = |harness, kind: &str, model: &str| SubagentCost {
             harness,
             profiles: vec!["profile".into()],
@@ -9223,24 +9031,23 @@ mod tests {
             model_setting: String::new(),
             effort_setting: String::new(),
         };
-        let tip = "user agent named Explore";
         assert_eq!(
-            subagent_guidance(&line(Harness::Codex, "explorer", "gpt-5")),
+            explore_warning(&line(Harness::Codex, "explorer", "gpt-5")),
             None
         );
-        let general =
-            subagent_guidance(&line(Harness::Claude, "log-reader", "claude-opus-5-5")).unwrap();
-        assert!(general.contains("keeps code edits and judgment calls on the main model"));
-        assert!(!general.contains(tip));
-        let explore =
-            subagent_guidance(&line(Harness::Claude, "Explore", "claude-opus-5-5")).unwrap();
-        assert!(explore.contains(tip));
-        let cheap =
-            subagent_guidance(&line(Harness::Claude, "Explore", "claude-haiku-5-5")).unwrap();
-        assert!(!cheap.contains(tip));
-        // A fork always runs on the main model, so no setting can act on the guide.
         assert_eq!(
-            subagent_guidance(&line(Harness::Claude, "fork", "claude-opus-5-5")),
+            explore_warning(&line(Harness::Claude, "log-reader", "claude-opus-5-5")),
+            None
+        );
+        let explore =
+            explore_warning(&line(Harness::Claude, "Explore", "claude-opus-5-5")).unwrap();
+        assert!(
+            explore.starts_with("Ran on claude-opus-5-5 and cost an unknown amount."),
+            "{explore}"
+        );
+        assert!(explore.contains("user agent named Explore with model: haiku"));
+        assert_eq!(
+            explore_warning(&line(Harness::Claude, "Explore", "claude-haiku-5-5")),
             None
         );
     }
@@ -9525,7 +9332,7 @@ mod tests {
         );
         assert!(
             line.evidence.contains(&format!(
-                "; {winner} costs {gap} less every 30 days, saved whenever the unset default would be {other}, and setting it keeps {winner} however usage is paid. Official: while it is unset,"
+                "; {winner} costs {gap} less every 30 days, saved whenever the unset default would be {other}, and setting it keeps {winner} however usage is paid. While it is unset,"
             )),
             "{summary}"
         );
@@ -9727,7 +9534,7 @@ mod tests {
     #[test]
     fn changes_rank_by_saving_and_the_rest_by_cost() {
         let line = |name: &str, mark, verb: &'static str, share: f64| {
-            let mut row = Row::new(Claim::Measured, mark, name.into(), String::new());
+            let mut row = Row::new(mark, name.into(), String::new());
             row.amount = Some((verb, String::new()));
             row.share = Some(share);
             row

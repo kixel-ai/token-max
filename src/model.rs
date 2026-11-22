@@ -923,8 +923,6 @@ pub struct EffortControl {
     /// Every `maxEffortLevel` below `max` that applies to the model, each of which a higher
     /// level must clear.
     pub caps: Vec<Owned>,
-    /// The levels the model accepts; empty when unknown.
-    pub supported: Vec<String>,
     /// The model's own level when no setting names one; None when unknown.
     pub default: Option<String>,
     /// Why the default cannot be resolved, such as an unrecorded `--profile` selection.
@@ -1829,7 +1827,7 @@ pub struct EffortRun {
 /// A different effort changes the output tokens, so nothing is repriced.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EffortCheck {
-    /// The effective level as current, and `xhigh`, `high` or `medium` as recommended.
+    /// The effective level as current, and never a recommended one.
     pub base: CheckBase<String>,
     pub harness: Harness,
     pub control: EffortControl,
@@ -1840,9 +1838,6 @@ pub struct EffortCheck {
     /// What every run's requests cost, extrapolated from the priced ones over all of them;
     /// None when none was priced.
     pub estimate: Option<Estimate>,
-    /// Settings beside `base.owner`, such as caps below the recommended level, that must
-    /// change with it.
-    pub also: Vec<String>,
 }
 
 /// What a background feature cost, estimated from the turns where it would have run.

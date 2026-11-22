@@ -116,6 +116,43 @@ fn command(w: &Workspace, args: &[&str]) -> Command {
     command
 }
 
+/// Where a plain report line's profile tag and setting start, after the columns two or
+/// more spaces separate; None when the last column is a figure or percent.
+fn setting_start(text: &str) -> Option<usize> {
+    let mut columns: Vec<(usize, &str)> = vec![];
+    let mut start = None;
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c == ' ' && chars.peek().is_some_and(|(_, next)| *next == ' ') {
+            if let Some(s) = start.take() {
+                columns.push((s, &text[s..i]));
+            }
+            while chars.peek().is_some_and(|(_, next)| *next == ' ') {
+                chars.next();
+            }
+        } else if start.is_none() && c != ' ' {
+            start = Some(i);
+        }
+    }
+    if let Some(s) = start {
+        columns.push((s, &text[s..]));
+    }
+    let (at, last) = *columns.last().filter(|_| columns.len() > 1)?;
+    let figure = last.ends_with('%')
+        || last.ends_with("/mo")
+        || last.starts_with('$')
+        || last.starts_with("~$")
+        || last.starts_with("at least ")
+        || matches!(last, "unknown" | "not measured" | "saving not measured");
+    if figure {
+        return None;
+    }
+    match columns.iter().rev().nth(1) {
+        Some((tag, text)) if text.starts_with('[') && columns.len() > 2 => Some(*tag),
+        _ => Some(at),
+    }
+}
+
 /// A plain report's line whose heading starts with `head`: its verdict word, heading
 /// (name, value, figure and percent) with padding collapsed, and the evidence under it,
 /// which only details show. The evidence cards after the lines are not searched.
@@ -135,11 +172,8 @@ fn report_line(text: &str, head: &str) -> (String, String, String) {
                 return None;
             }
             let rest = line.get(9..)?;
-            // The heading ends at the claim column.
-            let end = ["Measured", "Official", "Opinion"]
-                .iter()
-                .filter_map(|claim| rest.find(&format!("  {claim}")))
-                .min()?;
+            // The heading ends where the setting starts.
+            let end = setting_start(rest).unwrap_or(rest.len());
             let heading = rest[..end].split_whitespace().collect::<Vec<_>>().join(" ");
             let under = |n: usize| {
                 lines
@@ -1001,7 +1035,7 @@ fn a_relocated_binary_runs_from_any_directory_with_relative_paths() {
 
 // Built CLI warns from current settings alone, remains read-only and skips unreadable lines.
 #[test]
-fn warns_from_current_fast_settings_alone_stays_read_only_and_skips_unreadable_lines() {
+fn a_fast_setting_with_no_recorded_usage_has_no_verdict_and_skips_unreadable_lines() {
     let w = Workspace::new();
     let settings = w.codex.join("config.toml");
     let config = "model=\"gpt-6.1-sol\"\nservice_tier=\"ultrafast\"";
@@ -1017,9 +1051,10 @@ fn warns_from_current_fast_settings_alone_stays_read_only_and_skips_unreadable_l
         c.env("CODEX_HOME", &w.codex);
         run(&mut c)
     };
+    // No recorded usage measures a premium, so the setting alone is no change.
     let (status, stdout, stderr) = invoke();
-    assert_eq!(status, 1, "{stderr}");
-    assert!(stdout.contains("Fast mode"), "{stdout}");
+    assert_eq!(status, 0, "{stderr}");
+    assert_eq!(report_line(&stdout, "Fast mode").0, "unknown", "{stdout}");
     let report = analysis(&w, |d| d.codex_dirs = vec![text(&w.codex)], 1.0);
     let fast = check(&report, |c| matches!(c, CheckResult::Speed(_)));
     let CheckResult::Speed(fast) = fast else {
@@ -1032,7 +1067,9 @@ fn warns_from_current_fast_settings_alone_stays_read_only_and_skips_unreadable_l
         format!("{config}\n[features]\nultrafast_mode=false"),
     )
     .unwrap();
-    assert_eq!(invoke().0, 0);
+    let (status, stdout, _) = invoke();
+    assert_eq!(status, 0);
+    assert_eq!(report_line(&stdout, "Fast mode").0, "keep", "{stdout}");
     std::fs::write(
         w.codex.join("sessions/broken.jsonl"),
         "{\"private\":\"SYNTHETIC_PRIVATE\",BROKEN}\n",
@@ -1245,10 +1282,12 @@ mod unix {
 
     #[test]
     fn doctor_on_a_terminal_writes_only_the_changes_answered_yes() {
+        // A 5m TTL to raise, and a Bash cap that outlasts even 1h to decline.
+        const SETTINGS: &str = "{\n  \"promptCacheTtl\": \"5m\",\n  \"env\": {\n    \"BASH_MAX_TIMEOUT_MS\": \"7200000\"\n  }\n}\n";
         let w = Workspace::new();
         // A fixed window keeps the walk's dollar figures the same on any day.
         w.recent_fixture(15);
-        w.settings("{\n  \"promptCacheTtl\": \"5m\"\n}\n");
+        w.settings(SETTINGS);
         // Prices ten thousand times the fixture's, so the TTL saves enough to be asked: the
         // walk leaves out a change saving under $1/mo.
         let mut prices: Value =
@@ -1296,7 +1335,7 @@ mod unix {
         // Answers wait in the terminal until each prompt reads one; the terminal stays
         // open until the child exits, as a person's would.
         let mut keyboard = std::fs::File::from(master);
-        // A plan pays, then yes to the TTL, no to auto memory, then yes to writing it.
+        // A plan pays, then yes to the TTL, no to the Bash cap, then yes to writing it.
         keyboard.write_all(b"p\ny\nn\ny\n").unwrap();
         let status = child.wait().unwrap().code().unwrap();
         let (stdout, stderr) = (out.join().unwrap(), err.join().unwrap());
@@ -1326,35 +1365,32 @@ mod unix {
             "\n\n  2 questions, biggest saving first.\n  Nothing is written until you confirm the list at the end.\n",
         );
         let ttl = at("\n  [1/2] Main-agent prompt cache TTL ");
-        let memory = at("\n  [2/2] Auto memory ");
-        let report = at("\n  1 change recommended and 1 worth considering.\n");
-        assert!(
-            headline < ttl && ttl < memory && memory < report,
-            "{stdout}"
-        );
+        let bash = at("\n  [2/2] Bash timeout cap ");
+        let report = at("\n  2 changes recommended.\n");
+        assert!(headline < ttl && ttl < bash && bash < report, "{stdout}");
         // Each card shows the saving, the change and its verdict, then what the setting does
         // and why; the window ends now, so its day count and the wrapping follow the clock.
         let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let entry = words(&stdout[ttl..memory]);
+        let entry = words(&stdout[ttl..bash]);
         assert!(
-            entry.starts_with("[1/2] Main-agent prompt cache TTL saves $N/mo 13% 5m -> 1h Recommended (Measured) What How long the main conversation's prompt stays cached between requests: a 1h cache costs more to write than 5m but survives longer pauses. Why Measured on 2 requests over "),
+            entry.starts_with("[1/2] Main-agent prompt cache TTL saves $N/mo 13% 5m -> 1h Recommended What How long the main conversation's prompt stays cached between requests: a 1h cache costs more to write than 5m but survives longer pauses. Why Measured on 2 requests over "),
             "{entry}"
         );
         assert!(
-            entry.ends_with(" days. Replayed at 5m and 1h, assuming the same sessions; 1h costs less. Official: while it is unset, Claude Code gives the main conversation 1h on a Claude plan, which you answered pays for this profile; requests past the plan's included usage are paid with usage credits and get 5m. Accept? [y]es, [n]o, [q]uit: Accepted so far: about $N/mo, 13% of this host's spend."),
+            entry.ends_with(" days. Replayed at 5m and 1h, assuming the same sessions; 1h costs less. While it is unset, Claude Code gives the main conversation 1h on a Claude plan, which you answered pays for this profile; requests past the plan's included usage are paid with usage credits and get 5m. Accept? [y]es, [n]o, [q]uit: Accepted so far: about $N/mo, 13% of this host's spend."),
             "{entry}"
         );
         assert!(
-            words(&stdout[memory..report]).starts_with("[2/2] Auto memory saving not measured on -> off Worth considering (Opinion) What Auto memory lets Claude write notes for itself and loads them into every session."),
+            words(&stdout[bash..report]).starts_with("[2/2] Bash timeout cap saving not measured 2h -> 55m Recommended What The longest Claude waits on a foreground Bash command"),
             "{stdout}"
         );
         // Then the report, its accepted change first, and one question to write it.
         let accepted =
             at("\n  ACCEPTED  biggest saving first\n  change   Main-agent prompt cache TTL");
-        let declined = at("\n  NOT ACCEPTED\n  consider Auto memory");
+        let declined = at("\n  NOT ACCEPTED\n  change   Bash timeout cap");
         // The confirm shows the file's diff before its one question.
         let diff = at(
-            "\n  ~/.claude/settings.json\n  @@ -1,3 +1,3 @@\n    {\n  -   \"promptCacheTtl\": \"5m\"\n  +   \"promptCacheTtl\": \"1h\"\n    }\n",
+            "\n  ~/.claude/settings.json\n  @@ -1,3 +1,3 @@\n    {\n  -   \"promptCacheTtl\": \"5m\",\n  +   \"promptCacheTtl\": \"1h\",\n      \"env\": {\n",
         );
         let backup = at(
             "\n  Backs up ~/.claude/settings.json to ~/.claude/settings.json.token-max.bak\n  first.\n",
@@ -1372,11 +1408,12 @@ mod unix {
         // The backup is the file as it was, so copying it back undoes the change.
         assert_eq!(
             std::fs::read_to_string(w.claude.join("settings.json.token-max.bak")).unwrap(),
-            "{\n  \"promptCacheTtl\": \"5m\"\n}\n"
+            SETTINGS
         );
+        // The declined cap is left as it was.
         assert_eq!(
             std::fs::read_to_string(w.claude.join("settings.json")).unwrap(),
-            "{\n  \"promptCacheTtl\": \"1h\"\n}\n"
+            SETTINGS.replace("\"5m\"", "\"1h\"")
         );
         drop(keyboard);
     }

@@ -1,7 +1,6 @@
 //! Auto memory: Claude Code's MEMORY.md and system prompt section, and Codex's memory
-//! summary. Each profile gets one line with its total cost and uses, advised off whatever
-//! it cost: notes the agent writes for itself skip the review that checked-in
-//! `CLAUDE.md` or `AGENTS.md` gets, so durable guidance belongs there instead.
+//! summary. Each profile gets one line with its total cost and uses, judged like a skill:
+//! off when never read back or written, worth considering off above the cost per use.
 
 use crate::collections::HashMap;
 
@@ -29,10 +28,12 @@ pub struct MemoryInput<'a> {
     pub since: Option<Millis>,
     /// The window end, which monthly values scale to.
     pub now: Millis,
+    /// Above this cost per read or write, memory is worth considering off.
+    pub max_cost_per_use_usd: f64,
 }
 
-/// One check per line of profiles sharing the setting's owner: advisory while auto memory
-/// is on, keep once it is off.
+/// One check per line of profiles sharing the setting's owner: a change while auto memory
+/// is on and never used, advisory above the cost per use, keep otherwise.
 pub fn memory_checks(input: &MemoryInput<'_>) -> Vec<MemoryCheck> {
     let scan = input.scan;
     let calibration: HashMap<String, f64> = calibrate(&scan.exposure, &scan.requests)
@@ -310,9 +311,23 @@ fn check(
             if on { "on" } else { "off" },
         ));
     }
-    let (action, recommended) = match current {
-        Some(false) => (Action::Keep, Some(false)),
-        _ => (Action::Advisory, Some(false)),
+    let unmeasured_generation = profile.harness == Harness::Codex
+        && (current != Some(false) || control.stored || !uses.is_empty() || !rows.is_empty());
+    let lower_bound = unmeasured_generation || unpriced_reads > 0;
+    // Judged as a skill is: never used is off, above the limit per use worth considering
+    // off. A total that leaves a part out can prove neither that it was free nor that
+    // each use stayed under the limit.
+    let (action, recommended) = match (current, total) {
+        (Some(false), _) => (Action::Keep, Some(false)),
+        (None, _) | (Some(true), None) => (Action::Advisory, None),
+        (Some(true), Some(usd)) => match reads + writes {
+            _ if usd <= 0.0 && lower_bound => (Action::Advisory, None),
+            _ if usd <= 0.0 => (Action::Keep, Some(true)),
+            0 => (Action::Change, Some(false)),
+            n if usd / n as f64 > input.max_cost_per_use_usd => (Action::Advisory, Some(false)),
+            _ if lower_bound => (Action::Advisory, None),
+            _ => (Action::Keep, Some(true)),
+        },
     };
     MemoryCheck {
         base: CheckBase {
@@ -351,7 +366,7 @@ fn check(
             monthly_savings_usd: monthly,
             break_even: None,
             assumptions: [
-                "recommended off whatever it cost: notes the agent writes for itself are not reviewed, which encourages slop; durable guidance belongs in reviewed, checked-in CLAUDE.md or AGENTS.md",
+                "a read back or a write is a use, as a skill's invocation is; loading the memory index into every request is not",
                 "loaded memory is priced like other context at the cache state of its position",
                 "memory files read back are priced like other tool output; writes are estimated at the output price from their recorded characters",
                 "turning memory off is assumed to change no other work",
@@ -370,11 +385,7 @@ fn check(
         writes,
         unresolved,
         overrides: control.overrides.clone(),
-        unmeasured_generation: profile.harness == Harness::Codex
-            && (current != Some(false)
-                || control.stored
-                || !uses.is_empty()
-                || !rows.is_empty()),
+        unmeasured_generation,
         unpriced_reads,
     }
 }

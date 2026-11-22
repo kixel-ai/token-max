@@ -59,11 +59,21 @@ run. `tests/run_script.rs` runs the run script for the host (`run.ps1` on the
 Windows CI job) against fixture releases on a local server.
 
 The page's results are the maintainer's from `docs/results.md` and the
-README's top; change them together. Its terminal is real `token-max doctor`
-output on synthetic transcripts, as HTML: after a change to doctor's questions
-or output, run `python3 assets/demo/site.py site/public/index.html` from the
-repository root after `cargo build --release`. The README's recording,
-`assets/demo/walk.gif`, answers the same way, and `assets/demo/walk.tape`
+README's top; change them together. Its terminal is the maintainer's own
+`token-max doctor --defaults` on the `nixos` host, as HTML, with its EVERYTHING
+ELSE section cut to one line, since that section is long and names project
+files that can belong to private repositories. After a change to doctor's
+questions or output, run it again from the repository root on that host after
+`cargo build --release`, answering how each Claude profile pays:
+
+```sh
+python3 assets/demo/site.py site/public ~/.claude=p ~/.claude-api-credits=a ~/.claude-personal.merged-20261106=a
+```
+
+It writes the run into `index.html` and its timing into `style.css`. Read the
+result before committing it: it is public, so it must name no private
+repository, customer or project. The README's recording, `assets/demo/walk.gif`,
+runs on synthetic transcripts instead, and `assets/demo/walk.tape`
 regenerates it. `og.png`, the link preview, is a 1200x630 screenshot of the
 page's top, from the logo through the run box; retake it after changing that
 part.

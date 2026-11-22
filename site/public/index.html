@@ -58,133 +58,136 @@
   <div class="term">
     <div class="bar">
       <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
-      <span id="demo-title">token-max doctor <span class="d">on synthetic transcripts</span></span>
+      <span id="demo-title">token-max doctor --defaults <span class="d">on my transcripts, as a new user</span></span>
       <button class="replay" type="button" hidden>Replay</button>
     </div>
-    <!-- assets/demo/site.py writes the run between these markers; rerun it when doctor's output changes. -->
-    <div class="body"><!-- doctor --><pre class="screen"><code><span class="cmdline">$ <span class="typed">token-max doctor</span>
-</span><span class="step">  Claude Code caches the main conversation for 1h on a Claude plan and 5m on an
-  API key or usage credits. Which pays can't be read from the transcripts, so
-  say which to price each profile against its own default.
+    <!-- assets/demo/site.py writes the run between these markers, and its timing into style.css; rerun it when doctor's output changes. -->
+    <div class="body"><!-- doctor --><pre class="screen"><code><span class="cmdline">$ <span class="typed">token-max doctor --defaults</span>
+</span><span class="step">  Claude Code caches the main conversation for 1h on a Claude plan and 5m on an API key or usage
+  credits. Which pays can't be read from the transcripts, so say which to price each profile against
+  its own default.
   <span class="d">Nothing is saved; the next run asks again.</span>
-  <span class="b">How is ~/.claude paid for?</span> <span class="d">[p]lan, [a]PI key or usage credits, [s]kip</span>: <span class="ans">a</span><span class="cur"></span>
+  <span class="b">How is ~/.claude paid for?</span> <span class="d">[p]lan, [a]PI key or usage credits, [s]kip</span>: <span class="ans">p</span><span class="cur"></span>
+</span><span class="step">  <span class="b">How is ~/.claude-api-credits paid for?</span> <span class="d">[p]lan, [a]PI key or usage credits, [s]kip</span>: <span class="ans">a</span><span class="cur"></span>
+</span><span class="step">  <span class="b">How is ~/.claude-personal.merged-20261106 paid for?</span> <span class="d">[p]lan, [a]PI key or usage credits, [s]kip</span>: <span class="ans">a</span><span class="cur"></span>
 </span><span class="step">
-<span class="b">token-max</span>  <span class="d">1,124 requests in 24 sessions from 2026-11-08 to 2026-11-22 (14</span>
-           <span class="d">days), $231 at API prices</span>
+<span class="b">token-max</span>  <span class="d">241,041 requests in 2,343 sessions from 2026-10-13 to 2026-11-22 (41 days), ~$14,219 ±</span>
+           <span class="d">$146 at API prices</span>
+  As a user with no settings files would see it (--defaults): every user, project and local settings
+  file, T3 Code's settings and the shell's setting variables are pretended away, so each setting is
+  at its Claude Code or Codex default and every tool, skill and MCP server is on. Managed and system
+  policy still apply.
+  <span class="d">Profiles: claude ~/.claude, claude ~/.claude-api-credits, claude</span>
+  <span class="d">~/.claude-personal.merged-20261106, codex ~/.codex, T3 claudeAgent claude (~/.claude), T3</span>
+  <span class="d">claude_api_credits claude (~/.claude), T3 codex codex (~/.codex).</span>
+  <span class="d">T3 state: "/home/kixelated/.t3/userdata"; read-only consistent SQLite snapshot; allowlisted native</span>
+  <span class="d">links and controls only</span>
+  <span class="d">T3 coverage: Native terminal suggestions, away summaries, goal check-ins, Codex TUI recaps and</span>
+  <span class="d">terminal keepalive guidance do not apply to T3; their native toggles do not control T3 helpers</span>
+  <span class="d">T3 coverage: T3 instance opencode (opencode) is unsupported; its spend is excluded</span>
+  <span class="d">T3 coverage: T3 instance antigravity (antigravity) is unsupported; its spend is excluded</span>
+  <span class="d">T3 unresolved: 29,319 requests: the request predates T3's oldest retained turn item</span>
+  <span class="d">T3 unresolved: 9 requests: the subagent's root session has no transcript and no T3 provider thread</span>
+  <span class="d">T3 removed: 11,843 requests of instance claude_proxy, no longer in T3's settings: billed, left out</span>
+  <span class="d">of every current profile's checks</span>
+  <span class="d">T3 removed: 2,448 requests of instance claude_personal, no longer in T3's settings: billed, left</span>
+  <span class="d">out of every current profile's checks</span>
+  <span class="d">T3 removed: 888 requests of instance claude_local, no longer in T3's settings: billed, left out of</span>
+  <span class="d">every current profile's checks</span>
+  <span class="d">Dollars are public API prices, not an invoice: the closest public measure of what a request uses</span>
+  <span class="d">of a Claude or ChatGPT plan's limits, and what Claude's usage credits bill past them. Nothing was</span>
+  <span class="d">changed.</span>
+  <span class="d">68,681 Codex requests are priced at an assumed service tier, which their records leave unclear;</span>
+  <span class="d">--details shows each tier's cost.</span>
+  <span class="d">182 requests have no recorded usage and are left out of comparisons.</span>
 
-  <span class="b">3 questions, biggest saving first.</span>
-  <span class="d">Nothing is written until you confirm the list at the end.</span>
+  <span class="b r">23 changes recommended</span> <span class="b">and</span> <span class="b y">3 worth considering</span><span class="b">.</span>
+  From the defaults, these changes save ~$698/mo ± $4.08, 7% of this host's spend, plus 1 change
+  whose saving was not measured; overlapping changes may save less.
 
-  <span class="d">[1/3]</span> <span class="b">Fast mode</span>                                             <span class="g">saves $445/mo</span>  <span class="d">90%</span>
-        fast → off  <span class="y">Worth considering</span>
-        <span class="d">What</span>  Fast mode serves responses faster at a premium price per token.
-        <span class="d">Why</span>   Measured on 1,124 requests over 14 days. The premium is measured
-              at API rates for the same work; the speed it buys is not valued,
-              so turning it off is only worth considering. On a Claude plan,
-              fast mode is paid only from usage credits, at its API rates, even
-              with plan usage left.
-  <span class="b">Accept?</span> <span class="d">[y]es, [n]o, [q]uit</span>: <span class="ans">y</span><span class="cur"></span>
-</span><span class="step">  <span class="d">Accepted so far: about $445/mo, 90% of this host's spend.</span>
-
-  <span class="d">[2/3]</span> <span class="b">Main-agent prompt cache TTL</span>                           <span class="g">saves $351/mo</span>  <span class="d">71%</span>
-        5m → 1h  <span class="r">Recommended</span>
-        <span class="d">What</span>  How long the main conversation's prompt stays cached between
-              requests: a 1h cache costs more to write than 5m but survives
-              longer pauses.
-        <span class="d">Why</span>   Measured on 1,124 requests over 14 days. Replayed at 5m and 1h,
-              assuming the same sessions; 1h costs less. While it is unset,
-              Claude Code gives the main conversation 5m on an API key or usage
-              credits, which you answered pay for this profile.
-  <span class="b">Accept?</span> <span class="d">[y]es, [n]o, [q]uit</span>: <span class="ans">y</span><span class="cur"></span>
-</span><span class="step">  <span class="d">Accepted so far: about $796/mo, 161% of this host's spend; overlapping changes</span>
-  <span class="d">may save less.</span>
-
-  <span class="d">[3/3]</span> <span class="b">Bash timeout cap</span>                                     <span class="d">saving not measured</span>
-        2h → 55m  <span class="r">Recommended</span>
-        <span class="d">What</span>  The longest Claude waits on a foreground Bash command before
-              Claude Code moves it to the background.
-        <span class="d">Why</span>   Measured on 1,124 requests over 14 days. A wait that long outlasts
-              the 1h cache. No foreground Bash wait outlasted the cache.
-              Commands past the cap keep running in the background; what
-              checking on them costs is not measured.
-  <span class="b">Accept?</span> <span class="d">[y]es, [n]o, [q]uit</span>: <span class="ans">n</span><span class="cur"></span>
-</span><span class="step">
-  <span class="d">Profiles: claude ~/.claude.</span>
-  <span class="d">Dollars are public API prices, not an invoice: the closest public measure of</span>
-  <span class="d">what a request uses of a Claude or ChatGPT plan's limits, and what Claude's</span>
-  <span class="d">usage credits bill past them. Nothing was changed.</span>
-
-  <span class="b r">2 changes recommended</span> <span class="b">and</span> <span class="b y">1 worth considering</span><span class="b">.</span>
-  Together, these changes save about $796/mo, 161% of this host's spend, plus 1
-  change whose saving was not measured; overlapping changes may save less.
-  Compared with defaults, your settings cost about $445/mo more, 90% of this
-  host's spend. 1 more setting differs by an amount not measured.
-
-  <span class="d">Savings are per 30 days at the window's rate, and costs are totals over the</span>
-  <span class="d">window; each percent is of this host's spend over the window, $231. A tool,</span>
-  <span class="d">skill, MCP server or auto memory that was never used is recommended off, and</span>
-  <span class="d">one that cost more than $1 per use (--max-cost-per-use) is worth considering</span>
-  <span class="d">off.</span>
-  <span class="d">Background estimates apply current files to history; historical settings and</span>
-  <span class="d">unrecorded launch overrides remain unknown.</span>
+  <span class="d">Savings are per 30 days at the window's rate, and costs are totals over the window; each percent</span>
+  <span class="d">is of this host's spend over the window, ~$14,219 ± $146, extrapolated from the requests that</span>
+  <span class="d">could be priced. A ~ marks a figure extrapolated from the requests that could be priced to those</span>
+  <span class="d">that could not, assuming they resemble each other, followed by its 95% margin of error. A tool,</span>
+  <span class="d">skill, MCP server or auto memory that was never used is recommended off, and one that cost more</span>
+  <span class="d">than $1 per use (--max-cost-per-use) is worth considering off.</span>
+  <span class="d">Background estimates apply current files to history; historical settings and unrecorded launch</span>
+  <span class="d">overrides remain unknown.</span>
   <span class="r">● </span><span class="d">change</span>  <span class="y">● </span><span class="d">consider</span>  <span class="g">● </span><span class="d">keep  ○ no verdict</span>
-
-  <span class="b">ACCEPTED</span>  <span class="d">biggest saving first ───────────────────────────────────────────────</span>
-  <span class="y">●</span> Fast mode                              fast → off      <span class="g">saves  $445/mo</span>   <span class="d">90%</span>
-    <span class="d">"fastMode": false in ~/.claude/settings.json</span>
-    <span class="d">default off, costs $445/mo more</span>
-  <span class="r">●</span> Main-agent prompt cache TTL            5m → 1h         <span class="g">saves  $351/mo</span>   <span class="d">71%</span>
-    <span class="d">"promptCacheTtl": "1h" in ~/.claude/settings.json</span>
-    Accepted: about $796/mo, 161% of this host's spend; overlapping changes may
-    save less.
-
-  <span class="b">NOT ACCEPTED</span> <span class="d">─────────────────────────────────────────────────────────────────</span>
-  <span class="r">●</span> Bash timeout cap                       2h → 55m        saving not measured
-    <span class="d">"env": {"BASH_MAX_TIMEOUT_MS": "3300000"} in ~/.claude/settings.json</span>
-    <span class="d">default 10m, saving not measured</span>
-
-  <span class="b">EVERYTHING ELSE</span>  <span class="d">biggest cost first ──────────────────────────────────────────</span>
-  <span class="d">○ Main-session effort                    medium          costs     $231  100%</span>
-    <span class="d">~/.claude/settings.json:modelSettings.claude-opus-5-5.effortLevel (the</span>
-    <span class="d">model's default)</span>
-  <span class="g">●</span> Prompt suggestions                     on              costs    $0.69   <span class="d">&lt;1%</span>
-    <span class="d">~/.claude/settings.json:promptSuggestionEnabled (default)</span>
-  <span class="g">●</span> Session recaps                         on
-    <span class="d">~/.claude/settings.json:awaySummaryEnabled (default)</span>
-  <span class="d">○ Auto-compact window (claude-opus-5-5)  967k (default)</span>
-    <span class="d">~/.claude/settings.json:modelSettings.claude-opus-5-5.autoCompactWindow</span>
-  <span class="d">○ Idle compaction                        on</span>
-    <span class="d">~/.claude/settings.json:idleCompaction</span>
-  <span class="d">○ Goal check-ins                         on              costs  unknown</span>
-    <span class="d">CLAUDE_CODE_GOAL_CHECKIN_MINUTES (default)</span>
-  <span class="d">○ Auto memory                            on              costs  unknown</span>
-    <span class="d">~/.claude/settings.json:autoMemoryEnabled (default)</span>
-  <span class="d">○ Keepalive pings                        unknown</span>
-    <span class="d">no setting</span>
-  <span class="d">○ Fable weekly use</span>
-    <span class="d">/model, or model in settings.json</span>
+</span><span class="step">
+  <span class="b">CHANGES</span>  <span class="d">biggest saving first ────────────────────────────────────────────────────────────────────</span>
+  <span class="r">●</span> Subagent prompt cache TTL                 5m → 1h            <span class="g">saves  ~$465/mo ± $1.32</span>   <span class="d">4%</span>
+    <span class="d">[~/.claude/settings.json]  "subagentPromptCacheTtl": "1h"</span>
+  <span class="r">●</span> Main-agent prompt cache TTL               5m (default) → 1h  <span class="g">saves   $142/mo</span>   <span class="d">1%</span>
+    <span class="d">[~/.claude-api-credits/settings.json]  "promptCacheTtl": "1h"</span>
+  <span class="y">●</span> Auto memory                               on → off           <span class="g">saves  ~$40/mo ± $2.68</span>  <span class="d">&lt;1%</span>
+    <span class="d">[~/.claude/settings.json]  "autoMemoryEnabled": false</span>
+  <span class="r">●</span> Workflow tool                             on → off           <span class="g">saves  ~$13/mo ± &lt;$0.01</span>  <span class="d">&lt;1%</span>
+    <span class="d">[~/.claude/settings.json]  "enableWorkflows": false</span>
+  <span class="y">●</span> ScheduleWakeup tool                       on → off           <span class="g">saves  ~$11/mo ± &lt;$0.01</span>  <span class="d">&lt;1%</span>
+    <span class="d">[~/.claude/settings.json]  "permissions": {"deny": ["ScheduleWakeup"]} (added to the list)</span>
+  <span class="r">●</span> ReportFindings tool                       on → off           <span class="g">saves  ~$5.77/mo ± &lt;$0.01</span>  <span class="d">&lt;1%</span>
+    <span class="d">[~/.claude/settings.json]  "permissions": {"deny": ["ReportFindings"]} (added to the list)</span>
+  <span class="y">●</span> Skill dataviz                             on → typed only    <span class="g">saves  ~$5.32/mo ± $0.02</span>  <span class="d">&lt;1%</span>
+    <span class="d">[~/.claude/settings.json]  "skillOverrides": {"dataviz": "user-invocable-only"}</span>
+  <span class="r">●</span> Skill code-review                         on → typed only    <span class="g">saves  ~$3.08/mo ± $0.01</span>  <span class="d">&lt;1%</span>
+    <span class="d">[~/.claude/settings.json]  "skillOverrides": {"code-review": "user-invocable-only"}</span>
+  <span class="r">●</span> Skill update-config                       on → typed only    <span class="g">saves  ~$2.60/mo ± &lt;$0.01</span>  <span class="d">&lt;1%</span>
+    <span class="d">[~/.claude/settings.json]  "skillOverrides": {"update-config": "user-invocable-only"}</span>
+  <span class="r">●</span> Skill run                                 on → typed only    <span class="g">saves  ~$1.35/mo ± &lt;$0.01</span>  <span class="d">&lt;1%</span>
+    <span class="d">[~/.claude/settings.json]  "skillOverrides": {"run": "user-invocable-only"}</span>
+  <span class="r">●</span> Skill loop                                on → typed only    <span class="g">saves  ~$1.26/mo ± &lt;$0.01</span>  <span class="d">&lt;1%</span>
+    <span class="d">[~/.claude/settings.json]  "skillOverrides": {"loop": "user-invocable-only"}</span>
+  <span class="r">●</span> Skill plugin-authoring                    on → typed only    <span class="g">saves  ~$0.98/mo ± &lt;$0.01</span>  <span class="d">&lt;1%</span>
+    <span class="d">[~/.claude/settings.json]  "skillOverrides": {"plugin-authoring": "user-invocable-only"}</span>
+  <span class="r">●</span> Skill workflow-authoring                  on → typed only    <span class="g">saves  ~$0.93/mo ± &lt;$0.01</span>  <span class="d">&lt;1%</span>
+    <span class="d">[~/.claude/settings.json]  "skillOverrides": {"workflow-authoring": "user-invocable-only"}</span>
+  <span class="r">●</span> Skill keybindings-help                    on → typed only    <span class="g">saves  ~$0.91/mo ± &lt;$0.01</span>  <span class="d">&lt;1%</span>
+    <span class="d">[~/.claude/settings.json]  "skillOverrides": {"keybindings-help": "user-invocable-only"}</span>
+  <span class="r">●</span> Skill bump                                on → typed only    <span class="g">saves  ~$0.78/mo ± &lt;$0.01</span>  <span class="d">&lt;1%</span>
+    <span class="d">[~/.claude/settings.json]  "skillOverrides": {"bump": "user-invocable-only"}</span>
+  <span class="r">●</span> Skill quest-recurring                     on → typed only    <span class="g">saves  ~$0.77/mo ± &lt;$0.01</span>  <span class="d">&lt;1%</span>
+    <span class="d">[~/.claude/settings.json]  "skillOverrides": {"quest-recurring": "user-invocable-only"}</span>
+  <span class="r">●</span> Skill fewer-permission-prompts            on → typed only    <span class="g">saves  ~$0.70/mo ± &lt;$0.01</span>  <span class="d">&lt;1%</span>
+    <span class="d">[~/.claude/settings.json]  "skillOverrides": {"fewer-permission-prompts": "user-invocable-only"}</span>
+  <span class="r">●</span> Skill simplify                            on → typed only    <span class="g">saves  ~$0.69/mo ± &lt;$0.01</span>  <span class="d">&lt;1%</span>
+    <span class="d">[~/.claude/settings.json]  "skillOverrides": {"simplify": "user-invocable-only"}</span>
+  <span class="r">●</span> Skill quest-export                        on → typed only    <span class="g">saves  ~$0.59/mo ± &lt;$0.01</span>  <span class="d">&lt;1%</span>
+    <span class="d">[~/.claude/settings.json]  "skillOverrides": {"quest-export": "user-invocable-only"}</span>
+  <span class="r">●</span> Skill security-review                     on → typed only    <span class="g">saves  ~$0.33/mo ± &lt;$0.01</span>  <span class="d">&lt;1%</span>
+    <span class="d">[~/.claude/settings.json]  "skillOverrides": {"security-review": "user-invocable-only"}</span>
+  <span class="r">●</span> Skill init                                on → typed only    <span class="g">saves  ~$0.25/mo ± &lt;$0.01</span>  <span class="d">&lt;1%</span>
+    <span class="d">[~/.claude/settings.json]  "skillOverrides": {"init": "user-invocable-only"}</span>
+  <span class="r">●</span> Skill quest-delete                        on → typed only    <span class="g">saves  ~$0.12/mo ± &lt;$0.01</span>  <span class="d">&lt;1%</span>
+    <span class="d">[~/.claude/settings.json]  "skillOverrides": {"quest-delete": "user-invocable-only"}</span>
+  <span class="r">●</span> ExitWorktree tool                         on → off           <span class="g">saves  ~$0.05/mo ± &lt;$0.01</span>  <span class="d">&lt;1%</span>
+    <span class="d">[~/.claude/settings.json]  "permissions": {"deny": ["ExitWorktree"]} (added to the list)</span>
+  <span class="r">●</span> NotebookEdit tool                         on → off           <span class="g">saves  ~$0.05/mo ± &lt;$0.01</span>  <span class="d">&lt;1%</span>
+    <span class="d">[~/.claude/settings.json]  "permissions": {"deny": ["NotebookEdit"]} (added to the list)</span>
+  <span class="r">●</span> CronList tool                             on → off           <span class="g">saves  ~$0.03/mo ± &lt;$0.01</span>  <span class="d">&lt;1%</span>
+    <span class="d">[~/.claude/settings.json]  "permissions": {"deny": ["CronList"]} (added to the list)</span>
+  <span class="r">●</span> Bash timeout cap                          10m → 4m           saving not measured
+    <span class="d">[~/.claude-personal.merged-20261106/settings.json]  "env": {"BASH_MAX_TIMEOUT_MS": "240000"}</span>
+</span><span class="step">
+  <span class="b">EVERYTHING ELSE</span>  <span class="d">biggest cost first ──────────────────────────────────────────────────────────────</span>
+<span class="elided">  … 329 lines on every other setting and feature, cut from this page</span>
+</span><span class="step">
+  <span class="b">WARNINGS</span>  <span class="d">provider guidance the transcripts cannot price ─────────────────────────────────────────</span>
+  <span class="b">Explore subagent [~/.claude/settings.json]:</span> Ran on claude-opus-5-5 and cost ~$24 ± $0.49. On
+    claude-haiku-5-5 the same recorded tokens would cost ~$2.59 ± $0.09, assuming the same turns.
+    Anthropic's model guide notes that the built-in Explore runs on the session's model, and
+    suggests a user agent named Explore with model: haiku to keep exploration cheap.
+    <span class="d">https://claude.dev/blog/which-claude-model-should-you-build-with/</span>
+  <span class="b">Fable weekly use [~/.claude/settings.json]:</span> Cost $12 over 108 Fable requests. On a Claude Max or
+    Ultra plan or a Team or seat-based Enterprise premium seat, Fable models can use up to half the
+    weekly usage limit, and use it faster than other models; on Pro or a Team or seat-based
+    Enterprise standard seat, they run on usage credits; on usage-based Enterprise, they bill at API
+    rates. <span class="d">https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan</span>
 
   <span class="d">Prices: fetched from https://models.dev/api.json (2026-11-22).</span>
-  <span class="d">Each line compares one setting with everything else unchanged, so a sum of</span>
-  <span class="d">savings may count the same requests twice.</span>
+  <span class="d">Each line compares one setting with everything else unchanged, so a sum of savings may count the</span>
+  <span class="d">same requests twice.</span>
   <span class="d">--details shows the evidence, assumptions and sources behind each line.</span>
-
-  <span class="b">~/.claude/settings.json</span>
-  <span class="d">@@ -2,4 +2,4 @@</span>
-  <span class="d">    "model": "opus",</span>
-  <span class="r">-   "promptCacheTtl": "5m",</span>
-  <span class="r">-   "fastMode": true,</span>
-  <span class="g">+   "promptCacheTtl": "1h",</span>
-  <span class="g">+   "fastMode": false,</span>
-  <span class="d">    "env": {</span>
-
-  Backs up ~/.claude/settings.json to ~/.claude/settings.json.token-max.bak
-  first.
-
-  <span class="b">Write the 2 accepted changes to ~/.claude/settings.json?</span> <span class="d">[y]es, [n]o</span>: <span class="ans">y</span><span class="cur"></span>
-</span><span class="step">
-  <span class="g">Wrote 2 edits to ~/.claude/settings.json. Backed up the old file to</span>
-  <span class="g">~/.claude/settings.json.token-max.bak.</span>
 </span></code></pre><!-- /doctor --></div>
   </div>
 </section>

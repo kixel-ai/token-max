@@ -128,6 +128,7 @@ h1 { margin: 0; text-wrap: balance; }
 .screen .r { color: var(--term-red); }
 .screen .g { color: var(--term-green); }
 .screen .y { color: var(--term-yellow); }
+.screen .elided { color: var(--term-dim); font-style: italic; }
 .cur { display: none; }
 
 .term.wait .step, .term.wait .typed { display: none; }
@@ -135,7 +136,6 @@ h1 { margin: 0; text-wrap: balance; }
 	display: inline-block;
 	vertical-align: bottom;
 	overflow: hidden;
-	animation: type 0.9s steps(16) 0.3s both;
 }
 .term.play .step { animation: show 0s var(--t) both; }
 /* A step's descendants start animating only once the step shows, so --gap counts from --t. */
@@ -148,13 +148,17 @@ h1 { margin: 0; text-wrap: balance; }
 	background: var(--term-ink);
 	animation: hide 0s var(--gap) both, blink 1s step-end infinite;
 }
-.step:nth-child(2) { --t: 1.6s; --gap: 1.6s; }
-.step:nth-child(3) { --t: 3.6s; --gap: 4.4s; }
-.step:nth-child(4) { --t: 8.4s; --gap: 4.2s; }
-.step:nth-child(5) { --t: 13s; --gap: 3.6s; }
-.step:nth-child(6) { --t: 17s; --gap: 6s; }
-.step:nth-child(7) { --t: 23.5s; --gap: 0s; }
-@keyframes type { from { width: 0; } to { width: 16ch; } }
+/* steps: assets/demo/site.py writes the run's timing here */
+.term.play .typed { animation: type 0.9s steps(27) 0.3s both; }
+@keyframes type { from { width: 0; } to { width: 27ch; } }
+.step:nth-child(2) { --t: 1.6s; --gap: 1.4s; }
+.step:nth-child(3) { --t: 3.6s; --gap: 1.4s; }
+.step:nth-child(4) { --t: 5.6s; --gap: 1.4s; }
+.step:nth-child(5) { --t: 8.5s; --gap: 0.0s; }
+.step:nth-child(6) { --t: 9.1s; --gap: 0.0s; }
+.step:nth-child(7) { --t: 9.7s; --gap: 0.0s; }
+.step:nth-child(8) { --t: 10.3s; --gap: 0.0s; }
+/* /steps */
 @keyframes show { from { display: none; } to { display: inline; } }
 @keyframes hide { from { display: inline-block; } to { display: none; } }
 @keyframes blink { 50% { opacity: 0; } }

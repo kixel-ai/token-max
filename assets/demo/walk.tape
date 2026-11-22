@@ -1,7 +1,6 @@
 # The README's recording of `token-max doctor` on synthetic transcripts.
 # Regenerate from the repository root after `cargo build --release`:
 #   nix shell nixpkgs#vhs nixpkgs#python3 -c vhs assets/demo/walk.tape
-# max.kixel.ai shows the same run as HTML instead; site.py writes it with these answers.
 
 Output assets/demo/walk.gif
 

@@ -149,26 +149,28 @@ h1 { margin: 0; text-wrap: balance; }
 	background: var(--term-ink);
 	animation: blink 1s step-end infinite;
 }
-/* steps: assets/demo/site.py writes the run's timing here */
-.term.play .typed { animation: type 2.1s steps(70) 0.3s both; }
-@keyframes type { from { width: 0; } to { width: 70ch; } }
-.step:nth-child(2) { --t: 2.8s; --gap: 1.4s; }
-.step:nth-child(3) { --t: 4.8s; --gap: 1.4s; }
-.step:nth-child(4) { --t: 6.8s; --gap: 1.4s; }
-.step:nth-child(5) { --t: 9.7s; --gap: 0.0s; }
-.step:nth-child(6) { --t: 12.2s; --gap: 0.0s; }
-.step:nth-child(7) { --t: 12.8s; --gap: 0.0s; }
-.step:nth-child(8) { --t: 13.4s; --gap: 0.0s; }
-.step:nth-child(9) { --t: 14.0s; --gap: 0.0s; }
-.step:nth-child(10) { --t: 14.6s; --gap: 0.0s; }
-.step:nth-child(11) { --t: 15.2s; --gap: 0.0s; }
-.step:nth-child(12) { --t: 15.8s; --gap: 0.0s; }
-.step:nth-child(13) { --t: 16.4s; --gap: 0.0s; }
-.step:nth-child(14) { --t: 17.0s; --gap: 0.0s; }
-.step:nth-child(15) { --t: 17.6s; --gap: 0.0s; }
-.step:nth-child(16) { --t: 18.2s; --gap: 0.0s; }
-.step:nth-child(17) { --t: 18.8s; --gap: 0.0s; }
-/* /steps */
+/* run: assets/demo/site.py writes the run's timing and the results meter here */
+.term.play .typed { animation: type 2.7s steps(89) 0.3s both; }
+@keyframes type { from { width: 0; } to { width: 89ch; } }
+.step:nth-child(2) { --t: 3.4s; --gap: 1.4s; }
+.step:nth-child(3) { --t: 5.4s; --gap: 1.4s; }
+.step:nth-child(4) { --t: 7.4s; --gap: 1.4s; }
+.step:nth-child(5) { --t: 10.3s; --gap: 0.0s; }
+.step:nth-child(6) { --t: 12.8s; --gap: 0.0s; }
+.step:nth-child(7) { --t: 13.4s; --gap: 0.0s; }
+.step:nth-child(8) { --t: 14.0s; --gap: 0.0s; }
+.step:nth-child(9) { --t: 14.6s; --gap: 0.0s; }
+.step:nth-child(10) { --t: 15.2s; --gap: 0.0s; }
+.step:nth-child(11) { --t: 15.8s; --gap: 0.0s; }
+.step:nth-child(12) { --t: 16.4s; --gap: 0.0s; }
+.step:nth-child(13) { --t: 17.0s; --gap: 0.0s; }
+.step:nth-child(14) { --t: 17.6s; --gap: 0.0s; }
+.step:nth-child(15) { --t: 18.2s; --gap: 0.0s; }
+.step:nth-child(16) { --t: 18.8s; --gap: 0.0s; }
+.step:nth-child(17) { --t: 19.4s; --gap: 0.0s; }
+.meter .kept { flex: 93; }
+.meter .cut { flex: 7; }
+/* /run */
 @keyframes blink { 50% { opacity: 0; } }
 
 /* Findings */
@@ -187,8 +189,8 @@ h2 { margin: 6rem 0 2rem; text-wrap: balance; }
 .star { text-decoration: none; margin-left: 0.15em; }
 
 .meter { display: flex; gap: 2px; height: 1rem; margin-top: 2rem; }
-.meter .kept { flex: 92; border-radius: 4px 0 0 4px; }
-.meter .cut { flex: 8; border-radius: 0 4px 4px 0; }
+.meter .kept { border-radius: 4px 0 0 4px; }
+.meter .cut { border-radius: 0 4px 4px 0; }
 .meter-key { display: flex; justify-content: space-between; margin: 0.5rem 0 0; font: 0.8rem/1.3 var(--mono); }
 .fine { max-width: 48rem; margin: 1.75rem 0 0; font-size: 0.9rem; line-height: 1.55; }
 .cta { margin: 1.75rem 0 0; font-size: 1.2rem; font-weight: 700; }

@@ -58,22 +58,24 @@ the terminal; without it the page still works and the terminal shows the whole
 run. `tests/run_script.rs` runs the run script for the host (`run.ps1` on the
 Windows CI job) against fixture releases on a local server.
 
-The page's results are the maintainer's from `docs/results.md` and the
-README's top; change them together. Its terminal is the maintainer's own
-`token-max doctor --defaults` across their hosts, run from `nixos` with `--ssh`
-for the others, as HTML, with each host's EVERYTHING ELSE section cut to one
-line, since that section is long and names project files that can belong to
-private repositories. After a change to doctor's questions or output, run it
-again from the repository root on `nixos` after `cargo build --release`,
-answering how each of its Claude profiles pays (doctor asks only about this
-host's), and adding `--ssh kixtop` when the laptop is online:
+The page's terminal is the maintainer's own `token-max doctor --defaults` over
+the last 30 days across their hosts, run from `nixos` with `--ssh` for the
+others, as HTML, with each host's EVERYTHING ELSE section cut to one line,
+since that section is long and names project files that can belong to private
+repositories. The results section below it comes from the same run's total, so
+the page shows one set of figures; `docs/results.md` and the README's top are
+an earlier, fuller replay and need not match it. After a change to doctor's
+questions or output, run it again from the repository root on `nixos` after
+`cargo build --release`, answering how each of its Claude profiles pays
+(doctor asks only about this host's), and adding `--ssh kixtop` when the laptop
+is online:
 
 ```sh
 python3 assets/demo/site.py site/public ~/.claude=p ~/.claude-api-credits=a ~/.claude-personal.merged-20261106=a \
-  --ssh desktop --ssh fedora --include-local
+  --since "$(date -u -d '29 days ago' +%F)" --ssh desktop --ssh fedora --include-local
 ```
 
-It writes the run into `index.html` and its timing into `style.css`. Read the
+It writes the run and the results into `index.html`, and the run's timing and the results meter into `style.css`. Read the
 result before committing it: it is public, so it must name no private
 repository, customer or project. The README's recording, `assets/demo/walk.gif`,
 runs on synthetic transcripts instead, and `assets/demo/walk.tape`

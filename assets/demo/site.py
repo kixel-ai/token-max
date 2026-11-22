@@ -8,7 +8,9 @@ any --ssh destination, passing every argument that is not a PROFILE=ANSWER on to
 answering each "How is PROFILE paid for?" question with the PROFILE=ANSWER given for it, and replaces
 what sits between index.html's <!-- doctor --> and <!-- /doctor --> markers. Each question
 becomes a .step the page reveals in turn, then each section of the report; the run's timing
-goes between style.css's steps markers, since the page's CSP allows no inline styles. The
+goes between style.css's run markers, since the page's CSP allows no inline styles. The
+hosts' total, which --ssh prints, fills the results section between index.html's
+<!-- results --> markers, so the page shows one set of figures. The
 EVERYTHING ELSE section is cut to one line: it is hundreds of lines long, and it names
 project files, which can belong to private repositories. Read the result before committing it.
 """
@@ -18,6 +20,7 @@ import os
 import pty
 import re
 import sys
+from datetime import date
 from pathlib import Path
 
 COMMAND = ["token-max", "doctor", "--defaults"]
@@ -186,6 +189,49 @@ def timing(typed: str, count: int, questions: int) -> str:
     return "\n".join(rules) + "\n"
 
 
+def results(transcript: str) -> tuple[str, str]:
+    """The results section's figures and its meter's CSS, from the hosts' total."""
+    plain = " ".join(SGR.sub("", line).strip() for line in transcript.replace("\r", "").split("\n"))
+    total = re.search(
+        r"token-max: total over (\d+) hosts\s+([\d,]+) requests in ([\d,]+) sessions, (~?)\$([\d,]+)",
+        plain,
+    )
+    offered = re.search(
+        r"Changes offered: (~?)\$([\d,]+)/mo[^,]*, (\d+)% of these hosts' spend"
+        r"(?:, plus up to ~?\$([\d,]+)/mo[^,]*, \d+% of these hosts' spend, from (\d+) changes?)?",
+        plain,
+    )
+    if not total or not offered:
+        sys.exit("the results need the hosts' total that --ssh prints")
+    hosts, requests, sessions, about, spend = total.groups()
+    saves_about, saves, pct, up_to, depends = offered.groups()
+    kept = int(spend.replace(",", "")) - int(saves.replace(",", ""))
+    caveat = (
+        f", except {depends} whose saving depends on how a profile pays, which would save up to ~${up_to}/mo more"
+        if up_to
+        else ""
+    )
+    fragment = f"""
+  <dl class="stats">
+    <div class="stat"><dt>API cost</dt><dd>{about}${spend}</dd></div>
+    <div class="stat"><dt>Sessions</dt><dd>{sessions}</dd></div>
+    <div class="stat save"><dt>Estimated savings<a href="#fn" class="star">*</a></dt><dd>{saves_about}${saves}<small>/mo</small></dd><dd class="pct">{pct}% of spend</dd></div>
+  </dl>
+  <div class="meter" role="img" aria-label="Savings are {pct}% of the ${spend} spent">
+    <span class="kept"></span><span class="cut"></span>
+  </div>
+  <p class="meter-key"><span>${kept:,} still spent</span><span>${saves} saved</span></p>
+  <p class="fine" id="fn">* At public API prices, across {requests} Claude Code, Codex and T3 Code
+  requests on {hosts} of my machines, in the run above on {date.today().isoformat()}. Most of it ran on a
+  subscription, which is subsidized, so on a plan the saving shows up as usage limits that
+  last longer rather than dollars. The savings are every change
+  <code>token-max doctor --defaults</code> would make for a user with no settings files{caveat}.
+  ~ marks figures extrapolated over requests that could not be priced.</p>
+"""
+    meter = f".meter .kept {{ flex: {100 - int(pct)}; }}\n.meter .cut {{ flex: {pct}; }}\n"
+    return fragment, meter
+
+
 def replace(path: Path, start: str, end: str, body: str) -> None:
     text = path.read_text(encoding="utf-8")
     if text.count(start) != 1 or text.count(end) != 1:
@@ -210,15 +256,18 @@ def main() -> None:
         home = os.environ["HOME"]
         answers["~" + profile[len(home) :] if profile.startswith(home) else profile] = answer
     typed = " ".join(command)
-    run_steps, questions = steps(run(command, answers))
+    transcript = run(command, answers)
+    run_steps, questions = steps(transcript)
+    figures, meter = results(transcript)
     body = "".join(f'<span class="step">{chr(10).join(s)}\n</span>' for s in run_steps)
     fragment = f'<pre class="screen"><code><span class="cmdline">$ <span class="typed">{typed}</span>\n</span>{body}</code></pre>'
     replace(site / "index.html", "<!-- doctor -->", "<!-- /doctor -->", fragment)
+    replace(site / "index.html", "<!-- results -->", "<!-- /results -->", figures)
     replace(
         site / "style.css",
-        "/* steps: assets/demo/site.py writes the run's timing here */\n",
-        "/* /steps */",
-        timing(typed, len(run_steps), questions),
+        "/* run: assets/demo/site.py writes the run's timing and the results meter here */\n",
+        "/* /run */",
+        timing(typed, len(run_steps), questions) + meter,
     )
 
 

@@ -137,16 +137,17 @@ h1 { margin: 0; text-wrap: balance; }
 	vertical-align: bottom;
 	overflow: hidden;
 }
-.term.play .step { animation: show 0s var(--t) both; }
-/* A step's descendants start animating only once the step shows, so --gap counts from --t. */
-.term.play .ans { animation: show 0s var(--gap) both; }
-.term.play .cur {
+.body:focus-visible { outline: 2px solid var(--link); outline-offset: -2px; }
+/* site.js marks each step shown, then answered, at its --t and --gap (seconds after --t);
+   animating display itself is not supported everywhere. */
+.term.play .step:not(.shown), .term.play .step:not(.answered) .ans { display: none; }
+.term.play .step:not(.answered) .cur {
 	display: inline-block;
 	width: 0.6em;
 	height: 1.1em;
 	vertical-align: text-bottom;
 	background: var(--term-ink);
-	animation: hide 0s var(--gap) both, blink 1s step-end infinite;
+	animation: blink 1s step-end infinite;
 }
 /* steps: assets/demo/site.py writes the run's timing here */
 .term.play .typed { animation: type 0.9s steps(27) 0.3s both; }
@@ -159,8 +160,6 @@ h1 { margin: 0; text-wrap: balance; }
 .step:nth-child(7) { --t: 11.6s; --gap: 0.0s; }
 .step:nth-child(8) { --t: 12.2s; --gap: 0.0s; }
 /* /steps */
-@keyframes show { from { display: none; } to { display: inline; } }
-@keyframes hide { from { display: inline-block; } to { display: none; } }
 @keyframes blink { 50% { opacity: 0; } }
 
 /* Findings */

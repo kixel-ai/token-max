@@ -62,7 +62,7 @@
       <button class="replay" type="button" hidden>Replay</button>
     </div>
     <!-- assets/demo/site.py writes the run between these markers, and its timing into style.css; rerun it when doctor's output changes. -->
-    <div class="body"><!-- doctor --><pre class="screen"><code><span class="cmdline">$ <span class="typed">token-max doctor --defaults</span>
+    <div class="body" tabindex="0" role="region" aria-labelledby="demo-title"><!-- doctor --><pre class="screen"><code><span class="cmdline">$ <span class="typed">token-max doctor --defaults</span>
 </span><span class="step">  Claude Code caches the main conversation for 1h on a Claude plan and 5m on an API key or usage
   credits. Which pays can't be read from the transcripts, so say which to price each profile against
   its own default.
@@ -230,7 +230,7 @@
       <h3>Price</h3>
       <p>At public API prices from models.dev, its only network request. What it can't
       price <strong>stays unknown, never zero</strong>. Then it offers each change, shows
-      the edit and backs the file up first.</p>
+      the edit and backs the file up first, unless git already holds it.</p>
     </li>
   </ol>
 </section>

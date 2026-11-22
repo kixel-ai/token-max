@@ -25,6 +25,7 @@ copy.addEventListener("click", async () => {
 // While it plays, the button skips to the whole run (WCAG 2.2.2); after, it replays.
 const term = document.querySelector(".term");
 const button = document.querySelector(".replay");
+const steps = [...term.querySelectorAll(".step")];
 // A finished run rests on the report's count of changes rather than its last line.
 const screen = term.querySelector(".body");
 const rest = () => {
@@ -35,10 +36,33 @@ const rest = () => {
 if (matchMedia("(prefers-reduced-motion: reduce)").matches) {
 	rest();
 } else {
-	const play = () => {
+	let timers = [];
+	const cancel = () => {
+		timers.forEach(clearTimeout);
+		timers = [];
 		term.classList.remove("wait", "play");
-		void term.offsetWidth; // restart the CSS animations
+	};
+	const stop = () => {
+		cancel();
+		button.textContent = "Replay";
+		rest();
+	};
+	// Each step shows at its --t and its typed answer --gap later, both set in style.css.
+	const play = () => {
+		cancel();
+		for (const step of steps) step.classList.remove("shown", "answered");
+		void term.offsetWidth; // restart the command's typing animation
 		term.classList.add("play");
+		let end = 0;
+		for (const step of steps) {
+			const style = getComputedStyle(step);
+			const shown = parseFloat(style.getPropertyValue("--t")) * 1000;
+			const answered = shown + parseFloat(style.getPropertyValue("--gap")) * 1000;
+			timers.push(setTimeout(() => step.classList.add("shown"), shown));
+			timers.push(setTimeout(() => step.classList.add("answered"), answered));
+			end = Math.max(end, answered);
+		}
+		timers.push(setTimeout(stop, end + 500));
 		button.textContent = "Skip";
 		button.hidden = false;
 	};
@@ -48,15 +72,5 @@ if (matchMedia("(prefers-reduced-motion: reduce)").matches) {
 		observer.disconnect();
 		play();
 	}, { threshold: 0.35 }).observe(term);
-	// The last step's reveal ends the run.
-	term.querySelector(".step:last-child").addEventListener("animationend", () => {
-		button.textContent = "Replay";
-		rest();
-	});
-	button.addEventListener("click", () => {
-		if (button.textContent !== "Skip") return play();
-		term.classList.remove("wait", "play");
-		button.textContent = "Replay";
-		rest();
-	});
+	button.addEventListener("click", () => (button.textContent === "Skip" ? stop() : play()));
 }

@@ -1906,11 +1906,14 @@ fn codex_skills_and_mcp_details_keep_independent_evidence_controls_and_prices() 
         );
         assert!(output.contains("1 requested; 1 confirmed SKILL.md loads"));
         assert!(output.contains("Codex MCP loading:"));
-        assert!(
-            report_line(&output, "AGENTS.md")
-                .evidence
-                .starts_with("Under the 32,768 bytes Codex loads")
+        // Under the byte budget, the file is a cost with no warning.
+        let agents = report_line(&output, "AGENTS.md");
+        assert_eq!(
+            (agents.mark.as_str(), agents.head.as_str()),
+            ("info", "AGENTS.md 2 lines costs <$0.01 <1%")
         );
+        assert!(output.contains("AGENTS.md: 2 recorded lines"), "{output}");
+        assert!(!output.contains("WARNINGS"));
         assert!(output.contains("Duplicate skill same"));
         assert!(!leaks(&report, &["SYNTHETIC_PRIVATE"]));
     }
@@ -2374,7 +2377,7 @@ fn memory_check(report: &Report, harness: Harness) -> &crate::model::MemoryCheck
 }
 
 #[test]
-fn claude_auto_memory_is_priced_apart_from_the_system_prompt_and_advised_off() {
+fn claude_auto_memory_is_priced_apart_from_the_system_prompt_and_judged_by_its_cost_per_use() {
     let w = Workspace::new();
     let root = std::fs::canonicalize(&w.claude).unwrap();
     let root = root.to_string_lossy();
@@ -2421,8 +2424,9 @@ fn claude_auto_memory_is_priced_apart_from_the_system_prompt_and_advised_off() {
         control_text(memory.control.as_ref().unwrap(), Harness::Claude),
         r#""autoMemoryEnabled": false"#
     );
+    // Read back and written, it is judged as a skill is: kept within the cost per use.
     let check = memory_check(&report, Harness::Claude);
-    assert_eq!(check.base.action, crate::model::Action::Advisory);
+    assert_eq!(check.base.action, crate::model::Action::Keep);
     assert_eq!(check.base.current, Some(true));
     assert_eq!((check.reads, check.writes), (1, 1));
     assert!(check.writes_usd.unwrap() > 0.0);
@@ -2430,34 +2434,163 @@ fn claude_auto_memory_is_priced_apart_from_the_system_prompt_and_advised_off() {
         check.base.savings_usd,
         Some(memory.estimated_usd.unwrap() + check.writes_usd.unwrap())
     );
-    let text = format_report(
-        &report,
-        ReportOptions {
-            width: None,
-            color: false,
-            unicode: false,
-            details: true,
-            host: None,
-        },
-    );
+    let details = ReportOptions {
+        width: None,
+        color: false,
+        unicode: false,
+        details: true,
+        host: None,
+    };
+    let text = format_report(&report, details);
     assert!(shows(
         &text,
-        "consider",
-        "Auto memory on -> off saves ",
+        "keep",
+        "Auto memory on costs ",
         &[
-            "Opinion: ",
-            "used 2 times (1 read, 1 write). Set \"autoMemoryEnabled\": false in "
+            "Its cost per read or write is within --max-cost-per-use. Measured: used 2 times (1 read, 1 write)."
         ]
     ));
     assert!(!text.contains("MEMORY.md"));
-    // Advice is not a change, so it leaves the exit code alone.
+    assert!(!leaks(&report, &["SYNTHETIC_PRIVATE"]));
+    // Above the limit per use it is worth considering off, which leaves the exit code alone.
+    let costly = self::report(&data, 0.0001);
+    let check = memory_check(&costly, Harness::Claude);
+    assert_eq!(check.base.action, crate::model::Action::Advisory);
+    assert_eq!(check.base.recommended, Some(false));
+    assert!(shows(
+        &format_report(&costly, details),
+        "consider",
+        "Auto memory on -> off saves ",
+        &[
+            "It cost more than --max-cost-per-use per read or write. Measured: used 2 times (1 read, 1 write). Set \"autoMemoryEnabled\": false in "
+        ]
+    ));
     assert!(
-        !report
+        !costly
             .checks
             .iter()
             .any(|c| c.action() == crate::model::Action::Change)
     );
-    assert!(!leaks(&report, &["SYNTHETIC_PRIVATE"]));
+}
+
+#[test]
+fn claude_auto_memory_unused_is_turned_off_only_when_its_transcripts_prove_it() {
+    let w = Workspace::new();
+    let root = std::fs::canonicalize(&w.claude).unwrap();
+    let records = claude_memory_session(&root.to_string_lossy(), true);
+    std::fs::write(
+        w.claude.join("projects/project/main.jsonl"),
+        jsonl(&records),
+    )
+    .unwrap();
+    let mut data = scan(&options(&w, None)).unwrap();
+    // With no read or write recorded, memory that is on and costs something is turned off.
+    data.exposure.memory.clear();
+    let unused = report(&data, 1.0);
+    let check = memory_check(&unused, Harness::Claude);
+    assert_eq!(
+        (
+            check.base.action,
+            check.base.recommended,
+            check.use_unproven
+        ),
+        (crate::model::Action::Change, Some(false), false)
+    );
+    // An unreadable line that names a memory path could be a read or write the reader
+    // lost, so memory is only worth considering off, which leaves the exit code alone.
+    let mut named = data.clone();
+    for s in &mut named.snapshots {
+        s.skipped_lines = 1;
+        s.unreadable.observe(
+            format!(
+                r#"{{"name":"Write","input":{{"file_path":"{}/projects/p/memory/n.md"}}}}"#,
+                root.display()
+            )
+            .as_bytes(),
+        );
+    }
+    let check = memory_check(&self::report(&named, 1.0), Harness::Claude).clone();
+    assert_eq!(
+        (
+            check.base.action,
+            check.base.recommended,
+            check.use_unproven
+        ),
+        (crate::model::Action::Advisory, Some(false), true)
+    );
+    // autoMemoryDirectory can move memory anywhere; the directory of the MEMORY.md the
+    // scan saw loaded is what a lost call there names. A line naming another path proves
+    // nothing about memory.
+    let custom = |line: &str| {
+        let mut moved = data.clone();
+        for c in &mut moved.exposure.components {
+            if c.name.ends_with("/MEMORY.md") {
+                c.name = "/repo/agent-notes/MEMORY.md".into();
+            }
+        }
+        for s in &mut moved.snapshots {
+            s.skipped_lines = 1;
+            s.unreadable.observe(line.as_bytes());
+        }
+        memory_check(&self::report(&moved, 1.0), Harness::Claude)
+            .base
+            .action
+    };
+    assert_eq!(
+        custom(r#"{"name":"Write","input":{"file_path":"/repo/agent-notes/n.md"}}"#),
+        crate::model::Action::Advisory
+    );
+    assert_eq!(
+        custom(r#"{"name":"Write","input":{"file_path":"/repo/src/main.rs"}}"#),
+        crate::model::Action::Change
+    );
+    // So is one still being written.
+    for s in &mut data.snapshots {
+        s.deferred_bytes = 9;
+    }
+    let unfinished = report(&data, 1.0);
+    let check = memory_check(&unfinished, Harness::Claude);
+    assert_eq!(
+        (
+            check.base.action,
+            check.base.recommended,
+            check.use_unproven
+        ),
+        (crate::model::Action::Advisory, Some(false), true)
+    );
+    assert!(shows(
+        &text(&unfinished),
+        "consider",
+        "Auto memory on -> off saves ",
+        &[
+            "On, and no read back or write was recorded, but a transcript line that could not be read may hold one."
+        ]
+    ));
+    // A price that depends on an unrecorded service tier settles no verdict.
+    let mut context = unfinished.context.clone();
+    for c in context.iter_mut().filter(|c| c.kind == ContextKind::Memory) {
+        c.tier_unknown_requests = 1;
+    }
+    let checks = crate::memory::memory_checks(&crate::memory::MemoryInput {
+        scan: &unfinished.scan,
+        context: &context,
+        catalog: &prices(),
+        since: None,
+        now: NOW,
+        max_cost_per_use_usd: 1.0,
+    });
+    let check = checks
+        .iter()
+        .find(|c| c.harness == Harness::Claude)
+        .unwrap();
+    assert_eq!(
+        (
+            check.base.action,
+            check.base.recommended,
+            check.tier_unknown
+        ),
+        (crate::model::Action::Advisory, None, true)
+    );
 }
 
 /// The note auto memory's check gives when recorded sessions disagree with the setting.
@@ -2759,8 +2892,8 @@ fn claude_auto_memory_without_recorded_context_has_an_unknown_cost() {
     let both = text(&both);
     assert!(shows(
         &both,
-        "consider",
-        "Auto memory on -> off saves ~",
+        "keep",
+        "Auto memory on costs ~",
         &["; extrapolated from the 66.6% of requests that recorded their context."]
     ));
 }
@@ -2847,6 +2980,43 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
     let memory = row(&r, crate::context::CODEX_MEMORY);
     assert_eq!(memory.calls, Some(3));
     assert_eq!(memory.requests, 1);
+    // A write is priced at its own request's rate, so one with no recorded service tier
+    // leaves the cost per use unsettled even where every carrying request had one.
+    let mut context = r.context.clone();
+    for c in &mut context {
+        c.tier_unknown_requests = 0;
+    }
+    let tiered = |scan: &Scan| {
+        crate::memory::memory_checks(&crate::memory::MemoryInput {
+            scan,
+            context: &context,
+            catalog: &prices(),
+            since: None,
+            now: NOW,
+            max_cost_per_use_usd: 1.0,
+        })
+        .iter()
+        .find(|c| c.harness == Harness::Codex)
+        .unwrap()
+        .tier_unknown
+    };
+    let write = e
+        .memory
+        .iter()
+        .find(|m| m.access == MemoryAccess::Write)
+        .and_then(|m| m.request.clone())
+        .unwrap();
+    let with_tier = |tier: Option<&str>| {
+        let mut scan = r.scan.clone();
+        for request in scan.requests.iter_mut().filter(|q| *q.id == *write) {
+            for part in &mut request.parts {
+                part.tier = tier.map(Into::into);
+            }
+        }
+        scan
+    };
+    assert!(!tiered(&with_tier(Some("default"))));
+    assert!(tiered(&with_tier(None)));
     // Off by default: the session that carried a summary is noted, not taken as on.
     let check = memory_check(&r, Harness::Codex);
     assert_eq!(check.base.current, Some(false));
@@ -2865,17 +3035,21 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
     ));
     assert!(!leaks(&r, &["SYNTHETIC_PRIVATE"]));
 
-    // Turned on in settings, it is advised off.
+    // Turned on in settings, it has no verdict while its writes go unpriced.
     std::fs::write(w.codex.join("config.toml"), "[features]\nmemories = true\n").unwrap();
     let on = report(&scan(&options(&w, None)).unwrap(), 1.0);
     let check = memory_check(&on, Harness::Codex);
     assert_eq!(check.base.current, Some(true));
+    assert_eq!(check.base.recommended, None);
     assert_eq!(memory_note(check), None);
     assert!(shows(
         &text(&on),
-        "consider",
-        "Codex memories on",
-        &["Opinion: ", "Set features.memories = false in "]
+        "unknown",
+        "Codex memories on costs unknown",
+        &[
+            "What it costs could not be measured. Measured: ",
+            "Set features.memories = false in "
+        ]
     ));
     std::fs::remove_file(w.codex.join("config.toml")).unwrap();
 
@@ -3002,10 +3176,10 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
     );
     assert!(shows(
         &rendered,
-        "consider",
+        "unknown",
         "Codex memories may be on",
         &[
-            "Unknown whether it is on: a project .codex/config.toml sets memories, but the project's trust is not recorded. Opinion: ",
+            "Unknown whether it is on: a project .codex/config.toml sets memories, but the project's trust is not recorded. Measured: ",
             "Set features.memories = false in "
         ]
     ));

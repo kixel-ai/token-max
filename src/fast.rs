@@ -277,14 +277,18 @@ fn check(
         || unknown_cost("no selected usage for current-setting estimate"),
         Sum::cost,
     );
-    let action = match control.value.as_deref() {
-        Some(_) if !control.resolved => Action::Advisory,
-        None => Action::Advisory,
-        Some("standard") => Action::Keep,
-        Some(_) => Action::Change,
-    };
-    let change = action == Action::Change;
     let current_usd = current_cost.total_usd.map(Usd::to_f64);
+    // The premium is measured; the speed it buys is not, so turning it off is only
+    // worth considering, and a premium measured at nothing leaves it as it is.
+    let (action, recommended) = match (control.value.as_deref(), current_usd) {
+        (None, _) => (Action::Advisory, None),
+        (Some(_), _) if !control.resolved => (Action::Advisory, None),
+        (Some("standard"), _) => (Action::Keep, control.value.clone()),
+        (Some(_), Some(usd)) if usd > 0.0 => (Action::Advisory, Some("standard".to_string())),
+        (Some(_), Some(_)) => (Action::Keep, control.value.clone()),
+        (Some(_), None) => (Action::Advisory, None),
+    };
+    let change = recommended.as_deref() == Some("standard") && action == Action::Advisory;
     let history_profiles: IndexSet<&String> =
         requests.iter().flat_map(|r| r.profiles.iter()).collect();
     let mut uncertainty = vec![
@@ -298,10 +302,14 @@ fn check(
             profile: line.lead.id.clone(),
             profiles: line.ids.clone(),
             history_profiles: history_profiles.into_iter().cloned().collect(),
-            evidence: Evidence::Guidance,
+            evidence: if current_usd.is_some() {
+                Evidence::Estimated
+            } else {
+                Evidence::Unknown
+            },
             action,
             current: control.value.clone(),
-            recommended: control.resolved.then(|| "standard".to_string()),
+            recommended,
             owner: control.owner.clone(),
             since: start,
             until: Some(now),
@@ -319,7 +327,7 @@ fn check(
             monthly_savings_usd: if change { month(current_usd) } else { None },
             break_even: None,
             assumptions: [
-                "maintainer cost preference: fast and ultrafast off; setting warning does not require historical billing metadata",
+                "worth considering off when the current setting's premium over recorded usage is above zero; the speed it buys is not valued",
                 "rate-only premium at present public API prices, not an invoice; a Claude plan pays fast mode from usage credits at these rates, and a ChatGPT plan counts Fast at 2.5x and Ultrafast at 8x standard against included usage, or 2x and 6x on credits",
                 "recorded cache categories and context tiers held constant; Claude fast/standard have separate caches, so switching cold-cache effects are excluded",
                 "fixed behavior and work; latency value is not modeled; no summed per-check savings",
@@ -434,8 +442,10 @@ mod tests {
     fn rate_only_premium_preserves_cache_lifetimes_and_geography() {
         let s = premium_history();
         let result = &checks(&s, None, 30 * DAY_MS)[0];
-        assert_eq!(result.base.action, Action::Change);
-        assert_eq!(result.base.evidence, Evidence::Guidance);
+        // A measured premium is worth considering off; the speed it buys is not valued.
+        assert_eq!(result.base.action, Action::Advisory);
+        assert_eq!(result.base.recommended.as_deref(), Some("standard"));
+        assert_eq!(result.base.evidence, Evidence::Estimated);
         // Fast doubles every rate; the US part carries the 1.1 geography multiplier.
         let observed = ((100.0 * 4.0 + 200.0 * 5.0 + 300.0 * 0.2 + 50.0 * 20.0) * 1.1) / 1e6;
         assert!(close(
@@ -488,14 +498,16 @@ mod tests {
         let excluded = &checks(&s, Some(150), 200)[0];
         assert_eq!(excluded.base.requests, 0);
         assert_eq!(excluded.base.savings_usd, None);
-        assert_eq!(excluded.base.action, Action::Change);
+        // Nothing recorded measures a premium, so there is no verdict.
+        assert_eq!(excluded.base.action, Action::Advisory);
+        assert_eq!(excluded.base.recommended, None);
 
         s.requests[0].parts[0].speed = Some("fast".into());
         s.requests[0].parts[0].model = Some("claude-unpriced-model".into());
         s.requests[0].model = Some("claude-unpriced-model".into());
         let unpriced = &checks(&s, None, 200)[0];
         assert_eq!(unpriced.observed.premium.total_usd, None);
-        assert_eq!(unpriced.base.action, Action::Change);
+        assert_eq!(unpriced.base.action, Action::Advisory);
     }
 
     /// Codex requests at two directories whose project controls differ.
@@ -582,9 +594,9 @@ mod tests {
         assert_eq!(
             summary,
             [
-                (Action::Change, Some("ultrafast"), 1),
+                (Action::Advisory, Some("ultrafast"), 1),
                 (Action::Keep, Some("standard"), 1),
-                (Action::Change, Some("fast"), 1),
+                (Action::Advisory, Some("fast"), 1),
             ]
         );
         assert!(cards[0].base.savings_usd.unwrap() > cards[2].base.savings_usd.unwrap());
@@ -812,8 +824,8 @@ mod tests {
                     _ => None,
                 })
                 .unwrap();
-            assert_eq!(result.base.action, Action::Change);
-            assert_eq!(result.base.evidence, Evidence::Guidance);
+            assert_eq!(result.base.action, Action::Advisory);
+            assert_eq!(result.base.evidence, Evidence::Estimated);
             let observed = ((100.0 * 4.0 + 200.0 * 5.0 + 300.0 * 0.2 + 50.0 * 20.0) * 1.1) / 1e6;
             assert!(close(
                 result.observed.premium.total_usd.unwrap().to_f64(),
@@ -829,10 +841,16 @@ mod tests {
             assert_eq!(result.observed.standard_parts, 1);
             assert_eq!(result.current_estimate.priced_parts, 2);
             let text = format_report(&report, ReportOptions::default());
+            let lines = crate::test_support::report_lines(&text);
+            let line = lines
+                .iter()
+                .find(|l| l.head.starts_with("Fast mode "))
+                .expect("a fast mode line");
+            assert_eq!(line.mark, "consider");
+            // Against the default, the premium is what the current speed costs more.
             assert!(
-                crate::test_support::report_lines(&text)
-                    .iter()
-                    .any(|l| l.claim == "Opinion" && l.head.starts_with("Fast mode "))
+                line.default.starts_with("default off, costs ") && line.default.ends_with(" more"),
+                "{line:?}"
             );
             let details = format_report(
                 &report,
@@ -870,9 +888,9 @@ mod tests {
             assert!(standard.observed.premium.total_usd.unwrap().to_f64() > 0.0);
         }
 
-        // Current-setting warning survives missing billing metadata; historical unknowns and prices stay unknown.
+        // A current setting is priced from recorded tokens without billing metadata; unpriced usage stays unknown.
         #[test]
-        fn current_setting_warning_survives_missing_billing_metadata() {
+        fn a_current_setting_is_priced_from_recorded_tokens_without_billing_metadata() {
             let w = Workspace::new();
             write(
                 w.codex.join("config.toml"),
@@ -897,7 +915,7 @@ mod tests {
                 Some("default")
             );
             let first = check(&s, &c);
-            assert_eq!(first.base.action, Action::Change);
+            assert_eq!(first.base.action, Action::Advisory);
             assert_eq!(first.observed.premium.total_usd, None);
             assert!(
                 first.base.savings_usd.unwrap() > 0.0,
@@ -905,12 +923,13 @@ mod tests {
             );
             c.clear_models();
             let unpriced = check(&s, &c);
-            assert_eq!(unpriced.base.action, Action::Change);
+            assert_eq!(unpriced.base.action, Action::Advisory);
+            assert_eq!(unpriced.base.recommended, None);
             assert_eq!(unpriced.base.savings_usd, None);
             assert_eq!(unpriced.current_estimate.premium.total_usd, None);
             s.requests = vec![];
             let empty = check(&s, &c);
-            assert_eq!(empty.base.action, Action::Change);
+            assert_eq!(empty.base.action, Action::Advisory);
             assert_eq!(empty.base.savings_usd, None);
         }
 
@@ -1033,7 +1052,7 @@ mod tests {
             c.clear_models();
             let unknown = checks(&s, &c, None, 200).remove(0);
             assert_eq!(unknown.observed.premium.total_usd, None);
-            assert_eq!(unknown.base.action, Action::Change);
+            assert_eq!(unknown.base.action, Action::Advisory);
         }
 
         // Unsupported Opus history has no hypothetical premium and unknown iteration ownership stays unpriced.
@@ -1061,7 +1080,8 @@ mod tests {
                     Some(0.0),
                     "{model}"
                 );
-                assert_eq!(result.base.action, Action::Change);
+                // A premium measured at nothing leaves the setting as it is.
+                assert_eq!(result.base.action, Action::Keep);
             }
             s.requests[0].parts = vec![BillingPart {
                 kind: PartKind::Advisor,
@@ -1175,7 +1195,7 @@ mod tests {
                 .iter()
                 .map(|card| (card.base.action, card.base.requests))
                 .collect();
-            assert_eq!(cards, [(Action::Change, 1), (Action::Keep, 1)]);
+            assert_eq!(cards, [(Action::Advisory, 1), (Action::Keep, 1)]);
         }
 
         // Managed blocks survive named/legacy alternatives while a separately allowed premium remains unresolved.

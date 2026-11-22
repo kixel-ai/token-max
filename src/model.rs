@@ -923,8 +923,6 @@ pub struct EffortControl {
     /// Every `maxEffortLevel` below `max` that applies to the model, each of which a higher
     /// level must clear.
     pub caps: Vec<Owned>,
-    /// The levels the model accepts; empty when unknown.
-    pub supported: Vec<String>,
     /// The model's own level when no setting names one; None when unknown.
     pub default: Option<String>,
     /// Why the default cannot be resolved, such as an unrecorded `--profile` selection.
@@ -1829,7 +1827,7 @@ pub struct EffortRun {
 /// A different effort changes the output tokens, so nothing is repriced.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EffortCheck {
-    /// The effective level as current, and `xhigh`, `high` or `medium` as recommended.
+    /// The effective level as current, and never a recommended one.
     pub base: CheckBase<String>,
     pub harness: Harness,
     pub control: EffortControl,
@@ -1840,9 +1838,6 @@ pub struct EffortCheck {
     /// What every run's requests cost, extrapolated from the priced ones over all of them;
     /// None when none was priced.
     pub estimate: Option<Estimate>,
-    /// Settings beside `base.owner`, such as caps below the recommended level, that must
-    /// change with it.
-    pub also: Vec<String>,
 }
 
 /// What a background feature cost, estimated from the turns where it would have run.
@@ -1874,8 +1869,7 @@ pub struct BackgroundCheck {
     pub lost_estimate: Option<Estimate>,
 }
 
-/// Auto memory's cost over the window. It is advised off whatever it cost, since
-/// notes the agent writes for itself are not reviewed like checked-in instructions.
+/// Auto memory's cost over the window, judged as a skill is by its cost per read or write.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemoryCheck {
     /// Current and recommended values: true is on.
@@ -1901,6 +1895,12 @@ pub struct MemoryCheck {
     /// Requests that recorded no context and read memory back, none of whose reads could be
     /// priced, so the total leaves those reads out and is a lower bound.
     pub unpriced_reads: u64,
+    /// Whether a transcript line that could not be read, or was still being written, could
+    /// hold a read or write, so a window with none recorded does not prove it unused.
+    pub use_unproven: bool,
+    /// Whether a request that carried or wrote memory recorded no service tier, so its price
+    /// depends on the tier that served it and the cost per use is not settled.
+    pub tier_unknown: bool,
 }
 
 impl MemoryCheck {
@@ -2817,6 +2817,11 @@ pub struct ContextCost {
     pub details: Vec<ContextCost>,
     /// Size of the most recent recorded instruction revision.
     pub instruction_size: Option<InstructionSize>,
+    /// What 100 lines of instructions cost over the window: each request's cost of them
+    /// times the share 100 lines are of its own revision, at most all of it, extrapolated
+    /// over unpriced requests as `estimated_usd` is. None when a revision's size was not
+    /// recorded or none was priced.
+    pub hundred_lines: Option<Estimate>,
     /// The first sentence of the description it ships, from its latest recorded revision.
     pub description: Option<String>,
     /// The line's requests and their cost by the profiles that recorded them.
@@ -2929,6 +2934,8 @@ pub struct SubagentCost {
     pub native: bool,
     /// Whether every run was a Claude fork, which always runs on the main model.
     pub fork: bool,
+    /// Whether every run was Claude's built-in agent of its type, not an agent file of its name.
+    pub built_in: bool,
     /// Subagent transcripts of this type in the window.
     pub runs: u64,
     pub requests: u64,

@@ -39,7 +39,9 @@ on its own host, so these totals are its four reports added by hand, as
   savings came from too few priced requests to measure a spread. ~$3,940/mo is
   a 1h subagent cache on the plan profiles, and ~$518/mo a 1h main-agent cache
   on the usage credits profiles, both Measured lines. ~$391/mo is turning auto
-  memory off, the maintainer's Opinion line. The remaining ~$804/mo is skills
+  memory off, which this run advised whatever it cost; token-max now judges
+  it by its cost per read or write, as it does a skill, so a rerun would
+  count less of it. The remaining ~$804/mo is skills
   and built-in tools that were never used or cost more than $1 per use, led by
   the Workflow tool, the ScheduleWakeup tool, the `dataviz` skill and the
   `code-review` skill.

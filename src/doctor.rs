@@ -36,9 +36,6 @@ pub struct Fix {
     pub name: String,
     /// The current value and the one to change to, such as "5m -> 1h".
     pub value: String,
-    /// The kind of claim it rests on: Measured, Official or Opinion.
-    #[serde(deserialize_with = "known")]
-    pub claim: Known,
     /// Worth considering, rather than a recommended change.
     pub suggested: bool,
     /// What it saves every 30 days, when measured.
@@ -65,18 +62,18 @@ pub struct Fix {
     pub removal: Vec<Definition>,
 }
 
-/// A claim or saving verb. Named apart from `&'static str`, which serde would borrow from
-/// the input it reads.
+/// A saving verb. Named apart from `&'static str`, which serde would borrow from the input
+/// it reads.
 pub type Known = &'static str;
 
-/// A claim or saving verb read back from another host, which must be one this build prints.
+/// A saving verb read back from another host, which must be one this build prints.
 fn known<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<&'static str, D::Error> {
-    const KNOWN: [&str; 6] = ["Measured", "Official", "Opinion", "saves", UP_TO, AT_LEAST];
+    const KNOWN: [&str; 3] = ["saves", UP_TO, AT_LEAST];
     let text = String::deserialize(deserializer)?;
     KNOWN
         .into_iter()
         .find(|k| *k == text)
-        .ok_or_else(|| serde::de::Error::custom("unknown claim or verb"))
+        .ok_or_else(|| serde::de::Error::custom("unknown saving verb"))
 }
 
 /// Small changes the walk offers together: features of one kind changed for one reason,
@@ -308,13 +305,6 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
             reason: "its profile is no longer selected".into(),
         },
         (Some(profile), Source::Check(result)) => check_how(result, profile),
-        (Some(_), Source::Piece(c)) if c.kind == ContextKind::Instructions => How::Manual {
-            step: format!(
-                "shorten {}, or move parts into path-scoped rules or skills",
-                c.name
-            ),
-            reason: "no setting shortens a file".into(),
-        },
         (Some(_), Source::Piece(c)) => match &c.control {
             Some(control) => {
                 let how = switch(&members, control.into(), report.scan.defaults);
@@ -335,7 +325,6 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
     Fix {
         name: line.name,
         value: line.value,
-        claim: line.claim,
         suggested: line.suggested,
         saving: line.saving,
         margin: line.margin,
@@ -820,72 +809,8 @@ fn check_how(result: &CheckResult, profile: &Profile) -> How {
             )
         }
         CheckResult::Keepalive(k) => unknown(&k.base.owner),
-        CheckResult::Effort(e) => {
-            let Some(level) = e.base.recommended.as_deref() else {
-                return unknown(&e.base.owner);
-            };
-            let owner = &e.base.owner;
-            // Several settings that must all change, such as two caps, are one step by hand.
-            if !e.also.is_empty() {
-                let all = std::iter::once(owner).chain(&e.also);
-                return How::Manual {
-                    step: format!(
-                        "set {} to {level}",
-                        all.cloned().collect::<Vec<_>>().join(" and ")
-                    ),
-                    reason: format!(
-                        "{} settings keep it below {level}, so they change together",
-                        e.also.len() + 1
-                    ),
-                };
-            }
-            let step = format!("set {owner} to {level}");
-            if profile.harness == Harness::Codex {
-                let key = "model_reasoning_effort";
-                return owned(
-                    owner,
-                    profile,
-                    vec![(key.into(), vec![Edit::set(key, level)])],
-                    step,
-                );
-            }
-            let variable = "CLAUDE_CODE_EFFORT_LEVEL";
-            let mut candidates = vec![(format!("env.{variable}"), vec![env(variable, level)])];
-            // A level in the user's file is saved per model, which outranks its top-level
-            // level there; model IDs hold no dots.
-            if let Some(model) = &e.control.model {
-                let edit = vec![Edit {
-                    path: vec!["modelSettings".into(), model.clone(), "effortLevel".into()],
-                    value: level.into(),
-                    op: Op::Set,
-                }];
-                candidates.push(("effortLevel".into(), edit.clone()));
-                candidates.push((format!("modelSettings.{model}.effortLevel"), edit));
-            }
-            // A model's own level or cap, as the owner names its key; a cap that kept the
-            // level down is raised to the level.
-            candidates.push((
-                "maxEffortLevel".into(),
-                vec![Edit::set("maxEffortLevel", level)],
-            ));
-            let row = owner.strip_prefix(&format!("{file}:modelSettings."));
-            for field in ["effortLevel", "maxEffortLevel"] {
-                if let Some(key) = row
-                    .and_then(|rest| rest.strip_suffix(&format!(".{field}")))
-                    .filter(|key| !key.contains(' '))
-                {
-                    candidates.push((
-                        format!("modelSettings.{key}.{field}"),
-                        vec![Edit {
-                            path: vec!["modelSettings".into(), key.into(), field.into()],
-                            value: level.into(),
-                            op: Op::Set,
-                        }],
-                    ));
-                }
-            }
-            owned(owner, profile, candidates, step)
-        }
+        // Effort lines give no verdict, so they are never offered.
+        CheckResult::Effort(e) => unknown(&e.base.owner),
     }
 }
 
@@ -1042,9 +967,9 @@ pub struct Described {
 #[cfg(test)]
 pub fn describe(fix: &Fix, home: Option<&str>) -> Described {
     let kind = if fix.suggested {
-        format!("{}, worth considering", fix.claim)
+        "worth considering"
     } else {
-        fix.claim.to_string()
+        "recommended"
     };
     let head = format!("{}: {} ({kind})", fix.name, fix.value);
     let body = match &fix.how {
@@ -1118,7 +1043,6 @@ struct Card<'a> {
     /// The current value and the offered one, such as "on → off".
     value: String,
     suggested: bool,
-    claim: &'a str,
     /// Labeled paragraphs, such as ("What", ...) and ("Why", ...).
     rows: Vec<(&'a str, String)>,
 }
@@ -1217,7 +1141,7 @@ impl Style {
     }
 
     /// A card: the counter and name with the saving at the right, then the change with its
-    /// colored verdict and claim, then each labeled paragraph hanging under its label.
+    /// colored verdict, then each labeled paragraph hanging under its label.
     fn card(&self, card: &Card<'_>) -> String {
         let width = self.card_width();
         let body = MARGIN + crate::terminal::cells(&card.counter) + 1;
@@ -1256,13 +1180,7 @@ impl Style {
             ("Recommended", RED)
         };
         let value = format!("{}  ", card.value);
-        let claim = format!(" ({})", card.claim);
-        text += &self.spans(
-            &[(&value, ""), (verdict, color), (&claim, DIM)],
-            width,
-            body,
-            None,
-        );
+        text += &self.spans(&[(&value, ""), (verdict, color)], width, body, None);
         let label = card
             .rows
             .iter()
@@ -1298,7 +1216,6 @@ impl Style {
             no_saving: "saving not measured",
             value: fix.value.clone(),
             suggested: fix.suggested,
-            claim: fix.claim,
             rows,
         })
     }
@@ -2460,7 +2377,6 @@ impl Question<'_> {
             no_saving: "savings not measured",
             value: first.value.clone(),
             suggested: first.suggested,
-            claim: first.claim,
             rows,
         })
     }
@@ -2609,7 +2525,6 @@ impl Walk<'_, '_> {
                 no_saving: "saves nothing",
                 value: format!("off {} removed", style.arrow()),
                 suggested: true,
-                claim: "Opinion",
                 rows,
             })
         };
@@ -3727,7 +3642,6 @@ mod tests {
         Fix {
             name: name.into(),
             value: "on -> off".into(),
-            claim: "Measured",
             suggested: false,
             saving: Some(10.0),
             margin: None,
@@ -4040,8 +3954,9 @@ mod tests {
             reason: "why".into(),
         };
         assert!(manual.check().is_err());
-        // A claim or verb this build never prints is refused.
-        let forged = json.replace("\"Measured\"", "\"Proven\"");
+        // A saving verb this build never prints is refused.
+        assert!(json.contains("\"saves\""));
+        let forged = json.replace("\"saves\"", "\"proves\"");
         assert!(serde_json::from_str::<Offers>(&forged).is_err());
     }
 
@@ -4086,7 +4001,7 @@ mod tests {
         assert!(printed.starts_with("\n  5 questions, biggest saving first.\n  Nothing is written until you confirm the list at the end.\n"));
         // A card shows the change, not the edit, which the confirm shows once as a diff.
         assert!(printed.contains(
-            "\n  [1/5] A  saves $10/mo  10%\n        on -> off  Recommended (Measured)\n  Accept? [y]es, [n]o, [q]uit:   Accepted so far: about $10/mo, 10% of this host's spend.\n"
+            "\n  [1/5] A  saves $10/mo  10%\n        on -> off  Recommended\n  Accept? [y]es, [n]o, [q]uit:   Accepted so far: about $10/mo, 10% of this host's spend.\n"
         ), "{printed}");
         assert!(printed.contains(
             "  Accepted so far: about $20/mo, 20% of this host's spend; overlapping changes may save less.\n"
@@ -4214,7 +4129,6 @@ mod tests {
                 fix("C", Some(0.3)),
                 Fix {
                     suggested: true,
-                    claim: "Opinion",
                     ..fix("U", None)
                 },
                 member("K", None, Reason::Unused, unused),
@@ -4243,10 +4157,10 @@ mod tests {
         );
         assert!(printed.contains("\n  6 questions about 8 changes, biggest saving first.\n"));
         assert!(printed.contains(
-            "\n  [3/6] Never-used skills  saves $4.50/mo  5%\n        on -> off  Recommended (Measured)\n        What   Skills are packaged instructions the model can load when a task calls for one; each is listed by name and description in every request.\n        Which  s, t.\n  Accept all 2? [y]es, [n]o, [o]ne by one, [q]uit: "
+            "\n  [3/6] Never-used skills  saves $4.50/mo  5%\n        on -> off  Recommended\n        What   Skills are packaged instructions the model can load when a task calls for one; each is listed by name and description in every request.\n        Which  s, t.\n  Accept all 2? [y]es, [n]o, [o]ne by one, [q]uit: "
         ), "{printed}");
         assert!(printed.contains(
-            "\n  [6/6] Never-used skills  savings not measured\n        on -> off  Recommended (Measured)\n        What   Skills are packaged instructions the model can load when a task calls for one; each is listed by name and description in every request.\n        Which  k, l.\n"
+            "\n  [6/6] Never-used skills  savings not measured\n        on -> off  Recommended\n        What   Skills are packaged instructions the model can load when a task calls for one; each is listed by name and description in every request.\n        Which  k, l.\n"
         ), "{printed}");
         assert!(printed.ends_with(
             "\n  2 more changes in groups saving under $1/mo were not asked; they're in the list below.\n"
@@ -4481,7 +4395,6 @@ mod tests {
             no_saving: "saving not measured",
             value: "on → off".into(),
             suggested: false,
-            claim: "Measured",
             rows: vec![
                 (
                     "What",
@@ -4492,7 +4405,7 @@ mod tests {
         };
         assert_eq!(
             style(Some(50), false).card(&card),
-            "  [1/4] WebSearch tool          saves $206/mo  39%\n        on → off  Recommended (Measured)\n        What  Lets Claude search the web and read\n              the results.\n        Why   Never used; it cost $99 over the\n              window.\n"
+            "  [1/4] WebSearch tool          saves $206/mo  39%\n        on → off  Recommended\n        What  Lets Claude search the web and read\n              the results.\n        Why   Never used; it cost $99 over the\n              window.\n"
         );
         // A wide terminal still aligns the saving at the card's width.
         let wide = style(Some(200), false).card(&card);
@@ -4780,7 +4693,7 @@ mod tests {
             "  They stay configured; token-max can also remove:\n    mcpServers.B in ~{sep}.claude.json\n    mcpServers.B of project /p in ~{sep}.claude.json\n  To remove it by hand, since a plugin adds it: uninstall or disable the plugin that provides it.\n  Remove all 2 too? [y]es, [n]o, [q]uit: "
         )), "{printed}");
         assert!(printed.contains(&format!(
-            "\n  [3/3] MCP server off  saves nothing\n        off -> removed  Worth considering (Opinion)\n        Why    Its tools are off already, so no session uses this configuration.\n        Where  [mcp_servers.off] in ~{sep}.codex{sep}config.toml\n  Remove it? [y]es, [n]o, [q]uit: "
+            "\n  [3/3] MCP server off  saves nothing\n        off -> removed  Worth considering\n        Why    Its tools are off already, so no session uses this configuration.\n        Where  [mcp_servers.off] in ~{sep}.codex{sep}config.toml\n  Remove it? [y]es, [n]o, [q]uit: "
         )), "{printed}");
         for name in ["A", "B", "C"] {
             assert_eq!(choice(&plan, name), &Choice::Accepted, "{name}");
@@ -5079,7 +4992,7 @@ mod tests {
         let (after, printed) = run("o\nn\ny\nn\n");
         let sep = std::path::MAIN_SEPARATOR;
         assert!(printed.contains(&format!(
-            "\n  [1/1, 2/3] MCP server b  saves nothing\n             off -> removed  Worth considering (Opinion)\n             Where  [mcp_servers.b] in ~{sep}.codex{sep}config.toml\n  Remove it? [y]es, [n]o, [q]uit: "
+            "\n  [1/1, 2/3] MCP server b  saves nothing\n             off -> removed  Worth considering\n             Where  [mcp_servers.b] in ~{sep}.codex{sep}config.toml\n  Remove it? [y]es, [n]o, [q]uit: "
         )), "{printed}");
         assert_eq!(printed.matches("Remove it?").count(), 3, "{printed}");
         assert_eq!(servers(&after), ["a", "c", "on"]);

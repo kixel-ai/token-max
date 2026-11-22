@@ -1059,6 +1059,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         catalog,
         since,
         now,
+        max_cost_per_use_usd,
     });
     let effort = crate::effort::effort_checks(&crate::effort::EffortInput {
         scan: &scan,

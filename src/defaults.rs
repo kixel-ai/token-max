@@ -184,7 +184,7 @@ pub fn check(result: &CheckResult, profile: Option<&Profile>) -> Option<Baseline
         CheckResult::Speed(s) => match s.base.current.as_deref()? {
             "standard" => None,
             // What turning it off saves is the premium the current speed costs.
-            _ if s.base.action == Action::Change => baseline(
+            _ if s.base.recommended.as_deref() == Some("standard") => baseline(
                 "off",
                 s.base
                     .monthly_savings_usd

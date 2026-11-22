@@ -1,7 +1,6 @@
 //! The main session's default reasoning effort: what decides it, the level the session runs
-//! at, and what each model and effort pair cost. A `max` default is a change to `xhigh`, a
-//! `low` one is worth considering raising, and the rest cite guidance without a verdict.
-//! A different effort changes the output tokens, so no cost is repriced.
+//! at, and what each model and effort pair cost, with no verdict: a different effort
+//! changes the output tokens, so no cost is repriced and no saving can be measured.
 
 use std::cmp::Reverse;
 
@@ -188,7 +187,6 @@ pub fn claude_effort(
             effective: None,
             lowered: None,
             caps: vec![],
-            supported: vec![],
             default: None,
             unresolved: Some(why),
         };
@@ -376,11 +374,6 @@ pub fn claude_effort(
         effective: Some(effective.into()),
         lowered,
         caps,
-        supported: LEVELS
-            .iter()
-            .filter(|l| **l != "xhigh" || support.xhigh)
-            .map(|l| l.to_string())
-            .collect(),
         default: Some(support.default.into()),
         unresolved: None,
     })
@@ -390,7 +383,6 @@ pub fn claude_effort(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodexModel {
     pub default: String,
-    pub supported: Vec<String>,
 }
 
 /// Codex's cached model catalog, `models_cache.json` in its home, by model slug; None when it
@@ -407,18 +399,10 @@ pub fn codex_catalog(root: &str) -> Option<IndexMap<String, CodexModel>> {
         ) else {
             continue;
         };
-        let supported = m
-            .get("supported_reasoning_levels")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(|l| l.get("effort").and_then(Value::as_str).map(String::from))
-            .collect();
         catalog.insert(
             slug.to_string(),
             CodexModel {
                 default: default.into(),
-                supported,
             },
         );
     }
@@ -457,11 +441,6 @@ pub fn codex_effort(
         (Some(_), None) => "model_reasoning_effort is unset and Codex's model catalog, models_cache.json, cannot be read for the model's default".to_string(),
         (Some(m), Some(_)) => format!("model_reasoning_effort is unset and Codex's model catalog does not list {m}"),
     });
-    let supported = model
-        .as_deref()
-        .and_then(|m| catalog?.get(m))
-        .map(|m| m.supported.clone())
-        .unwrap_or_default();
     Ok(EffortControl {
         model,
         model_owner,
@@ -470,7 +449,6 @@ pub fn codex_effort(
         owner,
         lowered: None,
         caps: vec![],
-        supported,
         default,
         unresolved,
     })
@@ -501,18 +479,6 @@ pub fn effort_checks(input: &EffortInput<'_>) -> Vec<EffortCheck> {
         .iter()
         .map(|line| check(input, line, line.lead.effort.as_ref().expect("a control")))
         .collect()
-}
-
-/// The first of `levels` the model accepts, or the first when its levels are unknown; None
-/// when it accepts none of them.
-fn target(control: &EffortControl, levels: &[&str]) -> Option<String> {
-    if control.supported.is_empty() {
-        return Some(levels[0].into());
-    }
-    levels
-        .iter()
-        .find(|l| control.supported.iter().any(|s| s == *l))
-        .map(|l| l.to_string())
 }
 
 fn check(
@@ -563,47 +529,11 @@ fn check(
         .is_none()
         .then(|| control.effective.clone())
         .flatten();
-    let (action, recommended) = match effective.as_deref() {
-        None => (Action::Advisory, None),
-        Some("max") => match target(control, &["xhigh", "high"]) {
-            Some(level) => (Action::Change, Some(level)),
-            None => (Action::Keep, None),
-        },
-        Some("low") => match target(control, &["medium", "high"]) {
-            Some(level) => (Action::Advisory, Some(level)),
-            None => (Action::Keep, None),
-        },
-        Some(_) => (Action::Keep, None),
-    };
-    // Reaching the target takes raising every cap below it, and the default too when it is
-    // below; more than one owner is a change by hand.
-    let below =
-        |level: &str, target: &str| rank(level).zip(rank(target)).is_some_and(|(l, t)| l < t);
-    let mut owners: Vec<&str> = vec![];
-    if let Some(target) = recommended.as_deref() {
-        if control.level.as_deref().is_some_and(|l| below(l, target)) {
-            owners.push(&control.owner);
-        }
-        owners.extend(
-            control
-                .caps
-                .iter()
-                .filter(|c| below(&c.value, target))
-                .map(|c| c.owner.as_str()),
-        );
-    }
-    let (owner, also) = match owners.split_first() {
-        None => (control.owner.clone(), vec![]),
-        Some((first, rest)) => (
-            first.to_string(),
-            rest.iter().map(|o| o.to_string()).collect(),
-        ),
-    };
-    // Unknown stays advisory without a value; a known level other than max or low has no verdict.
+    // No level can be weighed against another, so a known one has no verdict.
     let action = if control.unresolved.is_some() {
         Action::Advisory
     } else {
-        action
+        Action::Keep
     };
     let mut uncertainty = vec![
         "a different effort changes the output tokens, so its cost is not repriced".to_string(),
@@ -621,11 +551,11 @@ fn check(
             profile: profile.id.clone(),
             profiles: line.ids.clone(),
             history_profiles: vec![],
-            evidence: Evidence::Guidance,
+            evidence: Evidence::Estimated,
             action,
             current: effective,
-            recommended,
-            owner,
+            recommended: None,
+            owner: control.owner.clone(),
             since: input.since.or(requests.iter().map(|r| r.time).min()),
             until: Some(input.now),
             window_basis: if input.since.is_none() {
@@ -652,7 +582,6 @@ fn check(
         enterprise,
         runs,
         estimate,
-        also,
     }
 }
 
@@ -894,7 +823,6 @@ mod tests {
         .unwrap();
         assert_eq!(level(&c).1, Some("high"));
         assert!(c.lowered.unwrap().contains("has no xhigh"));
-        assert_eq!(c.supported, ["low", "medium", "high", "max"]);
         assert!(c.caps.is_empty());
         // The lowest cap across files applies, and a model's own entry replaces its file's.
         let c = resolve(
@@ -991,7 +919,6 @@ mod tests {
             "gpt-6.1-sol".to_string(),
             CodexModel {
                 default: "low".into(),
-                supported: vec!["low".into(), "max".into()],
             },
         )]
         .into_iter()

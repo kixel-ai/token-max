@@ -1128,6 +1128,7 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
         let mut sources: IndexMap<(ModelSource, String), u64> = IndexMap::default();
         let mut model_settings: IndexSet<String> = IndexSet::default();
         let mut effort_settings: IndexSet<String> = IndexSet::default();
+        let mut built_in = true;
         for session in runs.keys() {
             let subagent = spawns.get(session).copied();
             let all = &history[session];
@@ -1162,6 +1163,13 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
                 .iter()
                 .find(|p| all.iter().any(|r| r.profiles.contains(&p.id)))
                 .or(owners.first());
+            // A run whose metadata doesn't say is built in only when no agent file of its
+            // name replaces the built-in, as its model source decides.
+            built_in &= subagent.is_some_and(|s| {
+                s.built_in.unwrap_or_else(|| {
+                    own.is_some_and(|p| definition(scoped(&p.agents, run.cwd), kind).is_none())
+                })
+            });
             if let Some(profile) = own {
                 let (model, effort) = settings_text(
                     profile,
@@ -1229,6 +1237,7 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
             kind: kind.to_string(),
             native,
             fork,
+            built_in: harness == Harness::Claude && built_in,
             runs: runs.len() as u64,
             requests: requests.len() as u64,
             priced: sample.priced(),
@@ -1644,6 +1653,19 @@ mod tests {
         assert_eq!(lines[1].sources[0].source, ModelSource::Unknown);
         // Already on the cheapest model: nothing to reprice.
         assert_eq!(lines[2].reprice, None);
+        // With no agent file of its name, an unflagged run is the built-in; an unrecorded
+        // type is not known to be.
+        assert!(explore.built_in);
+        assert!(!lines[1].built_in);
+        // A run recorded as a user agent, or one an agent file of its name replaces, is not.
+        let mut user = spawn("Explore");
+        user.built_in = Some(false);
+        let run = || vec![child("a", "child", "claude-opus-5-5", None)];
+        let lines = subagent_costs(&scan(run(), vec![user]), &prices());
+        assert!(!lines[0].built_in);
+        let mut defined_scan = scan(run(), vec![spawn("Explore")]);
+        defined_scan.profiles[0].agents.definitions = vec![defined("Explore", Some("opus"), None)];
+        assert!(!subagent_costs(&defined_scan, &prices())[0].built_in);
     }
 
     #[test]

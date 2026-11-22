@@ -155,9 +155,9 @@ h1 { margin: 0; text-wrap: balance; }
 .step:nth-child(3) { --t: 3.6s; --gap: 1.4s; }
 .step:nth-child(4) { --t: 5.6s; --gap: 1.4s; }
 .step:nth-child(5) { --t: 8.5s; --gap: 0.0s; }
-.step:nth-child(6) { --t: 9.1s; --gap: 0.0s; }
-.step:nth-child(7) { --t: 9.7s; --gap: 0.0s; }
-.step:nth-child(8) { --t: 10.3s; --gap: 0.0s; }
+.step:nth-child(6) { --t: 11.0s; --gap: 0.0s; }
+.step:nth-child(7) { --t: 11.6s; --gap: 0.0s; }
+.step:nth-child(8) { --t: 12.2s; --gap: 0.0s; }
 /* /steps */
 @keyframes show { from { display: none; } to { display: inline; } }
 @keyframes hide { from { display: inline-block; } to { display: none; } }

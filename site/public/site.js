@@ -25,7 +25,16 @@ copy.addEventListener("click", async () => {
 // While it plays, the button skips to the whole run (WCAG 2.2.2); after, it replays.
 const term = document.querySelector(".term");
 const button = document.querySelector(".replay");
-if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
+// A finished run rests on the report's count of changes rather than its last line.
+const screen = term.querySelector(".body");
+const rest = () => {
+	const top = term.querySelector(".rest").getBoundingClientRect().top;
+	const start = screen.getBoundingClientRect().top + parseFloat(getComputedStyle(screen).paddingTop);
+	screen.scrollBy(0, top - start);
+};
+if (matchMedia("(prefers-reduced-motion: reduce)").matches) {
+	rest();
+} else {
 	const play = () => {
 		term.classList.remove("wait", "play");
 		void term.offsetWidth; // restart the CSS animations
@@ -40,10 +49,14 @@ if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
 		play();
 	}, { threshold: 0.35 }).observe(term);
 	// The last step's reveal ends the run.
-	term.querySelector(".step:last-child").addEventListener("animationend", () => (button.textContent = "Replay"));
+	term.querySelector(".step:last-child").addEventListener("animationend", () => {
+		button.textContent = "Replay";
+		rest();
+	});
 	button.addEventListener("click", () => {
 		if (button.textContent !== "Skip") return play();
 		term.classList.remove("wait", "play");
 		button.textContent = "Replay";
+		rest();
 	});
 }

@@ -28,6 +28,8 @@ CLASSES = {"1": "b", "2": "d", "31": "r", "32": "g", "33": "y"}
 # A report section opens with its bold uppercase heading.
 HEADING = re.compile(r"^  [A-Z][A-Z ]+[A-Z]  ")
 CUT = "EVERYTHING ELSE"
+# The report's count of its changes, which the finished run scrolls back to.
+SUMMARY = re.compile(r"^  \d[\d,]* changes? ")
 
 
 def run(answers: dict[str, str]) -> str:
@@ -105,7 +107,7 @@ def steps(transcript: str) -> tuple[list[list[str]], int]:
     """Split the run into steps: each question with its answer, then each report section.
 
     Returns the steps as lines of HTML and how many of them are questions."""
-    out, lines, questions = [], [], 0
+    out, lines, questions, rests = [], [], 0, 0
     raws = transcript.replace("\r\n", "\n").split("\n")
     i = 0
     while i < len(raws):
@@ -134,6 +136,10 @@ def steps(transcript: str) -> tuple[list[list[str]], int]:
                 )
                 i = j
                 continue
+        elif SUMMARY.match(plain):
+            # The page scrolls the finished run back to its count of changes.
+            lines.append(f'<span class="rest">{line_html(raw)}</span>')
+            rests += 1
         else:
             lines.append(line_html(raw))
         i += 1
@@ -150,6 +156,8 @@ def steps(transcript: str) -> tuple[list[list[str]], int]:
             step = step[:-1]
         if step:
             tidy.append(step if len(tidy) < questions else [""] + step)
+    if rests != 1:
+        sys.exit(f"expected one count of changes, such as '3 changes recommended', found {rests}")
     return tidy, questions
 
 
@@ -164,7 +172,9 @@ def timing(count: int, questions: int) -> str:
         # The first step is the command line's sibling at nth-child(2).
         gap = 1.4 if n < questions else 0
         rules.append(f".step:nth-child({n + 2}) {{ --t: {t:.1f}s; --gap: {gap:.1f}s; }}")
-        t += gap + (1.5 if n == questions - 1 else 0.6)
+        # A pause for the scan after the last answer, and for the summary that ends the
+        # report's first section before the CHANGES push it up.
+        t += gap + (1.5 if n == questions - 1 else 2.5 if n == questions else 0.6)
     return "\n".join(rules) + "\n"
 
 

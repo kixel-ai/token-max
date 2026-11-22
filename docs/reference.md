@@ -74,9 +74,8 @@ unaccepted.
 
 The report follows, its list grouped: the accepted changes first with the
 total, then the ones not accepted, then the steps to take by hand, such as a
-CLAUDE.md over Claude Code's size guidance or a change something else would
-override, each saying why, then every other line, each group ranked as the
-report ranks it. Then the confirm shows how each settings file would change, as
+change something else would override, each saying why, then every other line,
+each group ranked as the report ranks it. Then the confirm shows how each settings file would change, as
 a diff with a line of context around each change, removed lines in red and
 added ones in green. Values that may be secrets show as `••••` (`****`
 without Unicode), keeping their keys: each variable or header of an MCP server

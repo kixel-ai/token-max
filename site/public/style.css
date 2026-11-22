@@ -234,7 +234,7 @@ body {
 .gh:hover { border-color: var(--violet); }
 .eyebrow { color: var(--green); }
 .eyebrow::before { content: ""; display: inline-block; width: 0.5em; height: 0.5em; margin-right: 0.6em; vertical-align: 0.1em; border-radius: 50%; background: var(--green); box-shadow: 0 0 12px var(--green); }
-h1 { font-size: clamp(3rem, 9vw, 7rem); font-weight: 700; line-height: 0.95; letter-spacing: -0.045em;
+h1 { font-size: clamp(3rem, 9vw, 7rem); font-weight: 700; line-height: 0.95; letter-spacing: -0.045em; padding-bottom: 0.15em;
 	background: linear-gradient(100deg, #fff 30%, #c4b5fd 55%, var(--green) 90%); -webkit-background-clip: text; background-clip: text; color: transparent; }
 .lede { color: var(--muted); }
 .lede strong { color: var(--ink); }
@@ -259,8 +259,8 @@ h2 { font-size: clamp(1.8rem, 4vw, 2.6rem); font-weight: 700; letter-spacing: -0
 .fine { color: var(--muted); }
 .cta a { display: inline-block; padding: 0.8rem 1.4rem; border-radius: 99px; color: #0b0614; background: linear-gradient(100deg, #c4b5fd, var(--green)); box-shadow: 0 10px 40px -10px #8b5cf6; }
 /* A pipeline: three nodes joined by a gradient rail. */
-.steps { gap: 2rem; }
-.steps::before { content: ""; position: absolute; left: 1.5rem; right: 1.5rem; top: 2.85rem; height: 2px; background: linear-gradient(90deg, var(--violet), var(--green)); opacity: 0.6; }
+.steps { gap: 2rem; position: relative; }
+.steps::before { content: ""; position: absolute; left: 1.8rem; right: 1.8rem; top: 1.8rem; height: 2px; background: linear-gradient(90deg, var(--violet), var(--green)); opacity: 0.6; }
 .steps li { padding: 0; }
 .steps .num { display: grid; place-items: center; width: 3.6rem; height: 3.6rem; font-size: 1.1rem; border-radius: 50%;
 	background: var(--bg); border: 2px solid var(--violet); color: var(--ink); box-shadow: 0 0 24px #8b5cf688; position: relative; }
@@ -269,7 +269,6 @@ h2 { font-size: clamp(1.8rem, 4vw, 2.6rem); font-weight: 700; letter-spacing: -0
 .steps h3 { font-size: 1.6rem; letter-spacing: -0.02em; margin-top: 1.25rem; }
 .steps p { color: var(--muted); }
 .steps strong { color: var(--ink); }
-.how { position: relative; }
 footer { border-top: 1px solid #ffffff14; }
 footer a { color: var(--muted); text-decoration: none; }
 @media (max-width: 56rem) { .steps::before { display: none; } }

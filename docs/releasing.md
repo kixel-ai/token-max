@@ -48,20 +48,40 @@ verify the archive against `sha256.sum` or with `gh attestation verify`.
 ## max.kixel.ai
 
 `site/` is a Cloudflare Worker with only static assets and no code:
-`index.html` and `style.css` are the landing page, `_redirects` sends
-`/install.sh` and `/install.ps1` to the latest release's installers, and
-`run.sh` and `run.ps1` are served as they are, so a release needs no deploy
-unless the page changes. `_headers` forbids scripts and other origins, which
-the page promises. `tests/run_script.rs` runs the run script for the host
-(`run.ps1` on the Windows CI job) against fixture releases on a local server.
+`index.html`, `style.css` and `site.js` are the landing page, `fonts/` holds
+its two OFL fonts subset to Latin, `_redirects` sends `/install.sh` and
+`/install.ps1` to the latest release's installers, and `run.sh` and `run.ps1`
+are served as they are, so a release needs no deploy unless the page changes.
+`_headers` allows scripts, styles and fonts from the page's own origin only.
+`site.js` picks the Windows command on Windows, adds the copy button and plays
+the terminal; without it the page still works and the terminal shows the whole
+run. `tests/run_script.rs` runs the run script for the host (`run.ps1` on the
+Windows CI job) against fixture releases on a local server.
 
-The page copies the README's top: the headline, the run line, the
-two cache findings from `docs/results.md` and "How it
-knows"; change them together. Its
-recording, `walk.gif`, is the README's too, and `assets/demo/walk.tape`
+The page's terminal is the maintainer's own `token-max doctor --defaults` over
+the last 30 days across their hosts, run from `nixos` with `--ssh` for the
+others, as HTML, with each host's EVERYTHING ELSE section cut to one line,
+since that section is long and names project files that can belong to private
+repositories. The results section below it comes from the same run's total, so
+the page shows one set of figures; `docs/results.md` and the README's top are
+an earlier, fuller replay and need not match it. After a change to doctor's
+questions or output, run it again from the repository root on `nixos` after
+`cargo build --release`, answering how each of its Claude profiles pays
+(doctor asks only about this host's), and adding `--ssh kixtop` when the laptop
+is online:
+
+```sh
+python3 assets/demo/site.py site/public ~/.claude=p ~/.claude-api-credits=a ~/.claude-personal.merged-20261106=a \
+  --since "$(date -u -d '29 days ago' +%F)" --ssh desktop --ssh fedora --include-local
+```
+
+It writes the run and the results into `index.html`, and the run's timing and the results meter into `style.css`. Read the
+result before committing it: it is public, so it must name no private
+repository, customer or project. The README's recording, `assets/demo/walk.gif`,
+runs on synthetic transcripts instead, and `assets/demo/walk.tape`
 regenerates it. `og.png`, the link preview, is a 1200x630 screenshot of the
-page's top in dark mode, from the logo through the run box;
-retake it after changing that part.
+page's top, from the logo through the run box; retake it after changing that
+part.
 
 Preview the page, its headers and redirects locally with
 `nix shell nixpkgs#wrangler -c wrangler dev` from `site/`. After changing

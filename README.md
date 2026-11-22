@@ -56,8 +56,9 @@ count. Your sessions differ: run it to see yours.
    same sessions again under the other setting.
 3. **Prices both.** At public API prices from `https://models.dev/api.json`,
    its only network request unless you name other machines with `--ssh`. What
-   it can't price stays unknown, never zero. Each line says whether it is
-   Measured, Official guidance or the maintainer's Opinion.
+   it can't price stays unknown, never zero. A provider's guidance that no
+   transcript can price is a cited warning apart from the lines, never a
+   verdict.
 
 Then `token-max doctor` offers each change, shows the edit, and writes it only
 after a yes, first copying the file to a
@@ -112,17 +113,19 @@ token-max doctor --help
 | Auto-compact window | Whether a different window would have cost less, summaries included |
 | Idle compaction | Whether compacting sessions you walked away from paid for itself |
 | Tools, skills and MCP servers | What each cost to send with every request, and how often it was used |
-| Instruction files | What each CLAUDE.md or AGENTS.md cost, beside the provider's size guidance |
-| Fast mode | What the premium cost; recommended off |
-| Main-session effort | What each model and effort cost, beside the provider's guidance; `max` recommended down to `xhigh` (or `high` where a model lacks it), `low` worth considering raising |
-| Auto memory | What loading, reading and writing it cost, and how often it was used; worth considering off |
+| Instruction files | What each CLAUDE.md or AGENTS.md cost, and what shortening it would save |
+| Fast mode | What the premium cost |
+| Main-session effort | What each model and effort cost |
+| Auto memory | What loading, reading and writing it cost, and how often it was read or written |
 | Prompt suggestions, recaps, check-ins | What each background feature cost, where it can be estimated |
 | Bash timeout cap | Whether long foreground waits let the cache expire |
 | Keepalive pings | Whether pinging idle sessions would beat the cache misses |
-| Subagent types | What each cost, which model and effort it ran on, and the same tokens on the cheapest current model, beside Anthropic's model guide |
-| Fable weekly use | Each week's Fable spend beside Anthropic's rule that, on Max and Ultra plans, Fable can use up to half the weekly limit |
+| Subagent types | What each cost, which model and effort it ran on, and the same tokens on the cheapest current model |
+| Fable weekly use | Each week's Fable spend |
 
-See the [reference](https://github.com/kixel-ai/token-max/blob/main/docs/reference.md#reading-the-report)
+Provider guidance the transcripts can't price, such as Claude Code's advice to
+keep a CLAUDE.md under 200 lines, appears as a cited warning after the lines,
+never as a verdict. See the [reference](https://github.com/kixel-ai/token-max/blob/main/docs/reference.md#reading-the-report)
 for how to read each line, and its sections for each check.
 
 ## More

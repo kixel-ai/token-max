@@ -371,8 +371,10 @@ fn a_remote_report_matches_running_there() {
         assert!(args.contains(option), "{option}: {args}");
     }
 
+    // With a change to offer on devbox, which exits 1.
+    std::fs::write(hosts.settings("devbox"), HOME_SETTINGS).unwrap();
     let (status, text, _) = hosts.run(&["--ssh", "devbox", "--include-local"]);
-    assert_eq!(status, 0);
+    assert_eq!(status, 1);
     // One total heads the report, beside each host's own section.
     assert!(
         text.starts_with("token-max: total over 2 hosts  4 requests in 2 sessions, "),
@@ -538,7 +540,7 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
             l.starts_with("  change   Bash timeout cap ")
                 && l.contains(" 2h -> 55m ")
                 && l.ends_with(
-                    "  Measured  \"env\": {\"BASH_MAX_TIMEOUT_MS\": \"3300000\"} in ~/.claude/settings.json",
+                    "  \"env\": {\"BASH_MAX_TIMEOUT_MS\": \"3300000\"} in ~/.claude/settings.json",
                 )
         }),
         "{stdout}"
@@ -1464,8 +1466,12 @@ fn flat(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Settings that turn auto memory off, as accepting its change writes them.
-const MEMORY_OFF: &str = "{\n  \"promptCacheTtl\": \"1h\",\n  \"autoMemoryEnabled\": false\n}";
+/// Each walked home's settings: a 1h TTL, and a Bash cap that outlasts it, which every host
+/// offers to lower with a saving not measured.
+const HOME_SETTINGS: &str = r#"{"promptCacheTtl":"1h","env":{"BASH_MAX_TIMEOUT_MS":"7200000"}}"#;
+
+/// [`HOME_SETTINGS`] with the cap lowered under the TTL, as accepting its change writes them.
+const CAP_LOWERED: &str = "{\n  \"promptCacheTtl\": \"1h\",\n  \"env\": {\n    \"BASH_MAX_TIMEOUT_MS\": \"3300000\"\n  }\n}";
 
 impl Hosts {
     /// `doctor` on this host, devbox and laptop, walked on a terminal after the billing question.
@@ -1475,8 +1481,12 @@ impl Hosts {
         self.walk_ready()
     }
 
-    /// The walk of [`Hosts::walk`] with its destinations already set up.
+    /// The walk of [`Hosts::walk`] with its destinations already set up, each home given
+    /// [`HOME_SETTINGS`].
     fn walk_ready(&self) -> Terminal {
+        for host in ["local", "devbox", "laptop"] {
+            std::fs::write(self.settings(host), HOME_SETTINGS).unwrap();
+        }
         let mut command = self.command(&["--ssh", "devbox", "--ssh", "laptop", "--include-local"]);
         command.env("NO_COLOR", "1");
         let mut terminal = Terminal::spawn(command);
@@ -1523,14 +1533,14 @@ fn the_walk_offers_every_hosts_changes_and_writes_each_on_its_host() {
     for host in ["local", "laptop"] {
         assert_eq!(
             std::fs::read_to_string(hosts.settings(host)).unwrap(),
-            MEMORY_OFF
+            CAP_LOWERED
         );
-        assert_eq!(hosts.backup(host).unwrap(), r#"{"promptCacheTtl":"1h"}"#);
+        assert_eq!(hosts.backup(host).unwrap(), HOME_SETTINGS);
     }
     // Declined, so its file is as it was.
     assert_eq!(
         std::fs::read_to_string(hosts.settings("devbox")).unwrap(),
-        r#"{"promptCacheTtl":"1h"}"#
+        HOME_SETTINGS
     );
     assert_eq!(hosts.backup("devbox"), None);
 }
@@ -1564,7 +1574,7 @@ fn a_host_that_fails_to_write_stops_the_run_before_later_hosts() {
     );
     assert_eq!(
         std::fs::read_to_string(hosts.settings("local")).unwrap(),
-        MEMORY_OFF
+        CAP_LOWERED
     );
     assert_eq!(
         std::fs::read_to_string(hosts.settings("devbox")).unwrap(),
@@ -1572,7 +1582,7 @@ fn a_host_that_fails_to_write_stops_the_run_before_later_hosts() {
     );
     assert_eq!(
         std::fs::read_to_string(hosts.settings("laptop")).unwrap(),
-        r#"{"promptCacheTtl":"1h"}"#
+        HOME_SETTINGS
     );
     for host in ["devbox", "laptop"] {
         assert_eq!(hosts.backup(host), None);
@@ -1593,7 +1603,7 @@ fn a_walk_that_is_not_confirmed_writes_no_host() {
     for host in ["local", "devbox", "laptop"] {
         assert_eq!(
             std::fs::read_to_string(hosts.settings(host)).unwrap(),
-            r#"{"promptCacheTtl":"1h"}"#
+            HOME_SETTINGS
         );
         assert_eq!(hosts.backup(host), None);
     }
@@ -1690,6 +1700,6 @@ done"#
     assert!(stderr.contains("nothing was written on laptop"), "{stderr}");
     assert_eq!(
         std::fs::read_to_string(hosts.settings("laptop")).unwrap(),
-        r#"{"promptCacheTtl":"1h"}"#
+        HOME_SETTINGS
     );
 }

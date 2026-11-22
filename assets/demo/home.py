@@ -22,7 +22,7 @@ project.mkdir(parents=True, exist_ok=True)
             "model": "opus",
             "promptCacheTtl": "5m",
             "fastMode": True,
-            "env": {"BASH_MAX_TIMEOUT_MS": "1800000"},
+            "env": {"BASH_MAX_TIMEOUT_MS": "7200000"},
         },
         indent=2,
     )

@@ -16,21 +16,28 @@ copy.addEventListener("click", async () => {
 });
 
 // Play the recorded run once it scrolls into view, unless the reader prefers less motion.
+// While it plays, the button skips to the whole run (WCAG 2.2.2); after, it replays.
 const term = document.querySelector(".term");
-const replay = document.querySelector(".replay");
+const button = document.querySelector(".replay");
 if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
 	const play = () => {
-		term.classList.remove("play");
+		term.classList.remove("wait", "play");
 		void term.offsetWidth; // restart the CSS animations
 		term.classList.add("play");
+		button.textContent = "Skip";
+		button.hidden = false;
 	};
 	term.classList.add("wait");
 	new IntersectionObserver((entries, observer) => {
 		if (!entries[0].isIntersecting) return;
 		observer.disconnect();
-		term.classList.remove("wait");
 		play();
 	}, { threshold: 0.35 }).observe(term);
-	replay.hidden = false;
-	replay.addEventListener("click", play);
+	// The last step's reveal ends the run.
+	term.querySelector(".step:last-child").addEventListener("animationend", () => (button.textContent = "Replay"));
+	button.addEventListener("click", () => {
+		if (button.textContent !== "Skip") return play();
+		term.classList.remove("wait", "play");
+		button.textContent = "Replay";
+	});
 }

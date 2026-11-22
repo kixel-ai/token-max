@@ -2518,6 +2518,32 @@ fn claude_auto_memory_unused_is_turned_off_only_when_its_transcripts_prove_it() 
         ),
         (crate::model::Action::Advisory, Some(false), true)
     );
+    // autoMemoryDirectory can move memory anywhere; the directory of the MEMORY.md the
+    // scan saw loaded is what a lost call there names. A line naming another path proves
+    // nothing about memory.
+    let custom = |line: &str| {
+        let mut moved = data.clone();
+        for c in &mut moved.exposure.components {
+            if c.name.ends_with("/MEMORY.md") {
+                c.name = "/repo/agent-notes/MEMORY.md".into();
+            }
+        }
+        for s in &mut moved.snapshots {
+            s.skipped_lines = 1;
+            s.unreadable.observe(line.as_bytes());
+        }
+        memory_check(&self::report(&moved, 1.0), Harness::Claude)
+            .base
+            .action
+    };
+    assert_eq!(
+        custom(r#"{"name":"Write","input":{"file_path":"/repo/agent-notes/n.md"}}"#),
+        crate::model::Action::Advisory
+    );
+    assert_eq!(
+        custom(r#"{"name":"Write","input":{"file_path":"/repo/src/main.rs"}}"#),
+        crate::model::Action::Change
+    );
     // So is one still being written.
     for s in &mut data.snapshots {
         s.deferred_bytes = 9;

@@ -148,10 +148,23 @@ pub fn hidden_use(
     } else {
         vec![]
     };
+    // A memory call names the directory it reads or writes, which `autoMemoryDirectory`
+    // can move anywhere: the directories of the memory files the scan saw loaded.
+    let directories: Vec<&str> = if c.kind == ContextKind::Memory {
+        scan.components
+            .iter()
+            .filter(|m| m.category == Category::Memory)
+            .filter_map(|m| m.name.rsplit(['/', '\\']).nth(1))
+            .filter(|d| !d.is_empty())
+            .collect()
+    } else {
+        vec![]
+    };
     covering(c, snapshots, profiles)
         .filter_map(|s| {
             let named = if synced.is_empty() {
                 s.unreadable.mentions(c.kind, &c.name)
+                    || directories.iter().any(|d| s.unreadable.names_every(d))
             } else {
                 synced.iter().any(|n| s.unreadable.mentions(c.kind, n))
             };

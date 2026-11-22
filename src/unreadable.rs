@@ -124,25 +124,34 @@ impl Unreadable {
         };
     }
 
+    /// Whether the lines hold every token of `name`, matching case, such as a directory's
+    /// name a call's path runs through.
+    pub fn names_every(&self, name: &str) -> bool {
+        self.named(name, false)
+    }
+
+    /// Whether the lines hold every token of `name`, folding case when `fold` is set.
+    fn named(&self, name: &str, fold: bool) -> bool {
+        let mut parts = name
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+            .filter(|p| !p.is_empty())
+            .peekable();
+        parts.peek().is_some()
+            && parts.all(|p| {
+                if fold {
+                    self.names.contains(&skill_key(p))
+                } else {
+                    self.names.contains(&hash(p))
+                }
+            })
+    }
+
     /// Whether the lines mention the row's feature by the name a call records it under.
     pub fn mentions(&self, kind: ContextKind, name: &str) -> bool {
         let has = |text: &str| self.names.contains(&hash(text));
         // A name made of several tokens, such as `plugin:skill`, needs every one. Skill
         // names fold case, as a skill call resolves its name; the others do not.
-        let named = |name: &str, fold: bool| {
-            let mut parts = name
-                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
-                .filter(|p| !p.is_empty())
-                .peekable();
-            parts.peek().is_some()
-                && parts.all(|p| {
-                    if fold {
-                        self.names.contains(&skill_key(p))
-                    } else {
-                        has(p)
-                    }
-                })
-        };
+        let named = |name: &str, fold: bool| self.named(name, fold);
         match kind {
             ContextKind::Tool if name == "Artifact" => self.names.contains(&artifact_marker()),
             ContextKind::Tool => named(name, false),

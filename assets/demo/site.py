@@ -114,13 +114,13 @@ def main() -> None:
     shutil.rmtree(home, ignore_errors=True)
     subprocess.run([sys.executable, Path(__file__).with_name("home.py"), home], check=True)
     fragment = render(run(home))
-    text = page.read_text()
+    text = page.read_text(encoding="utf-8")
     start, end = "<!-- doctor -->", "<!-- /doctor -->"
     if text.count(start) != 1 or text.count(end) != 1:
         sys.exit(f"{page} needs one {start} and one {end}")
     head, rest = text.split(start)
     _, tail = rest.split(end)
-    page.write_text(f"{head}{start}{fragment}{end}{tail}")
+    page.write_text(f"{head}{start}{fragment}{end}{tail}", encoding="utf-8")
 
 
 if __name__ == "__main__":

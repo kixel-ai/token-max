@@ -9,9 +9,15 @@ const copy = document.querySelector(".copy");
 copy.hidden = false;
 copy.addEventListener("click", async () => {
 	const windows = document.getElementById("os-windows").checked;
-	const command = document.querySelector(windows ? ".windows .sel" : ".unix .sel").textContent;
-	await navigator.clipboard.writeText(command);
-	copy.textContent = "Copied";
+	const command = document.querySelector(windows ? ".windows .sel" : ".unix .sel");
+	try {
+		await navigator.clipboard.writeText(command.textContent);
+		copy.textContent = "Copied";
+	} catch {
+		// Clipboard access denied: select the command so the reader can copy it.
+		getSelection().selectAllChildren(command);
+		copy.textContent = "Selected";
+	}
 	setTimeout(() => (copy.textContent = "Copy"), 1500);
 });
 

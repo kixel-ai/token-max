@@ -920,7 +920,11 @@ advisory, and otherwise, or once it is off, keep. Loading the memory index into
 every request is not a use. A total that leaves out what could not be priced,
 Codex's extraction and consolidation or unpriced reads, can show neither that
 memory was free nor that it stayed under the limit per use, so it gives no
-verdict there, as does an unknown total or an unresolved switch. The check
+verdict there, as does an unknown total, an unresolved switch, or a price that
+depends on a service tier a carrying request did not record. As for a skill, a
+transcript line that could not be read, or was still being written, could hold a
+read or write, so memory with none recorded is then only worth considering off.
+The check
 reports the total cost, the reads and writes, and the setting that turns it
 off; its `savings_usd` is that total. Once memory is off, the line
 still shows what it cost and how often it was used earlier in the window.

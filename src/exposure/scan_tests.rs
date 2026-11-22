@@ -2473,6 +2473,79 @@ fn claude_auto_memory_is_priced_apart_from_the_system_prompt_and_judged_by_its_c
     );
 }
 
+#[test]
+fn claude_auto_memory_unused_is_turned_off_only_when_its_transcripts_prove_it() {
+    let w = Workspace::new();
+    let root = std::fs::canonicalize(&w.claude).unwrap();
+    let records = claude_memory_session(&root.to_string_lossy(), true);
+    std::fs::write(
+        w.claude.join("projects/project/main.jsonl"),
+        jsonl(&records),
+    )
+    .unwrap();
+    let mut data = scan(&options(&w, None)).unwrap();
+    // With no read or write recorded, memory that is on and costs something is turned off.
+    data.exposure.memory.clear();
+    let unused = report(&data, 1.0);
+    let check = memory_check(&unused, Harness::Claude);
+    assert_eq!(
+        (
+            check.base.action,
+            check.base.recommended,
+            check.use_unproven
+        ),
+        (crate::model::Action::Change, Some(false), false)
+    );
+    // A transcript still being written could hold a read or write, so it is only worth
+    // considering off, which leaves the exit code alone.
+    for s in &mut data.snapshots {
+        s.deferred_bytes = 9;
+    }
+    let unfinished = report(&data, 1.0);
+    let check = memory_check(&unfinished, Harness::Claude);
+    assert_eq!(
+        (
+            check.base.action,
+            check.base.recommended,
+            check.use_unproven
+        ),
+        (crate::model::Action::Advisory, Some(false), true)
+    );
+    assert!(shows(
+        &text(&unfinished),
+        "consider",
+        "Auto memory on -> off saves ",
+        &[
+            "On, and no read back or write was recorded, but a transcript line that could not be read may hold one."
+        ]
+    ));
+    // A price that depends on an unrecorded service tier settles no verdict.
+    let mut context = unfinished.context.clone();
+    for c in context.iter_mut().filter(|c| c.kind == ContextKind::Memory) {
+        c.tier_unknown_requests = 1;
+    }
+    let checks = crate::memory::memory_checks(&crate::memory::MemoryInput {
+        scan: &unfinished.scan,
+        context: &context,
+        catalog: &prices(),
+        since: None,
+        now: NOW,
+        max_cost_per_use_usd: 1.0,
+    });
+    let check = checks
+        .iter()
+        .find(|c| c.harness == Harness::Claude)
+        .unwrap();
+    assert_eq!(
+        (
+            check.base.action,
+            check.base.recommended,
+            check.tier_unknown_requests
+        ),
+        (crate::model::Action::Advisory, None, 1)
+    );
+}
+
 /// The note auto memory's check gives when recorded sessions disagree with the setting.
 fn memory_note(check: &crate::model::MemoryCheck) -> Option<&str> {
     check

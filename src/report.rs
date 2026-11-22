@@ -610,12 +610,18 @@ fn memory_reason(m: &MemoryCheck, r: &Common<'_>) -> String {
             "Its cost per read or write is within --max-cost-per-use.".into()
         }
         Action::Change => "On, and never read back or written in the window.".into(),
+        Action::Advisory if r.recommended.is_some() && m.reads + m.writes == 0 => {
+            "On, and no read back or write was recorded, but a transcript line that could not be read may hold one.".into()
+        }
         Action::Advisory if r.recommended.is_some() => {
             "It cost more than --max-cost-per-use per read or write.".into()
         }
         Action::Advisory if m.unresolved.is_some() => format!("{}.", memory_unresolved(m)),
         Action::Advisory if r.savings_usd.is_none() => {
             "What it costs could not be measured.".into()
+        }
+        Action::Advisory if m.tier_unknown_requests > 0 => {
+            "Its price depends on a service tier some requests did not record, so its cost per use is not settled.".into()
         }
         // A total that leaves out what could not be priced shows neither nothing nor a
         // cost per use within the limit.
@@ -2381,10 +2387,12 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
         );
     }
     if action == Action::Advisory {
+        let weighed = matches!(result, CheckResult::Memory(_) | CheckResult::Speed(_))
+            && r.recommended.is_some();
         out.field(
             "Next",
-            if matches!(result, CheckResult::Memory(_)) {
-                "Move what is worth keeping into a reviewed CLAUDE.md or AGENTS.md, then turn it off; advisory findings do not affect the exit code."
+            if weighed {
+                "Weigh what it cost against what it gave before changing the setting; advisory findings do not affect the exit code."
             } else {
                 "Review evidence and resolve current ownership/coverage before changing a setting; advisory findings do not affect the exit code."
             },
@@ -4114,20 +4122,20 @@ const CLAUDE_MEMORY_DOCS: &str =
 /// The documented page behind Codex's AGENTS.md byte budget.
 const CODEX_AGENTS_DOCS: &str = "https://learn.chatgpt.com/docs/agent-configuration/agents-md";
 
-/// An instruction file's row: what it cost over the window, its size, and what each 100
-/// lines of it cost every 30 days, which is what shortening it saves. No verdict: what a
-/// line of instructions is worth is not recorded.
+/// An instruction file's row: what it cost over the window, its latest size, and what each
+/// 100 lines of it cost every 30 days, which is what shortening it saves. The cost is spread
+/// over the lines the average request carried, so a file edited in the window is priced by
+/// every revision it sent. No verdict: what a line of instructions is worth is not recorded.
 fn instruction_row(c: &ContextCost, out: &Out<'_>) -> Row {
     let mut row = Row::new(Mark::Info, out.home(&c.name), instructions_what(c));
-    let per = c
-        .instruction_size
-        .filter(|size| size.lines > 0)
-        .and_then(|size| {
-            row.value = plural(size.lines as u64, "line");
-            let usd = piece_saving(c, &out.spend)? * 100.0 / size.lines as f64;
-            let margin = piece_margin(c, &out.spend).map(|m| m.scale(100.0 / size.lines as f64));
-            Some(approx(usd, margin, "/mo"))
-        });
+    if let Some(size) = c.instruction_size.filter(|size| size.lines > 0) {
+        row.value = plural(size.lines as u64, "line");
+    }
+    let per = c.instruction_lines.filter(|&n| n > 0.0).and_then(|lines| {
+        let usd = piece_saving(c, &out.spend)? * 100.0 / lines;
+        let margin = piece_margin(c, &out.spend).map(|m| m.scale(100.0 / lines));
+        Some(approx(usd, margin, "/mo"))
+    });
     row.evidence = match per {
         Some(per) => format!(
             "Each 100 lines costs about {per}, which shortening it saves, assuming the rest of the work is unchanged. No setting turns it off."
@@ -6395,6 +6403,7 @@ mod tests {
             skill: None,
             details: vec![],
             instruction_size: None,
+            instruction_lines: None,
             description: None,
             shares: vec![],
             pretended_requests: None,
@@ -6600,6 +6609,8 @@ mod tests {
                     overrides: vec![],
                     unmeasured_generation: false,
                     unpriced_reads: 0,
+                    use_unproven: false,
+                    tier_unknown_requests: 0,
                 })
             },
         ];
@@ -7024,6 +7035,8 @@ mod tests {
                 overrides: vec![],
                 unmeasured_generation,
                 unpriced_reads: 0,
+                use_unproven: false,
+                tier_unknown_requests: 0,
             })
         };
         assert_eq!(
@@ -8358,6 +8371,7 @@ mod tests {
             let mut c = context_piece(ContextKind::Instructions, name, None, Some(4.0), None);
             c.harness = harness;
             c.instruction_size = Some(crate::model::InstructionSize { bytes, lines });
+            c.instruction_lines = Some(lines as f64);
             c
         };
         // Every file is a measured line with no verdict, priced per 100 lines.
@@ -8366,6 +8380,17 @@ mod tests {
         assert_eq!((row.mark, row.value.as_str()), (Mark::Info, "200 lines"));
         assert!(
             row.evidence.starts_with("Each 100 lines costs about $2/mo"),
+            "{}",
+            row.evidence
+        );
+        // A file shortened in the window is priced over the lines its requests carried,
+        // not only its latest revision's.
+        let mut shortened = claude(100);
+        shortened.instruction_lines = Some(400.0);
+        let row = instruction_row(&shortened, &out);
+        assert_eq!(row.value, "100 lines");
+        assert!(
+            row.evidence.starts_with("Each 100 lines costs about $1/mo"),
             "{}",
             row.evidence
         );
@@ -9996,6 +10021,7 @@ mod tests {
             skill: None,
             details: vec![],
             instruction_size: None,
+            instruction_lines: None,
             description: None,
             shares: vec![],
             pretended_requests: None,
@@ -10107,6 +10133,7 @@ mod tests {
             skill: None,
             details: vec![],
             instruction_size: None,
+            instruction_lines: None,
             description: None,
             shares: vec![],
             pretended_requests: None,

@@ -842,6 +842,9 @@ struct Row {
     /// from its first request stays advisory when unused; another source sending it
     /// only sometimes, as native Claude Code does a deferred tool, adds evidence instead.
     from_start: IndexMap<usize, bool>,
+    /// Instruction lines summed over the requests that carried it, revision by revision;
+    /// None once a carried revision's size is unknown.
+    lines: Option<u64>,
 }
 
 /// Evidence credited through the same profile and last-used rules for every harness.
@@ -1107,6 +1110,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                             }),
                         details: vec![],
                         instruction_size: None,
+                        instruction_lines: None,
                         description: None,
                         shares: vec![],
                         pretended_requests: None,
@@ -1118,6 +1122,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     time: Millis::MIN,
                     assumptions: IndexSet::default(),
                     from_start: IndexMap::default(),
+                    lines: Some(0),
                 }
             });
             *row.from_start.entry(share).or_default() |= first;
@@ -1132,10 +1137,10 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             if let History::Revision(revision) = piece.history
                 && interned.kinds[piece.key].kind == ContextKind::Instructions
             {
-                rows.get_mut(&(owner, piece.key))
-                    .expect("piece has a row")
-                    .cost
-                    .instruction_size = component(revision).instruction_size;
+                let row = rows.get_mut(&(owner, piece.key)).expect("piece has a row");
+                let size = component(revision).instruction_size;
+                row.cost.instruction_size = size;
+                row.lines = row.lines.zip(size).map(|(n, s)| n + s.lines as u64);
             }
         }
         // Each request's records describe this owner's lines, so the latest request decides:
@@ -1597,6 +1602,10 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 }
                 None => {}
             }
+            c.instruction_lines = row
+                .lines
+                .filter(|&n| c.kind == ContextKind::Instructions && n > 0 && c.requests > 0)
+                .map(|n| n as f64 / c.requests as f64);
             let estimate = row.sample.estimate(c.requests);
             c.estimated_usd = estimate.map(|e| e.usd);
             c.margin = estimate.and_then(|e| e.margin);
@@ -2649,6 +2658,38 @@ mod tests {
                 lines: 200
             })
         );
+        assert_eq!(c.instruction_lines, Some(200.0));
+        // Shortened to 100 lines for one of two requests: the latest size is shown, and
+        // each line is priced over the 150 lines the average request carried.
+        let mut shorter = component(
+            "shorter",
+            Category::Instructions,
+            "/repo/CLAUDE.md",
+            100,
+            &[],
+        );
+        shorter.instruction_size = Some(crate::model::InstructionSize {
+            bytes: 201,
+            lines: 100,
+        });
+        let scan = ExposureScan {
+            components: vec![scan.components[0].clone(), shorter],
+            requests: vec![
+                exposure("r1", &["claude"], 0, 300),
+                exposure("r2", &["shorter"], 0, 300),
+            ],
+            ..ExposureScan::default()
+        };
+        let requests = [request("r1", 1, 0, 300, 0), request("r2", 2, 0, 300, 0)];
+        let rows = costs(&scan, &requests, 1.0);
+        let c = row(&rows, "/repo/CLAUDE.md");
+        assert_eq!(c.instruction_size.map(|s| s.lines), Some(100));
+        assert_eq!(c.instruction_lines, Some(150.0));
+        // A revision whose size was not recorded leaves the lines unknown.
+        let mut scan = scan;
+        scan.components[1].instruction_size = None;
+        let c = row(&costs(&scan, &requests, 1.0), "/repo/CLAUDE.md").clone();
+        assert_eq!(c.instruction_lines, None);
     }
 
     #[test]
@@ -3294,6 +3335,7 @@ mod tests {
             skill: None,
             details,
             instruction_size: None,
+            instruction_lines: None,
             description: None,
             shares: vec![],
             pretended_requests: (requests < 3).then_some(3),

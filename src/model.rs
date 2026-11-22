@@ -1869,8 +1869,7 @@ pub struct BackgroundCheck {
     pub lost_estimate: Option<Estimate>,
 }
 
-/// Auto memory's cost over the window. It is advised off whatever it cost, since
-/// notes the agent writes for itself are not reviewed like checked-in instructions.
+/// Auto memory's cost over the window, judged as a skill is by its cost per read or write.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemoryCheck {
     /// Current and recommended values: true is on.
@@ -1896,6 +1895,12 @@ pub struct MemoryCheck {
     /// Requests that recorded no context and read memory back, none of whose reads could be
     /// priced, so the total leaves those reads out and is a lower bound.
     pub unpriced_reads: u64,
+    /// Whether a transcript line that could not be read, or was still being written, could
+    /// hold a read or write, so a window with none recorded does not prove it unused.
+    pub use_unproven: bool,
+    /// Requests that carried memory without a recorded service tier, whose price depends on
+    /// the tier that served them, so the cost per use is not settled.
+    pub tier_unknown_requests: u64,
 }
 
 impl MemoryCheck {
@@ -2812,6 +2817,10 @@ pub struct ContextCost {
     pub details: Vec<ContextCost>,
     /// Size of the most recent recorded instruction revision.
     pub instruction_size: Option<InstructionSize>,
+    /// Lines of instructions the average request carrying them sent, over every revision
+    /// in the window, which is what their cost is spread over to price one line. None when
+    /// a revision's size was not recorded.
+    pub instruction_lines: Option<f64>,
     /// The first sentence of the description it ships, from its latest recorded revision.
     pub description: Option<String>,
     /// The line's requests and their cost by the profiles that recorded them.

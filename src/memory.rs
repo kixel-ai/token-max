@@ -311,18 +311,44 @@ fn check(
             if on { "on" } else { "off" },
         ));
     }
+    // The memory rows that hold this line's requests, for what their transcripts and
+    // prices leave unsettled.
+    let costs: Vec<&ContextCost> = input
+        .context
+        .iter()
+        .filter(|c| c.kind == ContextKind::Memory)
+        .filter(|c| !c.shares_within(|profiles| line.covers(profiles)).is_empty())
+        .collect();
+    let use_unproven = costs.iter().any(|c| {
+        crate::context::hidden_use(c, &scan.snapshots, &scan.exposure, &scan.profiles).is_some()
+    });
+    let tier_unknown_requests: u64 = costs.iter().map(|c| c.tier_unknown_requests).sum();
+    if use_unproven {
+        uncertainty.push(
+            "a transcript line that could not be read, or was still being written, could hold a read or write"
+                .into(),
+        );
+    }
+    if tier_unknown_requests > 0 {
+        uncertainty.push(format!(
+            "{tier_unknown_requests} requests that carried memory recorded no service tier, so their price depends on the tier that served them"
+        ));
+    }
     let unmeasured_generation = profile.harness == Harness::Codex
         && (current != Some(false) || control.stored || !uses.is_empty() || !rows.is_empty());
     let lower_bound = unmeasured_generation || unpriced_reads > 0;
     // Judged as a skill is: never used is off, above the limit per use worth considering
     // off. A total that leaves a part out can prove neither that it was free nor that
-    // each use stayed under the limit.
+    // each use stayed under the limit, a price that depends on an unrecorded tier settles
+    // no comparison, and a line that could hold a use leaves nonuse unproven.
     let (action, recommended) = match (current, total) {
         (Some(false), _) => (Action::Keep, Some(false)),
         (None, _) | (Some(true), None) => (Action::Advisory, None),
+        (Some(true), Some(_)) if tier_unknown_requests > 0 => (Action::Advisory, None),
         (Some(true), Some(usd)) => match reads + writes {
             _ if usd <= 0.0 && lower_bound => (Action::Advisory, None),
             _ if usd <= 0.0 => (Action::Keep, Some(true)),
+            0 if use_unproven => (Action::Advisory, Some(false)),
             0 => (Action::Change, Some(false)),
             n if usd / n as f64 > input.max_cost_per_use_usd => (Action::Advisory, Some(false)),
             _ if lower_bound => (Action::Advisory, None),
@@ -387,6 +413,8 @@ fn check(
         overrides: control.overrides.clone(),
         unmeasured_generation,
         unpriced_reads,
+        use_unproven,
+        tier_unknown_requests,
     }
 }
 

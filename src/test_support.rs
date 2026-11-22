@@ -363,8 +363,6 @@ pub struct ReportLine {
     pub mark: String,
     /// The name, value, figure and percent, with column padding collapsed to single spaces.
     pub head: String,
-    /// The kind of claim: "Measured", "Official" or "Opinion".
-    pub claim: String,
     /// The profile, when several were read, then the setting that changes it.
     pub setting: String,
     /// The line under it naming its default and what the current value saves against it;
@@ -375,6 +373,53 @@ pub struct ReportLine {
     pub what: String,
     /// The line after that in a details report; empty otherwise.
     pub evidence: String,
+}
+
+/// A line's columns, which two or more spaces separate, with where each starts.
+fn columns(text: &str) -> Vec<(usize, &str)> {
+    let mut columns = vec![];
+    let mut start = None;
+    let mut chars = text.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        let gap = c == ' ' && chars.peek().is_some_and(|(_, next)| *next == ' ');
+        if gap {
+            if let Some(s) = start.take() {
+                columns.push((s, &text[s..i]));
+            }
+            while chars.peek().is_some_and(|(_, next)| *next == ' ') {
+                chars.next();
+            }
+        } else if start.is_none() && c != ' ' {
+            start = Some(i);
+        }
+    }
+    if let Some(s) = start {
+        columns.push((s, &text[s..]));
+    }
+    columns
+}
+
+/// Where a report line's profile tag and setting start, after its name, value, figure and
+/// percent; None when it names neither.
+fn setting_start(text: &str) -> Option<usize> {
+    let columns = columns(text);
+    let figure = |c: &str| {
+        c.ends_with('%')
+            || c.ends_with("/mo")
+            || c.starts_with('$')
+            || c.starts_with("~$")
+            || c.starts_with("at least ")
+            || matches!(c, "unknown" | "not measured" | "saving not measured")
+    };
+    let (at, last) = *columns.last().filter(|_| columns.len() > 1)?;
+    if figure(last) {
+        return None;
+    }
+    // A profile tag before the setting belongs with it.
+    match columns.iter().rev().nth(1) {
+        Some((tag, text)) if text.starts_with('[') && columns.len() > 2 => Some(*tag),
+        _ => Some(at),
+    }
 }
 
 /// Text with runs of spaces collapsed to one.
@@ -410,16 +455,10 @@ pub fn report_lines(text: &str) -> Vec<ReportLine> {
             continue;
         }
         let rest = &line[9..];
-        let (head, claim, setting) = ["Measured", "Official", "Opinion"]
-            .iter()
-            .filter_map(|claim| {
-                let at = rest.find(&format!("  {claim}"))?;
-                let after = &rest[at + 2 + claim.len()..];
-                (after.is_empty() || after.starts_with("  ")).then_some((at, *claim, after))
-            })
-            .min_by_key(|(at, _, _)| *at)
-            .map(|(at, claim, after)| (&rest[..at], claim, after))
-            .unwrap_or_else(|| panic!("no claim in {line:?}"));
+        let (head, setting) = match setting_start(rest) {
+            Some(at) => (&rest[..at], &rest[at..]),
+            None => (rest, ""),
+        };
         let under = |n: usize| {
             lines
                 .get(i + n)
@@ -436,7 +475,6 @@ pub fn report_lines(text: &str) -> Vec<ReportLine> {
             change,
             mark: word.into(),
             head: collapse(head),
-            claim: claim.into(),
             setting: collapse(setting),
             default: default.into(),
             what: what.into(),

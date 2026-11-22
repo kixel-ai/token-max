@@ -124,25 +124,33 @@ impl Unreadable {
         };
     }
 
+    /// Whether the lines hold every token of `name`, matching case, such as a directory's
+    /// name a call's path runs through.
+    pub fn names_every(&self, name: &str) -> bool {
+        self.named(name, false)
+    }
+
+    /// Whether the lines hold every token of `name`, folding case when `fold` is set. A
+    /// name with no ASCII token, such as `记忆`, can't be searched for, so any line could
+    /// hold it.
+    fn named(&self, name: &str, fold: bool) -> bool {
+        name.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+            .filter(|p| !p.is_empty())
+            .all(|p| {
+                if fold {
+                    self.names.contains(&skill_key(p))
+                } else {
+                    self.names.contains(&hash(p))
+                }
+            })
+    }
+
     /// Whether the lines mention the row's feature by the name a call records it under.
     pub fn mentions(&self, kind: ContextKind, name: &str) -> bool {
         let has = |text: &str| self.names.contains(&hash(text));
         // A name made of several tokens, such as `plugin:skill`, needs every one. Skill
         // names fold case, as a skill call resolves its name; the others do not.
-        let named = |name: &str, fold: bool| {
-            let mut parts = name
-                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
-                .filter(|p| !p.is_empty())
-                .peekable();
-            parts.peek().is_some()
-                && parts.all(|p| {
-                    if fold {
-                        self.names.contains(&skill_key(p))
-                    } else {
-                        has(p)
-                    }
-                })
-        };
+        let named = |name: &str, fold: bool| self.named(name, fold);
         match kind {
             ContextKind::Tool if name == "Artifact" => self.names.contains(&artifact_marker()),
             ContextKind::Tool => named(name, false),
@@ -158,6 +166,10 @@ impl Unreadable {
                         !tool.is_empty() && named(tool, false) && named(server, false)
                     })
             }
+            // A memory call names no feature: it reads or writes a path under Claude's
+            // `memory/` or Codex's `memories/` or `memories_v2/`, or calls a Codex
+            // `memories.` tool.
+            ContextKind::Memory => has("memory") || has("memories") || has("memories_v2"),
             _ => false,
         }
     }
@@ -352,6 +364,23 @@ mod tests {
         assert!(lines.mentions(ContextKind::Tool, "Artifact"));
         assert!(lines.mentions(ContextKind::Skill, "plugin:review"));
         assert!(!lines.mentions(ContextKind::Skill, "plugin:other"));
+    }
+
+    #[test]
+    fn memory_is_named_by_the_paths_and_tools_its_calls_use() {
+        let memory = |line: &str| seen(&[line]).mentions(ContextKind::Memory, "Auto memory");
+        assert!(memory(
+            r#"{"name":"Write","input":{"file_path":"/home/.claude/projects/p/memory/note.md"}}"#
+        ));
+        assert!(memory(r#"{"name":"memories.add_ad_hoc_note"}"#));
+        assert!(memory(r#"{"cmd":"cat ~/.codex/memories_v2/notes.md"}"#));
+        assert!(!memory(
+            r#"{"name":"Read","input":{"file_path":"/repo/MEMORY.md"}}"#
+        ));
+        // A directory with no ASCII token can't be searched for, so any line could name it.
+        let lines = seen(&[r#"{"name":"Write","input":{"file_path":"/repo/记忆/n.md"}}"#]);
+        assert!(lines.names_every("记忆"));
+        assert!(!lines.names_every("notes-记忆"));
     }
 
     #[test]

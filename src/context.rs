@@ -148,10 +148,23 @@ pub fn hidden_use(
     } else {
         vec![]
     };
+    // A memory call names the directory it reads or writes, which `autoMemoryDirectory`
+    // can move anywhere: the directories of the memory files the scan saw loaded.
+    let directories: Vec<&str> = if c.kind == ContextKind::Memory {
+        scan.components
+            .iter()
+            .filter(|m| m.category == Category::Memory)
+            .filter_map(|m| m.name.rsplit(['/', '\\']).nth(1))
+            .filter(|d| !d.is_empty())
+            .collect()
+    } else {
+        vec![]
+    };
     covering(c, snapshots, profiles)
         .filter_map(|s| {
             let named = if synced.is_empty() {
                 s.unreadable.mentions(c.kind, &c.name)
+                    || directories.iter().any(|d| s.unreadable.names_every(d))
             } else {
                 synced.iter().any(|n| s.unreadable.mentions(c.kind, n))
             };
@@ -842,6 +855,11 @@ struct Row {
     /// from its first request stays advisory when unused; another source sending it
     /// only sometimes, as native Claude Code does a deferred tool, adds evidence instead.
     from_start: IndexMap<usize, bool>,
+    /// For instructions, what each priced request paid for it divided by the lines its own
+    /// revision held, so a line is priced at the revision that sent it.
+    per_hundred: Sample,
+    /// Whether a request carried a revision of these instructions whose size is unknown.
+    size_unknown: bool,
 }
 
 /// Evidence credited through the same profile and last-used rules for every harness.
@@ -1107,6 +1125,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                             }),
                         details: vec![],
                         instruction_size: None,
+                        hundred_lines: None,
                         description: None,
                         shares: vec![],
                         pretended_requests: None,
@@ -1118,6 +1137,8 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     time: Millis::MIN,
                     assumptions: IndexSet::default(),
                     from_start: IndexMap::default(),
+                    per_hundred: Sample::default(),
+                    size_unknown: false,
                 }
             });
             *row.from_start.entry(share).or_default() |= first;
@@ -1128,14 +1149,19 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             row.cost.tier_unknown_requests += u64::from(p.is_some_and(|p| conditional_tier(r, p)));
             row.assumptions.extend(assumptions.iter().cloned());
         }
+        // The lines of instructions this request carried, by row; None when a revision's
+        // size is unknown.
+        let mut lines: IndexMap<usize, Option<usize>> = IndexMap::default();
         for piece in &parts {
             if let History::Revision(revision) = piece.history
                 && interned.kinds[piece.key].kind == ContextKind::Instructions
             {
-                rows.get_mut(&(owner, piece.key))
-                    .expect("piece has a row")
-                    .cost
-                    .instruction_size = component(revision).instruction_size;
+                let row = rows.get_mut(&(owner, piece.key)).expect("piece has a row");
+                let size = component(revision).instruction_size;
+                row.cost.instruction_size = size;
+                row.size_unknown |= size.is_none_or(|s| s.lines == 0);
+                let here = lines.entry(piece.key).or_insert(Some(0));
+                *here = here.zip(size).map(|(n, s)| n + s.lines);
             }
         }
         // Each request's records describe this owner's lines, so the latest request decides:
@@ -1295,6 +1321,13 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 row.cost.priced += 1;
                 row.cost.cost_usd += cost;
                 row.sample.add(cost);
+                if let Some(&Some(n)) = lines.get(&key)
+                    && n > 0
+                {
+                    // 100 lines of a shorter revision are all of it.
+                    let share = (100.0 / n as f64).min(1.0);
+                    row.per_hundred.add(Usd::from_f64(cost.to_f64() * share));
+                }
                 let counts = row.shares.entry(share).or_default();
                 counts.sample.add(cost);
                 if shaped {
@@ -1597,6 +1630,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 }
                 None => {}
             }
+            c.hundred_lines = (c.kind == ContextKind::Instructions && !row.size_unknown)
+                .then(|| row.per_hundred.estimate(c.requests))
+                .flatten();
             let estimate = row.sample.estimate(c.requests);
             c.estimated_usd = estimate.map(|e| e.usd);
             c.margin = estimate.and_then(|e| e.margin);
@@ -1623,7 +1659,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 .estimated_usd
                 .zip(c.calls.filter(|&calls| calls > 0))
                 .map(|(usd, calls)| usd / calls as f64);
-            // Auto memory is advised off by policy, never by its cost per use.
+            // Auto memory's own check judges it by its reads and writes.
             if let (Some(_), true, Some(usd), Some(calls)) =
                 (&c.control, c.current, c.estimated_usd, c.calls)
                 && c.tier_unknown_requests == 0
@@ -2649,6 +2685,57 @@ mod tests {
                 lines: 200
             })
         );
+        let whole = c.estimated_usd.unwrap();
+        assert!(whole > 0.0);
+        assert!((c.hundred_lines.unwrap().usd - whole / 2.0).abs() < 1e-12);
+        // Shortened to 50 lines for a second request: the latest size is shown, and 100
+        // lines are priced at each request's own revision, at most all of it, not over the
+        // latest length.
+        let mut shorter = component(
+            "shorter",
+            Category::Instructions,
+            "/repo/CLAUDE.md",
+            100,
+            &[],
+        );
+        shorter.instruction_size = Some(crate::model::InstructionSize {
+            bytes: 201,
+            lines: 50,
+        });
+        let scan = ExposureScan {
+            components: vec![scan.components[0].clone(), shorter],
+            requests: vec![
+                exposure("r1", &["claude"], 1, 300),
+                exposure("r2", &["shorter"], 1, 300),
+            ],
+            ..ExposureScan::default()
+        };
+        // The second request reads its prefix from the cache, so it pays another rate.
+        let requests = [request("r1", 1, 0, 300, 0), request("r2", 2, 300, 0, 0)];
+        let rows = costs(&scan, &requests, 1.0);
+        let c = row(&rows, "/repo/CLAUDE.md");
+        assert_eq!(c.instruction_size.map(|s| s.lines), Some(50));
+        assert_eq!(c.priced, 2);
+        // The first request costs what it did alone; the second the rest.
+        let total = c.estimated_usd.unwrap();
+        let second = total - whole;
+        let hundred = c.hundred_lines.unwrap().usd;
+        assert!(
+            (hundred - (whole / 2.0 + second)).abs() < 1e-12,
+            "{hundred} {whole} {second}"
+        );
+        // Neither the mean length nor the latest one prices it so, and it never exceeds
+        // the whole file.
+        assert!(
+            (hundred - total * 100.0 / 125.0).abs() > 1e-9,
+            "{hundred} {total}"
+        );
+        assert!(hundred < total, "{hundred} {total}");
+        // A revision whose size was not recorded leaves a line unpriced.
+        let mut scan = scan;
+        scan.components[1].instruction_size = None;
+        let c = row(&costs(&scan, &requests, 1.0), "/repo/CLAUDE.md").clone();
+        assert_eq!(c.hundred_lines, None);
     }
 
     #[test]
@@ -3294,6 +3381,7 @@ mod tests {
             skill: None,
             details,
             instruction_size: None,
+            hundred_lines: None,
             description: None,
             shares: vec![],
             pretended_requests: (requests < 3).then_some(3),

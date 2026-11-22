@@ -47,21 +47,20 @@ edit, which repeats the value change; the confirm shows every accepted edit
 once, as a diff. A change whose saving was not measured, such as raising an
 effort, comes after the measured ones and says so.
 
-A change saving $5/mo or more is its own question. A smaller one joins a group
-of its kind and reason, such as never-used skills or MCP servers over $1 per
-use. The reasons are never used, no use recorded where the window cannot rule
+A tool, skill or MCP server's change joins a group of its kind and reason,
+such as never-used skills or MCP servers over $1 per use, whatever it saves. The reasons are never used, no use recorded where the window cannot rule
 one out, over `--max-cost-per-use` per use, and a redundant copy of a Codex
 catalog skill whose most-used copy stays. Each reason is its own group, so a yes to
 never-used features never also removes one in use. A group is one question ranked by its combined saving,
-which names every member and takes `y` for all, `n` for none, `q` to quit or `o` to go
-through them one at a time; a group of one is asked as that change. Features
+which names every member and takes `y` for all, `n` for none, `q` to quit or `s` to split
+it and answer each member, as `git add -p` splits a hunk; a group of one is asked as that change. Features
 whose savings were not measured, such as Codex catalog skills, are grouped the
 same way after the measured questions. A group saving under $1/mo in total,
 including a lone small change such as a check, is not asked: one dim line says
 how many changes were left out, and the list after the walk shows them among
 those not accepted.
 
-Each question takes `y`, `n` or `q`; anything else asks again. An answer only
+Each question takes `y`, `n` or `q`, and a group also `s`; anything else asks again. An answer only
 selects: after each yes, a running total sums the accepted changes' own
 savings, in dollars and as a percent of this host's spend, and says that
 overlapping changes may save less, since each saving holds every other setting
@@ -662,7 +661,7 @@ private, interactive page you can share" for the Artifact tool that
 `enableArtifact` turns off. `--details` prints it under the line as `What:`,
 and the walk opens each change with it. A grouped question opens with what its
 kind of feature is, such as what skills are, and each member's own sentence
-shows when you go through the group one at a time. The default report keeps
+shows when you split the group. The default report keeps
 each line to one line.
 
 Checked settings, built-in Claude Code tools, subagent types and the other

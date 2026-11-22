@@ -64,8 +64,8 @@ Usage: token-max doctor [options]
   -h, --help              Show this help
 
 Prints which settings to change, with the evidence for each. When stdin and stdout are
-both a terminal, it then offers each change it can make, one at a time (y, n, or q to
-stop), shows the accepted edits as a diff of each file, and writes the profile's own
+both a terminal, it then offers the changes it can make, grouping tools, skills and MCP
+servers by why they are offered (y, n, s to split a group, or q to stop), shows the accepted edits as a diff of each file, and writes the profile's own
 settings.json or config.toml only after a final yes. A change another owner would
 override, such as a shell variable, a project or managed settings file or T3, is listed
 to make by hand. Without a terminal it prints the report, each change naming its edit,

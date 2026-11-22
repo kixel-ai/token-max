@@ -4151,23 +4151,27 @@ fn instruction_row(c: &ContextCost, out: &Out<'_>) -> Row {
 }
 
 /// What each 100 lines of an instruction file cost every 30 days, which is what shortening
-/// it by that much saves; for a shorter file, what all its lines cost, so the figure never
-/// exceeds the file. Each request's cost is spread over its own revision's lines, so a file
-/// edited in the window is priced by every revision it sent.
+/// it by that much saves, priced at each request's own revision; for a file now under 100
+/// lines, what the whole file cost, which removing it saves. Neither exceeds the file.
 fn instruction_saving(c: &ContextCost, out: &Out<'_>) -> Option<String> {
     let lines = c.instruction_size?.lines;
-    let block = lines.min(100);
-    let month = monthly(1.0, out.spend.since, Some(out.spend.until));
-    let per = c.instruction_line?.scale(block as f64 * month);
-    let per = approx(per.usd, per.margin, "/mo");
+    // Still None when a revision's size is unknown, as for a longer file.
+    let hundred = c.hundred_lines?;
+    let (figure, short) = if lines < 100 {
+        (c.estimate()?, true)
+    } else {
+        (hundred, false)
+    };
+    let figure = figure.scale(monthly(1.0, out.spend.since, Some(out.spend.until)));
+    let figure = approx(figure.usd, figure.margin, "/mo");
     let assuming = "assuming the rest of the work is unchanged.";
-    Some(if block < 100 {
+    Some(if short {
         format!(
-            "Its {} cost about {per}, which removing them saves, {assuming}",
+            "Its {} cost about {figure}, which removing them saves, {assuming}",
             plural(lines as u64, "line")
         )
     } else {
-        format!("Each 100 lines costs about {per}, which shortening it saves, {assuming}")
+        format!("Each 100 lines costs about {figure}, which shortening it saves, {assuming}")
     })
 }
 
@@ -6428,7 +6432,7 @@ mod tests {
             skill: None,
             details: vec![],
             instruction_size: None,
-            instruction_line: None,
+            hundred_lines: None,
             description: None,
             shares: vec![],
             pretended_requests: None,
@@ -8408,8 +8412,8 @@ mod tests {
             let mut c = context_piece(ContextKind::Instructions, name, None, Some(4.0), None);
             c.harness = harness;
             c.instruction_size = Some(crate::model::InstructionSize { bytes, lines });
-            c.instruction_line = Some(crate::model::Estimate {
-                usd: 4.0 / lines as f64,
+            c.hundred_lines = Some(crate::model::Estimate {
+                usd: 4.0 * (100.0 / lines as f64).min(1.0),
                 margin: None,
             });
             c
@@ -8423,19 +8427,25 @@ mod tests {
             "{}",
             row.evidence
         );
-        // A file under 100 lines quotes what all its lines cost, never more than the file.
-        let row = instruction_row(&claude(2), &out);
+        // A file now under 100 lines quotes what the whole file cost, whatever 100 lines
+        // of its longer revisions cost.
+        let mut short = claude(50);
+        short.hundred_lines = Some(crate::model::Estimate {
+            usd: 3.0,
+            margin: None,
+        });
+        let row = instruction_row(&short, &out);
         assert!(
             row.evidence
-                .starts_with("Its 2 lines cost about $4/mo, which removing them saves"),
+                .starts_with("Its 50 lines cost about $4/mo, which removing them saves"),
             "{}",
             row.evidence
         );
-        // The price of a line comes from the revisions its requests carried, not from the
-        // latest revision's length.
+        // The price of 100 lines comes from the revisions its requests carried, not from
+        // the latest revision's length.
         let mut shortened = claude(100);
-        shortened.instruction_line = Some(crate::model::Estimate {
-            usd: 0.01,
+        shortened.hundred_lines = Some(crate::model::Estimate {
+            usd: 1.0,
             margin: None,
         });
         let row = instruction_row(&shortened, &out);
@@ -8516,7 +8526,7 @@ mod tests {
         // With nothing priced, the line says only that no setting turns it off.
         let mut unpriced = claude(200);
         unpriced.estimated_usd = None;
-        unpriced.instruction_line = None;
+        unpriced.hundred_lines = None;
         assert_eq!(
             instruction_row(&unpriced, &out).evidence,
             "No setting turns it off."
@@ -10083,7 +10093,7 @@ mod tests {
             skill: None,
             details: vec![],
             instruction_size: None,
-            instruction_line: None,
+            hundred_lines: None,
             description: None,
             shares: vec![],
             pretended_requests: None,
@@ -10195,7 +10205,7 @@ mod tests {
             skill: None,
             details: vec![],
             instruction_size: None,
-            instruction_line: None,
+            hundred_lines: None,
             description: None,
             shares: vec![],
             pretended_requests: None,

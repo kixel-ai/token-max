@@ -2817,10 +2817,11 @@ pub struct ContextCost {
     pub details: Vec<ContextCost>,
     /// Size of the most recent recorded instruction revision.
     pub instruction_size: Option<InstructionSize>,
-    /// What one line of instructions cost over the window: each request's cost of them
-    /// divided by the lines its own revision held, extrapolated over unpriced requests as
-    /// `estimated_usd` is. None when a revision's size was not recorded or none was priced.
-    pub instruction_line: Option<Estimate>,
+    /// What 100 lines of instructions cost over the window: each request's cost of them
+    /// times the share 100 lines are of its own revision, at most all of it, extrapolated
+    /// over unpriced requests as `estimated_usd` is. None when a revision's size was not
+    /// recorded or none was priced.
+    pub hundred_lines: Option<Estimate>,
     /// The first sentence of the description it ships, from its latest recorded revision.
     pub description: Option<String>,
     /// The line's requests and their cost by the profiles that recorded them.

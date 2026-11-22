@@ -620,10 +620,11 @@ inventing per-app costs or a settings patch.
 Each instruction file Claude Code or Codex loads gets a line with what it cost
 over the window, its latest recorded length, and what each 100 lines of it cost
 per 30 days, which is what shortening it by that much saves, assuming the rest
-of the work is unchanged. A file under 100 lines gives what all its lines cost
-instead, so the figure never exceeds the file. Each request's cost of the file is spread over its own
-revision's lines, so a file edited during the window prices a line at every
-revision it sent. What a line of instructions is worth is not recorded, so the
+of the work is unchanged. Each request's cost of the file is shared over its
+own revision's lines, so a file edited during the window prices 100 lines at
+every revision it sent, and a revision under 100 lines counts whole. A file now
+under 100 lines gives what the whole file cost instead, which removing it
+saves. Neither figure exceeds what the file cost. What a line of instructions is worth is not recorded, so the
 line gives no verdict and `doctor` offers no change.
 
 A CLAUDE.md of 200 recorded lines or more, past Claude Code's documented

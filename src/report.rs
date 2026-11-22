@@ -4150,9 +4150,10 @@ fn instruction_row(c: &ContextCost, out: &Out<'_>) -> Row {
     row
 }
 
-/// What each 100 lines of an instruction file cost every 30 days, which is what shortening
-/// it by that much saves, priced at each request's own revision; for a file now under 100
-/// lines, what the whole file cost, which removing it saves. Neither exceeds the file.
+/// What an average 100 lines of an instruction file cost every 30 days, each line taking an
+/// even share of its revision, so about what shortening it by that much saves; for a file
+/// now under 100 lines, what the whole file cost, which removing it saves. Neither exceeds
+/// the file.
 fn instruction_saving(c: &ContextCost, out: &Out<'_>) -> Option<String> {
     let lines = c.instruction_size?.lines;
     // Still None when a revision's size is unknown, as for a longer file.
@@ -4171,7 +4172,9 @@ fn instruction_saving(c: &ContextCost, out: &Out<'_>) -> Option<String> {
             plural(lines as u64, "line")
         )
     } else {
-        format!("Each 100 lines costs about {figure}, which shortening it saves, {assuming}")
+        format!(
+            "Each 100 lines costs about {figure} on average, about what shortening it by that much saves, {assuming}"
+        )
     })
 }
 

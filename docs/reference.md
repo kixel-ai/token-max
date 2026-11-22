@@ -294,7 +294,7 @@ What the providers document, checked 2026-11-14:
 Where a provider documents a rule that API prices alone don't show, the line's
 evidence under `--details` states it before the setting that changes it, and
 the list ends with the source. Fable weekly use is the exception: its rule is
-a [warning](#warnings), shown when the window holds a Fable request:
+a [warning](#reading-the-report), shown when the window holds a Fable request:
 
 | Line | On a plan |
 | --- | --- |
@@ -618,14 +618,16 @@ the exposed app namespaces; the report names the supported controls without
 inventing per-app costs or a settings patch.
 
 Each instruction file Claude Code or Codex loads gets a line with what it cost
-over the window, its latest recorded length, and what each 100 lines of it cost
-per 30 days, which is what shortening it by that much saves, assuming the rest
-of the work is unchanged. Each request's cost of the file is shared over its
+over the window, its latest recorded length, and what an average 100 lines of
+it cost per 30 days. Each request's cost of the file is shared evenly over its
 own revision's lines, so a file edited during the window prices 100 lines at
-every revision it sent, and a revision under 100 lines counts whole. A file now
-under 100 lines gives what the whole file cost instead, which removing it
-saves. Neither figure exceeds what the file cost. What a line of instructions is worth is not recorded, so the
-line gives no verdict and `doctor` offers no change.
+every revision it sent, and a revision under 100 lines counts whole. Lines
+differ in length, so this is about what shortening the file by 100 lines saves,
+assuming the rest of the work is unchanged, not what removing particular lines
+saves. A file now under 100 lines gives what the whole file cost instead, which
+removing it saves. Neither figure exceeds what the file cost. What a line of
+instructions is worth is not recorded, so the line gives no verdict and
+`doctor` offers no change.
 
 A CLAUDE.md of 200 recorded lines or more, past Claude Code's documented
 guidance, gets a warning. So does a Codex AGENTS.md at or above the selected

@@ -2496,8 +2496,29 @@ fn claude_auto_memory_unused_is_turned_off_only_when_its_transcripts_prove_it() 
         ),
         (crate::model::Action::Change, Some(false), false)
     );
-    // A transcript still being written could hold a read or write, so it is only worth
-    // considering off, which leaves the exit code alone.
+    // An unreadable line that names a memory path could be a read or write the reader
+    // lost, so memory is only worth considering off, which leaves the exit code alone.
+    let mut named = data.clone();
+    for s in &mut named.snapshots {
+        s.skipped_lines = 1;
+        s.unreadable.observe(
+            format!(
+                r#"{{"name":"Write","input":{{"file_path":"{}/projects/p/memory/n.md"}}}}"#,
+                root.display()
+            )
+            .as_bytes(),
+        );
+    }
+    let check = memory_check(&self::report(&named, 1.0), Harness::Claude).clone();
+    assert_eq!(
+        (
+            check.base.action,
+            check.base.recommended,
+            check.use_unproven
+        ),
+        (crate::model::Action::Advisory, Some(false), true)
+    );
+    // So is one still being written.
     for s in &mut data.snapshots {
         s.deferred_bytes = 9;
     }
@@ -2540,9 +2561,9 @@ fn claude_auto_memory_unused_is_turned_off_only_when_its_transcripts_prove_it() 
         (
             check.base.action,
             check.base.recommended,
-            check.tier_unknown_requests
+            check.tier_unknown
         ),
-        (crate::model::Action::Advisory, None, 1)
+        (crate::model::Action::Advisory, None, true)
     );
 }
 
@@ -2933,6 +2954,43 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
     let memory = row(&r, crate::context::CODEX_MEMORY);
     assert_eq!(memory.calls, Some(3));
     assert_eq!(memory.requests, 1);
+    // A write is priced at its own request's rate, so one with no recorded service tier
+    // leaves the cost per use unsettled even where every carrying request had one.
+    let mut context = r.context.clone();
+    for c in &mut context {
+        c.tier_unknown_requests = 0;
+    }
+    let tiered = |scan: &Scan| {
+        crate::memory::memory_checks(&crate::memory::MemoryInput {
+            scan,
+            context: &context,
+            catalog: &prices(),
+            since: None,
+            now: NOW,
+            max_cost_per_use_usd: 1.0,
+        })
+        .iter()
+        .find(|c| c.harness == Harness::Codex)
+        .unwrap()
+        .tier_unknown
+    };
+    let write = e
+        .memory
+        .iter()
+        .find(|m| m.access == MemoryAccess::Write)
+        .and_then(|m| m.request.clone())
+        .unwrap();
+    let with_tier = |tier: Option<&str>| {
+        let mut scan = r.scan.clone();
+        for request in scan.requests.iter_mut().filter(|q| *q.id == *write) {
+            for part in &mut request.parts {
+                part.tier = tier.map(Into::into);
+            }
+        }
+        scan
+    };
+    assert!(!tiered(&with_tier(Some("default"))));
+    assert!(tiered(&with_tier(None)));
     // Off by default: the session that carried a summary is noted, not taken as on.
     let check = memory_check(&r, Harness::Codex);
     assert_eq!(check.base.current, Some(false));

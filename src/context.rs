@@ -842,9 +842,11 @@ struct Row {
     /// from its first request stays advisory when unused; another source sending it
     /// only sometimes, as native Claude Code does a deferred tool, adds evidence instead.
     from_start: IndexMap<usize, bool>,
-    /// Instruction lines summed over the requests that carried it, revision by revision;
-    /// None once a carried revision's size is unknown.
-    lines: Option<u64>,
+    /// For instructions, what each priced request paid for it divided by the lines its own
+    /// revision held, so a line is priced at the revision that sent it.
+    per_line: Sample,
+    /// Whether a request carried a revision of these instructions whose size is unknown.
+    size_unknown: bool,
 }
 
 /// Evidence credited through the same profile and last-used rules for every harness.
@@ -1110,7 +1112,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                             }),
                         details: vec![],
                         instruction_size: None,
-                        instruction_lines: None,
+                        instruction_line: None,
                         description: None,
                         shares: vec![],
                         pretended_requests: None,
@@ -1122,7 +1124,8 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     time: Millis::MIN,
                     assumptions: IndexSet::default(),
                     from_start: IndexMap::default(),
-                    lines: Some(0),
+                    per_line: Sample::default(),
+                    size_unknown: false,
                 }
             });
             *row.from_start.entry(share).or_default() |= first;
@@ -1133,6 +1136,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             row.cost.tier_unknown_requests += u64::from(p.is_some_and(|p| conditional_tier(r, p)));
             row.assumptions.extend(assumptions.iter().cloned());
         }
+        // The lines of instructions this request carried, by row; None when a revision's
+        // size is unknown.
+        let mut lines: IndexMap<usize, Option<usize>> = IndexMap::default();
         for piece in &parts {
             if let History::Revision(revision) = piece.history
                 && interned.kinds[piece.key].kind == ContextKind::Instructions
@@ -1140,7 +1146,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 let row = rows.get_mut(&(owner, piece.key)).expect("piece has a row");
                 let size = component(revision).instruction_size;
                 row.cost.instruction_size = size;
-                row.lines = row.lines.zip(size).map(|(n, s)| n + s.lines as u64);
+                row.size_unknown |= size.is_none_or(|s| s.lines == 0);
+                let here = lines.entry(piece.key).or_insert(Some(0));
+                *here = here.zip(size).map(|(n, s)| n + s.lines);
             }
         }
         // Each request's records describe this owner's lines, so the latest request decides:
@@ -1300,6 +1308,11 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 row.cost.priced += 1;
                 row.cost.cost_usd += cost;
                 row.sample.add(cost);
+                if let Some(&Some(n)) = lines.get(&key)
+                    && n > 0
+                {
+                    row.per_line.add(Usd::from_f64(cost.to_f64() / n as f64));
+                }
                 let counts = row.shares.entry(share).or_default();
                 counts.sample.add(cost);
                 if shaped {
@@ -1602,10 +1615,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 }
                 None => {}
             }
-            c.instruction_lines = row
-                .lines
-                .filter(|&n| c.kind == ContextKind::Instructions && n > 0 && c.requests > 0)
-                .map(|n| n as f64 / c.requests as f64);
+            c.instruction_line = (c.kind == ContextKind::Instructions && !row.size_unknown)
+                .then(|| row.per_line.estimate(c.requests))
+                .flatten();
             let estimate = row.sample.estimate(c.requests);
             c.estimated_usd = estimate.map(|e| e.usd);
             c.margin = estimate.and_then(|e| e.margin);
@@ -2658,9 +2670,11 @@ mod tests {
                 lines: 200
             })
         );
-        assert_eq!(c.instruction_lines, Some(200.0));
-        // Shortened to 100 lines for one of two requests: the latest size is shown, and
-        // each line is priced over the 150 lines the average request carried.
+        let whole = c.estimated_usd.unwrap();
+        assert!(whole > 0.0);
+        assert!((c.instruction_line.unwrap().usd - whole / 200.0).abs() < 1e-12);
+        // Shortened to 100 lines for a second request: the latest size is shown, and a
+        // line is priced at each request's own revision, not over the latest length.
         let mut shorter = component(
             "shorter",
             Category::Instructions,
@@ -2675,21 +2689,33 @@ mod tests {
         let scan = ExposureScan {
             components: vec![scan.components[0].clone(), shorter],
             requests: vec![
-                exposure("r1", &["claude"], 0, 300),
-                exposure("r2", &["shorter"], 0, 300),
+                exposure("r1", &["claude"], 1, 300),
+                exposure("r2", &["shorter"], 1, 300),
             ],
             ..ExposureScan::default()
         };
-        let requests = [request("r1", 1, 0, 300, 0), request("r2", 2, 0, 300, 0)];
+        // The second request reads its prefix from the cache, so it pays another rate.
+        let requests = [request("r1", 1, 0, 300, 0), request("r2", 2, 300, 0, 0)];
         let rows = costs(&scan, &requests, 1.0);
         let c = row(&rows, "/repo/CLAUDE.md");
         assert_eq!(c.instruction_size.map(|s| s.lines), Some(100));
-        assert_eq!(c.instruction_lines, Some(150.0));
-        // A revision whose size was not recorded leaves the lines unknown.
+        assert_eq!(c.priced, 2);
+        // The first request costs what it did alone; the second the rest.
+        let total = c.estimated_usd.unwrap();
+        let second = total - whole;
+        let line = c.instruction_line.unwrap().usd;
+        assert!(
+            (line - (whole / 200.0 + second / 100.0)).abs() < 1e-12,
+            "{line} {whole} {second}"
+        );
+        // Neither the mean length nor the latest one prices it so.
+        assert!((line - total / 150.0).abs() > 1e-9, "{line} {total}");
+        assert!((line - total / 100.0).abs() > 1e-9, "{line} {total}");
+        // A revision whose size was not recorded leaves a line unpriced.
         let mut scan = scan;
         scan.components[1].instruction_size = None;
         let c = row(&costs(&scan, &requests, 1.0), "/repo/CLAUDE.md").clone();
-        assert_eq!(c.instruction_lines, None);
+        assert_eq!(c.instruction_line, None);
     }
 
     #[test]
@@ -3335,7 +3361,7 @@ mod tests {
             skill: None,
             details,
             instruction_size: None,
-            instruction_lines: None,
+            instruction_line: None,
             description: None,
             shares: vec![],
             pretended_requests: (requests < 3).then_some(3),

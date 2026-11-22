@@ -620,7 +620,7 @@ fn memory_reason(m: &MemoryCheck, r: &Common<'_>) -> String {
         Action::Advisory if r.savings_usd.is_none() => {
             "What it costs could not be measured.".into()
         }
-        Action::Advisory if m.tier_unknown_requests > 0 => {
+        Action::Advisory if m.tier_unknown => {
             "Its price depends on a service tier some requests did not record, so its cost per use is not settled.".into()
         }
         // A total that leaves out what could not be priced shows neither nothing nor a
@@ -4123,18 +4123,18 @@ const CLAUDE_MEMORY_DOCS: &str =
 const CODEX_AGENTS_DOCS: &str = "https://learn.chatgpt.com/docs/agent-configuration/agents-md";
 
 /// An instruction file's row: what it cost over the window, its latest size, and what each
-/// 100 lines of it cost every 30 days, which is what shortening it saves. The cost is spread
-/// over the lines the average request carried, so a file edited in the window is priced by
-/// every revision it sent. No verdict: what a line of instructions is worth is not recorded.
+/// 100 lines of it cost every 30 days, which is what shortening it saves. Each request's
+/// cost is spread over its own revision's lines, so a file edited in the window is priced
+/// by every revision it sent. No verdict: what a line of instructions is worth is not
+/// recorded.
 fn instruction_row(c: &ContextCost, out: &Out<'_>) -> Row {
     let mut row = Row::new(Mark::Info, out.home(&c.name), instructions_what(c));
     if let Some(size) = c.instruction_size.filter(|size| size.lines > 0) {
         row.value = plural(size.lines as u64, "line");
     }
-    let per = c.instruction_lines.filter(|&n| n > 0.0).and_then(|lines| {
-        let usd = piece_saving(c, &out.spend)? * 100.0 / lines;
-        let margin = piece_margin(c, &out.spend).map(|m| m.scale(100.0 / lines));
-        Some(approx(usd, margin, "/mo"))
+    let per = c.instruction_line.map(|line| {
+        let per = line.scale(100.0 * monthly(1.0, out.spend.since, Some(out.spend.until)));
+        approx(per.usd, per.margin, "/mo")
     });
     row.evidence = match per {
         Some(per) => format!(
@@ -6403,7 +6403,7 @@ mod tests {
             skill: None,
             details: vec![],
             instruction_size: None,
-            instruction_lines: None,
+            instruction_line: None,
             description: None,
             shares: vec![],
             pretended_requests: None,
@@ -6610,7 +6610,7 @@ mod tests {
                     unmeasured_generation: false,
                     unpriced_reads: 0,
                     use_unproven: false,
-                    tier_unknown_requests: 0,
+                    tier_unknown: false,
                 })
             },
         ];
@@ -7036,7 +7036,7 @@ mod tests {
                 unmeasured_generation,
                 unpriced_reads: 0,
                 use_unproven: false,
-                tier_unknown_requests: 0,
+                tier_unknown: false,
             })
         };
         assert_eq!(
@@ -8371,7 +8371,10 @@ mod tests {
             let mut c = context_piece(ContextKind::Instructions, name, None, Some(4.0), None);
             c.harness = harness;
             c.instruction_size = Some(crate::model::InstructionSize { bytes, lines });
-            c.instruction_lines = Some(lines as f64);
+            c.instruction_line = Some(crate::model::Estimate {
+                usd: 4.0 / lines as f64,
+                margin: None,
+            });
             c
         };
         // Every file is a measured line with no verdict, priced per 100 lines.
@@ -8383,10 +8386,13 @@ mod tests {
             "{}",
             row.evidence
         );
-        // A file shortened in the window is priced over the lines its requests carried,
-        // not only its latest revision's.
+        // The price of a line comes from the revisions its requests carried, not from the
+        // latest revision's length.
         let mut shortened = claude(100);
-        shortened.instruction_lines = Some(400.0);
+        shortened.instruction_line = Some(crate::model::Estimate {
+            usd: 0.01,
+            margin: None,
+        });
         let row = instruction_row(&shortened, &out);
         assert_eq!(row.value, "100 lines");
         assert!(
@@ -8465,6 +8471,7 @@ mod tests {
         // With nothing priced, the line says only that no setting turns it off.
         let mut unpriced = claude(200);
         unpriced.estimated_usd = None;
+        unpriced.instruction_line = None;
         assert_eq!(
             instruction_row(&unpriced, &out).evidence,
             "No setting turns it off."
@@ -10021,7 +10028,7 @@ mod tests {
             skill: None,
             details: vec![],
             instruction_size: None,
-            instruction_lines: None,
+            instruction_line: None,
             description: None,
             shares: vec![],
             pretended_requests: None,
@@ -10133,7 +10140,7 @@ mod tests {
             skill: None,
             details: vec![],
             instruction_size: None,
-            instruction_lines: None,
+            instruction_line: None,
             description: None,
             shares: vec![],
             pretended_requests: None,

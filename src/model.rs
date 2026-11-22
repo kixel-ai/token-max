@@ -1898,9 +1898,9 @@ pub struct MemoryCheck {
     /// Whether a transcript line that could not be read, or was still being written, could
     /// hold a read or write, so a window with none recorded does not prove it unused.
     pub use_unproven: bool,
-    /// Requests that carried memory without a recorded service tier, whose price depends on
-    /// the tier that served them, so the cost per use is not settled.
-    pub tier_unknown_requests: u64,
+    /// Whether a request that carried or wrote memory recorded no service tier, so its price
+    /// depends on the tier that served it and the cost per use is not settled.
+    pub tier_unknown: bool,
 }
 
 impl MemoryCheck {
@@ -2817,10 +2817,10 @@ pub struct ContextCost {
     pub details: Vec<ContextCost>,
     /// Size of the most recent recorded instruction revision.
     pub instruction_size: Option<InstructionSize>,
-    /// Lines of instructions the average request carrying them sent, over every revision
-    /// in the window, which is what their cost is spread over to price one line. None when
-    /// a revision's size was not recorded.
-    pub instruction_lines: Option<f64>,
+    /// What one line of instructions cost over the window: each request's cost of them
+    /// divided by the lines its own revision held, extrapolated over unpriced requests as
+    /// `estimated_usd` is. None when a revision's size was not recorded or none was priced.
+    pub instruction_line: Option<Estimate>,
     /// The first sentence of the description it ships, from its latest recorded revision.
     pub description: Option<String>,
     /// The line's requests and their cost by the profiles that recorded them.

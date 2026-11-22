@@ -158,6 +158,10 @@ impl Unreadable {
                         !tool.is_empty() && named(tool, false) && named(server, false)
                     })
             }
+            // A memory call names no feature: it reads or writes a path under Claude's
+            // `memory/` or Codex's `memories/` or `memories_v2/`, or calls a Codex
+            // `memories.` tool.
+            ContextKind::Memory => has("memory") || has("memories") || has("memories_v2"),
             _ => false,
         }
     }
@@ -352,6 +356,19 @@ mod tests {
         assert!(lines.mentions(ContextKind::Tool, "Artifact"));
         assert!(lines.mentions(ContextKind::Skill, "plugin:review"));
         assert!(!lines.mentions(ContextKind::Skill, "plugin:other"));
+    }
+
+    #[test]
+    fn memory_is_named_by_the_paths_and_tools_its_calls_use() {
+        let memory = |line: &str| seen(&[line]).mentions(ContextKind::Memory, "Auto memory");
+        assert!(memory(
+            r#"{"name":"Write","input":{"file_path":"/home/.claude/projects/p/memory/note.md"}}"#
+        ));
+        assert!(memory(r#"{"name":"memories.add_ad_hoc_note"}"#));
+        assert!(memory(r#"{"cmd":"cat ~/.codex/memories_v2/notes.md"}"#));
+        assert!(!memory(
+            r#"{"name":"Read","input":{"file_path":"/repo/MEMORY.md"}}"#
+        ));
     }
 
     #[test]

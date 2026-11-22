@@ -480,7 +480,7 @@ such as Codex's extraction and consolidation, proves neither that memory was
 free nor that it stayed under the limit per use, so those lines and one that
 may be on because a Codex setting such as a `--profile` selection is not
 recorded give no verdict, as do lines whose price depends on a service tier a
-request did not record. A transcript line that could not be read could hold a
+request that carried or wrote memory did not record. A transcript line that could not be read could hold a
 read or write, so memory with none recorded is then only worth considering
 off. A profile with memory off shows it as kept.
 Claude plugin skills, which `skillOverrides` does not reach, and the system
@@ -619,9 +619,9 @@ inventing per-app costs or a settings patch.
 Each instruction file Claude Code or Codex loads gets a line with what it cost
 over the window, its latest recorded length, and what each 100 lines of it cost
 per 30 days, which is what shortening it by that much saves, assuming the rest
-of the work is unchanged. A file edited during the window is priced over the
-lines its requests carried on average, so each revision counts as often as it
-was sent. What a line of instructions is worth is not recorded, so the
+of the work is unchanged. Each request's cost of the file is spread over its own
+revision's lines, so a file edited during the window prices a line at every
+revision it sent. What a line of instructions is worth is not recorded, so the
 line gives no verdict and `doctor` offers no change.
 
 A CLAUDE.md of 200 recorded lines or more, past Claude Code's documented

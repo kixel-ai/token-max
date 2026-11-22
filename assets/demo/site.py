@@ -1,10 +1,11 @@
 """Write max.kixel.ai's terminal: the maintainer's `token-max doctor --defaults`, as HTML.
 
 Usage, from the repository root after `cargo build --release`, on the maintainer's host:
-    python3 assets/demo/site.py site/public ~/.claude=p ~/.claude-api-credits=a ...
+    python3 assets/demo/site.py site/public ~/.claude=p ~/.claude-api-credits=a --ssh desktop ...
 
-Runs the release binary in a pseudo-terminal against this host's own transcripts, answering
-each "How is PROFILE paid for?" question with the PROFILE=ANSWER given for it, and replaces
+Runs the release binary in a pseudo-terminal against this host's own transcripts and those of
+any --ssh destination, passing every argument that is not a PROFILE=ANSWER on to doctor and
+answering each "How is PROFILE paid for?" question with the PROFILE=ANSWER given for it, and replaces
 what sits between index.html's <!-- doctor --> and <!-- /doctor --> markers. Each question
 becomes a .step the page reveals in turn, then each section of the report; the run's timing
 goes between style.css's steps markers, since the page's CSP allows no inline styles. The
@@ -19,7 +20,7 @@ import re
 import sys
 from pathlib import Path
 
-COMMAND = "token-max doctor --defaults"
+COMMAND = ["token-max", "doctor", "--defaults"]
 COLUMNS = 100
 # Every question ends in its dim choices, then ": ".
 PROMPT = re.compile(rb"\x1b\[0m: $")
@@ -28,11 +29,14 @@ CLASSES = {"1": "b", "2": "d", "31": "r", "32": "g", "33": "y"}
 # A report section opens with its bold uppercase heading.
 HEADING = re.compile(r"^  [A-Z][A-Z ]+[A-Z]  ")
 CUT = "EVERYTHING ELSE"
-# The report's count of its changes, which the finished run scrolls back to.
+# A report, and each host's report under --ssh, opens with its title.
+TITLE = re.compile(r"^token-max[: ]")
+# The finished run scrolls back to the hosts' total under --ssh, else to the count of changes.
+TOTAL = re.compile(r"^token-max: total over ")
 SUMMARY = re.compile(r"^  \d[\d,]* changes? ")
 
 
-def run(answers: dict[str, str]) -> str:
+def run(command: list[str], answers: dict[str, str]) -> str:
     """Answer each question once its prompt shows, then read to exit."""
     root = Path.cwd()
     env = {
@@ -51,7 +55,7 @@ def run(answers: dict[str, str]) -> str:
         # Progress goes to stderr on a terminal; the page shows only the report.
         devnull = os.open(os.devnull, os.O_WRONLY)
         os.dup2(devnull, 2)
-        os.execvpe("token-max", COMMAND.split(), env)
+        os.execvpe("token-max", command, env)
     out, pending, asked = b"", b"", set()
     while True:
         try:
@@ -74,7 +78,7 @@ def run(answers: dict[str, str]) -> str:
     _, status = os.waitpid(pid, 0)
     # 1 means it recommends a change, as any report on real transcripts should.
     if os.waitstatus_to_exitcode(status) not in (0, 1):
-        sys.exit(f"{COMMAND} exited with {os.waitstatus_to_exitcode(status)}")
+        sys.exit(f"{' '.join(command)} exited with {os.waitstatus_to_exitcode(status)}")
     if unasked := set(answers) - asked:
         sys.exit(f"doctor never asked about {', '.join(sorted(unasked))}")
     return out.decode()
@@ -109,26 +113,33 @@ def steps(transcript: str) -> tuple[list[list[str]], int]:
     Returns the steps as lines of HTML and how many of them are questions."""
     out, lines, questions, rests = [], [], 0, 0
     raws = transcript.replace("\r\n", "\n").split("\n")
+    plains = [SGR.sub("", raw.split("\r")[-1]) for raw in raws]
+    rest = TOTAL if any(TOTAL.match(p) for p in plains) else SUMMARY
+
+    def starts(plain: str) -> bool:
+        return bool(HEADING.match(plain) or TITLE.match(plain))
     i = 0
     while i < len(raws):
-        raw = raws[i]
-        plain = SGR.sub("", raw.split("\r")[-1])
+        raw, plain = raws[i], plains[i]
+        line = line_html(raw)
+        if rest.match(plain):
+            line = f'<span class="rest">{line}</span>'
+            rests += 1
         if re.search(r"\[0m: [a-z]$", raw.rstrip()):
-            line = line_html(raw)
             prompt, answer = line[:-1], line[-1]
             lines.append(f'{prompt}<span class="ans">{answer}</span><span class="cur"></span>')
             out.append(lines)
             lines, questions = [], questions + 1
-        elif HEADING.match(plain):
+        elif starts(plain):
             while lines and not lines[-1]:
                 lines.pop()
             if lines:
                 out.append(lines + [""])
-            lines = [line_html(raw)]
+            lines = [line]
             if plain.strip().startswith(CUT):
                 # Skip to the next section, keeping only a count of what was cut.
                 j = i + 1
-                while j < len(raws) and not HEADING.match(SGR.sub("", raws[j])):
+                while j < len(raws) and not starts(plains[j]):
                     j += 1
                 cut = sum(1 for r in raws[i + 1 : j] if r.strip())
                 lines.append(
@@ -136,12 +147,8 @@ def steps(transcript: str) -> tuple[list[list[str]], int]:
                 )
                 i = j
                 continue
-        elif SUMMARY.match(plain):
-            # The page scrolls the finished run back to its count of changes.
-            lines.append(f'<span class="rest">{line_html(raw)}</span>')
-            rests += 1
         else:
-            lines.append(line_html(raw))
+            lines.append(line)
         i += 1
     while lines and not lines[-1]:
         lines.pop()
@@ -157,17 +164,18 @@ def steps(transcript: str) -> tuple[list[list[str]], int]:
         if step:
             tidy.append(step if len(tidy) < questions else [""] + step)
     if rests != 1:
-        sys.exit(f"expected one count of changes, such as '3 changes recommended', found {rests}")
+        sys.exit(f"expected one line for the run to rest on, matching {rest.pattern!r}, found {rests}")
     return tidy, questions
 
 
-def timing(count: int, questions: int) -> str:
+def timing(typed: str, count: int, questions: int) -> str:
     """CSS for when each step and its answer show: questions wait for a reader, the report streams."""
+    typing = 0.03 * len(typed)
     rules = [
-        f".term.play .typed {{ animation: type 0.9s steps({len(COMMAND)}) 0.3s both; }}",
-        f"@keyframes type {{ from {{ width: 0; }} to {{ width: {len(COMMAND)}ch; }} }}",
+        f".term.play .typed {{ animation: type {typing:.1f}s steps({len(typed)}) 0.3s both; }}",
+        f"@keyframes type {{ from {{ width: 0; }} to {{ width: {len(typed)}ch; }} }}",
     ]
-    t = 1.6
+    t = typing + 0.7
     for n in range(count):
         # The first step is the command line's sibling at nth-child(2).
         gap = 1.4 if n < questions else 0
@@ -191,22 +199,26 @@ def main() -> None:
     if len(sys.argv) < 2:
         sys.exit(__doc__)
     site = Path(sys.argv[1])
-    answers = {}
+    answers, command = {}, list(COMMAND)
     for arg in sys.argv[2:]:
         profile, sep, answer = arg.rpartition("=")
-        if not sep or answer not in ("p", "a", "s"):
+        if not sep or arg.startswith("-"):
+            command.append(arg)
+            continue
+        if answer not in ("p", "a", "s"):
             sys.exit(f"{arg!r} is not PROFILE=p, PROFILE=a or PROFILE=s")
         home = os.environ["HOME"]
         answers["~" + profile[len(home) :] if profile.startswith(home) else profile] = answer
-    run_steps, questions = steps(run(answers))
+    typed = " ".join(command)
+    run_steps, questions = steps(run(command, answers))
     body = "".join(f'<span class="step">{chr(10).join(s)}\n</span>' for s in run_steps)
-    fragment = f'<pre class="screen"><code><span class="cmdline">$ <span class="typed">{COMMAND}</span>\n</span>{body}</code></pre>'
+    fragment = f'<pre class="screen"><code><span class="cmdline">$ <span class="typed">{typed}</span>\n</span>{body}</code></pre>'
     replace(site / "index.html", "<!-- doctor -->", "<!-- /doctor -->", fragment)
     replace(
         site / "style.css",
         "/* steps: assets/demo/site.py writes the run's timing here */\n",
         "/* /steps */",
-        timing(len(run_steps), questions),
+        timing(typed, len(run_steps), questions),
     )
 
 

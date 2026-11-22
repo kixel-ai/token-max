@@ -150,15 +150,24 @@ h1 { margin: 0; text-wrap: balance; }
 	animation: blink 1s step-end infinite;
 }
 /* steps: assets/demo/site.py writes the run's timing here */
-.term.play .typed { animation: type 0.9s steps(27) 0.3s both; }
-@keyframes type { from { width: 0; } to { width: 27ch; } }
-.step:nth-child(2) { --t: 1.6s; --gap: 1.4s; }
-.step:nth-child(3) { --t: 3.6s; --gap: 1.4s; }
-.step:nth-child(4) { --t: 5.6s; --gap: 1.4s; }
-.step:nth-child(5) { --t: 8.5s; --gap: 0.0s; }
-.step:nth-child(6) { --t: 11.0s; --gap: 0.0s; }
-.step:nth-child(7) { --t: 11.6s; --gap: 0.0s; }
-.step:nth-child(8) { --t: 12.2s; --gap: 0.0s; }
+.term.play .typed { animation: type 2.1s steps(70) 0.3s both; }
+@keyframes type { from { width: 0; } to { width: 70ch; } }
+.step:nth-child(2) { --t: 2.8s; --gap: 1.4s; }
+.step:nth-child(3) { --t: 4.8s; --gap: 1.4s; }
+.step:nth-child(4) { --t: 6.8s; --gap: 1.4s; }
+.step:nth-child(5) { --t: 9.7s; --gap: 0.0s; }
+.step:nth-child(6) { --t: 12.2s; --gap: 0.0s; }
+.step:nth-child(7) { --t: 12.8s; --gap: 0.0s; }
+.step:nth-child(8) { --t: 13.4s; --gap: 0.0s; }
+.step:nth-child(9) { --t: 14.0s; --gap: 0.0s; }
+.step:nth-child(10) { --t: 14.6s; --gap: 0.0s; }
+.step:nth-child(11) { --t: 15.2s; --gap: 0.0s; }
+.step:nth-child(12) { --t: 15.8s; --gap: 0.0s; }
+.step:nth-child(13) { --t: 16.4s; --gap: 0.0s; }
+.step:nth-child(14) { --t: 17.0s; --gap: 0.0s; }
+.step:nth-child(15) { --t: 17.6s; --gap: 0.0s; }
+.step:nth-child(16) { --t: 18.2s; --gap: 0.0s; }
+.step:nth-child(17) { --t: 18.8s; --gap: 0.0s; }
 /* /steps */
 @keyframes blink { 50% { opacity: 0; } }
 

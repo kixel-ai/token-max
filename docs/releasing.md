@@ -60,14 +60,17 @@ Windows CI job) against fixture releases on a local server.
 
 The page's results are the maintainer's from `docs/results.md` and the
 README's top; change them together. Its terminal is the maintainer's own
-`token-max doctor --defaults` on the `nixos` host, as HTML, with its EVERYTHING
-ELSE section cut to one line, since that section is long and names project
-files that can belong to private repositories. After a change to doctor's
-questions or output, run it again from the repository root on that host after
-`cargo build --release`, answering how each Claude profile pays:
+`token-max doctor --defaults` across their hosts, run from `nixos` with `--ssh`
+for the others, as HTML, with each host's EVERYTHING ELSE section cut to one
+line, since that section is long and names project files that can belong to
+private repositories. After a change to doctor's questions or output, run it
+again from the repository root on `nixos` after `cargo build --release`,
+answering how each of its Claude profiles pays (doctor asks only about this
+host's), and adding `--ssh kixtop` when the laptop is online:
 
 ```sh
-python3 assets/demo/site.py site/public ~/.claude=p ~/.claude-api-credits=a ~/.claude-personal.merged-20261106=a
+python3 assets/demo/site.py site/public ~/.claude=p ~/.claude-api-credits=a ~/.claude-personal.merged-20261106=a \
+  --ssh desktop --ssh fedora --include-local
 ```
 
 It writes the run into `index.html` and its timing into `style.css`. Read the

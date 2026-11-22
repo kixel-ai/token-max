@@ -48,20 +48,25 @@ verify the archive against `sha256.sum` or with `gh attestation verify`.
 ## max.kixel.ai
 
 `site/` is a Cloudflare Worker with only static assets and no code:
-`index.html` and `style.css` are the landing page, `_redirects` sends
-`/install.sh` and `/install.ps1` to the latest release's installers, and
-`run.sh` and `run.ps1` are served as they are, so a release needs no deploy
-unless the page changes. `_headers` forbids scripts and other origins, which
-the page promises. `tests/run_script.rs` runs the run script for the host
-(`run.ps1` on the Windows CI job) against fixture releases on a local server.
+`index.html`, `style.css` and `site.js` are the landing page, `fonts/` holds
+its two OFL fonts subset to Latin, `_redirects` sends `/install.sh` and
+`/install.ps1` to the latest release's installers, and `run.sh` and `run.ps1`
+are served as they are, so a release needs no deploy unless the page changes.
+`_headers` allows scripts, styles and fonts from the page's own origin only.
+`site.js` picks the Windows command on Windows, adds the copy button and plays
+the terminal; without it the page still works and the terminal shows the whole
+run. `tests/run_script.rs` runs the run script for the host (`run.ps1` on the
+Windows CI job) against fixture releases on a local server.
 
-The page copies the README's top: the headline, the run line, the
-two cache findings from `docs/results.md` and "How it
-knows"; change them together. Its
-recording, `walk.gif`, is the README's too, and `assets/demo/walk.tape`
+The page's results are the maintainer's from `docs/results.md` and the
+README's top; change them together. Its terminal is real `token-max doctor`
+output on synthetic transcripts, as HTML: after a change to doctor's questions
+or output, run `python3 assets/demo/site.py site/public/index.html` from the
+repository root after `cargo build --release`. The README's recording,
+`assets/demo/walk.gif`, answers the same way, and `assets/demo/walk.tape`
 regenerates it. `og.png`, the link preview, is a 1200x630 screenshot of the
-page's top in dark mode, from the logo through the run box;
-retake it after changing that part.
+page's top, from the logo through the run box; retake it after changing that
+part.
 
 Preview the page, its headers and redirects locally with
 `nix shell nixpkgs#wrangler -c wrangler dev` from `site/`. After changing

@@ -776,6 +776,7 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
             discovery,
             since,
             reach,
+            reading: None,
         })?;
         // The stdin thread keeps the sender until it exits this process.
         let Ok(Incoming::Request(request)) = incoming.recv() else {

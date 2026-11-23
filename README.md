@@ -101,7 +101,7 @@ nix run github:kixel-ai/token-max -- doctor
 token-max doctor                     # every Claude Code and Codex profile on this host
 token-max doctor --since 2026-11-01  # only sessions from that date on
 token-max doctor --details           # the evidence behind every line
-token-max doctor --ssh devbox --include-local  # this host and devbox, each change made on its own host
+token-max doctor --ssh devbox       # this host and devbox, each change made on its own host
 token-max doctor --help
 ```
 

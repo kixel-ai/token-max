@@ -8,6 +8,7 @@ use std::fs::File;
 use std::hash::BuildHasher;
 use std::io::{ErrorKind, Read};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
@@ -40,6 +41,8 @@ pub struct ScanOptions {
     pub since: Option<Millis>,
     /// Which transcripts to read.
     pub reach: Reach,
+    /// Where the scan counts the transcript bytes it has read, for a progress line.
+    pub reading: Option<Arc<Reading>>,
 }
 
 /// Which transcripts a scan reads.
@@ -49,6 +52,15 @@ pub enum Reach {
     History,
     /// Only transcripts the window's requests and sessions depend on.
     Window,
+}
+
+/// How far a scan has read its transcripts, which another thread may watch.
+#[derive(Debug, Default)]
+pub struct Reading {
+    /// Bytes in every transcript the scan reads; zero until it knows which those are.
+    pub total: AtomicU64,
+    /// Bytes in the transcripts read so far.
+    pub read: AtomicU64,
 }
 
 /// Bytes read per system call; lines longer than this are assembled across chunks.
@@ -1968,6 +1980,11 @@ pub(crate) fn now() -> Millis {
 /// Parse request and structural metadata, deduplicating streams and inherited history.
 pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     let since = options.since;
+    // A reused counter shows no progress from an earlier scan.
+    if let Some(reading) = &options.reading {
+        reading.total.store(0, Ordering::Relaxed);
+        reading.read.store(0, Ordering::Relaxed);
+    }
     let snapshot_started_at = iso(now());
     let Discovery {
         roots,
@@ -1979,6 +1996,11 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     if let (Reach::Window, Some(since)) = (options.reach, since) {
         let mut reads = crate::window::reads(&snapshots, since)?.into_iter();
         snapshots.retain(|_| reads.next().expect("one per snapshot"));
+    }
+    // Counted after the window drops transcripts, so the total is what this pass reads.
+    if let Some(reading) = &options.reading {
+        let total = snapshots.iter().map(|s| s.bytes).sum();
+        reading.total.store(total, Ordering::Relaxed);
     }
     let mut native_ids = crate::t3::NativeIds::default();
     let has_t3 = profiles.iter().any(|p| p.t3.is_some());
@@ -2000,12 +2022,15 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         sessions: Sessions::default(),
     };
     reader.exposure.roots(&profiles);
+    // Bytes in the transcripts already read.
+    let mut finished = 0;
     for snapshot in &mut snapshots {
         // Records update the snapshot's counters while records are consumed against its metadata.
         let view = snapshot.clone();
         let mut file = FileState::new(&view, &mut reader.strings);
         let mut ids = ToolIds::default();
-        for record in read_snapshot(snapshot)? {
+        let mut records = read_snapshot(snapshot)?;
+        while let Some(record) = records.next() {
             let (raw, location) = record?;
             reader
                 .consume(&view, &mut file, &raw, &location)
@@ -2014,8 +2039,17 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
             if has_t3 {
                 native_ids.observe(&raw, view.harness, &file.context.session);
             }
+            // Counted by the chunk, so one large transcript still moves the bar.
+            if let Some(reading) = &options.reading {
+                let read = finished + records.position;
+                reading.read.store(read, Ordering::Relaxed);
+            }
         }
         snapshot.unreadable.finish(&ids, snapshot.skipped_lines);
+        finished += snapshot.bytes;
+        if let Some(reading) = &options.reading {
+            reading.read.store(finished, Ordering::Relaxed);
+        }
     }
     let Reader {
         exposure,
@@ -2447,6 +2481,21 @@ mod tests {
                 },
             },
         })
+    }
+
+    #[test]
+    fn a_reused_reading_counter_starts_from_zero_even_when_nothing_is_read() {
+        let w = Workspace::new();
+        let reading = std::sync::Arc::new(Reading::default());
+        reading.total.store(7, Ordering::Relaxed);
+        reading.read.store(5, Ordering::Relaxed);
+        scan(&ScanOptions {
+            reading: Some(reading.clone()),
+            ..options(&w)
+        })
+        .unwrap();
+        let progress = |n: &AtomicU64| n.load(Ordering::Relaxed);
+        assert_eq!((progress(&reading.total), progress(&reading.read)), (0, 0));
     }
 
     #[test]

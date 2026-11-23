@@ -724,7 +724,16 @@ puts the verdict word back in place of the dot. Evidence cards keep their
 verdict words and only add color, and each names its claim. Redirected output
 is plain, and progress appears only on interactive stderr.
 Unicode decorations require a UTF-8 locale. Progress is one line that shows each
-phase in turn, never an invented percent, and clears itself before the report.
+phase in turn and clears itself before the report. While this host's
+transcripts are read it is a bar of the bytes read out of the total discovery
+found, with the time left to read them at the rate so far; the analysis after
+reading has no measured fraction, so its phases show only a spinner and how
+long each has run.
+
+On a terminal, `doctor` opens with its name, says it is about to scan this
+host's transcripts, and lists each profile root it found with its transcript
+files and their size, then the SSH destinations it adds, or how to add one with
+`--ssh`, before it asks how a profile pays.
 
 ## Machine-readable output
 
@@ -744,12 +753,12 @@ overlapping changes may save less.
 `token-max sessions` prints each session's usage at public API prices, one
 JSON object per line, for tools that tie sessions to their own records, such
 as moq-dev/quest's `quest usage`. It takes `--since`, the profile and price
-options, and `--ssh` with `--include-local` as `doctor` does;
+options, and `--ssh` as `doctor` does;
 `token-max sessions --help` lists every field.
 
 ```sh
 token-max sessions --since 2026-11-01
-token-max sessions --ssh devbox --include-local
+token-max sessions --ssh devbox
 ```
 
 A Claude subagent, and a Codex review or spawned thread, is a session of its
@@ -992,15 +1001,15 @@ and limits.
 ## Other hosts over SSH
 
 `--ssh HOST` (repeatable) audits a machine you reach with OpenSSH, using your
-SSH configuration, keys and known hosts without prompting. Add
-`--include-local` to audit this host in the same run. You install nothing
+SSH configuration, keys and known hosts without prompting, along with this
+host, which every run audits. You install nothing
 there: each destination runs this build of token-max, which token-max puts
 there itself. Linux and macOS destinations on x86_64 or arm64 are supported.
 `token-max sessions` takes the same flags, and each destination sends only its
 priced session lines.
 
 ```sh
-token-max doctor --ssh devbox --ssh user@laptop --include-local
+token-max doctor --ssh devbox --ssh user@laptop
 ```
 
 The destination discovers that host's own profiles from its home and
@@ -1037,8 +1046,7 @@ there before it. Either step checks that the binary runs there before caching
 it. A copy linked against this host's libraries fails with a statically
 linked build to run here instead, such as the release installers'.
 
-`--claude-dir`, `--codex-dir` and `--t3-dir` select local profiles only, so with
-`--ssh` they need `--include-local`.
+`--claude-dir`, `--codex-dir` and `--t3-dir` select this host's profiles only.
 
 Each host is analyzed on its own and gets its own section, labeled with the
 destination, or `this host`. A run of several hosts heads its report with one

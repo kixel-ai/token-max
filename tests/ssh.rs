@@ -244,6 +244,7 @@ fn analysis(home: &Path, since: Option<i64>, max_cost_per_use_usd: f64) -> Repor
             discovery,
             since,
             reach: Reach::History,
+            reading: None,
         })
         .unwrap(),
         catalog: &catalog,
@@ -343,14 +344,7 @@ fn a_remote_report_matches_running_there() {
     let hosts = Hosts::new();
     let home = hosts.host("devbox");
     let since = ["--since", "2026-11-01"];
-    let (status, stdout, stderr) = hosts.run(&[
-        "--ssh",
-        "devbox",
-        "--include-local",
-        "--details",
-        since[0],
-        since[1],
-    ]);
+    let (status, stdout, stderr) = hosts.run(&["--ssh", "devbox", "--details", since[0], since[1]]);
     assert_eq!(status, 0, "{stderr}");
     // Login noise and transcript text stay out of the output.
     assert_eq!(stderr, "");
@@ -378,7 +372,7 @@ fn a_remote_report_matches_running_there() {
 
     // With a change to offer on devbox, which exits 1.
     std::fs::write(hosts.settings("devbox"), HOME_SETTINGS).unwrap();
-    let (status, text, _) = hosts.run(&["--ssh", "devbox", "--include-local"]);
+    let (status, text, _) = hosts.run(&["--ssh", "devbox"]);
     assert_eq!(status, 1);
     // One total heads the report, beside each host's own section.
     assert!(
@@ -393,13 +387,6 @@ fn a_remote_report_matches_running_there() {
     assert!(text.contains("\ntoken-max: devbox  "), "{text}");
     assert!(text.contains("  Profiles: claude ~/.claude.\n"), "{text}");
     assert!(!text.contains("don't add amounts across hosts"), "{text}");
-    let (_, alone, _) = hosts.run(&["--ssh", "devbox"]);
-    assert!(alone.starts_with("token-max: devbox  "), "{alone}");
-    assert!(!alone.contains("token-max: this host") && !alone.contains("total over"));
-    assert_eq!(
-        timeless(section(&alone, "devbox")),
-        timeless(section(&text, "devbox"))
-    );
 }
 
 #[test]
@@ -534,7 +521,7 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     assert_eq!((w.calls, w.long, w.timed_out, w.polling), (1, 1, 1, 1));
     assert!(w.miss_cost.total_usd.unwrap().to_f64() > 0.0);
 
-    let (status, stdout, stderr) = hosts.run(&["--ssh", "devbox", "--include-local", "--details"]);
+    let (status, stdout, stderr) = hosts.run(&["--ssh", "devbox", "--details"]);
     assert_eq!(status, 1, "{stderr}");
     assert_eq!(stderr, "");
     assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
@@ -659,8 +646,7 @@ fn codex_context_and_output_keep_their_remote_controls() {
         assert_eq!(output.priced, if priceable { 2 } else { 0 });
         assert_eq!(output.estimated_usd.is_some(), priceable);
 
-        let (status, stdout, stderr) =
-            hosts.run(&["--ssh", "devbox", "--include-local", "--details"]);
+        let (status, stdout, stderr) = hosts.run(&["--ssh", "devbox", "--details"]);
         assert_eq!(status, 0, "{stderr}");
         assert_eq!(stderr, "");
         assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
@@ -861,8 +847,7 @@ fn background_controls_and_estimates_keep_their_remote_history() {
         "--max-cost-per-use",
         "0.000001",
     ];
-    let (status, stdout, stderr) =
-        hosts.run(&[&["--ssh", "devbox", "--include-local"][..], &args].concat());
+    let (status, stdout, stderr) = hosts.run(&[&["--ssh", "devbox"][..], &args].concat());
     assert_eq!(status, 1, "{stderr}");
     assert_eq!(stderr, "");
     assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
@@ -908,7 +893,7 @@ fn the_coordinator_copies_itself_once_and_replaces_older_copies() {
     for _ in 0..2 {
         let (status, stdout, stderr) = hosts.run(&["--ssh", "devbox"]);
         assert_eq!(status, 0, "{stderr}");
-        assert!(stdout.starts_with("token-max: devbox  "), "{stdout}");
+        assert!(stdout.contains("\ntoken-max: devbox  "), "{stdout}");
         assert_eq!(copies(), 1);
     }
     let cached: Vec<_> = std::fs::read_dir(&cache)
@@ -936,7 +921,7 @@ fn another_platform_runs_its_installed_build() {
     script(&cargo.join("token-max"), "exit 2");
     let (status, stdout, stderr) = hosts.run(&["--ssh", "installed"]);
     assert_eq!(status, 0, "{stderr}");
-    assert!(stdout.starts_with("token-max: installed  "), "{stdout}");
+    assert!(stdout.contains("\ntoken-max: installed  "), "{stdout}");
     assert!(!hosts.cache("installed").exists());
 }
 
@@ -1008,8 +993,7 @@ fn any_failed_destination_fails_the_whole_report() {
         ("silent", "silent: invalid SSH audit stream at line 2"),
         ("broken", "broken: "),
     ] {
-        let (status, stdout, stderr) =
-            hosts.run(&["--ssh", "devbox", "--ssh", host, "--include-local"]);
+        let (status, stdout, stderr) = hosts.run(&["--ssh", "devbox", "--ssh", host]);
         assert_eq!(status, 2, "{host}: {stderr}");
         assert_eq!(stdout, "", "{host}");
         assert!(
@@ -1213,8 +1197,6 @@ fn destinations_and_directory_flags_are_unambiguous() {
         ),
         (&["--ssh", "two words"], "--ssh requires a destination"),
         (&["--ssh", "a", "--ssh", "a"], "--ssh a is selected twice"),
-        (&["--include-local"], "--include-local requires --ssh"),
-        (&["--ssh", "a", "--claude-dir", "x"], "add --include-local"),
         (&["--ssh-scan", "--plain"], "invalid arguments"),
         (&["--ssh", "-x"], "invalid arguments"),
     ] {
@@ -1261,7 +1243,7 @@ fn sessions_from_every_host_interleave_by_first_request() {
     std::fs::write(home.join(".claude/projects/my project/early.jsonl"), early).unwrap();
 
     let run_sessions = |args: &[&str]| run(&mut hosts.invoke("sessions", args));
-    let (status, stdout, stderr) = run_sessions(&["--ssh", "devbox", "--include-local"]);
+    let (status, stdout, stderr) = run_sessions(&["--ssh", "devbox"]);
     assert_eq!(status, 0, "{stderr}");
     assert_eq!(stderr, "");
     assert!(!stdout.contains("SYNTHETIC_PRIVATE"), "{stdout}");
@@ -1294,19 +1276,20 @@ fn sessions_from_every_host_interleave_by_first_request() {
         })
         .collect();
     assert_eq!(remote, lines(&there));
-    let (_, alone, _) = run_sessions(&["--ssh", "devbox"]);
-    assert_eq!(
-        lines(&alone),
-        lines(&stdout)
-            .into_iter()
-            .filter(|l| l["host"] == "devbox")
-            .collect::<Vec<_>>()
-    );
     let (_, windowed, stderr) = run_sessions(&["--ssh", "devbox", "--since", "2026-11-01"]);
     assert_eq!(stderr, "");
-    let windowed = lines(&windowed);
-    assert_eq!(windowed.len(), 1);
-    assert_eq!(windowed[0]["session"], "session-a");
+    // The window drops devbox's early session; this host's session-a starts inside it.
+    let windowed: Vec<_> = lines(&windowed)
+        .into_iter()
+        .map(|l| (l["host"].clone(), l["session"].clone()))
+        .collect();
+    assert_eq!(
+        windowed,
+        [
+            (Value::Null, Value::from("session-a")),
+            (Value::from("devbox"), Value::from("session-a"))
+        ]
+    );
 
     let args = std::fs::read_to_string(hosts.root.join("ssh.args")).unwrap();
     assert!(args.contains("-- devbox sh -c"), "{args}");
@@ -1325,15 +1308,10 @@ fn a_failed_host_fails_the_whole_session_export() {
     .unwrap();
     for (args, expected) in [
         (
-            &["--ssh", "devbox", "--ssh", "unreachable", "--include-local"][..],
+            &["--ssh", "devbox", "--ssh", "unreachable"][..],
             "unreachable: SSH connection failed",
         ),
         (&["--ssh", "devbox", "--ssh", "broken"], "broken: "),
-        (
-            &["--ssh", "devbox", "--claude-dir", "x"],
-            "--claude-dir, --codex-dir and --t3-dir select local profiles",
-        ),
-        (&["--include-local"], "--include-local requires --ssh"),
         (&["--ssh", "devbox", "--ssh-scan"], "invalid arguments"),
     ] {
         let (status, stdout, stderr) = run(&mut hosts.invoke("sessions", args));
@@ -1495,7 +1473,7 @@ impl Hosts {
         for host in ["local", "devbox", "laptop"] {
             std::fs::write(self.settings(host), HOME_SETTINGS).unwrap();
         }
-        let mut command = self.command(&["--ssh", "devbox", "--ssh", "laptop", "--include-local"]);
+        let mut command = self.command(&["--ssh", "devbox", "--ssh", "laptop"]);
         command.env("NO_COLOR", "1");
         let mut terminal = Terminal::spawn(command);
         terminal.answer("[s]kip:", "a");

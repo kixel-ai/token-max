@@ -315,7 +315,8 @@ mod windows {
         // Login noise and transcript text stay out of the output.
         assert_eq!(stderr, "");
         assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
-        assert!(stdout.starts_with("token-max: devbox  "), "{stdout}");
+        // This host, with an empty home, is audited beside it.
+        assert!(stdout.contains("\ntoken-max: devbox  "), "{stdout}");
         assert!(stdout.contains("; 2 requests;"), "{stdout}");
         assert!(
             stdout.contains("each percent is of devbox's spend"),

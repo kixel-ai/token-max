@@ -95,7 +95,7 @@ is online:
 
 ```sh
 python3 assets/demo/site.py site/public ~/.claude=p ~/.claude-api-credits=a ~/.claude-personal.merged-20261106=a \
-  --since "$(date -u -d '29 days ago' +%F)" --ssh desktop --ssh fedora --include-local
+  --since "$(date -u -d '29 days ago' +%F)" --ssh desktop --ssh fedora
 ```
 
 It writes the run and the results into `index.html`, and the run's timing and the breakdown's bars into `style.css`. Read the

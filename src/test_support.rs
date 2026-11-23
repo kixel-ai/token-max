@@ -187,6 +187,7 @@ impl Workspace {
             },
             since: None,
             reach: crate::reader::Reach::History,
+            reading: None,
         }
     }
 }

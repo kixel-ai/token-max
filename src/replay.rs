@@ -1102,6 +1102,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         max_cost_per_use_usd,
         subagents: crate::subagents::subagent_costs(&scan, catalog),
         fable: crate::fable::fable_use(&scan, catalog, since, now),
+        inbound: crate::inbound::inbound_use(&scan, catalog, since, now),
         checks,
         bash,
         assumptions: [

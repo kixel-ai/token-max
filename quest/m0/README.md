@@ -252,7 +252,7 @@ thresholds from the 100K floor up and recommend the cheapest; the study's
 
 Decided 2026-11-23 (maintainer, /quest-plan after Claude Code's
 [costs doc](https://code.claude.com/docs/en/costs)): ✅ take only its
-cross-session messages, as [their own line](/quest/m1/cross-session-messages.md)
+cross-session messages, as their own line
 (rejected: plan nothing). ✅ no `vibes` command for advice that can't be
 measured; cited provider guidance that applies to a setting goes in Warnings
 (rejected: a `vibes` command; a later quest for it), as

@@ -8,7 +8,7 @@
     # .claude/skills and .agents/skills call. Tracks main; flake.lock pins the
     # revision, so `nix flake update quest` upgrades it.
     quest = {
-      url = "github:moq-dev/quest";
+      url = "github:kixel-ai/quest";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };

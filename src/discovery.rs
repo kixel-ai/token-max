@@ -9,14 +9,14 @@ use serde_json::{Map, Value};
 
 use crate::controls::{
     CLAUDE_BACKGROUND_ENV, CompactionSources, Env, SettingsScope, bash_cap_control,
-    claude_background, claude_memory, codex_background, codex_memory, compaction_controls,
-    idle_controls, js_string, members, scoped_environment, speed_controls,
+    claude_background, claude_inbound, claude_memory, codex_background, codex_memory,
+    compaction_controls, idle_controls, js_string, members, scoped_environment, speed_controls,
 };
 use crate::effort::{claude_effort, codex_catalog, codex_effort, latest_model};
 use crate::model::{
-    Agent, BackgroundControl, Billing, Control, ControlValue, Harness, IdleControl, Location,
-    MemoryControl, PerBucket, Profile, Request, RootOrigin, RootState, RootStatus, Scalar,
-    Snapshot, SpeedControl, Ttl, TtlControl,
+    Agent, BackgroundControl, Billing, Control, ControlValue, Harness, IdleControl, InboundControl,
+    Location, MemoryControl, PerBucket, Profile, Request, RootOrigin, RootState, RootStatus,
+    Scalar, Snapshot, SpeedControl, Ttl, TtlControl,
 };
 use crate::safe::{ScanError, identity, label};
 
@@ -1044,6 +1044,63 @@ pub(crate) fn claude_project_files(
             "settings.local.json",
         ]),
     ])
+}
+
+/// Resolve each Claude profile's `crossSessionInbound` at its latest main-session request's
+/// directory, as auto memory's is; without an existing one, user and managed settings decide.
+/// It runs once T3 has attributed requests, so an instance reads its own sessions' directory.
+pub fn discover_inbound(
+    options: &DiscoveryOptions,
+    profiles: &mut [Profile],
+    requests: &[Request],
+) -> Result<(), ScanError> {
+    // Read only for Claude profiles: a Codex-only scan never reads Claude's policy.
+    if !profiles.iter().any(|p| p.harness == Harness::Claude) {
+        return Ok(());
+    }
+    let managed_file = options.managed_settings_file.as_str();
+    let managed = settings(managed_file, Harness::Claude)?;
+    for profile in profiles.iter_mut().filter(|p| p.harness == Harness::Claude) {
+        let user = options.settings(&profile.settings_file, Harness::Claude)?;
+        let mine: Vec<&Request> = requests
+            .iter()
+            .filter(|r| r.profiles.contains(&profile.id))
+            .collect();
+        let latest = crate::memory::deciding_request(&mine).and_then(|r| r.cwd.as_deref());
+        let directory = match latest {
+            Some(cwd) if existing_directory(cwd)? => Some(cwd),
+            _ => None,
+        };
+        let mut repository = vec![];
+        if let Some(cwd) = directory {
+            // A session in the home directory reads the user's own file as its project's.
+            for file in claude_project_files(cwd, options)? {
+                if !same_file(&file, &profile.settings_file) {
+                    let config = options.settings(&file, Harness::Claude)?;
+                    repository.push((file, config));
+                }
+            }
+        }
+        let scopes: Vec<SettingsScope> = repository
+            .iter()
+            .map(|(file, config)| SettingsScope { config, file })
+            .collect();
+        profile.inbound = Some(InboundControl {
+            directory: directory.map(String::from),
+            ..claude_inbound(
+                SettingsScope {
+                    config: &managed,
+                    file: managed_file,
+                },
+                SettingsScope {
+                    config: &user,
+                    file: &profile.settings_file,
+                },
+                &scopes,
+            )?
+        });
+    }
+    Ok(())
 }
 
 /// Resolve current project/local controls at recorded directories, preserving every owner.
@@ -2437,6 +2494,7 @@ pub(crate) fn profile(
         background_directories: IndexMap::default(),
         background_requests: IndexMap::default(),
         memory: Some(memory),
+        inbound: None,
         t3: None,
         agents: crate::model::AgentControls::default(),
         instruction_budget_file,

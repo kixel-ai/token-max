@@ -19,6 +19,7 @@ mod exposure;
 mod fable;
 mod fast;
 mod idle;
+mod inbound;
 mod keepalive;
 mod mcp;
 mod memory;

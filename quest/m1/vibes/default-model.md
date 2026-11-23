@@ -38,7 +38,9 @@ Recommendations:
 - Keep the picks and accepted alternatives in one table, so changing them is
   a one-line edit.
 - Confirm Sol 6.2's model ID before writing it. This host's Codex sessions
-  record `gpt-6.1-sol` and `gpt-6.2-astra`, but no Sol 6.2.
+  record `gpt-6.1-sol` and `gpt-6.2-astra`, but no Sol 6.2. The Codex
+  0.167.1 model catalog (`~/.codex/models_cache.json`) lists `gpt-6.2-sol`
+  first, so that is the likely ID.
 - Write the setting that `doctor`'s effort line already names as owning the
   default: Claude's `model` and effort setting, or Codex's `model` and
   `model_reasoning_effort`. #192 deleted the effort-target machinery

@@ -1469,3 +1469,47 @@ Fable request, as
 [Plans and API prices](reference.md#plans-and-api-prices) describes.
 `--details` gives each line's spans with their unknown costs, the caveats
 and the sources.
+
+## Messages from other sessions
+
+The reader marks three kinds of record, keeping no text. A Claude `user`
+record whose `origin.kind` is `peer` and that carries no `origin.senderTaskId`
+is a message from another session that started a turn: Claude Code delivers
+one to an idle session as a new turn (seen in 2.1.275 through 2.1.325; from
+2.1.280 on it also records `turnOrigin: "peer"`). An idle notice, a meta
+`user` record with no `origin` whose text opens with Claude Code's fixed
+`[Cross-session idle notice]`, starts one the same way. A `queued_command`
+attachment with such an origin, or such a notice, was read between tool
+calls of a running turn. A peer record with `senderTaskId` is a subagent
+reporting to its own session, which Claude Code 2.1.322 enqueues without the
+`crossSessionInbound` gate; like a scheduled task or other meta record with a
+`turnOrigin`, it starts a turn that only bounds the one before it. Records
+copied into a forked transcript share their `uuid` and count once.
+
+A message's turn runs from its record to the next record in its session that
+starts a turn: a typed or SDK prompt, a task notification, another message or
+one of those meta turns. A compaction summary carries its turn's `turnOrigin`
+but continues that turn, so it starts none, for every check. The turn's
+requests are its session's in that span, an unlinked API attempt among them
+as unpriced, and every request of each subagent whose first request falls in
+it, since a background subagent outlives the turn that started it; its first
+request is found in earlier history too, so one started before the window is
+never taken for the message's. A turn read in several sessions, as a forked
+transcript copies it, gathers its requests in each, and a request in two such
+turns, as a subagent resumed by a later one, counts once. Only deliveries and
+requests in the analysis window count. A delivery not marked meta, which no
+recorded client writes, also starts a prompt turn for the other checks. The
+cost extrapolates over unpriced requests as other figures do.
+
+`crossSessionInbound` resolves as the settings reference gives it: managed
+settings, then user settings, the first value found; then a project or local
+value, only where it is stricter (`refuse` over `hold` over `accept`). A
+repository value as strict as the user's names the repository file, as Claude
+Code does; one as strict as managed settings' leaves them named. A value
+Claude Code does not recognize fails the scan in the file that sets it.
+Project and local files are read at the latest main-session request's working
+directory, as auto memory's are, once T3 has attributed requests, so a T3
+instance reads its own sessions' directory; without an existing one, user and
+managed settings decide. A `--settings` flag outranks the user's file and is not recorded, and
+a T3 instance whose launch settings are unresolved gets the line unknown.
+

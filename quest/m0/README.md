@@ -249,3 +249,18 @@ prefix overhead, which is confounded by each client's settings and work).
 thresholds from the 100K floor up and recommend the cheapest; the study's
 100K advice is modeled, not measured). Its one settings gap is
 `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, which [kixel-ai/token-max#165](https://github.com/kixel-ai/token-max/pull/165) resolves.
+
+Decided 2026-11-23 (maintainer, /quest-plan after Claude Code's
+[costs doc](https://code.claude.com/docs/en/costs)): ✅ take only its
+cross-session messages, as [their own line](/quest/m1/cross-session-messages.md)
+(rejected: plan nothing). ✅ no `vibes` command for advice that can't be
+measured; cited provider guidance that applies to a setting goes in Warnings
+(rejected: a `vibes` command; a later quest for it), as
+[#192](https://github.com/kixel-ai/token-max/pull/192) decided. ✅ no
+main-session reprice on Sonnet, since the effort line already shows cost by
+model (rejected: a reprice as evidence; a reprice with a warning). ✅ no
+README comparison with `/usage` (rejected: an XS quest for it). Agent teams,
+`MAX_THINKING_TOKENS` and `modelPricing` are also out: agent teams are
+experimental and off by default, current models ignore a thinking budget,
+and token-max prices at public API rates on purpose. The doc's other levers
+are already lines or are habits, which the 2026-11-17 entry rules out.

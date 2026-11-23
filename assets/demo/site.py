@@ -17,11 +17,12 @@ project files, which can belong to private repositories. Read the result before 
 """
 
 import html
+import math
 import os
 import pty
 import re
 import sys
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 COMMAND = ["token-max", "doctor", "--defaults"]
@@ -209,7 +210,8 @@ CHANGE = re.compile(
 def changes(transcript: str, api: set[str], api_rates: bool) -> dict[str, list]:
     """Each setting's offered saving summed over every host's CHANGES section, as
     [measured $/mo, $/mo that depends on how a profile pays, whether any part has a ~,
-    how many lines, the measured $/mo outside this host's profiles in `api`]. `api_rates` says
+    how many lines, the measured $/mo outside this host's profiles in `api`, whether any part is
+    a lower bound]. `api_rates` says
     every profile doctor asked about was answered as API."""
     rows: dict[str, list] = {}
     section, here = None, False
@@ -242,10 +244,12 @@ def changes(transcript: str, api: set[str], api_rates: bool) -> dict[str, list]:
             )
             # "<$0.01" counts as nothing.
             usd = 0.0 if m["lt"] else dollars(m["usd"])
-            row = rows.setdefault(m["name"], [0.0, 0.0, False, 0, 0.0])
+            row = rows.setdefault(m["name"], [0.0, 0.0, False, 0, 0.0, False])
             row[1 if up_to else 0] += usd
             row[2] |= bool(m["about"])
             row[3] += 1
+            # "At least" leaves part of the saving unpriced, so the figure is a lower bound.
+            row[5] |= bool(m["verb"]) and m["verb"].startswith("at least")
             if not up_to and not paid:
                 row[4] += usd
     return rows
@@ -258,19 +262,20 @@ TOTAL_LINE = re.compile(
     r"(.*?) at API prices"
 )
 # A whole spend, as doctor prints it without unpriced requests: an amount, perhaps with a margin.
-SPENT = re.compile(r"(~?)\$([\d,.]+)(?: ± \$[\d,.]+|, margin unknown)?")
+SPENT = re.compile(r"(~?)\$([\d,.]+)(?: ± <?\$[\d,.]+|, margin unknown)?")
 # One part of the "Changes offered" sentence: its amount and its percent of the hosts' spend.
 AMOUNT = re.compile(r"^(?:up to )?(?:about )?(~?)(<?)\$([\d,.]+)/mo.*?, (<?)(\d+)% of these hosts' spend")
 
 
-def offered(transcript: str) -> tuple[re.Match, dict[str, tuple[float, bool, int]]]:
-    """The hosts' total, and what their changes offer as (usd, has a ~, percent) for "measured"
+def offered(transcript: str) -> tuple[re.Match, dict[str, tuple[float, bool, int, bool]]]:
+    """The hosts' total, and what their changes offer as (usd, has a ~, percent, is a lower
+    bound) for "measured"
     and "up to"; a run with nothing to offer prints no "Changes offered" sentence."""
     plain = " ".join(line.strip() for line in plain_lines(transcript))
     total = TOTAL_LINE.search(plain)
     if not total:
         sys.exit("the results need the hosts' total that --ssh prints")
-    offer = {"measured": (0.0, False, 0), "up to": (0.0, False, 0)}
+    offer = {"measured": (0.0, False, 0, False), "up to": (0.0, False, 0, False)}
     sentence = re.search(r"Changes offered: (.*?)\.(?: |$)", plain[total.end():])
     unmeasured = False
     for part in sentence[1].split(", plus ") if sentence else []:
@@ -283,15 +288,17 @@ def offered(transcript: str) -> tuple[re.Match, dict[str, tuple[float, bool, int
         # "<$1" and "<1%" count as nothing.
         usd = 0.0 if m[2] else dollars(m[3])
         pct = 0 if m[4] else int(m[5])
-        offer["up to" if part.startswith("up to ") else "measured"] = (usd, bool(m[1]), pct)
+        # Changes "priced only in part" make the measured amount a lower bound.
+        lower = ", more where " in part
+        offer["up to" if part.startswith("up to ") else "measured"] = (usd, bool(m[1]), pct, lower)
     # A 0% beside changes whose savings went unmeasured would claim what doctor did not.
-    if unmeasured and not any(usd for usd, _, _ in offer.values()):
+    if unmeasured and not any(usd for usd, *_ in offer.values()):
         sys.exit("the run measured none of its changes' savings, so the results have nothing to show")
     return total, offer
 
 
-def usd(value: float, about: bool) -> str:
-    return f"{'~' if about else ''}${value:,.0f}"
+def usd(value: float, about: bool, lower: bool = False) -> str:
+    return f"{'≥' if lower else ''}{'~' if about else ''}${value:,.0f}"
 
 
 def billions(tokens: int) -> str:
@@ -302,7 +309,7 @@ def billions(tokens: int) -> str:
 LISTED = 5
 
 
-def results(plan: str, api: str, paid: set[str], since: date, today: date) -> tuple[str, str]:
+def results(plan: str, api: str, paid: set[str], since: date, now: datetime) -> tuple[str, str]:
     """The results section and its bars' CSS: the plan run as the maintainer pays, and the
     run with every profile answered as API. Doctor asks only about this host's profiles, so a
     destination's main-TTL change stays "up to"; billing picks only that change's default, and
@@ -313,11 +320,14 @@ def results(plan: str, api: str, paid: set[str], since: date, today: date) -> tu
     spent = SPENT.fullmatch(spent_text)
     if not spent:
         sys.exit(f"the usage boxes need a whole spend, not {spent_text!r}")
-    # Every host's spend covers --since to the run, so the window is the same for the total.
-    days = (today - since).days
-    plan_usd, plan_about, plan_pct = plan_offer["measured"]
+    # Every host's spend covers --since to the run, so the window is the same for the total;
+    # count its days as doctor does, rounded to the nearest and at least one.
+    start = datetime.combine(since, time(), timezone.utc)
+    days = max(1, math.floor((now - start) / timedelta(days=1) + 0.5))
+    plan_usd, plan_about, plan_pct, plan_lower = plan_offer["measured"]
     _, api_offer = offered(api)
     api_about = api_offer["measured"][1] or api_offer["up to"][1]
+    api_lower = api_offer["measured"][3]
     api_usd = api_offer["measured"][0] + api_offer["up to"][0]
     # Each percent is of the same spend, so they add; each was rounded, so the sum may be one off.
     api_pct = api_offer["measured"][2] + api_offer["up to"][2]
@@ -332,10 +342,10 @@ def results(plan: str, api: str, paid: set[str], since: date, today: date) -> tu
     # A setting saves on the subscription what the first run measured outside the profiles
     # answered as API; at API rates, everything the second run offers.
     rows = []
-    for name, (measured, up_to, about, _, _) in api_rows.items():
+    for name, (measured, up_to, about, _, _, lower) in api_rows.items():
         # A 1h main TTL makes cache writes dearer, so a change can save more on the plan.
         on_plan = min(plan_rows.get(name, [0.0] * 5)[4], measured + up_to)
-        rows.append((measured + up_to, on_plan, about, name))
+        rows.append((measured + up_to, on_plan, about, name, lower))
     # A change only the plan run offers, such as a 1h main TTL moved to 5m, saves nothing at
     # API rates, so the breakdown leaves it out.
     rows.sort(key=lambda r: (-r[0], r[3]))
@@ -343,22 +353,22 @@ def results(plan: str, api: str, paid: set[str], since: date, today: date) -> tu
     if rest:
         listed.append(
             (sum(r[0] for r in rest), sum(r[1] for r in rest), any(r[2] for r in rest),
-             f"Everything else ({len(rest)} settings)")
+             f"Everything else ({len(rest)} settings)", any(r[4] for r in rest))
         )
     top = max((r[0] for r in listed), default=0)
     items, css = [], []
-    for n, (whole, on_plan, about, name) in enumerate(listed, 1):
+    for n, (whole, on_plan, about, name, lower) in enumerate(listed, 1):
         tag = ' <span class="tag">API only</span>' if on_plan < 0.005 else ""
         # The bars are decorative, so a screen reader hears the split they draw as text.
         if on_plan < 0.005:
             split = ""
-        elif usd(on_plan, about) == usd(whole, about):
+        elif usd(on_plan, about, lower) == usd(whole, about, lower):
             split = '<span class="sr">, all of it on my subscription too</span>'
         else:
-            split = f'<span class="sr">, {usd(on_plan, about)}/mo of it on my subscription too</span>'
+            split = f'<span class="sr">, {usd(on_plan, about, lower)}/mo of it on my subscription too</span>'
         items.append(
             f'    <li><span class="name">{html.escape(name)}{tag}</span>'
-            f'<span class="amt">{usd(whole, about)}<small>/mo</small></span>{split}'
+            f'<span class="amt">{usd(whole, about, lower)}<small>/mo</small></span>{split}'
             f'<span class="track" aria-hidden="true"><i class="plan"></i><i class="api"></i></span></li>'
         )
         # A saving too small to see keeps a sliver; one of nothing keeps none.
@@ -369,6 +379,8 @@ def results(plan: str, api: str, paid: set[str], since: date, today: date) -> tu
             f".breakdown li:nth-child({n}) .plan {{ width: {max(plan_w, 0.3) if on_plan else 0:.1f}%; }}\n"
             f".breakdown li:nth-child({n}) .api {{ width: {max(api_w, 0.3) if whole - on_plan >= 0.005 else 0:.1f}%; }}\n"
         )
+    lowers = plan_lower or api_lower or any(r[4] for r in listed)
+    bound = " ≥ marks savings priced only in part." if lowers else ""
     breakdown = f"""  <h3 class="where">Where it comes from, at API rates</h3>
   <ol class="breakdown">
 {chr(10).join(items)}
@@ -385,18 +397,18 @@ def results(plan: str, api: str, paid: set[str], since: date, today: date) -> tu
   <div class="cols">
     <div class="col plan">
       <h3>On my subscription</h3>
-      <p class="big">{plan_pct}%<small> saved</small></p>
-      <p>{usd(plan_usd, plan_about)}/mo at API rates</p>
+      <p class="big">{"≥" if plan_lower else ""}{plan_pct}%<small> saved</small></p>
+      <p>{usd(plan_usd, plan_about, plan_lower)}/mo at API rates</p>
     </div>
     <div class="col api">
       <h3>If I used the API</h3>
-      <p class="big">{api_pct}%<small> saved</small></p>
-      <p>{usd(api_usd, api_about)}/mo</p>
+      <p class="big">{"≥" if api_lower else ""}{api_pct}%<small> saved</small></p>
+      <p>{usd(api_usd, api_about, api_lower)}/mo</p>
     </div>
   </div>
-{breakdown}  <p class="fine">Replayed at public API prices on {hosts} of my machines on {today.isoformat()}, each change
+{breakdown}  <p class="fine">Replayed at public API prices on {hosts} of my machines on {now.date().isoformat()}, each change
   priced alone, so together they may save less. ~ marks figures extrapolated over unpriced requests,
-  assuming they resemble the priced ones.</p>
+  assuming they resemble the priced ones.{bound}</p>
 """
     return fragment, "".join(css)
 
@@ -431,13 +443,13 @@ def main() -> None:
         sys.exit("pass one --since YYYY-MM-DD, so the usage boxes can name their window")
     since = date.fromisoformat(starts[0])
     typed = " ".join(command)
+    # Doctor dates its window in UTC, ending when it runs.
+    now = datetime.now(timezone.utc)
     transcript = run(command, answers)
     # The same run with every profile answered as API, for the results' API-rate column.
     api = run(command, {profile: "a" for profile in answers})
     run_steps, questions = steps(transcript)
-    # Doctor dates its window in UTC.
-    today = datetime.now(timezone.utc).date()
-    figures, bars = results(transcript, api, {p for p, a in answers.items() if a == "a"}, since, today)
+    figures, bars = results(transcript, api, {p for p, a in answers.items() if a == "a"}, since, now)
     body = "".join(f'<span class="step">{chr(10).join(s)}\n</span>' for s in run_steps)
     fragment = f'<pre class="screen"><code><span class="cmdline">$ <span class="typed">{typed}</span>\n</span>{body}</code></pre>'
     replace(site / "index.html", "<!-- doctor -->", "<!-- /doctor -->", fragment)

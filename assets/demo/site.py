@@ -385,7 +385,7 @@ def results(plan: str, api: str, paid: set[str]) -> tuple[str, str]:
       <p>{usd(plan_usd, plan_about)}/mo at API rates</p>
     </div>
     <div class="col api">
-      <h3>If I paid API rates</h3>
+      <h3>If I used the API</h3>
       <p class="big">{api_pct}%<small> saved</small></p>
       <p>{usd(api_usd, api_about)}/mo</p>
     </div>

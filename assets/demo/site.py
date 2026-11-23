@@ -268,8 +268,10 @@ def offered(transcript: str) -> tuple[re.Match, dict[str, tuple[float, bool, int
         sys.exit("the results need the hosts' total that --ssh prints")
     offer = {"measured": (0.0, False, 0), "up to": (0.0, False, 0)}
     sentence = re.search(r"Changes offered: (.*?)\.(?: |$)", plain[total.end():])
+    unmeasured = False
     for part in sentence[1].split(", plus ") if sentence else []:
         if re.search(r"not measured(; overlapping changes may save less)?$", part):
+            unmeasured = True
             continue
         m = AMOUNT.match(part)
         if not m:
@@ -278,6 +280,9 @@ def offered(transcript: str) -> tuple[re.Match, dict[str, tuple[float, bool, int
         usd = 0.0 if m[2] else dollars(m[3])
         pct = 0 if m[4] else int(m[5])
         offer["up to" if part.startswith("up to ") else "measured"] = (usd, bool(m[1]), pct)
+    # A 0% beside changes whose savings went unmeasured would claim what doctor did not.
+    if unmeasured and not any(usd for usd, _, _ in offer.values()):
+        sys.exit("the run measured none of its changes' savings, so the results have nothing to show")
     return total, offer
 
 
@@ -341,8 +346,9 @@ def results(plan: str, api: str, paid: set[str]) -> tuple[str, str]:
             f'<span class="track" aria-hidden="true"><i class="plan"></i><i class="api"></i></span></li>'
         )
         # A saving too small to see keeps a sliver; one of nothing keeps none.
-        plan_w = 100 * on_plan / top
-        api_w = 100 * (whole - on_plan) / top
+        # Rows of only "<$0.01" leave no length to scale by.
+        plan_w = 100 * on_plan / top if top else 0
+        api_w = 100 * (whole - on_plan) / top if top else 0
         css.append(
             f".breakdown li:nth-child({n}) .plan {{ width: {max(plan_w, 0.3) if on_plan else 0:.1f}%; }}\n"
             f".breakdown li:nth-child({n}) .api {{ width: {max(api_w, 0.3) if whole - on_plan >= 0.005 else 0:.1f}%; }}\n"

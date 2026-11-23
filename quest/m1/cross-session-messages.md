@@ -16,20 +16,25 @@ Decided 2026-11-23 (maintainer, /quest-plan after Claude Code's
 That doc lists cross-session messages as a cause of usage climbing in a long
 session: Claude Code delivers each one to an idle session as a new turn that
 resends the full context, and a break past the cache TTL makes that turn a
-cache miss. `crossSessionInbound: hold` shows the message as a notice that
-reaches Claude only once you approve it, and `refuse` drops it
+cache miss. `crossSessionInbound: hold` shows each message as a notice and
+keeps it undelivered until an `accept` later applies, and `refuse` drops it
+(the approval dialog belongs to the default when no value is set)
 ([settings reference](https://code.claude.com/docs/en/settings-reference#crosssessioninbound),
 [cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging#control-inbound-messages)).
 
 - Cost basis: ✅ every request of each idle turn a delivered message started,
-  since that turn is what `hold` removes (rejected: only the cache rebuild
+  since `refuse` removes that turn and `hold` defers it until an `accept`
+  releases the message, which can still start a turn then (rejected: only the cache rebuild
   when a message wakes a session past its TTL, which is smaller but not what
   the setting removes). The work done in that turn is the capability
   traded, priced as a tool's or auto memory's would be.
 - Verdict: ✅ evidence only, with no verdict and no offer (rejected: judged
   like a tool against `--max-cost-per-use` with `hold` offered; offering
   `refuse`). Orchestrators such as quest-run depend on these messages, so a
-  high cost per message does not mean the messages should stop.
+  high cost per message does not mean the messages should stop. This is a
+  deliberate exception to AGENTS.md's usage-based verdict for features, as
+  the subagent-model and effort lines are; "never used" cannot arise anyway,
+  since a line with no deliveries costs nothing.
 
 Recommendations:
 

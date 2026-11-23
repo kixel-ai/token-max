@@ -377,7 +377,10 @@ fn a_remote_report_matches_running_there() {
     assert_eq!(status, 1);
     // One total heads the report, beside each host's own section.
     assert!(
-        text.starts_with("token-max: total over 2 hosts  4 requests in 2 sessions, "),
+        // Each host recorded 1,020 and 1,120 tokens, cache included.
+        text.starts_with(
+            "token-max: total over 2 hosts  4 requests and 4,280 tokens in 2 sessions, "
+        ),
         "{text}"
     );
     assert!(text.contains("\n  Changes offered: "), "{text}");

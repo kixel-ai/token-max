@@ -1,8 +1,8 @@
 #!/bin/sh
 # Runs `token-max doctor` from the latest release without installing it:
 #
-#   curl -LsSf https://max.kixel.ai/run.sh | sh
-#   curl -LsSf https://max.kixel.ai/run.sh | sh -s -- --since 2026-11-01
+#   curl -LsSf https://max.kixel.me/run.sh | sh
+#   curl -LsSf https://max.kixel.me/run.sh | sh -s -- --since 2026-11-01
 #
 # The binary is checked against its release checksum, cached under
 # ${XDG_CACHE_HOME:-~/.cache}/token-max/run, and reused while it is the latest. Each

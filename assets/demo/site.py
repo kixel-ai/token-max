@@ -1,30 +1,36 @@
-"""Write max.kixel.ai's terminal: the maintainer's `token-max doctor --defaults`, as HTML.
+"""Write max.kixel.me's terminal: the maintainer's `token-max doctor --defaults`, as HTML.
 
 Usage, from the repository root after `cargo build --release`, on the maintainer's host:
-    python3 assets/demo/site.py site/public ~/.claude=p ~/.claude-api-credits=a --ssh desktop ...
+    python3 assets/demo/site.py site/public ~/.claude=p ~/.claude-api-credits=a --since 2026-10-25 --ssh desktop ...
 
 Runs the release binary in a pseudo-terminal against this host's own transcripts and those of
 any --ssh destination, passing every argument that is not a PROFILE=ANSWER on to doctor and
 answering each "How is PROFILE paid for?" question with the PROFILE=ANSWER given for it, and replaces
 what sits between index.html's <!-- doctor --> and <!-- /doctor --> markers. Each question
 becomes a .step the page reveals in turn, then each section of the report; the run's timing
-goes between style.css's run markers, since the page's CSP allows no inline styles. The
-hosts' total, which --ssh prints, fills the results section between index.html's
-<!-- results --> markers, so the page shows one set of figures. The
+goes between style.css's run markers, since the page's CSP allows no inline styles. Two more
+runs on a terminal too wide to wrap a row repeat it and answer every profile as API. The hosts'
+totals, which --ssh prints, and their changes fill the results section between index.html's
+<!-- results --> markers: the shown run's usage and saving on the subscription, the API run's
+saving at API rates, and both wide runs' changes ranked by setting. The
 EVERYTHING ELSE section is cut to one line: it is hundreds of lines long, and it names
 project files, which can belong to private repositories. Read the result before committing it.
 """
 
 import html
+import math
 import os
 import pty
 import re
 import sys
-from datetime import date
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 COMMAND = ["token-max", "doctor", "--defaults"]
 COLUMNS = 100
+# The runs the results parse are this wide, so no change row wraps: a wrap can break at a column
+# gap or inside a name, which leave the same text.
+WIDE = 10000
 # Every question ends in its dim choices, then ": ".
 PROMPT = re.compile(rb"\x1b\[0m: $")
 SGR = re.compile(r"\x1b\[([0-9;]*)m")
@@ -39,8 +45,8 @@ TOTAL = re.compile(r"^token-max: total over ")
 SUMMARY = re.compile(r"^  \d[\d,]* changes? ")
 
 
-def run(command: list[str], answers: dict[str, str]) -> str:
-    """Answer each question once its prompt shows, then read to exit."""
+def run(command: list[str], answers: dict[str, str], columns: int) -> str:
+    """Answer each question once its prompt shows, then read to exit, on a terminal `columns` wide."""
     root = Path.cwd()
     env = {
         "HOME": os.environ["HOME"],
@@ -54,7 +60,7 @@ def run(command: list[str], answers: dict[str, str]) -> str:
         import struct
         import termios
 
-        fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 50, COLUMNS, 0, 0))
+        fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 50, columns, 0, 0))
         # Progress goes to stderr on a terminal; the page shows only the report.
         devnull = os.open(os.devnull, os.O_WRONLY)
         os.dup2(devnull, 2)
@@ -189,47 +195,229 @@ def timing(typed: str, count: int, questions: int) -> str:
     return "\n".join(rules) + "\n"
 
 
-def results(transcript: str) -> tuple[str, str]:
-    """The results section's figures and its meter's CSS, from the hosts' total."""
-    plain = " ".join(SGR.sub("", line).strip() for line in transcript.replace("\r", "").split("\n"))
-    total = re.search(
-        r"token-max: total over (\d+) hosts\s+([\d,]+) requests in ([\d,]+) sessions, (~?)\$([\d,]+)",
-        plain,
-    )
-    offered = re.search(
-        r"Changes offered: (~?)\$([\d,]+)/mo[^,]*, (\d+)% of these hosts' spend"
-        r"(?:, plus up to ~?\$([\d,]+)/mo[^,]*, \d+% of these hosts' spend, from (\d+) changes?)?",
-        plain,
-    )
-    if not total or not offered:
+def plain_lines(transcript: str) -> list[str]:
+    """The run's lines without colors, each as its last overwrite left it."""
+    return [SGR.sub("", line.split("\r")[-1]) for line in transcript.replace("\r\n", "\n").split("\n")]
+
+
+def dollars(text: str) -> float:
+    return float(text.replace(",", ""))
+
+
+# One change in a report's CHANGES section: its setting, the saving's verb, ~ and amount.
+CHANGE = re.compile(
+    r"^  ● (?P<name>\S.*?\S)\s{2,}\S.*?→ (?P<to>\S+).*?\s{2,}saves\s+(?P<verb>up to\s+|at least\s+)?"
+    r"(?P<about>~?)(?P<lt><?)\$(?P<usd>[\d,.]+)/mo"
+)
+
+
+def changes(transcript: str, api: set[str], api_rates: bool) -> dict[str, list]:
+    """Each setting's offered saving summed over every host's CHANGES section of a WIDE run, as
+    [measured $/mo, $/mo that depends on how a profile pays, whether any part has a ~,
+    how many lines, the measured $/mo outside this host's profiles in `api`, whether any part is
+    a lower bound]. `api_rates` says
+    every profile doctor asked about was answered as API."""
+    rows: dict[str, list] = {}
+    section, here = None, False
+    for plain in plain_lines(transcript):
+        if TITLE.match(plain):
+            section, here = None, plain.startswith("token-max: this host ")
+        elif HEADING.match(plain):
+            section = plain.split()[0]
+        elif section == "CHANGES" and plain.startswith("  ● "):
+            # A change whose saving was not measured, or one priced only as what it costs,
+            # such as a Codex catalog skill's listing, promises no saving.
+            if not re.search(r"\ssaves\s", plain):
+                if not re.search(r"\ssaving not measured(\s{2}|$)|\scosts\s", plain.rstrip()):
+                    sys.exit(f"unparsed change line {plain.strip()!r}")
+                continue
+            m = CHANGE.match(plain)
+            if not m:
+                sys.exit(f"unparsed change line {plain.strip()!r}")
+            up_to = bool(m["verb"]) and m["verb"].startswith("up to")
+            # "Up to" prices an unset main TTL against the default it would replace, which the
+            # API's 5m is only for a change to 1h.
+            if api_rates and up_to and m["to"] != "1h":
+                sys.exit(f"cannot price {plain.strip()!r} at API rates without that profile's billing")
+            # After its saving, a change names the file it edits, such as
+            # [~/.claude/settings.json], unless its host has one profile.
+            path = re.match(r"[^\[]*?\s{2}\[([^\]]+)\]", plain[m.end():])
+            paid = here and (
+                any(path[1].startswith(root + "/") for root in api) if path else bool(api)
+            )
+            # "<$0.01" counts as nothing.
+            usd = 0.0 if m["lt"] else dollars(m["usd"])
+            row = rows.setdefault(m["name"], [0.0, 0.0, False, 0, 0.0, False])
+            row[1 if up_to else 0] += usd
+            row[2] |= bool(m["about"])
+            row[3] += 1
+            # "At least" leaves part of the saving unpriced, so the figure is a lower bound.
+            row[5] |= bool(m["verb"]) and m["verb"].startswith("at least")
+            if not up_to and not paid:
+                row[4] += usd
+    return rows
+
+
+# The hosts' total, which --ssh prints, with what they spent at API prices, then what their
+# changes offer.
+TOTAL_LINE = re.compile(
+    r"token-max: total over (\d+) hosts\s+([\d,]+) requests and ([\d,]+) tokens in [\d,]+ sessions?, "
+    r"(.*?) at API prices"
+)
+# A whole spend, as doctor prints it without unpriced requests: an amount, perhaps with a margin.
+SPENT = re.compile(r"(~?)\$([\d,.]+)(?: ± <?\$[\d,.]+|, margin unknown)?")
+# One part of the "Changes offered" sentence: its amount and its percent of the hosts' spend.
+AMOUNT = re.compile(r"^(?:up to )?(?:about )?(~?)(<?)\$([\d,.]+)/mo.*?, (<?)(\d+)% of these hosts' spend")
+
+
+def offered(transcript: str) -> tuple[re.Match, dict[str, tuple[float, bool, int, bool]]]:
+    """The hosts' total, and what their changes offer as (usd, has a ~, percent, is a lower
+    bound) for "measured"
+    and "up to"; a run with nothing to offer prints no "Changes offered" sentence."""
+    plain = " ".join(line.strip() for line in plain_lines(transcript))
+    total = TOTAL_LINE.search(plain)
+    if not total:
         sys.exit("the results need the hosts' total that --ssh prints")
-    hosts, requests, sessions, about, spend = total.groups()
-    saves_about, saves, pct, up_to, depends = offered.groups()
-    kept = int(spend.replace(",", "")) - int(saves.replace(",", ""))
-    caveat = (
-        f", except {depends} whose saving depends on how a profile pays, which would save up to ~${up_to}/mo more"
-        if up_to
-        else ""
-    )
+    offer = {"measured": (0.0, False, 0, False), "up to": (0.0, False, 0, False)}
+    sentence = re.search(r"Changes offered: (.*?)\.(?: |$)", plain[total.end():])
+    unmeasured = False
+    for part in sentence[1].split(", plus ") if sentence else []:
+        if re.search(r"not measured(; overlapping changes may save less)?$", part):
+            unmeasured = True
+            continue
+        m = AMOUNT.match(part)
+        if not m:
+            sys.exit(f"unparsed offer {part!r}")
+        # "<$1" and "<1%" count as nothing.
+        usd = 0.0 if m[2] else dollars(m[3])
+        pct = 0 if m[4] else int(m[5])
+        # Changes "priced only in part" make the measured amount a lower bound.
+        lower = ", more where " in part
+        offer["up to" if part.startswith("up to ") else "measured"] = (usd, bool(m[1]), pct, lower)
+    # A 0% beside changes whose savings went unmeasured would claim what doctor did not.
+    if unmeasured and not any(usd for usd, *_ in offer.values()):
+        sys.exit("the run measured none of its changes' savings, so the results have nothing to show")
+    return total, offer
+
+
+def usd(value: float, about: bool, lower: bool = False) -> str:
+    return f"{'≥' if lower else ''}{'~' if about else ''}${value:,.0f}"
+
+
+def billions(tokens: int) -> str:
+    return f"{tokens / 1e9:.1f}B" if tokens >= 1e9 else f"{tokens / 1e6:.0f}M"
+
+
+# The breakdown names this many settings, then one row for every other one.
+LISTED = 5
+
+
+def results(shown: str, plan: str, api: str, paid: set[str], since: date, now: datetime) -> tuple[str, str]:
+    """The results section and its bars' CSS: the shown run, whose totals the page's terminal
+    prints, and two WIDE runs whose rows it parses: the plan run as the maintainer pays, and the
+    run with every profile answered as API. Doctor asks only about this host's profiles, so a
+    destination's main-TTL change stays "up to"; billing picks only that change's default, and
+    for a change to 1h "up to" prices it against the API's 5m, so it counts in full at API rates.
+    A destination's profiles count as the subscription, since their billing is unknown."""
+    # The boxes and the subscription column repeat the terminal's figures; the rows come from
+    # a later run, so they are checked against that run's own totals.
+    total, shown_offer = offered(shown)
+    hosts, requests, tokens, spent_text = total.groups()
+    spent = SPENT.fullmatch(spent_text)
+    if not spent:
+        sys.exit(f"the usage boxes need a whole spend, not {spent_text!r}")
+    # Every host's spend covers --since to the run, so the window is the same for the total;
+    # count its days as doctor does, rounded to the nearest and at least one.
+    start = datetime.combine(since, time(), timezone.utc)
+    days = max(1, math.floor((now - start) / timedelta(days=1) + 0.5))
+    plan_usd, plan_about, plan_pct, plan_lower = shown_offer["measured"]
+    _, plan_offer = offered(plan)
+    _, api_offer = offered(api)
+    api_about = api_offer["measured"][1] or api_offer["up to"][1]
+    api_lower = api_offer["measured"][3]
+    api_usd = api_offer["measured"][0] + api_offer["up to"][0]
+    # Each percent is of the same spend, so they add; each was rounded, so the sum may be one off.
+    api_pct = api_offer["measured"][2] + api_offer["up to"][2]
+    plan_rows, api_rows = changes(plan, paid, False), changes(api, set(), True)
+    # The rows must add up to the totals, each rounded to at most a dollar's half.
+    for rows_, offer in ((plan_rows, plan_offer), (api_rows, api_offer)):
+        slack = 0.5 * (sum(r[3] for r in rows_.values()) + 1)
+        for part, key in ((0, "measured"), (1, "up to")):
+            summed = sum(r[part] for r in rows_.values())
+            if abs(summed - offer[key][0]) > slack:
+                sys.exit(f"the changes add up to ${summed:,.2f}/mo, not the total's ${offer[key][0]:,.2f}/mo")
+    # A setting saves on the subscription what the first run measured outside the profiles
+    # answered as API; at API rates, everything the second run offers.
+    rows = []
+    for name, (measured, up_to, about, _, _, lower) in api_rows.items():
+        # A 1h main TTL makes cache writes dearer, so a change can save more on the plan.
+        on_plan = min(plan_rows.get(name, [0.0] * 5)[4], measured + up_to)
+        rows.append((measured + up_to, on_plan, about, name, lower))
+    # A change only the plan run offers, such as a 1h main TTL moved to 5m, saves nothing at
+    # API rates, so the breakdown leaves it out.
+    rows.sort(key=lambda r: (-r[0], r[3]))
+    listed, rest = rows[:LISTED], rows[LISTED:]
+    if rest:
+        listed.append(
+            (sum(r[0] for r in rest), sum(r[1] for r in rest), any(r[2] for r in rest),
+             f"Everything else ({len(rest)} settings)", any(r[4] for r in rest))
+        )
+    top = max((r[0] for r in listed), default=0)
+    items, css = [], []
+    for n, (whole, on_plan, about, name, lower) in enumerate(listed, 1):
+        tag = ' <span class="tag">API only</span>' if on_plan < 0.005 else ""
+        # The bars are decorative, so a screen reader hears the split they draw as text.
+        if on_plan < 0.005:
+            split = ""
+        elif usd(on_plan, about, lower) == usd(whole, about, lower):
+            split = '<span class="sr">, all of it on my subscription too</span>'
+        else:
+            split = f'<span class="sr">, {usd(on_plan, about, lower)}/mo of it on my subscription too</span>'
+        items.append(
+            f'    <li><span class="name">{html.escape(name)}{tag}</span>'
+            f'<span class="amt">{usd(whole, about, lower)}<small>/mo</small></span>{split}'
+            f'<span class="track" aria-hidden="true"><i class="plan"></i><i class="api"></i></span></li>'
+        )
+        # A saving too small to see keeps a sliver; one of nothing keeps none.
+        # Rows of only "<$0.01" leave no length to scale by.
+        plan_w = 100 * on_plan / top if top else 0
+        api_w = 100 * (whole - on_plan) / top if top else 0
+        css.append(
+            f".breakdown li:nth-child({n}) .plan {{ width: {max(plan_w, 0.3) if on_plan else 0:.1f}%; }}\n"
+            f".breakdown li:nth-child({n}) .api {{ width: {max(api_w, 0.3) if whole - on_plan >= 0.005 else 0:.1f}%; }}\n"
+        )
+    lowers = plan_lower or api_lower or any(r[4] for r in listed)
+    bound = " ≥ marks savings priced only in part." if lowers else ""
+    breakdown = f"""  <h3 class="where">Where it comes from, at API rates</h3>
+  <ol class="breakdown">
+{chr(10).join(items)}
+  </ol>
+  <p class="key"><span class="k-plan">saves on my subscription too</span><span class="k-api">saves only at API rates</span></p>
+""" if items else ""
     fragment = f"""
-  <dl class="stats">
-    <div class="stat"><dt>API cost</dt><dd>{about}${spend}</dd></div>
-    <div class="stat"><dt>Sessions</dt><dd>{sessions}</dd></div>
-    <div class="stat save"><dt>Estimated savings<a href="#fn" class="star">*</a></dt><dd>{saves_about}${saves}<small>/mo</small></dd><dd class="pct">{pct}% of spend</dd></div>
-  </dl>
-  <div class="meter" role="img" aria-label="Savings are {pct}% of the ${spend} spent">
-    <span class="kept"></span><span class="cut"></span>
+  <div class="stats">
+    <div class="stat"><h3>Tokens</h3><p>{billions(int(tokens.replace(",", "")))}</p></div>
+    <div class="stat"><h3>Requests</h3><p>{requests}</p></div>
+    <div class="stat"><h3>API price, {days} day{"" if days == 1 else "s"}</h3><p>{spent[1]}${spent[2]}</p></div>
   </div>
-  <p class="meter-key"><span>${kept:,} still spent</span><span>${saves} saved</span></p>
-  <p class="fine" id="fn">* At public API prices, across {requests} Claude Code, Codex and T3 Code
-  requests on {hosts} of my machines, in the run above on {date.today().isoformat()}. Most of it ran on a
-  subscription, which is subsidized, so on a plan the saving shows up as usage limits that
-  last longer rather than dollars. The savings are every change
-  <code>token-max doctor --defaults</code> would make for a user with no settings files{caveat}.
-  ~ marks figures extrapolated over requests that could not be priced.</p>
+  <h3 class="where">What token-max saves</h3>
+  <div class="cols">
+    <div class="col plan">
+      <h3>On my subscription</h3>
+      <p class="big">{"≥" if plan_lower else ""}{plan_pct}%<small> saved</small></p>
+      <p>{usd(plan_usd, plan_about, plan_lower)}/mo at API rates</p>
+    </div>
+    <div class="col api">
+      <h3>If I used the API</h3>
+      <p class="big">{"≥" if api_lower else ""}{api_pct}%<small> saved</small></p>
+      <p>{usd(api_usd, api_about, api_lower)}/mo</p>
+    </div>
+  </div>
+{breakdown}  <p class="fine">Replayed at public API prices on {hosts} of my machines on {now.date().isoformat()}, each change
+  priced alone, so together they may save less. ~ marks figures extrapolated over unpriced requests,
+  assuming they resemble the priced ones.{bound}</p>
 """
-    meter = f".meter .kept {{ flex: {100 - int(pct)}; }}\n.meter .cut {{ flex: {pct}; }}\n"
-    return fragment, meter
+    return fragment, "".join(css)
 
 
 def replace(path: Path, start: str, end: str, body: str) -> None:
@@ -255,19 +443,31 @@ def main() -> None:
             sys.exit(f"{arg!r} is not PROFILE=p, PROFILE=a or PROFILE=s")
         home = os.environ["HOME"]
         answers["~" + profile[len(home) :] if profile.startswith(home) else profile] = answer
+    # The usage boxes name the window, so the run must set its start.
+    starts = [command[i + 1] for i, arg in enumerate(command[:-1]) if arg == "--since"]
+    starts += [arg.removeprefix("--since=") for arg in command if arg.startswith("--since=")]
+    if len(starts) != 1:
+        sys.exit("pass one --since YYYY-MM-DD, so the usage boxes can name their window")
+    since = date.fromisoformat(starts[0])
     typed = " ".join(command)
-    transcript = run(command, answers)
+    # Doctor dates its window in UTC, ending when it runs.
+    now = datetime.now(timezone.utc)
+    transcript = run(command, answers, COLUMNS)
+    # The results parse each change's row from runs too wide to wrap one: the same run, and one
+    # with every profile answered as API for the API-rate column.
+    plan = run(command, answers, WIDE)
+    api = run(command, {profile: "a" for profile in answers}, WIDE)
     run_steps, questions = steps(transcript)
-    figures, meter = results(transcript)
+    figures, bars = results(transcript, plan, api, {p for p, a in answers.items() if a == "a"}, since, now)
     body = "".join(f'<span class="step">{chr(10).join(s)}\n</span>' for s in run_steps)
     fragment = f'<pre class="screen"><code><span class="cmdline">$ <span class="typed">{typed}</span>\n</span>{body}</code></pre>'
     replace(site / "index.html", "<!-- doctor -->", "<!-- /doctor -->", fragment)
     replace(site / "index.html", "<!-- results -->", "<!-- /results -->", figures)
     replace(
         site / "style.css",
-        "/* run: assets/demo/site.py writes the run's timing and the results meter here */\n",
+        "/* run: assets/demo/site.py writes the run's timing and the breakdown's bars here */\n",
         "/* /run */",
-        timing(typed, len(run_steps), questions) + meter,
+        timing(typed, len(run_steps), questions) + bars,
     )
 
 

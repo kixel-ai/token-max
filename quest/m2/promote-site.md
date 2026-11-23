@@ -23,14 +23,9 @@ the headline and the run line. The redesign from
 [kixel-ai/token-max#194](https://github.com/kixel-ai/token-max/pull/194).
 
 Tried 2026-11-22 (maintainer, /quest-run): the page "looks nice". The
-requested tweaks, including the move to max.kixel.me, are
-[their own quest](/quest/m2/personal-site.md). Promote the page once that
-quest lands.
+requested tweaks, including the move to max.kixel.me, landed with the
+personal-site quest's PR; promote the page once max.kixel.ai redirects to it.
 
 ## Waiting
 
 - Maintainer: once the tweaks are deployed, open https://max.kixel.me, try it on a desktop and a phone, and promote it; report anything to change as a new quest. Only the maintainer can judge the page and post as themselves.
-
-## Required
-
-- [Personal site](/quest/m2/personal-site.md) - the page on max.kixel.me with the maintainer's tweaks, which is the one to promote

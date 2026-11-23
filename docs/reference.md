@@ -12,8 +12,8 @@ directory. Reports go to stdout; diagnostics go to stderr; exit codes are as
 described below. Ctrl-C cancels the running analysis: SIGINT or SIGTERM exits 2
 with no success report.
 
-`curl -LsSf https://max.kixel.ai/run.sh | sh` and, on Windows,
-`irm https://max.kixel.ai/run.ps1 | iex` run `token-max doctor` from the
+`curl -LsSf https://max.kixel.me/run.sh | sh` and, on Windows,
+`irm https://max.kixel.me/run.ps1 | iex` run `token-max doctor` from the
 latest release without installing it. Each downloads the release archive for
 this platform, refuses it unless it matches the release's `.sha256` file, and
 keeps the binary in `token-max/run` under `$XDG_CACHE_HOME` or `~/.cache`,
@@ -22,9 +22,9 @@ release; a newer one is downloaded beside it, and deleting the directory
 reclaims the space. `run.sh` hands `doctor` the
 terminal from `/dev/tty`, since its stdin is the piped script, so the changes
 are still offered. Options go after `sh -s --`, as in
-`curl -LsSf https://max.kixel.ai/run.sh | sh -s -- --since 2026-11-01`, or
+`curl -LsSf https://max.kixel.me/run.sh | sh -s -- --since 2026-11-01`, or
 in PowerShell,
-`& ([scriptblock]::Create((irm https://max.kixel.ai/run.ps1))) --since 2026-11-01`.
+`& ([scriptblock]::Create((irm https://max.kixel.me/run.ps1))) --since 2026-11-01`.
 `install.sh` and `install.ps1` redirect to the release's own installers.
 
 ## Applying changes
@@ -1025,7 +1025,7 @@ linked build to run here instead, such as the release installers'.
 
 Each host is analyzed on its own and gets its own section, labeled with the
 destination, or `this host`. A run of several hosts heads its report with one
-total: the hosts' requests and sessions, their spend at API prices, and the sum of what the
+total: the hosts' requests, the input and output tokens they recorded (cache reads and writes included) and their sessions, their spend at API prices, and the sum of what the
 changes they offer save every 30 days, with each saving's percent of the hosts'
 spend together. Offered changes may overlap, within a host or between hosts, so
 applying them all can save less than that sum, as the total says. The hosts' figures are added as they are, so a history copied between

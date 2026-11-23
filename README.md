@@ -122,6 +122,7 @@ token-max doctor --help
 | Keepalive pings | Whether pinging idle sessions would beat the cache misses |
 | Subagent types | What each cost, which model and effort it ran on, and the same tokens on the cheapest current model |
 | Fable weekly use | Each week's Fable spend |
+| Messages from other sessions | What the turns messages from your other Claude Code sessions started cost, and how many arrived |
 
 Provider guidance the transcripts can't price, such as Claude Code's advice to
 keep a CLAUDE.md under 200 lines, appears as a cited warning after the lines,

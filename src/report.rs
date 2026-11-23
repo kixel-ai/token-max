@@ -14,10 +14,10 @@ use crate::keepalive::duration as keepalive_duration;
 use crate::model::{
     Action, BackgroundCheck, BackgroundFeature, BashCapCheck, Billing, CacheReplayEvidence,
     CheckBase, CheckResult, ContextCost, ContextKind, ControlValue, Cost, Coverage, EffortCheck,
-    EffortRun, Estimate, EstimateEvidence, Evidence, FableUse, FableWeek, Harness, KeepaliveCheck,
-    Margin, MemoryCheck, Millis, ModelSource, PeriodStatus, Profile, Report, RequestEvidence,
-    ReturnTiming, Scalar, Share, SubagentCost, T3IdleCheck, T3TextGeneration, Ttl, UsageEstimate,
-    Verdict,
+    EffortRun, Estimate, EstimateEvidence, Evidence, FableUse, FableWeek, Harness, InboundControl,
+    InboundUse, KeepaliveCheck, Margin, MemoryCheck, Millis, ModelSource, PeriodStatus, Profile,
+    Report, RequestEvidence, ReturnTiming, Scalar, Share, SubagentCost, T3IdleCheck,
+    T3TextGeneration, Ttl, UsageEstimate, Verdict,
 };
 use crate::prices::{TIER_SENSITIVITY, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
@@ -1616,6 +1616,39 @@ fn details(report: &Report, out: &mut Out<'_>) {
         }
     }
 
+    if !report.inbound.is_empty() {
+        out.section("Messages from other sessions");
+        for u in &report.inbound {
+            out.blank();
+            let names: Vec<String> = u.profiles.iter().map(|p| out.profile_name(p)).collect();
+            out.line(&names.join(", "), 0, BOLD);
+            out.field("Value", &inbound_value(&u.control));
+            out.field(
+                "Set in",
+                &format!("{}:crossSessionInbound", out.home(&u.control.file)),
+            );
+            out.field("Read from", &inbound_read(&u.control, out));
+            if let Some(why) = &u.control.unresolved {
+                out.field("Unresolved", why);
+            }
+            out.field(
+                "Started turns",
+                &format!(
+                    "{}, {}",
+                    plural(u.idle, "message"),
+                    plural(u.requests, "request")
+                ),
+            );
+            if u.idle > 0 {
+                out.estimate("Those turns", &u.cost, u.estimate);
+            }
+            out.field(
+                "Between tool calls",
+                &format!("{}, not priced", plural(u.busy, "message")),
+            );
+        }
+    }
+
     out.section("Recorded usage and coverage");
     out.field(
         "Attribution",
@@ -1967,6 +2000,88 @@ fn fable_row(u: &FableUse) -> Row {
         plural(u.requests, "Fable request"),
         weeks.join(", ")
     );
+    row
+}
+
+/// The pages that document `crossSessionInbound` and how a message reaches a session.
+const INBOUND_SOURCES: [&str; 2] = [
+    "https://code.claude.com/docs/en/settings-reference#crosssessioninbound",
+    "https://code.claude.com/docs/en/cross-session-messaging#control-inbound-messages",
+];
+
+/// Why the line has no verdict.
+const INBOUND_NO_VERDICT: &str = "Hold or refuse would remove the turns these messages start and the work done in them, which sessions that coordinate depend on, so the line gives no verdict.";
+
+/// What Claude Code does with a message when no file sets `crossSessionInbound`.
+const INBOUND_UNSET: &str = "With no value set, Claude Code delivers a message when both sessions bypass permission prompts or neither does, and holds it for approval otherwise.";
+
+/// Which files the value was read from, and what may outrank them unrecorded.
+fn inbound_read(c: &InboundControl, out: &Out<'_>) -> String {
+    let flag = "a --settings flag would outrank these files and is not recorded";
+    match &c.directory {
+        Some(cwd) => format!(
+            "managed, user, project and local settings at {}, the latest session's directory; {flag}",
+            out.home(cwd)
+        ),
+        None => format!("managed and user settings; {flag}"),
+    }
+}
+
+/// The current `crossSessionInbound` value, or what Claude Code does with none set.
+fn inbound_value(c: &InboundControl) -> String {
+    match (&c.unresolved, c.value) {
+        (Some(_), _) => "unknown".into(),
+        (None, Some(value)) => value.as_str().into(),
+        (None, None) => "unset, by permission mode".into(),
+    }
+}
+
+/// The turns messages from other sessions started, with no verdict: orchestrators depend on
+/// these messages, so their cost says nothing about whether to stop them.
+fn inbound_row(u: &InboundUse, out: &Out<'_>) -> Row {
+    let mut row = Row::new(
+        Mark::Info,
+        "Messages from other sessions".into(),
+        "Lets your other Claude Code sessions message this one; a message to an idle session starts a turn that resends the whole conversation.".into(),
+    );
+    row.value = inbound_value(&u.control);
+    row.sources = INBOUND_SOURCES.to_vec();
+    let c = &u.control;
+    row.setting = format!("{}:crossSessionInbound", out.home(&c.file));
+    let mut parts = vec![];
+    if let Some(why) = &c.unresolved {
+        parts.push(not_enough(why) + ".");
+    }
+    if u.idle + u.busy == 0 {
+        parts.push("No message from another session arrived in the window.".into());
+    } else if u.idle == 0 {
+        parts.push("No message from another session started a turn in the window.".into());
+    } else {
+        parts.push(format!(
+            "{} from other sessions started turns in an idle session, which with the subagents they started made {} costing {}.",
+            plural(u.idle, "message"),
+            plural(u.requests, "request"),
+            figure(u.estimate)
+        ));
+    }
+    if u.busy > 0 {
+        parts.push(format!(
+            "{} arrived between tool calls of a running turn, at a cost not measured.",
+            plural(u.busy, "more message")
+        ));
+    }
+    if u.idle + u.busy > 0 {
+        parts.push(INBOUND_NO_VERDICT.into());
+    }
+    if c.value.is_none() && c.unresolved.is_none() {
+        parts.push(INBOUND_UNSET.into());
+    }
+    parts.push(format!("Read from {}.", inbound_read(c, out)));
+    parts.push(format!(
+        "Set crossSessionInbound to accept, hold or refuse in {}.",
+        out.home(&c.file)
+    ));
+    row.evidence = parts.join(" ");
     row
 }
 
@@ -5702,6 +5817,19 @@ fn summary(
             .to_string();
         rows.push(row);
     }
+    for u in &report.inbound {
+        let mut row = inbound_row(u, out);
+        let owner = |p: &Profile| {
+            p.inbound
+                .as_ref()
+                .map_or_else(String::new, |c| format!("{}:crossSessionInbound", c.file))
+        };
+        row.profile = tag(&u.profiles, &owner, out);
+        if u.idle > 0 {
+            row.costs(u.estimate, false, &spend);
+        }
+        rows.push(row);
+    }
     for u in &report.fable {
         let mut row = fable_row(u);
         row.profile = tag(&u.profiles, &switch, out);
@@ -6650,6 +6778,7 @@ mod tests {
         Report {
             subagents: vec![],
             fable: vec![],
+            inbound: vec![],
             generated_at: "2026-12-01T00:00:00.000Z".into(),
             scan: Scan {
                 subagents: vec![],

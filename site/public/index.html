@@ -603,23 +603,23 @@
     <li>
       <span class="num">01</span>
       <h3>Read</h3>
-      <p>Claude Code, Codex and T3 Code record each request's token counts. token-max
-      streams them a line at a time and keeps the counts, times and IDs,
-      <strong>never a prompt or a reply</strong>.</p>
+      <p>Reads all of your Claude Code and Codex transcripts, including timestamps
+      and token counts, on this machine and any you name over SSH. It
+      <strong>never keeps a prompt or a reply</strong>.</p>
     </li>
     <li>
       <span class="num">02</span>
-      <h3>Replay</h3>
-      <p>For every request it rebuilds what was cached, when it was written and whether
-      it had expired by the next one, then <strong>plays the same sessions again</strong>
-      under the other setting.</p>
+      <h3>Estimate</h3>
+      <p>Estimates what is loaded into the context window, such as tools, skills and
+      MCP servers, and <strong>what causes an expensive cache miss</strong>, such as
+      a pause longer than the cache lasts.</p>
     </li>
     <li>
       <span class="num">03</span>
-      <h3>Price</h3>
-      <p>At public API prices from models.dev, its only network request. What it can't
-      price <strong>stays unknown, never zero</strong>. Then it offers each change, shows
-      the edit and backs the file up first, unless git already holds it.</p>
+      <h3>Replay</h3>
+      <p>Replays your sessions with different settings, such as the cache TTL or which
+      tools load, and prices each at public API prices to <strong>predict which would
+      save money</strong>.</p>
     </li>
   </ol>
 </section>

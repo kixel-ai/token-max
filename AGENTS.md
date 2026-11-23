@@ -4,12 +4,14 @@ A Rust CLI that reads this host's Claude Code and Codex transcripts and
 settings and tells a person which settings to change. Most advice about agent
 configuration is asserted, not measured; this tool shows its evidence.
 
-Every line is measured: replayed from the user's own transcripts at public API
-prices, naming what the replay holds constant and what it could not measure.
-The maintainer's preferences never become a verdict. A provider's guidance
-that the transcripts can't price, such as Claude Code's 200-line CLAUDE.md
-advice, is a cited warning apart from the lines, with no verdict and no effect
-on the exit code. Say plainly when a cost can't be measured
+Every line of `doctor` is measured: replayed from the user's own transcripts at
+public API prices, naming what the replay holds constant and what it could not
+measure. The maintainer's preferences never become a verdict. Advice the
+transcripts can't price lives in `token-max vibes` instead: a provider's
+guidance, such as Claude Code's 200-line CLAUDE.md advice, the maintainer's
+picks, and a setting whose saving is a guess, such as the Bash timeout cap.
+Each is a card naming whose advice it is, with no verdict and no effect on an
+exit code. Say plainly when a cost can't be measured
 rather than hiding the setting or guessing a number. A cost measured on only some
 requests is extrapolated to the rest, marked with `~` and its margin of error,
 and states its assumption that the unpriced requests resemble the priced ones.
@@ -22,11 +24,16 @@ and states its assumption that the unpriced requests resemble the priced ones.
   `--max-cost-per-use` (default $1) per recorded use, suggest turning it off
   as an advisory (yellow, exit 0); otherwise recommend keeping it (green).
 - Show every setting and feature on its own line, and name the setting that
-  changes it.
+  changes it. A setting with nothing measured to compare, such as the Bash
+  timeout cap, has its line in `vibes`, not `doctor`.
 
 `token-max doctor` is the command people run. It is interactive: it walks
 through the recommendations and offers to apply each one, editing a settings
-file only after showing the change and getting a yes. Machine-readable output
+file only after showing the change and getting a yes. It never recommends or
+offers a change it didn't measure; when its walk ends it asks whether to show
+`vibes`' advice, from the same scan. `vibes` uses the same cards and confirm,
+offers an edit where its advice names the settings to change, and shows the
+rest with no question. Machine-readable output
 for other tools, such as quest's session export, lives in other commands and
 never shapes `doctor`. A change to `doctor`'s questions reruns
 `assets/demo/walk.tape` and `assets/demo/site.py`, since no check runs them.

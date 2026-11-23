@@ -56,8 +56,8 @@ count. Your sessions differ: run it to see yours.
    same sessions again under the other setting.
 3. **Prices both.** At public API prices from `https://models.dev/api.json`,
    its only network request unless you name other machines with `--ssh`. What
-   it can't price stays unknown, never zero. A provider's guidance that no
-   transcript can price is a cited warning apart from the lines, never a
+   it can't price stays unknown, never zero. Advice no transcript can price,
+   such as a provider's guidance, is left to `token-max vibes`, which gives no
    verdict.
 
 Then `token-max doctor` offers each change, shows the edit, and writes it only
@@ -102,6 +102,7 @@ token-max doctor                     # every Claude Code and Codex profile on th
 token-max doctor --since 2026-11-01  # only sessions from that date on
 token-max doctor --details           # the evidence behind every line
 token-max doctor --ssh devbox --include-local  # this host and devbox, each change made on its own host
+token-max vibes                      # advice the transcripts can't price, with no verdict
 token-max doctor --help
 ```
 
@@ -118,14 +119,16 @@ token-max doctor --help
 | Main-session effort | What each model and effort cost |
 | Auto memory | What loading, reading and writing it cost, and how often it was read or written |
 | Prompt suggestions, recaps, check-ins | What each background feature cost, where it can be estimated |
-| Bash timeout cap | Whether long foreground waits let the cache expire |
 | Keepalive pings | Whether pinging idle sessions would beat the cache misses |
 | Subagent types | What each cost, which model and effort it ran on, and the same tokens on the cheapest current model |
 | Fable weekly use | Each week's Fable spend |
 
-Provider guidance the transcripts can't price, such as Claude Code's advice to
-keep a CLAUDE.md under 200 lines, appears as a cited warning after the lines,
-never as a verdict. See the [reference](https://github.com/kixel-ai/token-max/blob/main/docs/reference.md#reading-the-report)
+Every line of that report is measured. Advice the transcripts can't price is
+in [`token-max vibes`](https://github.com/kixel-ai/token-max/blob/main/docs/reference.md#vibes),
+which `doctor` offers when its walk ends: Claude Code's advice to keep a
+CLAUDE.md under 200 lines, say, or a Bash timeout cap under the cache TTL.
+Each is a card that names whose advice it is, never a verdict. See the
+[reference](https://github.com/kixel-ai/token-max/blob/main/docs/reference.md#reading-the-report)
 for how to read each line, and its sections for each check.
 
 ## More

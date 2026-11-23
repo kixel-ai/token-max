@@ -238,3 +238,229 @@ pub fn hint(count: usize) -> String {
         if count == 1 { "" } else { "s" }
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::doctor::{Edit, Op, Owner, Patch};
+    use crate::model::Harness;
+    use crate::test_support::Workspace;
+    use serde_json::json;
+
+    fn style(w: &Workspace) -> Style {
+        Style {
+            color: false,
+            unicode: false,
+            width: None,
+            home: Some(w.home.to_string_lossy().into_owned()),
+            host: None,
+        }
+    }
+
+    /// A card with no change to make.
+    fn card(name: &str) -> Item {
+        Item {
+            name: name.into(),
+            value: String::new(),
+            what: String::new(),
+            text: format!("{name} is advised against."),
+            sources: vec!["https://example.com/guide".into()],
+            how: None,
+            quiet: false,
+        }
+    }
+
+    /// A card that sets the timeout variables named, in the profile's settings.
+    fn cap(w: &Workspace, name: &str, variables: &[&str], value: &str) -> Item {
+        let edits = variables
+            .iter()
+            .map(|variable| Edit {
+                path: vec!["env".into(), variable.to_string()],
+                value: json!(value),
+                op: Op::Set,
+            })
+            .collect();
+        Item {
+            value: "10m -> 4m".into(),
+            what: "How long a foreground command may run.".into(),
+            how: Some(How::Edit(Patch {
+                file: w
+                    .claude
+                    .join("settings.json")
+                    .to_string_lossy()
+                    .into_owned(),
+                harness: Harness::Claude,
+                edits,
+            })),
+            ..card(name)
+        }
+    }
+
+    /// Walk `items` on this host with `answers` typed, returning what was printed and each
+    /// answer recorded.
+    fn walk(w: &Workspace, items: &[Item], answers: &str) -> (String, Vec<Event>, Owner) {
+        let style = style(w);
+        let owner = Owner::new(fixes(items), vec![], style.home.clone(), 100.0);
+        let hosts = [Host {
+            label: None,
+            items,
+            offers: Some(owner.offers()),
+            style: &style,
+        }];
+        let mut output = vec![];
+        let selections = ask(&hosts, &style, &mut answers.as_bytes(), &mut output).unwrap();
+        let events = selections[0].events().to_vec();
+        (String::from_utf8(output).unwrap(), events, owner)
+    }
+
+    const MAX: &str = "BASH_MAX_TIMEOUT_MS";
+    const DEFAULT: &str = "BASH_DEFAULT_TIMEOUT_MS";
+
+    #[test]
+    fn only_a_card_that_names_its_settings_asks_and_two_keys_are_one_confirmed_edit() {
+        let w = Workspace::new();
+        std::fs::write(w.claude.join("settings.json"), "{}\n").unwrap();
+        let items = [
+            card("Main-session effort"),
+            cap(&w, "Bash timeout cap", &[MAX, DEFAULT], "240000"),
+            card("Fable weekly use"),
+        ];
+        let (text, events, owner) = walk(&w, &items, "y\n");
+        // One question, for the one card with a change; the others end at their source.
+        assert_eq!(text.matches("Accept? [y]es, [n]o, [q]uit:").count(), 1);
+        assert!(
+            text.starts_with("token-max vibes: 3 pieces of advice the transcripts can't price.\n  None of it is measured, so none of it is a verdict. Each card names whose advice it is.\n  Nothing is written until you confirm the list at the end.\n\n  [1/3] Main-session effort  not measured\n        Advice  Main-session effort is advised against.\n        Source  https://example.com/guide\n\n  [2/3] Bash timeout cap  not measured\n        10m -> 4m\n        What    How long a foreground command may run.\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("        Change  \"env\": {\"BASH_MAX_TIMEOUT_MS\": \"240000\"} and \"env\": {\"BASH_DEFAULT_TIMEOUT_MS\": \"240000\"} in ~/.claude/settings.json\n  Accept? [y]es, [n]o, [q]uit: \n  [3/3] Fable weekly use  not measured\n"),
+            "{text}"
+        );
+        // No card carries a verdict.
+        assert!(!text.contains("Recommended") && !text.contains("Worth considering"));
+        assert_eq!(
+            events,
+            [Event::Choose {
+                offer: 0,
+                yes: true
+            }]
+        );
+        // The yes is one change to one file, though it writes two keys.
+        let plan = owner.plan(&events).unwrap();
+        let written = crate::doctor::write(&plan).unwrap();
+        assert_eq!(written.len(), 1);
+        let settings: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(w.claude.join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(settings, json!({"env": {MAX: "240000", DEFAULT: "240000"}}));
+    }
+
+    #[test]
+    fn a_quit_shows_no_more_cards_and_accepts_nothing_more() {
+        let w = Workspace::new();
+        std::fs::write(w.claude.join("settings.json"), "{}\n").unwrap();
+        let other = w.home.join("other.json");
+        std::fs::write(&other, "{}\n").unwrap();
+        let mut second = cap(&w, "Second cap", &[MAX], "240000");
+        if let Some(How::Edit(patch)) = &mut second.how {
+            patch.file = other.to_string_lossy().into_owned();
+        }
+        let items = [
+            cap(&w, "First cap", &[MAX], "240000"),
+            second,
+            card("Fable weekly use"),
+        ];
+        for (answers, shown, accepted) in [
+            ("q\n", 1, vec![false]),
+            // End of input is a quit.
+            ("y\n", 2, vec![true, false]),
+            ("n\ny\n", 3, vec![false, true]),
+        ] {
+            let (text, events, _) = walk(&w, &items, answers);
+            assert_eq!(text.matches("not measured").count(), shown, "{answers:?}");
+            let yes: Vec<bool> = events
+                .iter()
+                .map(|e| matches!(e, Event::Choose { yes: true, .. }))
+                .collect();
+            assert_eq!(yes, accepted, "{answers:?}");
+        }
+    }
+
+    #[test]
+    fn cards_that_share_an_edit_ask_once_and_a_clashing_or_unwritable_one_is_by_hand() {
+        let w = Workspace::new();
+        std::fs::write(w.claude.join("settings.json"), "{}\n").unwrap();
+        let items = [
+            cap(&w, "Cap", &[MAX], "240000"),
+            cap(&w, "Same cap", &[MAX], "240000"),
+            cap(&w, "Other cap", &[MAX], "3300000"),
+        ];
+        let (text, events, _) = walk(&w, &items, "y\n");
+        assert_eq!(text.matches("Accept?").count(), 1, "{text}");
+        assert!(
+            text.contains("in ~/.claude/settings.json\n  The same edit as a card above.\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("        Change  by hand, since Cap wants a different value for the same setting: in ~/.claude/settings.json, set \"env\": {\"BASH_MAX_TIMEOUT_MS\": \"3300000\"}\n"),
+            "{text}"
+        );
+        assert_eq!(events.len(), 1);
+        // Off a terminal the same changes are named, and nothing is asked or read.
+        let style = style(&w);
+        let hosts = [Host {
+            label: Some("devbox"),
+            items: &items,
+            offers: None,
+            style: &style,
+        }];
+        let printed = super::text(&hosts, &style);
+        assert!(!printed.contains("Accept?") && !printed.contains("Nothing is written"));
+        assert_eq!(printed.matches("        Host    devbox\n").count(), 3);
+        assert_eq!(
+            printed
+                .matches("        Change  \"env\": {\"BASH_MAX_TIMEOUT_MS\": \"240000\"} in ~/.claude/settings.json\n")
+                .count(),
+            2,
+            "{printed}"
+        );
+        assert!(
+            printed.contains("        Change  by hand, since Cap wants"),
+            "{printed}"
+        );
+        // A file that cannot take the edit leaves the walk a step by hand, with no question.
+        std::fs::write(w.claude.join("settings.json"), "not json").unwrap();
+        let (text, events, _) = walk(&w, &items[..1], "y\n");
+        assert!(text.contains("        Change  by hand, since "), "{text}");
+        assert!(!text.contains("Accept?") && !text.contains("Nothing is written"));
+        assert_eq!(events, []);
+    }
+
+    #[test]
+    fn nothing_to_advise_says_so_and_quiet_cards_are_not_worth_an_offer() {
+        let w = Workspace::new();
+        let style = style(&w);
+        assert_eq!(
+            super::text(&[], &style),
+            "token-max vibes: no advice for these settings.\n"
+        );
+        let quiet = Item {
+            quiet: true,
+            ..card("Bash timeout cap")
+        };
+        assert_eq!(pending(&[quiet, card("Fable weekly use")]), 1);
+        assert_eq!(
+            hint(1),
+            "token-max vibes has 1 piece of advice the transcripts can't price."
+        );
+        let mut output = vec![];
+        // End of input is a no.
+        assert!(!offer(2, &style, &mut "".as_bytes(), &mut output).unwrap());
+        assert!(offer(2, &style, &mut "yes\n".as_bytes(), &mut output).unwrap());
+        assert!(
+            String::from_utf8(output).unwrap().starts_with(
+                "\n  token-max vibes has 2 pieces of advice the transcripts can't price. Show them? [y]es, [n]o: "
+            )
+        );
+    }
+}

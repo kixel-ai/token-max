@@ -4242,6 +4242,8 @@ fn bash_item(cap: &BashCap, profile: &str, how: Option<How>, out: &Out<'_>) -> I
     let current = duration(cap.current);
     let ttl = cap.ttl.map_or("unknown", Ttl::as_str);
     let set_in = format!("Set in {}.", out.home(&cap.owner));
+    // Which TTL the cap is compared with, since it may not be the one set now.
+    let basis = cap.ttl_basis.as_str();
     const BACKGROUND: &str = "A command past the cap is not killed: it keeps running in the background, where Claude checks on it in later turns.";
     let (value, text) = match cap.suggested {
         None => (
@@ -4254,18 +4256,18 @@ fn bash_item(cap: &BashCap, profile: &str, how: Option<How>, out: &Out<'_>) -> I
         Some(suggested) if suggested == cap.current => (
             String::new(),
             format!(
-                "Capped at {current}, the margin suggested under the {ttl} cache. {waits} {set_in}"
+                "Capped at {current}, the margin suggested under the {ttl} cache, {basis}. {waits} {set_in}"
             ),
         ),
         Some(suggested) => {
             let to = duration(suggested);
             let trade = if suggested < cap.current {
                 format!(
-                    "A foreground wait at or past the {ttl} cache TTL lets the cache expire before Claude replies, and a {to} cap leaves room under it. {waits} What a lower cap saves is not measured, and the {to} margin is a guess. {BACKGROUND} Some commands need longer in the foreground; keep the cap if yours do."
+                    "A foreground wait at or past the {ttl} cache TTL, {basis}, lets the cache expire before Claude replies, and a {to} cap leaves room under it. {waits} What a lower cap saves is not measured, and the {to} margin is a guess. {BACKGROUND} Some commands need longer in the foreground; keep the cap if yours do."
                 )
             } else {
                 format!(
-                    "A {current} cap moves commands to the background sooner than the {ttl} cache needs. Raising it to {to} trades longer foreground waits for fewer background check-ins. {waits} What a higher cap saves is not measured, and the {to} margin is a guess. {BACKGROUND}"
+                    "A {current} cap moves commands to the background sooner than the {ttl} cache, {basis}, needs. Raising it to {to} trades longer foreground waits for fewer background check-ins. {waits} What a higher cap saves is not measured, and the {to} margin is a guess. {BACKGROUND}"
                 )
             };
             (format!("{current} {} {to}", out.arrow), trade)

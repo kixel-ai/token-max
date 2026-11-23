@@ -6,7 +6,9 @@ the accounting underneath.
 ## Running it
 
 `token-max doctor` prints the report, then, when stdin and stdout are both a
-terminal, walks through its changes. Bare `token-max` prints the commands and
+terminal, walks through its changes. [`token-max vibes`](#vibes) prints the
+advice the transcripts can't price, which `doctor` leaves out. Bare
+`token-max` prints the commands and
 exits 2; options follow a command. Relative paths resolve from the working
 directory. Reports go to stdout; diagnostics go to stderr; exit codes are as
 described below. Ctrl-C cancels the running analysis: SIGINT or SIGTERM exits 2
@@ -44,8 +46,14 @@ feature does (see [What each line does](#what-each-line-does)), and `Why`
 gives what was measured, such as the requests a replay covered or a tool's
 uses and what each cost, and why the change makes sense. A card leaves out the
 edit, which repeats the value change; the confirm shows every accepted edit
-once, as a diff. A change whose saving was not measured, such as lowering a
-Bash timeout cap, comes after the measured ones and says so.
+once, as a diff. A change whose saving was not measured, such as turning off
+a Codex catalog skill, comes after the measured ones and says so.
+
+When the walk ends, and [`vibes`](#vibes) has advice for these profiles,
+`doctor` asks whether to show it. A yes walks through `vibes`' cards from the
+same scan, with nothing read or asked again, and with its own confirm before
+anything more is written. Without a terminal, the report ends with one line
+naming `token-max vibes`.
 
 A tool, skill or MCP server's change joins a group of its kind and reason, such
 as never-used skills or MCP servers over $1 per use, whatever it saves. The
@@ -295,7 +303,7 @@ What the providers document, checked 2026-11-14:
 Where a provider documents a rule that API prices alone don't show, the line's
 evidence under `--details` states it before the setting that changes it, and
 the list ends with the source. Fable weekly use is the exception: its rule is
-a [warning](#reading-the-report), shown when the window holds a Fable request:
+a [`vibes`](#vibes) card, shown when the window holds a Fable request:
 
 | Line | On a plan |
 | --- | --- |
@@ -343,8 +351,10 @@ setting or environment override.
 
 ## Exit codes and unreadable lines
 
+`vibes` exits `0`, or `2` for a failed scan, price fetch, invalid argument or
+cancellation: advice never sets an exit code, in `vibes` or in `doctor`.
 When `doctor` walks through the changes on a terminal, it exits `0`, or
-`2` for a failure or cancellation. Otherwise exit codes are `0` for no applicable
+`2` for a failure or cancellation. Otherwise its exit codes are `0` for no applicable
 change, `1` for a recommended setting or feature change, and `2`
 for a failed scan, price fetch, invalid argument, or cancellation. A failed run emits no
 success report or partial recommendations. Invalid selected usage fails with only
@@ -385,17 +395,9 @@ Every line is measured: replayed or priced from your own transcripts at public
 API prices, or marked unknown where they can't price it. No verdict rests on
 anyone's preference or on a provider's advice alone.
 
-A provider's guidance that the transcripts can't price comes after the lines,
-under **Warnings**, each naming its line, saying what the provider advises
-beside what was measured, and citing the page. A warning has no verdict, never
-changes the exit code, and `doctor` never asks about it:
-
-| Warning | When |
-| --- | --- |
-| Main-session effort | The default level is above `high`: Anthropic's [model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/) and [model configuration docs](https://code.claude.com/docs/en/model-config#choose-an-effort-level) for Claude, OpenAI's [reasoning guide](https://developers.openai.com/api/docs/guides/reasoning) for Codex. |
-| An instruction file | A CLAUDE.md of 200 lines or more, past Claude Code's [guidance](https://code.claude.com/docs/en/memory#write-effective-instructions), or an AGENTS.md at or above the byte budget Codex [loads](https://learn.chatgpt.com/docs/agent-configuration/agents-md), with what each 100 lines of it costs. |
-| Explore subagent | Claude's built-in Explore ran off Haiku: what it cost, the same tokens on the cheapest model, and the model guide's tip. |
-| Fable weekly use | Any Fable request in the window: what they cost, and Anthropic's [plan rule](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan). |
+Advice that the transcripts can't price, such as a provider's guidance, is no
+part of this report: [`token-max vibes`](#vibes) shows it, and `doctor` only
+offers to.
 
 The lines come in two groups. **Changes** come first: every line recommended
 (red, exit 1) or worth considering (yellow, exit 0), ranked together by what
@@ -440,13 +442,13 @@ headline's totals add their changes' margins, since savings from overlapping
 requests can err the same way.
 
 Comparisons between setting values are per 30 days at the window's rate; what
-features, context and long Bash waits cost, and how often they were used, are
-totals over the whole window.
+features and context cost, and how often they were used, are totals over the
+whole window.
 
 `--details` puts each line's evidence under it: what the replay held constant,
 such as the same sessions, and what it could not measure, such as the detail a
-smaller compaction window or idle summary loses, or what checking on a
-backgrounded Bash command costs, then the setting that changes it. A line
+smaller compaction window or idle summary loses, then the setting that changes
+it. A line
 without enough evidence says why there, such as no request with recorded usage
 to compare; a line extrapolated over unpriced requests names the share measured.
 Unresolved current ownership gives
@@ -522,7 +524,6 @@ one that cannot be measured is counted, never priced at zero.
 | Compaction window | The model's tuned window (see [Compaction window](#compaction-window)), or Codex's per-model limit | Not measured: a window smaller than the default can't be replayed at the default, since the detail its summaries dropped is gone. |
 | Idle compaction | On | The on and off replay under the current settings. |
 | T3 idle compaction | `onReturn` | The difference between the two modes' replays. |
-| Bash timeout cap | 10m | Not measured: what checking on a backgrounded command costs is not recorded. |
 | Fast mode | Off | The measured premium, as a cost. |
 | Background generation | On | Not measured: its requests are estimated only where it runs. |
 | Auto memory | On for Claude Code, off for Codex | Codex memories on cost what the line measured; Claude Code's off is not measured. |
@@ -631,13 +632,13 @@ instructions is worth is not recorded, so the line gives no verdict and
 `doctor` offers no change.
 
 A CLAUDE.md of 200 recorded lines or more, past Claude Code's documented
-guidance, gets a warning. So does a Codex AGENTS.md at or above the selected
+guidance, gets a [`vibes`](#vibes) card. So does a Codex AGENTS.md at or above the selected
 profiles' `project_doc_max_bytes` from the system and user configuration (32
 KiB by default), where Codex may have cut it short: the recorded rendered bytes
 include headers and wrappers, so only reaching the budget can mean truncation.
-The warning names the file that sets the budget, or says it is the default. A
+The card names the file that sets the budget, or says it is the default. A
 project `.codex/config.toml` at a recorded directory or a named profile that
-sets it gives no warning, since the transcripts do not record which applied;
+sets it gives no card, since the transcripts do not record which applied;
 neither do profiles with different or unreadable budgets, or records with no
 rendered text. Command-line overrides and original file sizes are unavailable.
 Output-cap lines
@@ -997,7 +998,8 @@ SSH configuration, keys and known hosts without prompting. Add
 there: each destination runs this build of token-max, which token-max puts
 there itself. Linux and macOS destinations on x86_64 or arm64 are supported.
 `token-max sessions` takes the same flags, and each destination sends only its
-priced session lines.
+priced session lines. `token-max vibes` takes them too, and each destination
+sends only its cards and, for a walk, the changes they offer.
 
 ```sh
 token-max doctor --ssh devbox --ssh user@laptop --include-local
@@ -1157,27 +1159,76 @@ are not recorded either, so one never counts as unused: a whole cost above
 kept. Goal check-ins and Codex recaps
 cannot be told apart in transcripts, so their cost is shown as unknown.
 
-## Bash timeout cap
+## Vibes
+
+`token-max vibes` is the advice the transcripts can't price, which `doctor`
+leaves out so that every line of its report is measured. It reads the hosts,
+profiles and window `doctor` reads, takes the same selection flags (`--since`,
+the directory flags, `--ssh`, `--include-local`, `--plain` and the price
+flags), and asks the same question about [how a profile pays](#how-a-profile-pays).
+
+Each piece of advice is a card: the setting or feature, the change advised
+when it names one, what the setting does, the advice beside what was measured,
+and `Source`, which says whose advice it is, a provider's page or the
+maintainer's pick. A card has no verdict and no saving, and nothing here sets
+an exit code.
+
+| Card | When |
+| --- | --- |
+| [Bash timeout cap](#bash-timeout-cap) | Every Claude settings file: the cap beside the long waits measured under it. |
+| Main-session effort | The default level is above `high`: Anthropic's [model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/) and [model configuration docs](https://code.claude.com/docs/en/model-config#choose-an-effort-level) for Claude, OpenAI's [reasoning guide](https://developers.openai.com/api/docs/guides/reasoning) for Codex. |
+| An instruction file | A CLAUDE.md of 200 lines or more, past Claude Code's [guidance](https://code.claude.com/docs/en/memory#write-effective-instructions), or an AGENTS.md at or above the byte budget Codex [loads](https://learn.chatgpt.com/docs/agent-configuration/agents-md), with what each 100 lines of it costs. |
+| Explore subagent | Claude's built-in Explore ran off Haiku: what it cost, the same tokens on the cheapest model, and the model guide's tip. |
+| Fable weekly use | Any Fable request in the window: what they cost, and Anthropic's [plan rule](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan). |
+
+The effort, instruction-file, subagent and Fable lines stay in `doctor`, where
+their costs are measured; only the advice about them is here.
+
+On a terminal, a card that names the settings to change ends with `Change`,
+the edit and its file, and asks `Accept?` with `y`, `n` or `q` to stop. Every
+other card is shown with no question. The accepted edits are then shown as a
+diff of each file and written only after a final yes, with the checks, lock
+and [backups](#backups) `doctor` uses. One card is one edit to one file, even
+when it sets two keys. A change another owner would override, such as a shell
+variable or T3, is named on its card as a step by hand. Without a terminal,
+`vibes` prints the cards, each change naming its edit, and edits nothing.
+
+`doctor` offers `vibes` when its walk ends, counting the cards that advise
+something: a setting already as advised still has its card in `vibes`, and is
+not worth the question. With `--ssh`, each host's cards name their host, and
+each destination checks and writes its own files, as in
+[`doctor`'s walk](#on-ssh-hosts).
+
+### Bash timeout cap
 
 Claude Code waits on a foreground Bash call for at most
 `max(BASH_MAX_TIMEOUT_MS, BASH_DEFAULT_TIMEOUT_MS)`, 600000 ms by default,
 then moves the command to the background. A wait at least as long as the cache
 TTL lets the cache expire before the model replies, so the next request
-rewrites the whole prefix. The `bash-timeout-cap` check compares the cap with
-the main-agent TTL: the one this report recommends, else the current setting,
-else the lifetime the latest main-agent request wrote. At or above it, the
-check recommends 240000 ms for a 5m cache or 3300000 ms for 1h, which leaves
-room for the model's reply on either side of the wait, and exits 1. Commands
-longer than the cap keep running in the background, where checking on them
-reads the cache instead.
+rewrites the whole prefix.
 
-The line also counts foreground Bash waits that outlasted the cache the
+The card compares the cap with the main-agent TTL: the one `doctor`
+recommends, else the current setting, else the lifetime the latest main-agent
+request wrote. It advises 240000 ms under a 5m cache and 3300000 ms under 1h,
+a margin that leaves room for the model's reply on either side of the wait,
+whenever the cap is anything else: a higher cap comes down, and a lower one
+goes up. That margin is the maintainer's pick, not a measurement, and the card
+says so. A cap already there, or one with no TTL to compare with or an owner
+T3 left unsettled, has a card that advises nothing.
+
+The card counts the foreground Bash waits that outlasted the cache the
 starting request wrote, how many hit their timeout or slept in a polling loop,
-and what their cache misses cost: the prefix the next request wrote instead of
-read, at the write rate minus the read rate. Background commands and the user's
-own processes are unaffected by the cap. Codex's
-`background_terminal_max_timeout` bounds one poll of a background terminal,
-and each poll reads the cache, so it is not checked.
+and what their cache misses cost over the window: the prefix the next request
+wrote instead of read, at the write rate minus the read rate. Those are
+measured. What another cap would save is not: a lower cap doesn't kill a
+command, which keeps running in the background, where checking on it takes
+later turns the transcripts can't predict; a higher cap trades those check-ins
+for longer foreground waits. Some commands need longer in the foreground, so
+the card is advice to weigh, and `doctor` never offers it.
+
+Background commands and the user's own processes are unaffected by the cap.
+Codex's `background_terminal_max_timeout` bounds one poll of a background
+terminal, and each poll reads the cache, so it has no card.
 
 ## Main-session effort
 
@@ -1190,7 +1241,7 @@ is repriced, no saving is claimed, and the line gives no verdict; `doctor`
 never offers to change it. A default token-max cannot resolve, such as a T3
 thread's selection, is unknown.
 
-A default above `high` gets a warning citing the provider's own guidance. For
+A default above `high` gets a [`vibes`](#vibes) card citing the provider's own guidance. For
 Claude, `xhigh` and `max` cite Anthropic's
 [model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/)
 (past `high`, test the next model up at a lower effort), and `max` also the
@@ -1224,11 +1275,11 @@ attributed. The reprice assumes the same turns, and a lower effort's cost
 cannot be measured. The source is unknown when today's settings and agent
 files do not explain the recorded model, for example after a file changed.
 
-When Claude's built-in Explore ran off Haiku, a warning gives what it cost,
+When Claude's built-in Explore ran off Haiku, a [`vibes`](#vibes) card gives what it cost,
 the same tokens on the cheapest model, and the tip from Anthropic's
 [model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/):
 a user agent named `Explore` with `model: haiku`. A run of an agent file
-named `Explore`, which replaces the built-in, gets none. Other types get no warning:
+named `Explore`, which replaces the built-in, gets none. Other types get no card:
 the guide splits subagents by whether they search or edit, which the
 transcripts don't record.
 See [subagent models](semantics.md#subagent-models).
@@ -1238,8 +1289,8 @@ See [subagent models](semantics.md#subagent-models).
 The report gives every Claude settings file whose profiles sign in to
 Anthropic its own Fable line, shared by native Claude Code and the T3
 instances that use it: what its Fable requests cost at API prices in each 7-day span
-of the window, counted back from the report. With any Fable request, a warning
-gives their cost beside the plan rule Anthropic documents in
+of the window, counted back from the report. With any Fable request, a
+[`vibes`](#vibes) card gives their cost beside the plan rule Anthropic documents in
 [Fable models on your plan](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan),
 as [Plans and API prices](#plans-and-api-prices) describes: on a Claude Max or
 Ultra plan or a Team or seat-based Enterprise premium seat, Fable models can

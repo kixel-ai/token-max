@@ -21,9 +21,5 @@ Recommendations:
   the card gives the step by hand and asks nothing.
 - Don't offer `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`: it moves every subagent to
   Haiku, not just Explore.
-- This card replaces the Explore warning that
-  [the command quest](/quest/m1/vibes/command.md) moves into `vibes`.
-
-## Required
-
-- [Vibes command](/quest/m1/vibes/command.md) - the `vibes` walk this card joins
+- This card replaces the Explore card `vibes` took over from `doctor`'s
+  Warnings (`explore_warning` in `src/report.rs`).

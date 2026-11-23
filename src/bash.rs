@@ -80,7 +80,7 @@ fn evaluation_ttl(
         .filter(|t| t.base.action != Action::Advisory)
         .and_then(|t| t.base.recommended);
     if let Some(ttl) = verdict {
-        return (Some(ttl), "the main-agent cache TTL this report recommends");
+        return (Some(ttl), "the main-agent cache TTL doctor recommends");
     }
     if let Some(ttl) = profile.ttl.main.one().value {
         return (Some(ttl), "the current main-agent cache TTL setting");
@@ -556,7 +556,7 @@ mod tests {
         assert_eq!(item.how, None);
         assert!(
             item.text
-                .starts_with("Capped at 4m, the margin suggested under the 5m cache."),
+                .starts_with("Capped at 4m, the margin suggested under the 5m cache, the current main-agent cache TTL setting."),
             "{}",
             item.text
         );

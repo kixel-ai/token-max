@@ -385,6 +385,86 @@ fn exit_codes_and_no_partial_findings_or_transcript_content() {
 }
 
 #[test]
+fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options() {
+    let w = Workspace::new();
+    w.fixture();
+    // A TTL doctor recommends raising, and a cap past the margin under it.
+    const SETTINGS: &str = r#"{"promptCacheTtl":"5m","env":{"BASH_MAX_TIMEOUT_MS":"7200000"}}"#;
+    w.settings(SETTINGS);
+    let base = prices_args(&w);
+    let invoke = |name: &str, extra: &[&str]| {
+        let mut all = vec![name];
+        all.extend(base.iter().map(String::as_str));
+        all.extend(extra);
+        run(&mut command(&w, &all))
+    };
+    // Doctor's measured change sets its exit code; the cap is no line of its report, which
+    // only names the command that has it.
+    let (status, report, stderr) = invoke("doctor", &["--details"]);
+    assert_eq!((status, stderr.as_str()), (1, ""), "{report}");
+    assert!(!report.contains("Bash timeout cap") && !report.contains("BASH_MAX_TIMEOUT_MS"));
+    assert!(!report.contains("WARNINGS"), "{report}");
+    assert!(
+        report.ends_with(
+            "\n\n  token-max vibes has 1 piece of advice the transcripts can't price. Run token-max vibes to see it.\n"
+        ),
+        "{report}"
+    );
+    // The same scan's advice: one cited card, its change named and not made, exit 0.
+    let (status, stdout, stderr) = invoke("vibes", &[]);
+    assert_eq!((status, stderr.as_str()), (0, ""), "{stdout}");
+    assert_eq!(
+        stdout,
+        "token-max vibes: 1 piece of advice the transcripts can't price.\n  None of it is measured, so none of it is a verdict. Each card names whose advice it is.\n\n  [1/1] Bash timeout cap  not measured\n        2h -> 55m\n        What    The longest Claude waits on a foreground Bash command before Claude Code moves it to the background.\n        Advice  A foreground wait at or past the 1h cache TTL, the main-agent cache TTL doctor recommends, lets the cache expire before Claude replies, and a 55m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 55m margin is a guess. A command past the cap is not killed: it keeps running in the background, where Claude checks on it in later turns. Some commands need longer in the foreground; keep the cap if yours do.\n        Source  The maintainer's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching\n        Change  \"env\": {\"BASH_MAX_TIMEOUT_MS\": \"3300000\"} in ~/.claude/settings.json\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(w.claude.join("settings.json")).unwrap(),
+        SETTINGS
+    );
+    // A cap already at the margin keeps its card, and doctor has nothing to name.
+    w.settings(r#"{"promptCacheTtl":"1h","env":{"BASH_MAX_TIMEOUT_MS":"3300000"}}"#);
+    let (status, report, _) = invoke("doctor", &[]);
+    assert_eq!(status, 0, "{report}");
+    assert!(!report.contains("token-max vibes"), "{report}");
+    let (status, stdout, _) = invoke("vibes", &[]);
+    assert_eq!(status, 0);
+    assert!(
+        stdout.contains("\n  [1/1] Bash timeout cap  not measured\n        What    ")
+            && stdout.contains("Capped at 55m, the margin suggested under the 1h cache, the main-agent cache TTL doctor recommends.")
+            && !stdout.contains("Change"),
+        "{stdout}"
+    );
+    // Advice has no verdict to tune, evidence to expand or defaults to pretend.
+    for extra in [
+        &["--details"][..],
+        &["--defaults"],
+        &["--max-cost-per-use", "2"],
+        &["--ssh-scan"],
+        &["-v"],
+        &["--bogus"],
+    ] {
+        let (status, stdout, stderr) = invoke("vibes", extra);
+        assert_eq!((status, stdout.as_str()), (2, ""), "{extra:?}");
+        assert_eq!(
+            stderr, "token-max: invalid arguments; use token-max vibes --help\n",
+            "{extra:?}"
+        );
+    }
+    let (status, help, _) = invoke("vibes", &["--help"]);
+    assert_eq!(status, 0);
+    assert!(help.starts_with("token-max vibes: advice the transcripts can't price"));
+    let (_, top, _) = run(&mut command(&w, &["--help"]));
+    assert!(
+        top.contains("\n  vibes     Advice the transcripts can't price"),
+        "{top}"
+    );
+    // A failed scan is the one way it exits nonzero.
+    std::fs::write(w.transcript(), "{\"type\":\"assistant\",\"timestamp\":\"2020-01-01T00:00:00Z\",\"message\":{\"usage\":{\"input_tokens\":\"bad\"}}}\n").unwrap();
+    let (status, stdout, stderr) = invoke("vibes", &[]);
+    assert_eq!((status, stdout.as_str()), (2, ""), "{stderr}");
+}
+
+#[test]
 fn a_tool_only_recommendation_sets_exit_one() {
     let w = Workspace::new();
     w.settings(r#"{"promptCacheTtl":"1h","subagentPromptCacheTtl":"1h"}"#);
@@ -1427,7 +1507,7 @@ mod unix {
             .unwrap_or_else(|| panic!("{stdout}"));
         let entry = words(&stdout[card..again]);
         assert!(
-            entry.starts_with("[1/1] Bash timeout cap not measured 2h -> 55m What The longest Claude waits on a foreground Bash command before Claude Code moves it to the background. Advice A foreground wait at or past the 1h cache TTL lets the cache expire before Claude replies, and a 55m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 55m margin is a guess."),
+            entry.starts_with("[1/1] Bash timeout cap not measured 2h -> 55m What The longest Claude waits on a foreground Bash command before Claude Code moves it to the background. Advice A foreground wait at or past the 1h cache TTL, the main-agent cache TTL doctor recommends, lets the cache expire before Claude replies, and a 55m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 55m margin is a guess."),
             "{entry}"
         );
         assert!(

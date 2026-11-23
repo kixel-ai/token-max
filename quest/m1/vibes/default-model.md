@@ -29,8 +29,8 @@ Decision prompts, chosen options marked ✅ (maintainer, 2026-11-23):
 
 Recommendations:
 
-- This card replaces the effort warning that
-  [the command quest](/quest/m1/vibes/command.md) moves into `vibes`, so Sol
+- This card replaces the effort card `vibes` took over from `doctor`'s
+  Warnings (`effort_warning` in `src/report.rs`), so Sol
   6.2 at `xhigh` no longer gets OpenAI's xhigh caution. That is deliberate:
   the maintainer accepted it as a fine default, and a caution against it
   would contradict that. Every other default above `high` gets this card,
@@ -44,7 +44,3 @@ Recommendations:
   `model_reasoning_effort`. #192 deleted the effort-target machinery
   (`EffortCheck.also`, `EffortControl.supported`); bring back only what the
   offer needs.
-
-## Required
-
-- [Vibes command](/quest/m1/vibes/command.md) - the `vibes` walk this card joins

@@ -9,6 +9,7 @@
 //! For a walk through a report's changes, the audit stays open: the destination keeps the
 //! settings files it read, and this host sends it the person's answers and their confirm, so
 //! each destination writes its own files with the same checks, locks and backups as this host.
+//! `doctor`'s walk can go on to `vibes`' in the same audit, so the destination scans once.
 //!
 //! A destination without this build gets one first, cached there for later runs: a copy of this
 //! binary when its platform matches, or else this version's release, checked against its
@@ -740,6 +741,11 @@ impl Remote {
             .as_mut()
             .map(|stdin| wire::write(&mut BufWriter::new(stdin), &Answer::Done));
         if !matches!(sent, Some(Ok(()))) || self.stream.end().is_err() {
+            // Ctrl-C stopped the client, which its report of the write came before.
+            if cancelled() {
+                self.session.stop(true);
+                return Ok(());
+            }
             return Err(self.session.fail(true, |_| {
                 "token-max sent more than its result after writing".into()
             }));

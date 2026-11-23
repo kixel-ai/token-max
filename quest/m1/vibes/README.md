@@ -27,8 +27,8 @@ Decision prompts, chosen options marked ✅:
 - Against the morning's decision: ✅ build `vibes` (rejected: keep it
   rejected and move the Bash cap into doctor's Warnings as a no-verdict
   warning).
-- Its first items: ✅ the Bash cap and today's Warnings, in
-  [the command quest](/quest/m1/vibes/command.md); ✅
+- Its first items: ✅ the Bash cap and the old Warnings, which the `vibes`
+  command shipped with; ✅
   [a default main-session model and effort](/quest/m1/vibes/default-model.md);
   ✅ [Explore on Haiku](/quest/m1/vibes/explore-haiku.md) (rejected for now:
   cache habits from the 2026-11-17 study, which can return as their own quest
@@ -37,3 +37,10 @@ Decision prompts, chosen options marked ✅:
 Recommendation, not asked: each `vibes` card names its source, either a
 cited provider page or "the maintainer's pick", so a reader can tell whose
 advice it is.
+
+How a card is added, since the command landed: a card is one `vibes::Item`
+(`src/vibes.rs`), built where `summary` in `src/report.rs` builds the others.
+Give it `how` and the walk offers its edit, over SSH too, with nothing else
+to wire; leave `how` empty for a cited card with no question. `quiet` marks
+a card that advises nothing, which `doctor` does not offer `vibes` for.
+`docs/reference.md#vibes` lists every card.

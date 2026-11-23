@@ -8,7 +8,7 @@ and lists every covered profile in `profiles`. A profile whose setting a shell
 variable, a project, local or managed file, or T3's thread selection decides,
 and every setting of a disabled or unresolved T3 instance, is a line of its
 own. A check that replays other controls, such as the cache TTL under the
-compaction, idle, keepalive and Bash checks, also needs the line's profiles to
+compaction, idle and keepalive checks and the Bash cap, also needs the line's profiles to
 share those controls' owners and values, so a source with caching off or its
 own TTL is a line of its own. A request with profiles on several lines counts on each of them, as each
 profile's check counted it before; ambiguous provenance outside a line keeps
@@ -863,7 +863,7 @@ Controls checked against authoritative documentation on 2026-11-08:
   guidance only and never enter the automatic settings patch.
 - [Claude instruction guidance](https://code.claude.com/docs/en/memory#write-effective-instructions)
   targets under 200 lines per CLAUDE.md. A recorded file reaching that length
-  gets a warning naming it beside what each 100 of its lines cost, without
+  gets a `vibes` card naming it beside what each 100 of its lines cost, without
   judging quality. Path-scoped rules can narrow loading; imports still load
   together.
 - [Codex instruction loading](https://learn.chatgpt.com/docs/agent-configuration/agents-md)
@@ -1245,22 +1245,24 @@ this host finishes, and no later host's write starts.
 
 ## Bash timeout cap
 
-The `bash-timeout-cap` check uses `Profile.bash`, resolved from user and
+The Bash cap, a `vibes` card and no check of `doctor`'s, uses `Profile.bash`, resolved from user and
 managed settings `env` and the active profile's shell environment. For a terminal
 launch, settings `env` overrides inherited shell values.
 Like Claude Code, a value parses as a leading integer or an integral exponent
 form, and anything else, zero or negative falls back to the default (600000 ms
 maximum, 120000 ms default timeout). The effective cap is the larger of the two,
 so lowering only the maximum cannot override a larger default; the replacement
-names both when needed. Project and local settings are not read for this check.
-The recommended cap is 4 minutes under a 5m TTL and 55 minutes under 1h, leaving
+names both when needed. Project and local settings are not read for it.
+The advised cap is 4 minutes under a 5m TTL and 55 minutes under 1h, leaving
 room for the starting request's output and the reply (`safe_cap` in
-`src/bash.rs`).
+`src/bash.rs`). The margin is a guess, so the cap is advice with no verdict:
+any other cap, lower or higher, is advised to it, and none changes `doctor`'s
+exit code.
 
 The compared TTL is the main-agent TTL check's verdict when it has one, else the
 current `promptCacheTtl`, else the write lifetime of the latest selected
 main-agent request; with none, or when recorded projects set the main TTL
-differently, the check is advisory. Claude Code 2.1.319 moves
+differently, no cap is advised. Claude Code 2.1.319 moves
 commands in async subagents with a 5m cache to the background after 3 minutes
 on its own, so the subagent TTL does not set the cap.
 
@@ -1275,7 +1277,7 @@ lifetime that request wrote, else the compared TTL. Its miss is
 where `prefix` is the starting request's total input, priced at its recorded
 write lifetime's rate minus the read rate. A missing next request, usage, write
 split or price leaves that wait's cost unknown, and the known subtotal is kept.
-The check makes no savings estimate: a lower cap adds background polls whose
+There is no savings estimate: a lower cap adds background polls whose
 reads the transcripts cannot predict.
 
 Sources, checked 2026-11-08:
@@ -1347,7 +1349,7 @@ evidence only. They never recommend a model, offer no change
 and never change the exit code: a cheaper model or lower effort trades
 capability, and the main agent's extra work after a weaker subagent lands in
 its own requests, where transcripts cannot attribute it. Claude's built-in
-Explore, when it ran off Haiku, gets a warning citing Anthropic's model guide
+Explore, when it ran off Haiku, gets a `vibes` card citing Anthropic's model guide
 (checked 2026-11-14), equally verdict-free. When runs in
 different projects are set by different files, the model and effort settings
 name each.
@@ -1451,7 +1453,7 @@ Fable draws that limit faster than other models without a rate, so neither the
 share of the cap used nor whether it was reached can be derived. Requests made
 after the cap, paid with usage credits, are not marked in transcripts and stay
 in the figures. token-max never reads which plan a profile is signed in to, so
-the rule is a warning stated for each plan, given whenever the window has a
+the rule is a `vibes` card stated for each plan, given whenever the window has a
 Fable request, as
 [Plans and API prices](reference.md#plans-and-api-prices) describes.
 `--details` gives each line's spans with their unknown costs, the caveats

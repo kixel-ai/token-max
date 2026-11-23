@@ -260,7 +260,12 @@ impl Meter {
                     // when SSH hosts' prices or reports arrive first.
                     let (line, plain) = if read < total {
                         let began = *began.get_or_insert_with(Instant::now);
-                        bar(read, total, began.elapsed(), shared.look)
+                        let progress = Progress {
+                            read,
+                            total,
+                            elapsed: began.elapsed(),
+                        };
+                        bar(&progress, shared.look, progress_room())
                     } else {
                         // A phase that began under the bar is timed from when reading ended.
                         let since = match total {
@@ -320,25 +325,25 @@ fn busy(phase: &str, elapsed: Duration, tick: usize, unicode: bool) -> String {
     line
 }
 
-/// Cells in the reading bar's track.
-const BAR_CELLS: usize = 24;
+/// The widest and narrowest the reading bar's track gets.
+const TRACK_CELLS: (usize, usize) = (24, 8);
 
-/// The reading bar: how much of `total` bytes is read, and when the rest should be, from the
-/// rate since reading `began`. Returns the line and its text without color.
-fn bar(read: u64, total: u64, elapsed: Duration, look: Look) -> (String, String) {
+/// How far reading has come: bytes `read` of `total`, `elapsed` since reading began.
+struct Progress {
+    read: u64,
+    total: u64,
+    elapsed: Duration,
+}
+
+/// The reading bar, its track narrowed to fit `room` cells: how much is read, and when the
+/// rest should be, from the rate so far. Returns the line and its text without color.
+fn bar(progress: &Progress, look: Look, room: usize) -> (String, String) {
+    let Progress {
+        read,
+        total,
+        elapsed,
+    } = *progress;
     let fraction = read as f64 / total as f64;
-    // Eighths of a cell, so the bar moves smoothly on a Unicode terminal.
-    let eighths = (fraction * (BAR_CELLS * 8) as f64) as usize;
-    let (full, part) = (eighths / 8, eighths % 8);
-    let (done, todo) = if look.unicode {
-        let partial = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"][part];
-        let filled = format!("{}{partial}", "█".repeat(full));
-        let left = BAR_CELLS - full - usize::from(!partial.is_empty());
-        (filled, "░".repeat(left))
-    } else {
-        ("#".repeat(full), "-".repeat(BAR_CELLS - full))
-    };
-    let (open, close) = if look.unicode { ("", "") } else { ("[", "]") };
     let mut rest = format!(
         " {:>3.0}%  {} of {}",
         (fraction * 100.0).floor(),
@@ -351,6 +356,22 @@ fn bar(read: u64, total: u64, elapsed: Duration, look: Look) -> (String, String)
         rest.push_str(&format!("  ~{} left to read", duration(left)));
     }
     let lead = "token-max: Reading ";
+    let (open, close) = if look.unicode { ("", "") } else { ("[", "]") };
+    let used = crate::terminal::cells(lead) + open.len() + close.len() + rest.len();
+    let track = room
+        .saturating_sub(used)
+        .clamp(TRACK_CELLS.1, TRACK_CELLS.0);
+    // Eighths of a cell, so the bar moves smoothly on a Unicode terminal.
+    let eighths = (fraction * (track * 8) as f64) as usize;
+    let (full, part) = (eighths / 8, eighths % 8);
+    let (done, todo) = if look.unicode {
+        let partial = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"][part];
+        let filled = format!("{}{partial}", "█".repeat(full));
+        let left = track - full - usize::from(!partial.is_empty());
+        (filled, "░".repeat(left))
+    } else {
+        ("#".repeat(full), "-".repeat(track - full))
+    };
     let plain = format!("{lead}{open}{done}{todo}{close}{rest}");
     let line = if look.color {
         format!("{lead}{open}\x1b[35m{done}\x1b[2m{todo}\x1b[0m{close}{rest}")
@@ -1600,41 +1621,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_reading_bar_fills_by_eighths_and_estimates_only_after_a_second() {
+    fn the_reading_bar_fills_by_eighths_fits_its_row_and_estimates_only_after_a_second() {
         let unicode = Look {
             color: false,
             unicode: true,
         };
-        let second = Duration::from_secs(1);
-        // 1/64 of 24 cells is 3/8 of the first one.
-        let (line, plain) = bar(1, 64, second, unicode);
-        assert_eq!(
-            line,
-            format!("token-max: Reading ▍{}   1%  1 B of 64 B", "░".repeat(23))
-        );
-        assert_eq!(plain, line);
-        let (line, _) = bar(500, 1000, Duration::from_millis(999), unicode);
-        assert!(line.ends_with(" 50%  500 B of 1.0 kB"), "{line}");
-        let (line, _) = bar(500, 1000, 4 * second, unicode);
-        assert!(line.ends_with("  ~4s left to read"), "{line}");
         let plain = Look {
             color: false,
             unicode: false,
         };
-        let (line, _) = bar(999, 1000, 100 * second, plain);
-        let track = format!("[{}-]", "#".repeat(23));
-        assert!(line.contains(&track), "{line}");
+        let second = Duration::from_secs(1);
+        let at = |read, total, elapsed, look, room| {
+            let progress = Progress {
+                read,
+                total,
+                elapsed,
+            };
+            bar(&progress, look, room)
+        };
+        // 1/64 of 24 cells is 3/8 of the first one.
+        let (line, text) = at(1, 64, second, unicode, 200);
+        assert_eq!(
+            line,
+            format!("token-max: Reading ▍{}   1%  1 B of 64 B", "░".repeat(23))
+        );
+        assert_eq!(text, line);
+        let (line, _) = at(500, 1000, Duration::from_millis(999), unicode, 200);
+        assert!(line.ends_with(" 50%  500 B of 1.0 kB"), "{line}");
+        let (line, _) = at(500, 1000, 4 * second, unicode, 200);
+        assert!(line.ends_with("  ~4s left to read"), "{line}");
+        let (line, _) = at(999, 1000, 100 * second, plain, 200);
+        assert!(line.contains(&format!("[{}-]", "#".repeat(23))), "{line}");
         assert!(
             line.ends_with(" 99%  999 B of 1.0 kB  ~1s left to read"),
             "{line}"
         );
+        // A GB-scale line narrows its track to keep the estimate on an 80-column row, down
+        // to eight cells, past which the line is cut instead.
+        let gb = 1_000_000_000;
+        let (line, _) = at(3 * gb, 8 * gb, 60 * second, unicode, 79);
+        assert_eq!(crate::terminal::cells(&line), 79, "{line}");
+        assert!(line.ends_with("  ~1m 40s left to read"), "{line}");
+        let (line, _) = at(3 * gb, 8 * gb, 60 * second, plain, 10);
+        assert!(line.contains("[###-----]"), "{line}");
         let color = Look {
             color: true,
             unicode: true,
         };
-        let (line, plain) = bar(1, 2, second, color);
-        assert!(line.contains('\x1b') && !plain.contains('\x1b'));
-        assert_eq!(plain, bar(1, 2, second, unicode).0);
+        let (line, text) = at(1, 2, second, color, 200);
+        assert!(line.contains('\x1b') && !text.contains('\x1b'));
+        assert_eq!(text, at(1, 2, second, unicode, 200).0);
     }
 
     #[test]

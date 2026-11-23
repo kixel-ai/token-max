@@ -188,11 +188,11 @@ h1 { margin: 0; text-wrap: balance; }
 .breakdown li:nth-child(2) .api { width: 0.0%; }
 .breakdown li:nth-child(3) .plan { width: 2.2%; }
 .breakdown li:nth-child(3) .api { width: 0.0%; }
-.breakdown li:nth-child(4) .plan { width: 1.1%; }
+.breakdown li:nth-child(4) .plan { width: 0.6%; }
 .breakdown li:nth-child(4) .api { width: 0.0%; }
-.breakdown li:nth-child(5) .plan { width: 1.0%; }
+.breakdown li:nth-child(5) .plan { width: 0.5%; }
 .breakdown li:nth-child(5) .api { width: 0.0%; }
-.breakdown li:nth-child(6) .plan { width: 3.4%; }
+.breakdown li:nth-child(6) .plan { width: 2.4%; }
 .breakdown li:nth-child(6) .api { width: 0.3%; }
 /* /run */
 @keyframes blink { 50% { opacity: 0; } }

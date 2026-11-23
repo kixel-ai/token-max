@@ -166,9 +166,24 @@ def steps(transcript: str) -> tuple[list[list[str]], int]:
             step = step[:-1]
         if step:
             tidy.append(step if len(tidy) < questions else [""] + step)
+    tidy = [art(step) for step in tidy]
     if rests != 1:
         sys.exit(f"expected one line for the run to rest on, matching {rest.pattern!r}, found {rests}")
     return tidy, questions
+
+
+def art(step: list[str]) -> list[str]:
+    """Join each run of block-letter lines into one tight span, so the page's line height
+    leaves no gap between the halves of the wordmark."""
+    out: list[str] = []
+    for line in step:
+        if "█" in line and out and out[-1].startswith('<span class="art">'):
+            out[-1] = out[-1][: -len("</span>")] + "\n" + line + "</span>"
+        elif "█" in line:
+            out.append(f'<span class="art">{line}</span>')
+        else:
+            out.append(line)
+    return out
 
 
 def timing(typed: str, count: int, questions: int) -> str:

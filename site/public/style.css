@@ -129,6 +129,7 @@ h1 { margin: 0; text-wrap: balance; }
 .screen .g { color: var(--term-green); }
 .screen .y { color: var(--term-yellow); }
 .screen .p { color: var(--violet); }
+.screen .art { display: inline-block; line-height: 1; }
 .screen .elided { color: var(--term-dim); font-style: italic; }
 .cur { display: none; }
 
@@ -151,24 +152,24 @@ h1 { margin: 0; text-wrap: balance; }
 	animation: blink 1s step-end infinite;
 }
 /* run: assets/demo/site.py writes the run's timing and the results meter here */
-.term.play .typed { animation: type 2.7s steps(89) 0.3s both; }
-@keyframes type { from { width: 0; } to { width: 89ch; } }
-.step:nth-child(2) { --t: 3.4s; --gap: 1.4s; }
-.step:nth-child(3) { --t: 5.4s; --gap: 1.4s; }
-.step:nth-child(4) { --t: 7.4s; --gap: 1.4s; }
-.step:nth-child(5) { --t: 10.3s; --gap: 0.0s; }
-.step:nth-child(6) { --t: 12.8s; --gap: 0.0s; }
-.step:nth-child(7) { --t: 13.4s; --gap: 0.0s; }
-.step:nth-child(8) { --t: 14.0s; --gap: 0.0s; }
-.step:nth-child(9) { --t: 14.6s; --gap: 0.0s; }
-.step:nth-child(10) { --t: 15.2s; --gap: 0.0s; }
-.step:nth-child(11) { --t: 15.8s; --gap: 0.0s; }
-.step:nth-child(12) { --t: 16.4s; --gap: 0.0s; }
-.step:nth-child(13) { --t: 17.0s; --gap: 0.0s; }
-.step:nth-child(14) { --t: 17.6s; --gap: 0.0s; }
-.step:nth-child(15) { --t: 18.2s; --gap: 0.0s; }
-.step:nth-child(16) { --t: 18.8s; --gap: 0.0s; }
-.step:nth-child(17) { --t: 19.4s; --gap: 0.0s; }
+.term.play .typed { animation: type 2.2s steps(73) 0.3s both; }
+@keyframes type { from { width: 0; } to { width: 73ch; } }
+.step:nth-child(2) { --t: 2.9s; --gap: 1.4s; }
+.step:nth-child(3) { --t: 4.9s; --gap: 1.4s; }
+.step:nth-child(4) { --t: 6.9s; --gap: 1.4s; }
+.step:nth-child(5) { --t: 9.8s; --gap: 0.0s; }
+.step:nth-child(6) { --t: 12.3s; --gap: 0.0s; }
+.step:nth-child(7) { --t: 12.9s; --gap: 0.0s; }
+.step:nth-child(8) { --t: 13.5s; --gap: 0.0s; }
+.step:nth-child(9) { --t: 14.1s; --gap: 0.0s; }
+.step:nth-child(10) { --t: 14.7s; --gap: 0.0s; }
+.step:nth-child(11) { --t: 15.3s; --gap: 0.0s; }
+.step:nth-child(12) { --t: 15.9s; --gap: 0.0s; }
+.step:nth-child(13) { --t: 16.5s; --gap: 0.0s; }
+.step:nth-child(14) { --t: 17.1s; --gap: 0.0s; }
+.step:nth-child(15) { --t: 17.7s; --gap: 0.0s; }
+.step:nth-child(16) { --t: 18.3s; --gap: 0.0s; }
+.step:nth-child(17) { --t: 18.9s; --gap: 0.0s; }
 .meter .kept { flex: 93; }
 .meter .cut { flex: 7; }
 /* /run */

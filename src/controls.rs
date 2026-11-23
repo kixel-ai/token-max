@@ -388,13 +388,12 @@ pub fn claude_inbound(
         Some(Value::String(s)) if s == "refuse" => Ok(Some(Inbound::Refuse)),
         Some(_) => Err(invalid(format!("invalid {key}"), scope.file)),
     };
-    let mut resolved = None;
-    for scope in [managed, user] {
-        if let Some(value) = read(&scope)? {
-            resolved = Some((value, scope.file));
-            break;
-        }
-    }
+    // Read both, so an invalid value fails even in the file the first value outranks.
+    let found = [read(&managed)?, read(&user)?];
+    let mut resolved = [managed, user]
+        .iter()
+        .zip(found)
+        .find_map(|(scope, value)| Some((value?, scope.file)));
     let policy = resolved.is_some_and(|(_, file)| file == managed.file);
     for scope in repository {
         let current = resolved.map(|(value, _)| value);
@@ -2949,12 +2948,12 @@ mod tests {
             resolve(Some("hold"), None, &[Some("hold")]),
             at(Some("hold"), "managed")
         );
-        // A value Claude Code does not recognize fails where it is set.
+        // A value Claude Code does not recognize fails where it is set, even outranked.
         let bad = map(json!({ "crossSessionInbound": "deny" }));
-        let none = Map::new();
+        let managed = config(Some("accept"));
         let error = claude_inbound(
             SettingsScope {
-                config: &none,
+                config: &managed,
                 file: "managed",
             },
             SettingsScope {

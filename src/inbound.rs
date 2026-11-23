@@ -17,9 +17,15 @@ pub fn inbound_use(
     since: Option<Millis>,
     now: Millis,
 ) -> Vec<InboundUse> {
+    // A T3 instance whose launch arguments may decide it stays apart from a resolved owner.
     let owner = |p: &Profile| {
         let c = p.inbound.as_ref().expect("filtered on an inbound control");
-        format!("{}:crossSessionInbound\n{:?}", c.file, c.value)
+        format!(
+            "{}:crossSessionInbound\n{:?}\n{}",
+            c.file,
+            c.value,
+            t3_unresolved(p)
+        )
     };
     let controlled = scan
         .profiles
@@ -83,6 +89,12 @@ impl<'a> Turns<'a> {
                 requests.entry(&r.session).or_default().push(r);
             }
         }
+        for list in starts.values_mut() {
+            list.sort_by_key(|e| e.time);
+        }
+        for list in requests.values_mut() {
+            list.sort_by_key(|r| r.time);
+        }
         let mut subagents: HashMap<&str, Vec<(Millis, &str)>> = HashMap::default();
         for s in scan
             .subagents
@@ -112,14 +124,19 @@ impl<'a> Turns<'a> {
         for session in sessions(start) {
             // A delivery also recorded as a prompt is one record, not the next turn.
             let next = self.starts.get(session).and_then(|list| {
-                let at = list.iter().position(|e| e.id == start.id)?;
+                let first = list.partition_point(|e| e.time < start.time);
+                let at = first + list[first..].iter().position(|e| e.id == start.id)?;
                 list[at + 1..]
                     .iter()
                     .find(|e| e.location != start.location)
                     .map(|e| e.time)
             });
             let within = |time: Millis| time >= start.time && next.is_none_or(|n| time < n);
-            let own = self.requests.get(session).into_iter().flatten();
+            // Sorted by time, so the turn's own requests are one slice.
+            let all = self.requests.get(session).map_or(&[][..], Vec::as_slice);
+            let from = all.partition_point(|r| r.time < start.time);
+            let to = next.map_or(all.len(), |n| all.partition_point(|r| r.time < n));
+            let own = all[from..to.max(from)].iter();
             let spawned = self
                 .subagents
                 .get(session)
@@ -127,10 +144,16 @@ impl<'a> Turns<'a> {
                 .flatten()
                 .filter(|&&(first, _)| within(first))
                 .flat_map(|(_, s)| self.requests.get(s).into_iter().flatten());
-            found.extend(own.filter(|r| within(r.time)).chain(spawned).copied());
+            found.extend(own.chain(spawned).copied());
         }
         found
     }
+}
+
+/// Whether a T3 instance's launch arguments can set this profile's settings unseen.
+fn t3_unresolved(p: &Profile) -> bool {
+    p.t3.as_ref()
+        .is_some_and(|t| t.enabled && t.settings_unresolved)
 }
 
 fn line_use(
@@ -146,13 +169,7 @@ fn line_use(
         .clone()
         .expect("filtered on an inbound control");
     // A T3 instance's launch arguments, including any --settings, can decide it instead.
-    if control.unresolved.is_none()
-        && line
-            .lead
-            .t3
-            .as_ref()
-            .is_some_and(|t| t.enabled && t.settings_unresolved)
-    {
+    if control.unresolved.is_none() && t3_unresolved(line.lead) {
         control.unresolved = Some("the T3 instance's launch arguments, a secret environment value or machine policy can set it, and which apply is unresolved".into());
     }
     let mine = |e: &&StructuralEvent| {
@@ -166,7 +183,12 @@ fn line_use(
         match e.kind {
             EventKind::PeerTurn => {
                 idle += 1;
-                for r in turns.requests(e) {
+                // A request T3 enrichment gave another profile is not this line's.
+                for r in turns
+                    .requests(e)
+                    .into_iter()
+                    .filter(|r| line.covers(&r.profiles))
+                {
                     priced.entry(&r.id).or_insert(r);
                 }
             }
@@ -349,9 +371,11 @@ mod tests {
         )
         .unwrap();
         // The project tightens it, so it decides.
-        let project = format!("{cwd}/.claude/settings.json");
-        std::fs::create_dir_all(format!("{cwd}/.claude")).unwrap();
+        let dot_claude = std::path::Path::new(&cwd).join(".claude");
+        std::fs::create_dir_all(&dot_claude).unwrap();
+        let project = dot_claude.join("settings.json");
         std::fs::write(&project, r#"{"crossSessionInbound": "hold"}"#).unwrap();
+        let project = project.to_str().unwrap().to_string();
 
         let data = scan(&w.scan_options()).unwrap();
         assert!(!format!("{data:?}").contains("SYNTHETIC_PRIVATE"));
@@ -408,7 +432,7 @@ mod tests {
         let project = w.home.join("t3-project");
         std::fs::create_dir_all(project.join(".claude")).unwrap();
         std::fs::create_dir_all(project.join(".git")).unwrap();
-        let local = project.join(".claude/settings.local.json");
+        let local = project.join(".claude").join("settings.local.json");
         std::fs::write(&local, r#"{"crossSessionInbound": "refuse"}"#).unwrap();
         let root = w.claude.to_str().unwrap();
         let mut profiles = vec![

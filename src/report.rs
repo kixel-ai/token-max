@@ -2046,8 +2046,8 @@ fn inbound_row(u: &InboundUse, out: &Out<'_>) -> Row {
     );
     row.value = inbound_value(&u.control);
     row.sources = INBOUND_SOURCES.to_vec();
-    row.setting = "crossSessionInbound".into();
     let c = &u.control;
+    row.setting = format!("{}:crossSessionInbound", out.home(&c.file));
     let mut parts = vec![];
     if let Some(why) = &c.unresolved {
         parts.push(not_enough(why) + ".");

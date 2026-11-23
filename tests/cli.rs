@@ -229,7 +229,7 @@ fn analysis(
     use token_max::Env;
     use token_max::{AnalyzeOptions, analyze};
     use token_max::{PriceOptions, load_prices};
-    use token_max::{ScanOptions, scan};
+    use token_max::{Reach, ScanOptions, scan};
 
     let mut discovery = DiscoveryOptions {
         home: text(&w.home),
@@ -254,6 +254,7 @@ fn analysis(
         scan: scan(&ScanOptions {
             discovery,
             since: None,
+            reach: Reach::History,
         })
         .unwrap(),
         catalog: &catalog,
@@ -794,8 +795,8 @@ fn explicit_windows_match_the_library_replay() {
     use token_max::{Action, CheckResult};
     use token_max::{AnalyzeOptions, analyze};
     use token_max::{PriceOptions, load_prices};
+    use token_max::{Reach, ScanOptions, scan};
     use token_max::{ReportOptions, format_report};
-    use token_max::{ScanOptions, scan};
 
     const MIN: i64 = 60_000;
     let iso = |minute: i64| {
@@ -874,6 +875,7 @@ fn explicit_windows_match_the_library_replay() {
                 billing: Default::default(),
             },
             since: Some(since),
+            reach: Reach::History,
         })
         .unwrap();
         let report = analyze(AnalyzeOptions {

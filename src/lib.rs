@@ -40,6 +40,7 @@ mod terminal;
 mod totals;
 mod unreadable;
 mod version;
+mod window;
 mod wire;
 
 #[cfg(test)]
@@ -55,6 +56,6 @@ pub use model::{
     Verdict,
 };
 pub use prices::{PriceOptions, load_prices};
-pub use reader::{ScanOptions, scan};
+pub use reader::{Reach, ScanOptions, scan};
 pub use replay::{AnalyzeOptions, analyze};
 pub use report::{ReportOptions, format_report};

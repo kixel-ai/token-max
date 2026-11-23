@@ -8,10 +8,11 @@ any --ssh destination, passing every argument that is not a PROFILE=ANSWER on to
 answering each "How is PROFILE paid for?" question with the PROFILE=ANSWER given for it, and replaces
 what sits between index.html's <!-- doctor --> and <!-- /doctor --> markers. Each question
 becomes a .step the page reveals in turn, then each section of the report; the run's timing
-goes between style.css's run markers, since the page's CSP allows no inline styles. A second
-run answers every profile as API. The hosts' totals, which --ssh prints, and their changes fill
-the results section between index.html's <!-- results --> markers: the first run's saving on
-the subscription, the second's at API rates, and the second's changes ranked by setting. The
+goes between style.css's run markers, since the page's CSP allows no inline styles. Two more
+runs on a terminal too wide to wrap a row repeat it and answer every profile as API. The hosts'
+totals, which --ssh prints, and their changes fill the results section between index.html's
+<!-- results --> markers: the shown run's usage and saving on the subscription, the API run's
+saving at API rates, and both wide runs' changes ranked by setting. The
 EVERYTHING ELSE section is cut to one line: it is hundreds of lines long, and it names
 project files, which can belong to private repositories. Read the result before committing it.
 """
@@ -27,6 +28,9 @@ from pathlib import Path
 
 COMMAND = ["token-max", "doctor", "--defaults"]
 COLUMNS = 100
+# The runs the results parse are this wide, so no change row wraps: a wrap can break at a column
+# gap or inside a name, which leave the same text.
+WIDE = 10000
 # Every question ends in its dim choices, then ": ".
 PROMPT = re.compile(rb"\x1b\[0m: $")
 SGR = re.compile(r"\x1b\[([0-9;]*)m")
@@ -41,8 +45,8 @@ TOTAL = re.compile(r"^token-max: total over ")
 SUMMARY = re.compile(r"^  \d[\d,]* changes? ")
 
 
-def run(command: list[str], answers: dict[str, str]) -> str:
-    """Answer each question once its prompt shows, then read to exit."""
+def run(command: list[str], answers: dict[str, str], columns: int) -> str:
+    """Answer each question once its prompt shows, then read to exit, on a terminal `columns` wide."""
     root = Path.cwd()
     env = {
         "HOME": os.environ["HOME"],
@@ -56,7 +60,7 @@ def run(command: list[str], answers: dict[str, str]) -> str:
         import struct
         import termios
 
-        fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 50, COLUMNS, 0, 0))
+        fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 50, columns, 0, 0))
         # Progress goes to stderr on a terminal; the page shows only the report.
         devnull = os.open(os.devnull, os.O_WRONLY)
         os.dup2(devnull, 2)
@@ -208,15 +212,14 @@ CHANGE = re.compile(
 
 
 def changes(transcript: str, api: set[str], api_rates: bool) -> dict[str, list]:
-    """Each setting's offered saving summed over every host's CHANGES section, as
+    """Each setting's offered saving summed over every host's CHANGES section of a WIDE run, as
     [measured $/mo, $/mo that depends on how a profile pays, whether any part has a ~,
     how many lines, the measured $/mo outside this host's profiles in `api`, whether any part is
     a lower bound]. `api_rates` says
     every profile doctor asked about was answered as API."""
     rows: dict[str, list] = {}
     section, here = None, False
-    lines = plain_lines(transcript)
-    for i, plain in enumerate(lines):
+    for plain in plain_lines(transcript):
         if TITLE.match(plain):
             section, here = None, plain.startswith("token-max: this host ")
         elif HEADING.match(plain):
@@ -225,7 +228,7 @@ def changes(transcript: str, api: set[str], api_rates: bool) -> dict[str, list]:
             # A change whose saving was not measured, or one priced only as what it costs,
             # such as a Codex catalog skill's listing, promises no saving.
             if not re.search(r"\ssaves\s", plain):
-                if not re.search(r"saving not measured$|\scosts\s", plain.rstrip()):
+                if not re.search(r"\ssaving not measured(\s{2}|$)|\scosts\s", plain.rstrip()):
                     sys.exit(f"unparsed change line {plain.strip()!r}")
                 continue
             m = CHANGE.match(plain)
@@ -236,9 +239,9 @@ def changes(transcript: str, api: set[str], api_rates: bool) -> dict[str, list]:
             # API's 5m is only for a change to 1h.
             if api_rates and up_to and m["to"] != "1h":
                 sys.exit(f"cannot price {plain.strip()!r} at API rates without that profile's billing")
-            # The line after a change names the file it edits, such as [~/.claude/settings.json],
-            # unless its host has one profile.
-            path = re.match(r"^    \[([^\]]+)\]", lines[i + 1] if i + 1 < len(lines) else "")
+            # After its saving, a change names the file it edits, such as
+            # [~/.claude/settings.json], unless its host has one profile.
+            path = re.match(r"[^\[]*?\s{2}\[([^\]]+)\]", plain[m.end():])
             paid = here and (
                 any(path[1].startswith(root + "/") for root in api) if path else bool(api)
             )
@@ -309,13 +312,16 @@ def billions(tokens: int) -> str:
 LISTED = 5
 
 
-def results(plan: str, api: str, paid: set[str], since: date, now: datetime) -> tuple[str, str]:
-    """The results section and its bars' CSS: the plan run as the maintainer pays, and the
+def results(shown: str, plan: str, api: str, paid: set[str], since: date, now: datetime) -> tuple[str, str]:
+    """The results section and its bars' CSS: the shown run, whose totals the page's terminal
+    prints, and two WIDE runs whose rows it parses: the plan run as the maintainer pays, and the
     run with every profile answered as API. Doctor asks only about this host's profiles, so a
     destination's main-TTL change stays "up to"; billing picks only that change's default, and
     for a change to 1h "up to" prices it against the API's 5m, so it counts in full at API rates.
     A destination's profiles count as the subscription, since their billing is unknown."""
-    total, plan_offer = offered(plan)
+    # The boxes and the subscription column repeat the terminal's figures; the rows come from
+    # a later run, so they are checked against that run's own totals.
+    total, shown_offer = offered(shown)
     hosts, requests, tokens, spent_text = total.groups()
     spent = SPENT.fullmatch(spent_text)
     if not spent:
@@ -324,7 +330,8 @@ def results(plan: str, api: str, paid: set[str], since: date, now: datetime) -> 
     # count its days as doctor does, rounded to the nearest and at least one.
     start = datetime.combine(since, time(), timezone.utc)
     days = max(1, math.floor((now - start) / timedelta(days=1) + 0.5))
-    plan_usd, plan_about, plan_pct, plan_lower = plan_offer["measured"]
+    plan_usd, plan_about, plan_pct, plan_lower = shown_offer["measured"]
+    _, plan_offer = offered(plan)
     _, api_offer = offered(api)
     api_about = api_offer["measured"][1] or api_offer["up to"][1]
     api_lower = api_offer["measured"][3]
@@ -445,11 +452,13 @@ def main() -> None:
     typed = " ".join(command)
     # Doctor dates its window in UTC, ending when it runs.
     now = datetime.now(timezone.utc)
-    transcript = run(command, answers)
-    # The same run with every profile answered as API, for the results' API-rate column.
-    api = run(command, {profile: "a" for profile in answers})
+    transcript = run(command, answers, COLUMNS)
+    # The results parse each change's row from runs too wide to wrap one: the same run, and one
+    # with every profile answered as API for the API-rate column.
+    plan = run(command, answers, WIDE)
+    api = run(command, {profile: "a" for profile in answers}, WIDE)
     run_steps, questions = steps(transcript)
-    figures, bars = results(transcript, api, {p for p, a in answers.items() if a == "a"}, since, now)
+    figures, bars = results(transcript, plan, api, {p for p, a in answers.items() if a == "a"}, since, now)
     body = "".join(f'<span class="step">{chr(10).join(s)}\n</span>' for s in run_steps)
     fragment = f'<pre class="screen"><code><span class="cmdline">$ <span class="typed">{typed}</span>\n</span>{body}</code></pre>'
     replace(site / "index.html", "<!-- doctor -->", "<!-- /doctor -->", fragment)

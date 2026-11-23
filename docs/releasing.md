@@ -69,14 +69,16 @@ the last 30 days across their hosts, run from `nixos` with `--ssh` for the
 others, as HTML, with each host's EVERYTHING ELSE section cut to one line,
 since that section is long and names project files that can belong to private
 repositories. The results section below it comes from the same run's total and
-a second run that answers every profile as API. The first gives the usage boxes
-(the hosts' tokens, requests, and spend at API prices over this host's window;
+two more runs on a terminal too wide to wrap a change's row, since a wrapped row
+can't be parsed reliably: the same answers again, for each setting's saving on
+the subscription, and every profile answered as API. The shown run gives the usage boxes
+(the hosts' tokens, requests, and spend at API prices from `--since` to the run;
 a spend with unpriced requests stops the script) and the saving on the
-subscription, also in dollars at API rates. The second gives the saving at API
-rates and the breakdown by setting. Each line's bar is green for what the first run saved on profiles
-not answered as API, and violet for the rest; a line with no green is tagged
-"API only".
-The subscription column is the first run's total, as the maintainer pays, so
+subscription, also in dollars at API rates. The API run gives the saving at API
+rates and the breakdown by setting. Each line's bar is green for what the
+wide run with the same answers saved on profiles not answered as API, and
+violet for the rest; a line with no green is tagged "API only".
+The subscription column is the shown run's total, as the maintainer pays, so
 it includes what the profiles they answered as API save; the bars leave those
 out. Doctor asks only how this host's profiles pay, so a destination's profiles
 count as the subscription, and its main-agent cache TTL change stays "saves up

@@ -16,10 +16,6 @@ Run the `docs` audit: `quest audit docs` prints what it checks, what each findin
 
 - docs
 
-## Required
-
-- [m1](/quest/m1/README.md) - runs once per milestone
-
 ## Scheduled
 
 - 2026-11-27 - so a fast milestone does not rerun the audit at once

@@ -1924,6 +1924,11 @@ pub(crate) fn now() -> Millis {
 /// Parse request and structural metadata, deduplicating streams and inherited history.
 pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     let since = options.since;
+    // A reused counter shows no progress from an earlier scan.
+    if let Some(reading) = &options.reading {
+        reading.total.store(0, Ordering::Relaxed);
+        reading.read.store(0, Ordering::Relaxed);
+    }
     let snapshot_started_at = iso(now());
     let Discovery {
         roots,
@@ -2418,6 +2423,21 @@ mod tests {
                 },
             },
         })
+    }
+
+    #[test]
+    fn a_reused_reading_counter_starts_from_zero_even_when_nothing_is_read() {
+        let w = Workspace::new();
+        let reading = std::sync::Arc::new(Reading::default());
+        reading.total.store(7, Ordering::Relaxed);
+        reading.read.store(5, Ordering::Relaxed);
+        scan(&ScanOptions {
+            reading: Some(reading.clone()),
+            ..options(&w)
+        })
+        .unwrap();
+        let progress = |n: &AtomicU64| n.load(Ordering::Relaxed);
+        assert_eq!((progress(&reading.total), progress(&reading.read)), (0, 0));
     }
 
     #[test]

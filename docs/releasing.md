@@ -81,7 +81,10 @@ repository, customer or project. The README's recording, `assets/demo/walk.gif`,
 runs on synthetic transcripts instead, and `assets/demo/walk.tape`
 regenerates it. `og.png`, the link preview, is a 1200x630 screenshot of the
 page's top, from the logo through the run box; retake it after changing that
-part.
+part. The run box ends below 630 pixels at a 1200-pixel width, so take it at a
+1280x672 viewport with a device scale factor of 0.9375 (`agent-browser set
+viewport 1280 672 0.9375`), in a headless browser: the agent Chrome's screenshots
+time out.
 
 Preview the page, its headers and redirects locally with
 `nix shell nixpkgs#wrangler -c wrangler dev` from `site/`. After changing

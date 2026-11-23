@@ -49,7 +49,3 @@ Kept on purpose:
 ## Scheduled
 
 - 2026-11-27 - a week after the m1 run, so a fast m1 does not rerun it at once
-
-## Required
-
-- [m1](/quest/m1/README.md) - runs once per milestone

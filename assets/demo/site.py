@@ -248,8 +248,6 @@ def changes(transcript: str, api: set[str], api_rates: bool) -> dict[str, list]:
             row[3] += 1
             if not up_to and not paid:
                 row[4] += usd
-    if not rows:
-        sys.exit("the run offered no change with a saving")
     return rows
 
 
@@ -257,17 +255,29 @@ def changes(transcript: str, api: set[str], api_rates: bool) -> dict[str, list]:
 TOTAL_LINE = re.compile(
     r"token-max: total over (\d+) hosts\s+([\d,]+) requests and ([\d,]+) tokens in [\d,]+ sessions?"
 )
-OFFERED = re.compile(
-    r"Changes offered: (~?)\$([\d,.]+)/mo[^,]*, (\d+)% of these hosts' spend"
-    r"(?:, plus up to (~?)\$([\d,.]+)/mo[^,]*, (\d+)% of these hosts' spend, from \d+ changes?)?"
-)
+# One part of the "Changes offered" sentence: its amount and its percent of the hosts' spend.
+AMOUNT = re.compile(r"^(?:up to )?(?:about )?(~?)(<?)\$([\d,.]+)/mo.*?, (<?)(\d+)% of these hosts' spend")
 
 
-def offered(transcript: str) -> tuple[re.Match, re.Match]:
+def offered(transcript: str) -> tuple[re.Match, dict[str, tuple[float, bool, int]]]:
+    """The hosts' total, and what their changes offer as (usd, has a ~, percent) for "measured"
+    and "up to"; a run with nothing to offer prints no "Changes offered" sentence."""
     plain = " ".join(line.strip() for line in plain_lines(transcript))
-    total, offer = TOTAL_LINE.search(plain), OFFERED.search(plain)
-    if not total or not offer:
+    total = TOTAL_LINE.search(plain)
+    if not total:
         sys.exit("the results need the hosts' total that --ssh prints")
+    offer = {"measured": (0.0, False, 0), "up to": (0.0, False, 0)}
+    sentence = re.search(r"Changes offered: (.*?)\.(?: |$)", plain[total.end():])
+    for part in sentence[1].split(", plus ") if sentence else []:
+        if re.search(r"not measured(; overlapping changes may save less)?$", part):
+            continue
+        m = AMOUNT.match(part)
+        if not m:
+            sys.exit(f"unparsed offer {part!r}")
+        # "<$1" and "<1%" count as nothing.
+        usd = 0.0 if m[2] else dollars(m[3])
+        pct = 0 if m[4] else int(m[5])
+        offer["up to" if part.startswith("up to ") else "measured"] = (usd, bool(m[1]), pct)
     return total, offer
 
 
@@ -291,20 +301,20 @@ def results(plan: str, api: str, paid: set[str]) -> tuple[str, str]:
     A destination's profiles count as the subscription, since their billing is unknown."""
     total, plan_offer = offered(plan)
     hosts, requests, tokens = total.groups()
-    plan_pct = plan_offer[3]
+    plan_pct = plan_offer["measured"][2]
     _, api_offer = offered(api)
-    api_about = bool(api_offer[1] or api_offer[4])
-    api_usd = dollars(api_offer[2]) + (dollars(api_offer[5]) if api_offer[5] else 0)
+    api_about = api_offer["measured"][1] or api_offer["up to"][1]
+    api_usd = api_offer["measured"][0] + api_offer["up to"][0]
     # Each percent is of the same spend, so they add; each was rounded, so the sum may be one off.
-    api_pct = int(api_offer[3]) + int(api_offer[6] or 0)
+    api_pct = api_offer["measured"][2] + api_offer["up to"][2]
     plan_rows, api_rows = changes(plan, paid, False), changes(api, set(), True)
     # The rows must add up to the totals, each rounded to at most a dollar's half.
     for rows_, offer in ((plan_rows, plan_offer), (api_rows, api_offer)):
         slack = 0.5 * (sum(r[3] for r in rows_.values()) + 1)
-        for part, figure in ((0, offer[2]), (1, offer[5])):
+        for part, key in ((0, "measured"), (1, "up to")):
             summed = sum(r[part] for r in rows_.values())
-            if abs(summed - (dollars(figure) if figure else 0)) > slack:
-                sys.exit(f"the changes add up to ${summed:,.2f}/mo, not the total's ${figure}/mo")
+            if abs(summed - offer[key][0]) > slack:
+                sys.exit(f"the changes add up to ${summed:,.2f}/mo, not the total's ${offer[key][0]:,.2f}/mo")
     # A setting saves on the subscription what the first run measured outside the profiles
     # answered as API; at API rates, everything the second run offers.
     rows = []
@@ -321,7 +331,7 @@ def results(plan: str, api: str, paid: set[str]) -> tuple[str, str]:
             (sum(r[0] for r in rest), sum(r[1] for r in rest), any(r[2] for r in rest),
              f"Everything else ({len(rest)} settings)")
         )
-    top = max(r[0] for r in listed)
+    top = max((r[0] for r in listed), default=0)
     items, css = [], []
     for n, (whole, on_plan, about, name) in enumerate(listed, 1):
         tag = ' <span class="tag">API only</span>' if on_plan < 0.005 else ""
@@ -337,6 +347,12 @@ def results(plan: str, api: str, paid: set[str]) -> tuple[str, str]:
             f".breakdown li:nth-child({n}) .plan {{ width: {max(plan_w, 0.3) if on_plan else 0:.1f}%; }}\n"
             f".breakdown li:nth-child({n}) .api {{ width: {max(api_w, 0.3) if whole - on_plan >= 0.005 else 0:.1f}%; }}\n"
         )
+    breakdown = f"""  <h3 class="where">Where it comes from, at API rates</h3>
+  <ol class="breakdown">
+{chr(10).join(items)}
+  </ol>
+  <p class="key"><span class="k-plan">saves on my subscription too</span><span class="k-api">saves only at API rates</span></p>
+""" if items else ""
     fragment = f"""
   <p class="context">{billions(int(tokens.replace(",", "")))} tokens in {requests} requests on {hosts} machines</p>
   <div class="cols">
@@ -351,12 +367,7 @@ def results(plan: str, api: str, paid: set[str]) -> tuple[str, str]:
       <p>saved, {usd(api_usd, api_about)}/mo <span class="nope">(hell no)</span></p>
     </div>
   </div>
-  <h3 class="where">Where it comes from, at API rates</h3>
-  <ol class="breakdown">
-{chr(10).join(items)}
-  </ol>
-  <p class="key"><span class="k-plan">saves on my subscription too</span><span class="k-api">saves only at API rates</span></p>
-  <p class="fine">Replayed at public API prices on {hosts} of my machines on {date.today().isoformat()}, each change
+{breakdown}  <p class="fine">Replayed at public API prices on {hosts} of my machines on {date.today().isoformat()}, each change
   priced alone, so together they may save less. ~ marks figures extrapolated over unpriced requests.</p>
 """
     return fragment, "".join(css)

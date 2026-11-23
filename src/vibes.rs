@@ -63,10 +63,24 @@ pub fn fixes(items: &[Item]) -> Vec<Fix> {
     crate::doctor::fixes_from(fixes.collect())
 }
 
+/// `items` with each change as the walk would offer it, for a host that only prints them.
+/// Resolved on the host whose files they name, since a symlink there can make two files one.
+pub fn resolved(mut items: Vec<Item>) -> Vec<Item> {
+    let fixes = fixes(&items);
+    for (index, item) in items.iter_mut().enumerate() {
+        item.how = fixes
+            .iter()
+            .find(|f| f.origins.contains(&Origin::Vibe(index)))
+            .map(|f| f.how.clone());
+    }
+    items
+}
+
 /// One host's advice.
 pub struct Host<'a> {
     /// The host's name, when the run covers another host than this one.
     pub label: Option<&'a str>,
+    /// Its cards, [`resolved`] on that host when no walk offers them.
     pub items: &'a [Item],
     /// Its items' changes checked against its files, which a walk offers; None off a
     /// terminal, where each change is only named.
@@ -75,13 +89,13 @@ pub struct Host<'a> {
     pub style: &'a Style,
 }
 
-/// The heading over `count` cards.
+/// The heading over the cards, counting the advice as `doctor`'s offer does: a card with
+/// nothing to act on is shown and not counted.
 fn title(hosts: &[Host<'_>], style: &Style) -> String {
-    let count: usize = hosts.iter().map(|h| h.items.len()).sum();
+    let count: usize = hosts.iter().map(|h| pending(h.items)).sum();
     let head = match count {
         0 => "token-max vibes: no advice for these settings.".to_string(),
-        1 => "token-max vibes: 1 piece of advice the transcripts can't price.".to_string(),
-        n => format!("token-max vibes: {n} pieces of advice the transcripts can't price."),
+        n => format!("token-max vibes: {}.", pieces(n)),
     };
     let mut text = style.spans(&[(&head, BOLD)], style.width, 0, None);
     if count > 0 {
@@ -148,13 +162,9 @@ pub fn text(hosts: &[Host<'_>], style: &Style) -> String {
     let mut text = title(hosts, style);
     let mut n = 0;
     for host in hosts {
-        let fixes = fixes(host.items);
-        for (index, item) in host.items.iter().enumerate() {
+        for item in host.items {
             n += 1;
-            let change = fixes
-                .iter()
-                .find(|f| f.origins.contains(&Origin::Vibe(index)))
-                .map(|f| named(&f.how, host.style));
+            let change = item.how.as_ref().map(|how| named(how, host.style));
             text += &format!("\n{}", card(item, format!("[{n}/{count}]"), host, change));
         }
     }
@@ -244,9 +254,14 @@ pub fn offer(
 
 /// What `doctor` says of `vibes`' `count` pieces of advice, which it leaves out.
 pub fn hint(count: usize) -> String {
+    format!("token-max vibes has {}.", pieces(count))
+}
+
+/// `count` pieces of advice, as the heading and `doctor` both count them.
+fn pieces(count: usize) -> String {
     format!(
-        "token-max vibes has {count} piece{} of advice the transcripts can't price.",
-        if count == 1 { "" } else { "s" }
+        "{} of advice the transcripts can't price",
+        crate::report::plural(count as u64, "piece")
     )
 }
 
@@ -419,6 +434,8 @@ mod tests {
         assert_eq!(events.len(), 1);
         // Off a terminal the same changes are named, and nothing is asked or read.
         let style = style(&w);
+        // Resolved where the files are, as each host does before it prints or sends them.
+        let items = resolved(items.to_vec());
         let hosts = [Host {
             label: Some("devbox"),
             items: &items,

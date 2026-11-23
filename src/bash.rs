@@ -552,7 +552,7 @@ mod tests {
         );
         assert!(
             item.text
-                .ends_with("settings.json:env.BASH_MAX_TIMEOUT_MS.")
+                .ends_with("settings.json:env.BASH_MAX_TIMEOUT_MS. Project and local settings, which override it, are not read.")
         );
         // Under the TTL but past the margin, which a threshold at the TTL would keep.
         let near = report(r#"{"promptCacheTtl":"5m","env":{"BASH_MAX_TIMEOUT_MS":"270000"}}"#);

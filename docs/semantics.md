@@ -1193,8 +1193,9 @@ download steps.
 The stream is private to one build. The destination writes a header naming the
 package version and a fingerprint of the stream's types, and starts scanning.
 The coordinator loads prices meanwhile and writes one request on the
-destination's stdin: the price catalog and the job. For `doctor` the job is a
-report, with `--max-cost-per-use` and the report format (this terminal's
+destination's stdin: the price catalog and the job. For `doctor` and `vibes`
+the job is a report, which says whether to answer with `vibes`' cards instead,
+with `--max-cost-per-use` and the report format (this terminal's
 width, color and Unicode settings, `--details` and the host's label); for
 `sessions` it is the session export. The destination then writes its printed
 report and whether it recommends a change, or its session lines, either with
@@ -1210,10 +1211,17 @@ its index among the destination's offers, never an edit or a path. The
 destination replays them, rejecting an index it never offered, and replies with
 its report marked with the answers and the masked diff of each file it would
 write. After the confirm, the coordinator sends the write; the destination
-stops reading stdin, so the write finishes even if the coordinator goes, writes
-its files as a local write does, and replies with each file written or its
-diagnostic. A coordinator that does not confirm closes the connection, and the
-destination exits without writing. Remote reports, diffs and file names are
+writes its files as a local write does, finishing even if its stdin closes
+meanwhile, and replies with each file written or its diagnostic. It then keeps
+reading: when `doctor` hands off to `vibes`, the coordinator asks for its
+cards, which the destination sends with their changes checked against its
+files as they are now, and the review, confirm and write repeat for them. Off
+a terminal a destination sends its cards with their conflicts already
+resolved, since only it can tell which of its files a symlink makes one. The
+coordinator tells a destination that wrote that the audit is done, and the
+destination exits 0 without another message. A coordinator that never asked
+for a write closes the connection, and the destination exits without
+writing. Remote reports, diffs and file names are
 printed with terminal controls escaped as reports are. Any other build, a
 truncated or trailing value, a result for another window or job than
 requested, or a nonzero exit fails the run. The coordinator sets each session
@@ -1239,9 +1247,12 @@ before exiting 2. Each `ssh` client runs in its own process group, on Windows as
 well, so the terminal's Ctrl-C reaches only the coordinator,
 which stops the clients itself. After a walk's confirm, a signal closes every
 remaining SSH session. Only the destination that was already sent the write can
-still change its files: it no longer reads stdin, so the write it started may
-still finish. The others exit without writing. A write already under way on
+still change its files: a write it started finishes though its stdin closed. The others exit without writing. A write already under way on
 this host finishes, and no later host's write starts.
+A signal at `vibes`' offer or questions after `doctor` wrote exits 2 like any
+cancelled question, saying no further settings were changed: every write was
+reported before the offer, so what was written stands, and a destination
+stopped there is not asked to end its audit.
 
 ## Bash timeout cap
 

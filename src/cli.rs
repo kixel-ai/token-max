@@ -1365,7 +1365,7 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
         }
         if advice {
             let (label, style) = here();
-            cards.push((label, items, style));
+            cards.push((label, vibes::resolved(items), style));
             continue;
         }
         let Some(printed) = printed else {
@@ -1436,8 +1436,9 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
         }
         _ => String::new(),
     };
-    // Off a terminal, the advice this report leaves out is one command away.
-    let hint = if pending > 0 {
+    // Off a terminal, the advice this report leaves out is one command away. Under
+    // `--defaults` the count is of settings pretended away, which `vibes` reads as they are.
+    let hint = if pending > 0 && !values.defaults {
         let hint = format!(
             "{} Run token-max vibes over the same profiles, hosts and window to see it.",
             vibes::hint(pending)

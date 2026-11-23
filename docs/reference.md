@@ -1194,8 +1194,9 @@ variable or T3, is named on its card as a step by hand. Without a terminal,
 `vibes` prints the cards, each change naming its edit, and edits nothing.
 
 `doctor` offers `vibes` when its walk ends, counting the cards that advise
-something: a setting already as advised still has its card in `vibes`, and is
-not worth the question. With `--ssh`, each host's cards name their host, and
+something, as `vibes`' own heading does: a setting already as advised still
+has its card in `vibes`, and is not worth the question. Under `--defaults`,
+`doctor` names no count, since `vibes` reads the settings as they are. With `--ssh`, each host's cards name their host, and
 each destination checks and writes its own files, as in
 [`doctor`'s walk](#on-ssh-hosts).
 
@@ -1209,10 +1210,11 @@ rewrites the whole prefix.
 
 The card compares the cap with the main-agent TTL in effect now: the current
 setting, else the lifetime the latest main-agent request wrote. It never uses
-a TTL `doctor` recommends changing to, so no cap it writes outlasts the cache
-that is set. The cost is one extra step: when `doctor` hands off to `vibes`
-right after writing a TTL change, the card still advises the cap for the old
-TTL, and the next run advises the cap for the new one. It advises 240000 ms
+a TTL `doctor` recommends changing to. The card `doctor` hands off to comes
+from the scan made before `doctor` wrote anything, so right after a TTL change
+is written it still advises the cap for the old TTL: accepted after a change
+from 1h to 5m, a 55m cap outlasts the new cache until the next run advises 4m.
+Run `token-max vibes` again after changing the TTL. It advises 240000 ms
 under a 5m cache and 3300000 ms under 1h, a margin that leaves room for the
 model's reply on either side of the wait, whenever the cap is anything else: a
 higher cap comes down, and a lower one goes up. That margin is the maintainer's pick, not a measurement, and the card
@@ -1227,7 +1229,10 @@ measured. What another cap would save is not: a lower cap doesn't kill a
 command, which keeps running in the background, where checking on it takes
 later turns the transcripts can't predict; a higher cap trades those check-ins
 for longer foreground waits. Some commands need longer in the foreground, so
-the card is advice to weigh, and `doctor` never offers it.
+the card is advice to weigh: `doctor` gives it no line or verdict, and offers
+it only through `vibes` once its own walk ends. Project and local settings,
+which override the user file the edit goes to, are not read, and the card
+says so.
 
 Background commands and the user's own processes are unaffected by the cap.
 Codex's `background_terminal_max_timeout` bounds one poll of a background

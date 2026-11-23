@@ -1909,7 +1909,7 @@ const FABLE_RULE: &str = "on a Claude Max or Ultra plan or a Team or seat-based 
 const FABLE_PARTIAL: &str = "These figures are partial: the cap counts Fable use on every Claude surface, they cover only this profile's recorded sessions, and they may include requests paid with usage credits after the cap was reached. The weekly reset time is not recorded, and the limit is not published in tokens or dollars, so no share of it is shown.";
 
 /// A grouped count with the noun in the right number, such as "1,024 runs".
-fn plural(n: impl Into<i128>, noun: &str) -> String {
+pub(crate) fn plural(n: impl Into<i128>, noun: &str) -> String {
     let n = n.into();
     format!("{} {noun}{}", count(n), if n == 1 { "" } else { "s" })
 }
@@ -4250,7 +4250,9 @@ fn bash_item(cap: &BashCap, profile: &str, how: Option<How>, out: &Out<'_>) -> I
     };
     let current = duration(cap.current);
     let ttl = cap.ttl.map_or("unknown", Ttl::as_str);
-    let set_in = format!("Set in {}.", out.home(&cap.owner));
+    // An edit to the user file changes nothing where a project sets the cap itself.
+    const UNREAD: &str = "Project and local settings, which override it, are not read.";
+    let set_in = format!("Set in {}. {UNREAD}", out.home(&cap.owner));
     // Where the compared TTL came from: the setting, or the lifetime a request wrote.
     let basis = cap.ttl_basis.as_str();
     const BACKGROUND: &str = "A command past the cap is not killed: it keeps running in the background, where Claude checks on it in later turns.";
@@ -4272,11 +4274,11 @@ fn bash_item(cap: &BashCap, profile: &str, how: Option<How>, out: &Out<'_>) -> I
             let to = duration(suggested);
             let trade = if suggested < cap.current {
                 format!(
-                    "A foreground wait at or past the {ttl} cache TTL, {basis}, lets the cache expire before Claude replies, and a {to} cap leaves room under it. {waits} What a lower cap saves is not measured, and the {to} margin is a guess. {BACKGROUND} Some commands need longer in the foreground; keep the cap if yours do."
+                    "A foreground wait at or past the {ttl} cache TTL, {basis}, lets the cache expire before Claude replies, and a {to} cap leaves room under it. {waits} What a lower cap saves is not measured, and the {to} margin is a guess. {BACKGROUND} Some commands need longer in the foreground; keep the cap if yours do. {UNREAD}"
                 )
             } else {
                 format!(
-                    "A {current} cap moves commands to the background sooner than the {ttl} cache, {basis}, needs. Raising it to {to} trades longer foreground waits for fewer background check-ins. {waits} What a higher cap saves is not measured, and the {to} margin is a guess. {BACKGROUND}"
+                    "A {current} cap moves commands to the background sooner than the {ttl} cache, {basis}, needs. Raising it to {to} trades longer foreground waits for fewer background check-ins. {waits} What a higher cap saves is not measured, and the {to} margin is a guess. {BACKGROUND} {UNREAD}"
                 )
             };
             (format!("{current} {} {to}", out.arrow), trade)

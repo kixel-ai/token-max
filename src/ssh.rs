@@ -740,14 +740,19 @@ impl Remote {
             .stdin
             .as_mut()
             .map(|stdin| wire::write(&mut BufWriter::new(stdin), &Answer::Done));
-        if !matches!(sent, Some(Ok(()))) || self.stream.end().is_err() {
+        let sent = matches!(sent, Some(Ok(())));
+        if !sent || self.stream.end().is_err() {
             // Ctrl-C stopped the client, which its report of the write came before.
             if cancelled() {
                 self.session.stop(true);
                 return Ok(());
             }
             return Err(self.session.fail(true, |_| {
-                "token-max sent more than its result after writing".into()
+                if sent {
+                    "token-max sent more than its result after writing".into()
+                } else {
+                    "the connection closed after writing, before the audit could be ended".into()
+                }
             }));
         }
         match self.session.stop(false).and_then(|s| s.code()) {
@@ -948,7 +953,7 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
             (true, Some(walked)) => walked.advise(),
             (true, None) => Outcome::Vibes {
                 since,
-                items: vibes,
+                items: crate::vibes::resolved(vibes),
                 home,
                 offers: None,
             },

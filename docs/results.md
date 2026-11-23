@@ -1,6 +1,6 @@
 # Results on the maintainer's machines
 
-The README and [max.kixel.ai](https://max.kixel.ai) lead with figures from
+The README and [max.kixel.me](https://max.kixel.me) lead with figures from
 `token-max doctor --details --since 2026-10-19T11:59:22Z` and the same with
 `--defaults`, run 2026-11-18 on each of the maintainer's four machines, a macOS
 laptop and three Linux hosts, from commit `aeb01f5` (main with the shared

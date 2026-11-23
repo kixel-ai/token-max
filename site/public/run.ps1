@@ -1,7 +1,7 @@
 # Runs `token-max doctor` from the latest release without installing it:
 #
-#   irm https://max.kixel.ai/run.ps1 | iex
-#   & ([scriptblock]::Create((irm https://max.kixel.ai/run.ps1))) --since 2026-11-01
+#   irm https://max.kixel.me/run.ps1 | iex
+#   & ([scriptblock]::Create((irm https://max.kixel.me/run.ps1))) --since 2026-11-01
 #
 # The binary is checked against its release checksum, cached under
 # $env:XDG_CACHE_HOME or ~\.cache, in token-max\run, and reused while it is the latest.

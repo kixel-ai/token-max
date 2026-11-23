@@ -12,8 +12,8 @@ directory. Reports go to stdout; diagnostics go to stderr; exit codes are as
 described below. Ctrl-C cancels the running analysis: SIGINT or SIGTERM exits 2
 with no success report.
 
-`curl -LsSf https://max.kixel.ai/run.sh | sh` and, on Windows,
-`irm https://max.kixel.ai/run.ps1 | iex` run `token-max doctor` from the
+`curl -LsSf https://max.kixel.me/run.sh | sh` and, on Windows,
+`irm https://max.kixel.me/run.ps1 | iex` run `token-max doctor` from the
 latest release without installing it. Each downloads the release archive for
 this platform, refuses it unless it matches the release's `.sha256` file, and
 keeps the binary in `token-max/run` under `$XDG_CACHE_HOME` or `~/.cache`,
@@ -22,9 +22,9 @@ release; a newer one is downloaded beside it, and deleting the directory
 reclaims the space. `run.sh` hands `doctor` the
 terminal from `/dev/tty`, since its stdin is the piped script, so the changes
 are still offered. Options go after `sh -s --`, as in
-`curl -LsSf https://max.kixel.ai/run.sh | sh -s -- --since 2026-11-01`, or
+`curl -LsSf https://max.kixel.me/run.sh | sh -s -- --since 2026-11-01`, or
 in PowerShell,
-`& ([scriptblock]::Create((irm https://max.kixel.ai/run.ps1))) --since 2026-11-01`.
+`& ([scriptblock]::Create((irm https://max.kixel.me/run.ps1))) --since 2026-11-01`.
 `install.sh` and `install.ps1` redirect to the release's own installers.
 
 ## Applying changes
@@ -774,6 +774,21 @@ session. A cost is a lower bound, marked `"complete": false`, when a request
 could not be priced or a transcript had unreadable or unfinished lines.
 Compaction summaries the transcripts never recorded are not estimated here.
 
+With `--since`, only the transcripts the window depends on are read whole, so
+a recent window costs what its own transcripts hold rather than the whole
+history. Every transcript is first scanned for its record times and the
+identifiers it shares with others: sessions, threads and their parents, fork
+sources, requests and their API records, turns, and the record and tool keys
+T3 links. A transcript is read whole when one of its records is timed in the
+window, or is a request with no time, or when it shares an identifier with a
+transcript read whole, such as an earlier copy of a streamed reply, a resumed
+session's earlier branch and directory, or a subagent's parent. The lines
+printed are the ones reading every transcript would print. Modification times
+are not used, since a clock change or a copy can leave a transcript's earlier
+than the records inside. A malformed record in a transcript left unread does not
+fail the export. `doctor` reads every transcript, since its checks use the
+history before the window too.
+
 Each line names its `host`: the `--ssh` destination as given, or null for this
 host. Lines from every host are ordered together by first request; a session
 whose history was copied between hosts is printed once per host, each with its
@@ -997,11 +1012,13 @@ priced session lines.
 token-max doctor --ssh devbox --ssh user@laptop
 ```
 
-The destination runs `token-max doctor --ssh-scan`, which discovers that host's own
-profiles from its home and environment, reads its transcripts and settings,
-and runs every check there, priced from the one catalog this host loads and
-sends it. Only its finished report comes back, so its transcripts and scan
-never leave it, and this host never holds more than its own scan.
+The destination discovers that host's own profiles from its home and
+environment and reads its transcripts and settings, priced from the one catalog
+this host loads and sends it. For a report it runs `token-max doctor --ssh-scan`,
+which runs every check there and sends back only its finished report. For
+session lines it runs `token-max sessions --ssh-scan`, which sends back only
+the priced session lines of that host's transcripts. Either way its transcripts
+and scan never leave it, and this host never holds more than its own scan.
 
 Each run first asks the destination its OS and architecture, over the
 connection that then runs the audit:
@@ -1033,7 +1050,7 @@ linked build to run here instead, such as the release installers'.
 
 Each host is analyzed on its own and gets its own section, labeled with the
 destination, or `this host`. A run of several hosts heads its report with one
-total: the hosts' requests and sessions, their spend at API prices, and the sum of what the
+total: the hosts' requests, the input and output tokens they recorded (cache reads and writes included) and their sessions, their spend at API prices, and the sum of what the
 changes they offer save every 30 days, with each saving's percent of the hosts'
 spend together. Offered changes may overlap, within a host or between hosts, so
 applying them all can save less than that sum, as the total says. The hosts' figures are added as they are, so a history copied between

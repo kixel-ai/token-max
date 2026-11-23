@@ -45,7 +45,7 @@ but skips the check, saying so, on a system without `sha256sum`.
 cargo-dist's PowerShell installer checks nothing. Where either applies,
 verify the archive against `sha256.sum` or with `gh attestation verify`.
 
-## max.kixel.ai
+## max.kixel.me
 
 `site/` is a Cloudflare Worker with only static assets and no code:
 `index.html`, `style.css` and `site.js` are the landing page, `fonts/` holds
@@ -58,12 +58,35 @@ the terminal; without it the page still works and the terminal shows the whole
 run. `tests/run_script.rs` runs the run script for the host (`run.ps1` on the
 Windows CI job) against fixture releases on a local server.
 
+The page is the maintainer's personal project: its header holds their avatar,
+`avatar.webp` (their GitHub avatar at 96 pixels) linking to kixel.me, and
+inline icons from
+[Simple Icons](https://simpleicons.org) (CC0), since `_headers` allows only the
+page's own origin.
+
 The page's terminal is the maintainer's own `token-max doctor --defaults` over
 the last 30 days across their hosts, run from `nixos` with `--ssh` for the
 others, as HTML, with each host's EVERYTHING ELSE section cut to one line,
 since that section is long and names project files that can belong to private
-repositories. The results section below it comes from the same run's total, so
-the page shows one set of figures; `docs/results.md` and the README's top are
+repositories. The results section below it comes from the same run's total and
+two more runs on a terminal too wide to wrap a change's row, since a wrapped row
+can't be parsed reliably: the same answers again, for each setting's saving on
+the subscription, and every profile answered as API. The shown run gives the usage boxes
+(the hosts' tokens, requests, and spend at API prices from `--since` to the run;
+a spend with unpriced requests stops the script) and the saving on the
+subscription, also in dollars at API rates. The API run gives the saving at API
+rates and the breakdown by setting. Each line's bar is green for what the
+wide run with the same answers saved on profiles not answered as API, and
+violet for the rest; a line with no green is tagged "API only".
+The subscription column is the shown run's total, as the maintainer pays, so
+it includes what the profiles they answered as API save; the bars leave those
+out. Doctor asks only how this host's profiles pay, so a destination's profiles
+count as the subscription, and its main-agent cache TTL change stays "saves up
+to". Billing picks only that change's default, and for a change to 1h "up to"
+prices it against the API's 5m, so the second run counts it in full; a change
+to 5m there stops the script, since only that profile's billing could price it.
+The API column's percent adds the total's two rounded percents, so it can be
+one point off; `docs/results.md` and the README's top are
 an earlier, fuller replay and need not match it. After a change to doctor's
 questions or output, run it again from the repository root on `nixos` after
 `cargo build --release`, answering how each of its Claude profiles pays
@@ -75,7 +98,7 @@ python3 assets/demo/site.py site/public ~/.claude=p ~/.claude-api-credits=a ~/.c
   --since "$(date -u -d '29 days ago' +%F)" --ssh desktop --ssh fedora
 ```
 
-It writes the run and the results into `index.html`, and the run's timing and the results meter into `style.css`. Read the
+It writes the run and the results into `index.html`, and the run's timing and the breakdown's bars into `style.css`. Read the
 result before committing it: it is public, so it must name no private
 repository, customer or project. The README's recording, `assets/demo/walk.gif`,
 runs on synthetic transcripts instead, and `assets/demo/walk.tape`
@@ -89,11 +112,17 @@ time out.
 Preview the page, its headers and redirects locally with
 `nix shell nixpkgs#wrangler -c wrangler dev` from `site/`. After changing
 `site/`, deploy by hand from that directory with a wrangler login for the
-kixel.ai account:
+Cloudflare account that holds both kixel.me and kixel.ai:
 
 ```sh
 nix shell nixpkgs#wrangler -c wrangler deploy
 ```
+
+max.kixel.ai, the page's first host, answers every path with a 301 to the same
+path and query on max.kixel.me, so shared `/install.sh` and `/run.sh` links keep
+working. `site/redirect/` is that Worker, named `max-kixel-ai` like the
+assets-only Worker it replaced; deploy it the same way from its directory, only
+when it changes.
 
 The flake's default package builds from source and needs no release:
 `nix run github:kixel-ai/token-max -- doctor`.
@@ -161,7 +190,7 @@ branch with `dry-run` and the branch's `Cargo.toml` version (0.0.0 is
 allowed). It builds every archive and installer and uploads them as workflow
 artifacts; the jobs that publish only run on `main` without `dry-run`.
 
-After publication, run both installers through max.kixel.ai, and both run
+After publication, run both installers through max.kixel.me, and both run
 scripts, from a clean home without a Rust
 toolchain, and `cargo binstall token-max` and `cargo install --locked
 token-max` from a clean `CARGO_HOME`; verify help, version and a synthetic

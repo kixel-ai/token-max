@@ -10,10 +10,10 @@ Code and Codex transcripts under other settings, at API prices, and shows
 which ones to change. Run this:
 
 ```sh
-curl -LsSf https://max.kixel.ai/run.sh | sh
+curl -LsSf https://max.kixel.me/run.sh | sh
 ```
 
-On Windows, `irm https://max.kixel.ai/run.ps1 | iex`. It changes nothing
+On Windows, `irm https://max.kixel.me/run.ps1 | iex`. It changes nothing
 without a yes.
 
 ## What it found
@@ -69,13 +69,13 @@ has the accounting.
 ## Install
 
 ```sh
-curl -LsSf https://max.kixel.ai/install.sh | sh
+curl -LsSf https://max.kixel.me/install.sh | sh
 ```
 
 On Windows, in PowerShell:
 
 ```powershell
-irm https://max.kixel.ai/install.ps1 | iex
+irm https://max.kixel.me/install.ps1 | iex
 ```
 
 Each GitHub release has prebuilt binaries for

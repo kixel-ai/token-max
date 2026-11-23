@@ -137,6 +137,7 @@ fn options(w: &Workspace, since: Option<Millis>) -> ScanOptions {
             billing: Default::default(),
         },
         since,
+        reach: crate::reader::Reach::History,
         reading: None,
     }
 }

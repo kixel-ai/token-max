@@ -1189,8 +1189,9 @@ pub fn totals_section(
     let spent = spend_text(totals.spend, totals.margin, totals.floor, totals.partial);
     let name = format!("token-max: total over {hosts} hosts");
     let read = format!(
-        "  {} requests in {}, {spent} at API prices",
+        "  {} requests and {} tokens in {}, {spent} at API prices",
         count(totals.requests),
+        count(totals.tokens),
         plural(totals.sessions, "session")
     );
     let mut text = wrap_spans(

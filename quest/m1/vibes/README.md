@@ -33,6 +33,12 @@ Decision prompts, chosen options marked ✅:
   ✅ [Explore on Haiku](/quest/m1/vibes/explore-haiku.md) (rejected for now:
   cache habits from the 2026-11-17 study, which can return as their own quest
   here).
+- The TTL the Bash cap card compares with (2026-11-23, maintainer,
+  [#205](https://github.com/kixel-ai/token-max/pull/205#issuecomment-7116807299)):
+  ✅ the cache TTL set now (rejected: the TTL `doctor` recommends, with a
+  step by hand for a cap raised past the TTL set now; merging that as is).
+  Accepted cost: right after `doctor`'s hand-off writes a TTL change, the
+  card advises a cap for the old TTL, and the next run reverses it.
 
 Recommendation, not asked: each `vibes` card names its source, either a
 cited provider page or "the maintainer's pick", so a reader can tell whose

@@ -53,7 +53,7 @@ Type "y"
 Sleep 300ms
 Enter
 Sleep 5s
-# Its Bash cap, lowered under the 1h cache just written, then the write.
+# Its Bash cap, lowered under the 5m cache the scan saw, then the write.
 Type "y"
 Sleep 300ms
 Enter

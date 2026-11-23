@@ -1207,14 +1207,15 @@ then moves the command to the background. A wait at least as long as the cache
 TTL lets the cache expire before the model replies, so the next request
 rewrites the whole prefix.
 
-The card compares the cap with the main-agent TTL: the one `doctor`
-recommends, else the current setting, else the lifetime the latest main-agent
-request wrote. A cap raised past the cache TTL set now, for one `doctor` recommends
-changing to, is a step by hand that says to take that change first, since the
-longer wait would outlast the cache. It advises 240000 ms under a 5m cache and 3300000 ms under 1h,
-a margin that leaves room for the model's reply on either side of the wait,
-whenever the cap is anything else: a higher cap comes down, and a lower one
-goes up. That margin is the maintainer's pick, not a measurement, and the card
+The card compares the cap with the main-agent TTL in effect now: the current
+setting, else the lifetime the latest main-agent request wrote. It never uses
+a TTL `doctor` recommends changing to, so no cap it writes outlasts the cache
+that is set. The cost is one extra step: when `doctor` hands off to `vibes`
+right after writing a TTL change, the card still advises the cap for the old
+TTL, and the next run advises the cap for the new one. It advises 240000 ms
+under a 5m cache and 3300000 ms under 1h, a margin that leaves room for the
+model's reply on either side of the wait, whenever the cap is anything else: a
+higher cap comes down, and a lower one goes up. That margin is the maintainer's pick, not a measurement, and the card
 says so. A cap already there, or one with no TTL to compare with or an owner
 T3 left unsettled, has a card that advises nothing.
 

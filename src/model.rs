@@ -1941,13 +1941,10 @@ pub struct BashCap {
     pub suggested: Option<Millis>,
     /// Where `BASH_MAX_TIMEOUT_MS` is set, or the settings file that would set it.
     pub owner: String,
-    /// The main-agent TTL the cap is compared with; None when unresolved.
+    /// The main-agent TTL in effect now, which the cap is compared with; None when unresolved.
     pub ttl: Option<Ttl>,
     /// Where `ttl` came from.
     pub ttl_basis: String,
-    /// The suggested cap is a raise past the cache TTL set now, so it fits only once the TTL
-    /// change `doctor` recommends is made.
-    pub needs_ttl: bool,
     /// Why no cap is suggested: no TTL to compare with, or an owner that is not settled.
     pub unresolved: Option<String>,
     /// The settings that make the suggested cap, such as `env.BASH_MAX_TIMEOUT_MS: "240000"`.

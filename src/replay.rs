@@ -1028,7 +1028,6 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     let bash = bash_caps(&BashInput {
         scan: &scan,
         catalog,
-        ttls: &ttl_refs,
         since,
     });
     let t3_idle = crate::idle::t3_idle_checks(&IdleOptions {

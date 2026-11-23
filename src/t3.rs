@@ -2691,7 +2691,6 @@ mod tests {
             let checks = crate::bash::bash_caps(&crate::bash::BashInput {
                 scan: &data,
                 catalog: &crate::test_support::prices(),
-                ttls: &[],
                 since: None,
             });
             // One file's cap is the cap whichever owner ran the request; the instance's own

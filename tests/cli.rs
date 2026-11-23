@@ -388,7 +388,7 @@ fn exit_codes_and_no_partial_findings_or_transcript_content() {
 fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options() {
     let w = Workspace::new();
     w.fixture();
-    // A TTL doctor recommends raising, and a cap past the margin under it.
+    // A TTL doctor recommends raising, and a cap past the margin under the one set now.
     const SETTINGS: &str = r#"{"promptCacheTtl":"5m","env":{"BASH_MAX_TIMEOUT_MS":"7200000"}}"#;
     w.settings(SETTINGS);
     let base = prices_args(&w);
@@ -415,7 +415,7 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     assert_eq!((status, stderr.as_str()), (0, ""), "{stdout}");
     assert_eq!(
         stdout,
-        "token-max vibes: 1 piece of advice the transcripts can't price.\n  None of it is measured, so none of it is a verdict. Each card names whose advice it is.\n\n  [1/1] Bash timeout cap  not measured\n        2h -> 55m\n        What    The longest Claude waits on a foreground Bash command before Claude Code moves it to the background.\n        Advice  A foreground wait at or past the 1h cache TTL, the main-agent cache TTL doctor recommends, lets the cache expire before Claude replies, and a 55m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 55m margin is a guess. A command past the cap is not killed: it keeps running in the background, where Claude checks on it in later turns. Some commands need longer in the foreground; keep the cap if yours do.\n        Source  The maintainer's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching\n        Change  \"env\": {\"BASH_MAX_TIMEOUT_MS\": \"3300000\"} in ~/.claude/settings.json\n"
+        "token-max vibes: 1 piece of advice the transcripts can't price.\n  None of it is measured, so none of it is a verdict. Each card names whose advice it is.\n\n  [1/1] Bash timeout cap  not measured\n        2h -> 4m\n        What    The longest Claude waits on a foreground Bash command before Claude Code moves it to the background.\n        Advice  A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess. A command past the cap is not killed: it keeps running in the background, where Claude checks on it in later turns. Some commands need longer in the foreground; keep the cap if yours do.\n        Source  The maintainer's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching\n        Change  \"env\": {\"BASH_MAX_TIMEOUT_MS\": \"240000\"} in ~/.claude/settings.json\n"
     );
     assert_eq!(
         std::fs::read_to_string(w.claude.join("settings.json")).unwrap(),
@@ -430,7 +430,7 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     assert_eq!(status, 0);
     assert!(
         stdout.contains("\n  [1/1] Bash timeout cap  not measured\n        What    ")
-            && stdout.contains("Capped at 55m, the margin suggested under the 1h cache, the main-agent cache TTL doctor recommends.")
+            && stdout.contains("Capped at 55m, the margin suggested under the 1h cache, the current main-agent cache TTL setting.")
             && !stdout.contains("Change"),
         "{stdout}"
     );
@@ -1507,18 +1507,20 @@ mod unix {
             .unwrap_or_else(|| panic!("{stdout}"));
         let entry = words(&stdout[card..again]);
         assert!(
-            entry.starts_with("[1/1] Bash timeout cap not measured 2h -> 55m What The longest Claude waits on a foreground Bash command before Claude Code moves it to the background. Advice A foreground wait at or past the 1h cache TTL, the main-agent cache TTL doctor recommends, lets the cache expire before Claude replies, and a 55m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 55m margin is a guess."),
+            entry.starts_with("[1/1] Bash timeout cap not measured 2h -> 4m What The longest Claude waits on a foreground Bash command before Claude Code moves it to the background. Advice A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess."),
             "{entry}"
         );
         assert!(
-            entry.ends_with(r#"Source The maintainer's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching Change "env": {"BASH_MAX_TIMEOUT_MS": "3300000"} in ~/.claude/settings.json Accept? [y]es, [n]o, [q]uit:"#),
+            entry.ends_with(r#"Source The maintainer's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching Change "env": {"BASH_MAX_TIMEOUT_MS": "240000"} in ~/.claude/settings.json Accept? [y]es, [n]o, [q]uit:"#),
             "{entry}"
         );
         assert!(!entry.contains("Recommended") && !entry.contains("Worth considering"));
+        // The card is from the scan before doctor wrote 1h, so its cap is for the 5m cache
+        // set then; the next run moves it to 55m.
         // Its edit is checked against the file as doctor just wrote it, and confirmed alone.
         let tail = &stdout[again..];
         assert!(
-            tail.contains("  @@ -3,3 +3,3 @@\n      \"env\": {\n  -     \"BASH_MAX_TIMEOUT_MS\": \"7200000\"\n  +     \"BASH_MAX_TIMEOUT_MS\": \"3300000\"\n"),
+            tail.contains("  @@ -3,3 +3,3 @@\n      \"env\": {\n  -     \"BASH_MAX_TIMEOUT_MS\": \"7200000\"\n  +     \"BASH_MAX_TIMEOUT_MS\": \"240000\"\n"),
             "{tail}"
         );
         assert!(
@@ -1543,7 +1545,7 @@ mod unix {
         );
         assert_eq!(
             std::fs::read_to_string(w.claude.join("settings.json")).unwrap(),
-            raised.replace("7200000", "3300000")
+            raised.replace("7200000", "240000")
         );
         drop(keyboard);
     }

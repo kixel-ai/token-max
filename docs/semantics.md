@@ -1259,9 +1259,9 @@ room for the starting request's output and the reply (`safe_cap` in
 any other cap, lower or higher, is advised to it, and none changes `doctor`'s
 exit code.
 
-The compared TTL is the main-agent TTL check's verdict when it has one, else the
-current `promptCacheTtl`, else the write lifetime of the latest selected
-main-agent request; with none, or when recorded projects set the main TTL
+The compared TTL is the current `promptCacheTtl`, else the write lifetime of
+the latest selected main-agent request, and never the main-agent TTL check's
+verdict; with none, or when recorded projects set the main TTL
 differently, no cap is advised. Claude Code 2.1.319 moves
 commands in async subagents with a 5m cache to the background after 3 minutes
 on its own, so the subagent TTL does not set the cap.

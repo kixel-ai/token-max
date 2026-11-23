@@ -4,8 +4,8 @@ use crate::collections::HashMap;
 
 use crate::cache::{observed_ttl, ttl_milliseconds};
 use crate::model::{
-    Action, BashCap, BashCapControl, BashWaits, Bucket, Cost, EventKind, Harness, Id, Millis,
-    Profile, Request, RequestEvidence, Scan, StructuralEvent, Ttl, TtlCheck, Usd,
+    BashCap, BashCapControl, BashWaits, Cost, EventKind, Harness, Id, Millis, Profile, Request,
+    RequestEvidence, Scan, StructuralEvent, Ttl, Usd,
 };
 use crate::prices::{Catalog, Sample, add_costs, known_cost, unit_rates, unknown_cost, zero_cost};
 
@@ -33,8 +33,6 @@ pub struct BashInput<'a> {
     pub scan: &'a Scan,
     /// Public prices.
     pub catalog: &'a Catalog,
-    /// TTL checks, whose main-agent verdict sets the TTL the cap must stay under.
-    pub ttls: &'a [&'a TtlCheck],
     /// The explicit window start; None uses the first request.
     pub since: Option<Millis>,
 }
@@ -61,38 +59,20 @@ pub(crate) fn owner(p: &Profile) -> Option<String> {
     ))
 }
 
-/// The main-agent TTL the cap must stay under, where it came from, and, when it is a change
-/// `doctor` recommends, the TTL set now that it replaces (None inside when unknown).
-fn evaluation_ttl(
-    ttls: &[&TtlCheck],
-    profile: &Profile,
-    requests: &[&Request],
-) -> (Option<Ttl>, &'static str, Option<Option<Ttl>>) {
+/// The main-agent TTL in effect now, which the cap must stay under, and where it came from.
+///
+/// Never the TTL `doctor` recommends: a cap written for a TTL that is not set yet would
+/// outlast the cache that is.
+fn evaluation_ttl(profile: &Profile, requests: &[&Request]) -> (Option<Ttl>, &'static str) {
     // No one TTL holds across projects that set it differently, so no fallback stands in.
     if profile.ttl.main.varies {
         return (
             None,
             "recorded projects set the main-agent cache TTL differently",
-            None,
         );
     }
-    let verdict = ttls
-        .iter()
-        .find(|t| t.base.profiles.contains(&profile.id) && t.bucket == Bucket::Main)
-        .filter(|t| t.base.action != Action::Advisory)
-        .and_then(|t| {
-            let replaces = (t.base.action == Action::Change).then_some(t.base.current);
-            Some((t.base.recommended?, replaces))
-        });
-    if let Some((ttl, replaces)) = verdict {
-        return (
-            Some(ttl),
-            "the main-agent cache TTL doctor recommends",
-            replaces,
-        );
-    }
-    if let Some(ttl) = profile.ttl.main.one().value {
-        return (Some(ttl), "the current main-agent cache TTL setting", None);
+    if let Some(ttl) = profile.ttl.main.value {
+        return (Some(ttl), "the current main-agent cache TTL setting");
     }
     let observed = requests
         .iter()
@@ -103,9 +83,8 @@ fn evaluation_ttl(
         Some(ttl) => (
             Some(ttl),
             "the cache lifetime the latest main-agent request wrote",
-            None,
         ),
-        None => (None, "the main-agent cache TTL is unresolved", None),
+        None => (None, "the main-agent cache TTL is unresolved"),
     }
 }
 
@@ -149,7 +128,6 @@ fn check(
     let BashInput {
         scan,
         catalog,
-        ttls,
         since,
     } = *input;
     let selected = |time: Millis| since.is_none_or(|s| time >= s);
@@ -164,7 +142,7 @@ fn check(
     for &r in &requests {
         sessions.entry(&r.session).or_default().push(r);
     }
-    let (ttl, ttl_basis, replaces) = evaluation_ttl(ttls, profile, &requests);
+    let (ttl, ttl_basis) = evaluation_ttl(profile, &requests);
 
     let mine = |e: &&StructuralEvent| line.covers(&e.profiles) && selected(e.time);
     let mut ends: HashMap<(&str, &Id), &StructuralEvent> = HashMap::default();
@@ -242,10 +220,6 @@ fn check(
         })
         .or_else(|| ttl.is_none().then(|| ttl_basis.into()));
     let suggested = ttl.map(safe_cap).filter(|_| unresolved.is_none());
-    // A cap raised past the margin under the TTL set now fits only the recommended one.
-    let needs_ttl = suggested.is_some_and(|to| {
-        to > control.value && replaces.is_some_and(|set| set.is_none_or(|set| to > safe_cap(set)))
-    });
     let cap = suggested.unwrap_or(control.value);
     let mut replacement = format!("env.BASH_MAX_TIMEOUT_MS: \"{cap}\"");
     // A default above the cap raises the cap again, so it comes down too.
@@ -260,7 +234,6 @@ fn check(
         owner: control.owner.clone(),
         ttl,
         ttl_basis: ttl_basis.into(),
-        needs_ttl,
         unresolved,
         replacement,
         waits: BashWaits {
@@ -277,7 +250,7 @@ fn check(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::CheckResult;
+    use crate::model::{Action, Bucket, CheckResult};
     use crate::prices::unit_rates;
     use crate::reader::scan;
     use crate::replay::{AnalyzeOptions, analyze};
@@ -375,23 +348,14 @@ mod tests {
         ];
         let lines: String = records.iter().map(|r| format!("{r}\n")).collect();
         std::fs::write(w.claude.join("projects/project/main.jsonl"), lines).unwrap();
-        let data = scan(&w.scan_options()).unwrap();
-        let mut report = analyze(AnalyzeOptions {
-            scan: data,
+        analyze(AnalyzeOptions {
+            scan: scan(&w.scan_options()).unwrap(),
             catalog: &prices(),
             since: None,
             now: START + 60 * MIN,
             max_cost_per_use_usd: 1.0,
         })
-        .unwrap();
-        // Compare with the current TTL alone; the TTL check's own verdict is tested separately.
-        report.bash = bash_caps(&BashInput {
-            scan: &report.scan,
-            catalog: &prices(),
-            ttls: &[],
-            since: None,
-        });
-        report
+        .unwrap()
     }
 
     fn bash(report: &crate::model::Report) -> &BashCap {
@@ -414,13 +378,13 @@ mod tests {
         let mut profile = crate::test_support::make_profile("p", "root");
         profile.ttl.main.value = Some(Ttl::OneHour);
         profile.ttl.main.varies = true;
-        let (ttl, basis, _) = evaluation_ttl(&[], &profile, &[]);
+        let (ttl, basis) = evaluation_ttl(&profile, &[]);
         assert_eq!(ttl, None);
         assert!(basis.contains("differently"));
     }
 
     #[test]
-    fn the_ttl_check_verdict_sets_the_compared_ttl() {
+    fn a_ttl_doctor_recommends_changing_does_not_move_the_cap() {
         let w = Workspace::new();
         std::fs::write(w.claude.join("settings.json"), r#"{"promptCacheTtl":"5m"}"#).unwrap();
         let records = [
@@ -452,11 +416,6 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        assert_ne!(verdict.base.action, Action::Advisory);
-        let check = &report.bash[0];
-        assert_eq!(check.ttl, verdict.base.recommended);
-        assert!(check.ttl_basis.contains("recommends"));
-        // The default 10m cap would rise to 55m, past the 5m cache set now.
         assert_eq!(
             (
                 verdict.base.current,
@@ -465,11 +424,14 @@ mod tests {
             ),
             (Some(Ttl::FiveMinutes), Some(Ttl::OneHour), Action::Change)
         );
-        assert!(check.needs_ttl);
-        assert!(matches!(
-            card(&report).how,
-            Some(crate::doctor::How::Manual { .. })
-        ));
+        // The cap follows the 5m cache set now, so its edit never outlasts that cache.
+        let check = &report.bash[0];
+        assert_eq!(check.ttl, Some(Ttl::FiveMinutes));
+        assert_eq!(check.suggested, Some(240_000));
+        assert!(check.ttl_basis.contains("current"));
+        let card = card(&report);
+        assert_eq!(card.value, "10m -> 4m");
+        assert!(matches!(card.how, Some(crate::doctor::How::Edit(_))));
     }
 
     #[test]
@@ -564,7 +526,6 @@ mod tests {
         let checks = bash_caps(&BashInput {
             scan: &data,
             catalog: &prices(),
-            ttls: &[],
             since: None,
         });
         let waits = &checks[0].waits;
@@ -597,7 +558,7 @@ mod tests {
         let near = report(r#"{"promptCacheTtl":"5m","env":{"BASH_MAX_TIMEOUT_MS":"270000"}}"#);
         assert_eq!(card(&near).value, "270s -> 4m");
         // A low cap is raised, and says what that trades.
-        let mut low = report(r#"{"promptCacheTtl":"5m","env":{"BASH_MAX_TIMEOUT_MS":"120000"}}"#);
+        let low = report(r#"{"promptCacheTtl":"5m","env":{"BASH_MAX_TIMEOUT_MS":"120000"}}"#);
         let item = card(&low);
         assert_eq!(item.value, "2m -> 4m");
         assert!(
@@ -608,21 +569,6 @@ mod tests {
             item.text
         );
         assert!(matches!(item.how, Some(crate::doctor::How::Edit(_))));
-        // Raised past the cache set now, the cap waits on the TTL change and is no edit.
-        low.bash[0].needs_ttl = true;
-        let item = card(&low);
-        assert!(
-            item.text.contains(
-                "check-ins. Take doctor's cache TTL change first: a 4m wait outlasts the cache set now. 1 foreground"
-            ),
-            "{}",
-            item.text
-        );
-        assert!(
-            matches!(&item.how, Some(crate::doctor::How::Manual { reason, .. }) if reason.contains("cache TTL change")),
-            "{:?}",
-            item.how
-        );
         // The default timeout raises the effective cap, so both come down in the one edit.
         let both = report(
             r#"{"promptCacheTtl":"5m","env":{"BASH_MAX_TIMEOUT_MS":"200000","BASH_DEFAULT_TIMEOUT_MS":"300000"}}"#,

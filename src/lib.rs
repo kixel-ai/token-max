@@ -40,6 +40,7 @@ mod terminal;
 mod totals;
 mod unreadable;
 mod version;
+mod window;
 mod wire;
 
 #[cfg(test)]

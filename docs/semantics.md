@@ -35,7 +35,10 @@ silently discarded attempt; it does not fail selected billing validation. Select
 usage errors fail the scan. Requests linked across the window use their recorded
 start time, so a completion after the boundary does not move old work into billing.
 Context records still establish subsequent model/client metadata. File dates and
-modification times cannot prove that all records precede the window. A complete
+modification times cannot prove that all records precede the window, so
+`token-max sessions --since` picks the transcripts it reads by their record
+times, adding each transcript that shares an identifier the reader joins on with
+one it reads, and prints what reading every transcript would. A complete
 line that is not a JSON object cannot prove its timestamp either; it is skipped and
 counted, and its usage is missing, wherever it falls. Each counts as one unpriced
 pair in its profile's paired comparisons, so many such lines block a verdict. Real histories contain such

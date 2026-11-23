@@ -765,14 +765,20 @@ session. A cost is a lower bound, marked `"complete": false`, when a request
 could not be priced or a transcript had unreadable or unfinished lines.
 Compaction summaries the transcripts never recorded are not estimated here.
 
-With `--since`, only transcripts written since the window opened are read, so
+With `--since`, only the transcripts the window depends on are read whole, so
 a recent window costs what its own transcripts hold rather than the whole
-history. A record is never written before its own timestamp, so a transcript
-last modified before the window, allowing two seconds for filesystems that
-record coarse modification times, holds none of it. Each transcript read is
-read whole, since its earlier records still price the window's requests.
-`files` and `skippedLines` count only transcripts read. `doctor` reads every
-transcript, since its checks use the history before the window too.
+history. Every transcript is first scanned for its record times and the
+identifiers it shares with others: sessions, threads and their parents, fork
+sources, requests and their API records, turns, and the record and tool keys
+T3 links. A transcript is read whole when one of its records is timed in the
+window, or is a request with no time, or when it shares an identifier with a
+transcript read whole, such as an earlier copy of a streamed reply, a resumed
+session's earlier branch and directory, or a subagent's parent. The lines
+printed are the ones reading every transcript would print. Modification times
+are not used, since a clock change or a copy can leave a transcript's earlier
+than the records inside. A malformed record in a transcript left unread does not
+fail the export. `doctor` reads every transcript, since its checks use the
+history before the window too.
 
 Each line names its `host`: the `--ssh` destination as given, or null for this
 host. Lines from every host are ordered together by first request; a session

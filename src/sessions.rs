@@ -552,39 +552,144 @@ mod tests {
         assert!(fork.complete && close(fork.cost_usd.to_f64(), 0.0041));
     }
 
-    #[test]
-    fn a_window_reads_only_transcripts_written_since_it_opened() {
-        let w = Workspace::new();
-        let since: Millis = 1_793_491_200_000;
-        let project = w.claude.join("projects/project");
-        // Each file's modification time is set before its own record, which no harness writes,
-        // so only a file the window reads can export its session.
-        for (name, written) in [("late", since - 2_001), ("rounded", since - 2_000)] {
-            let path = project.join(format!("{name}.jsonl"));
-            let record = reply(name, name, "2026-11-01T00:01:00Z", "main", "high");
-            write(&path, &[record], "");
-            let at = std::time::UNIX_EPOCH + std::time::Duration::from_millis(written as u64);
-            std::fs::File::options()
-                .write(true)
-                .open(&path)
-                .unwrap()
-                .set_modified(at)
-                .unwrap();
-        }
-        let exported = |reach| {
-            let options = crate::reader::ScanOptions {
-                since: Some(since),
-                reach,
-                ..w.scan_options()
-            };
-            let sessions = export(&scan(&options).unwrap(), &prices()).unwrap();
-            let ids: Vec<_> = sessions.into_iter().filter_map(|s| s.session).collect();
-            ids
-        };
+    /// Export with and without skipping transcripts, require the same requests and
+    /// sessions, and return the names of the transcripts the window read.
+    fn window_agrees(options: crate::reader::ScanOptions) -> Vec<String> {
         use crate::reader::Reach;
-        assert_eq!(exported(Reach::History), ["late", "rounded"]);
-        // A two-second modification time may round a write in the window down to before it.
-        assert_eq!(exported(Reach::Window), ["rounded"]);
+        let history = scan(&crate::reader::ScanOptions {
+            reach: Reach::History,
+            ..options.clone()
+        })
+        .unwrap();
+        let window = scan(&crate::reader::ScanOptions {
+            reach: Reach::Window,
+            ..options
+        })
+        .unwrap();
+        assert_eq!(window.requests, history.requests);
+        assert_eq!(
+            export(&window, &prices()).unwrap(),
+            export(&history, &prices()).unwrap()
+        );
+        let mut read: Vec<_> = window
+            .snapshots
+            .iter()
+            .map(|s| {
+                let name = s.file.rsplit(['/', '\\']).next().unwrap();
+                name.trim_end_matches(".jsonl").to_string()
+            })
+            .collect();
+        read.sort();
+        read
+    }
+
+    #[test]
+    fn a_window_reads_transcripts_by_record_time_and_whatever_they_share_ids_with() {
+        let w = Workspace::new();
+        let project = w.claude.join("projects/project");
+        let file = |name: &str, records: &[Value]| {
+            write(&project.join(format!("{name}.jsonl")), records, "");
+        };
+        // A transcript's modification time can precede its records after a clock change
+        // or a copy, so it decides nothing.
+        file(
+            "clock",
+            &[reply("clock", "c1", "2026-11-01T00:01:00Z", "main", "high")],
+        );
+        let past = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(project.join("clock.jsonl"))
+            .unwrap()
+            .set_modified(past)
+            .unwrap();
+        // A streamed reply's earliest copy, in a transcript otherwise before the window,
+        // puts the whole request before it.
+        file(
+            "stream-old",
+            &[reply(
+                "stream-old",
+                "s1",
+                "2026-10-31T23:59:00Z",
+                "main",
+                "high",
+            )],
+        );
+        file(
+            "stream-new",
+            &[
+                reply("stream-new", "s1", "2026-11-01T00:01:00Z", "main", "high"),
+                reply("stream-new", "s2", "2026-11-01T00:02:00Z", "main", "high"),
+            ],
+        );
+        // A resumed session's earlier transcript names its branch and directory.
+        let mut earlier = reply("resumed", "r0", "2026-10-31T00:00:00Z", "feature", "high");
+        earlier["cwd"] = json!("/synthetic/earlier");
+        file("resumed-old", &[earlier]);
+        let mut later = reply("resumed", "r1", "2026-11-01T00:03:00Z", "main", "high");
+        later.as_object_mut().unwrap().remove("gitBranch");
+        later.as_object_mut().unwrap().remove("cwd");
+        file("resumed-new", &[later]);
+        // Neither in the window nor sharing an identifier with it.
+        file(
+            "unrelated",
+            &[reply(
+                "unrelated",
+                "u1",
+                "2026-10-31T00:00:00Z",
+                "main",
+                "high",
+            )],
+        );
+        // A record without a time may be in the window, as the reader counts it, unless it
+        // is one the reader never prices, such as a title.
+        let mut untimed = reply("untimed", "t1", "2026-11-01T00:00:00Z", "main", "high");
+        untimed.as_object_mut().unwrap().remove("timestamp");
+        let title = json!({"type": "ai-title", "sessionId": "titled", "title": "SYNTHETIC"});
+        file(
+            "titled",
+            &[
+                reply("titled", "a1", "2026-10-31T00:00:00Z", "main", "high"),
+                title,
+            ],
+        );
+        let options = crate::reader::ScanOptions {
+            since: Some(1_793_491_200_000),
+            ..w.scan_options()
+        };
+        assert_eq!(
+            window_agrees(options.clone()),
+            [
+                "clock",
+                "resumed-new",
+                "resumed-old",
+                "stream-new",
+                "stream-old"
+            ]
+        );
+        let sessions = export(&scan(&options).unwrap(), &prices()).unwrap();
+        let resumed = sessions
+            .iter()
+            .find(|s| s.session.as_deref() == Some("resumed"))
+            .unwrap();
+        assert_eq!(resumed.cwd.as_deref(), Some("/synthetic/earlier"));
+        assert_eq!(resumed.branches[0].name, "feature");
+        assert_eq!(resumed.files.len(), 2);
+        let stream = sessions
+            .iter()
+            .find(|s| s.session.as_deref() == Some("stream-new"))
+            .unwrap();
+        assert_eq!(stream.models[0].requests, 1);
+        // The reader fails on a request without a time, wherever the window opens.
+        file("untimed", &[untimed]);
+        assert!(scan(&options).is_err());
+        assert!(
+            scan(&crate::reader::ScanOptions {
+                reach: crate::reader::Reach::Window,
+                ..options
+            })
+            .is_err()
+        );
     }
 
     #[test]
@@ -711,10 +816,15 @@ mod tests {
         // A fork begins after its source, or records its lineage when the times tie. The
         // last case's fork came through a fork whose rollout is gone, while the source is
         // itself a recorded fork, so lineage depth alone would rank the fork first.
-        for (forked_at, lineage, source_lineage) in [
-            ("01:00", None, None),
-            ("00:00", Some("source"), None),
-            ("01:00", Some("gone"), Some("root")),
+        for (forked_at, lineage, source_lineage, read) in [
+            ("01:00", None, None, &["a-fork", "b-source"][..]),
+            ("00:00", Some("source"), None, &["a-fork", "b-source"]),
+            (
+                "01:00",
+                Some("gone"),
+                Some("root"),
+                &["a-fork", "b-source", "c-root"],
+            ),
         ] {
             let w = Workspace::new();
             let meta = |id: &str, time: &str, source: Option<&str>| {
@@ -748,6 +858,13 @@ mod tests {
                 "",
             );
             let sessions = export(&scan(&w.scan_options()).unwrap(), &prices()).unwrap();
+            // A window after the copy still reads the source sharing it, and the root its
+            // lineage names, which rank the copy's owner.
+            let window = crate::reader::ScanOptions {
+                since: Some(1_793_494_801_000),
+                ..w.scan_options()
+            };
+            assert_eq!(window_agrees(window), read, "{forked_at} {lineage:?}");
             let found: Vec<_> = sessions
                 .iter()
                 .map(|s| (s.session.as_deref(), s.models[0].requests, &*s.start))

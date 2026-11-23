@@ -3620,6 +3620,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_window_follows_a_nested_subagent_through_its_earlier_parent_to_the_root_owner() {
+        let w = Workspace::new();
+        let root = state(
+            &w,
+            json!({"providerInstances":{"instance":{"driver":"codex"}}}),
+        );
+        seed(&db(&root), "codex", "instance");
+        // The parent's only record precedes the window, in a transcript of its own.
+        write(
+            w.codex.join("sessions/parent.jsonl"),
+            "{\"type\":\"session_meta\",\"timestamp\":\"2026-01-01T00:00:02Z\",\"payload\":{\"id\":\"sub-thread\",\"session_id\":\"native-session\",\"model_provider\":\"openai\",\"source\":{\"subagent\":\"review\"}}}\n",
+        );
+        write(
+            w.codex.join("sessions/nested.jsonl"),
+            concat!(
+                "{\"type\":\"session_meta\",\"timestamp\":\"2026-01-01T00:00:03Z\",\"payload\":{\"id\":\"nested-thread\",\"model_provider\":\"openai\",\"source\":{\"subagent\":{\"thread_spawn\":{\"parent_thread_id\":\"sub-thread\",\"depth\":2}}}}}\n",
+                "{\"type\":\"turn_context\",\"timestamp\":\"2026-01-01T00:00:03Z\",\"payload\":{\"turn_id\":\"sub-turn\",\"model\":\"gpt-6.1-sol\"}}\n",
+                "{\"type\":\"token_usage_record\",\"timestamp\":\"2026-01-01T00:00:04Z\",\"payload\":{\"response_id\":\"sub-response\",\"turn_id\":\"sub-turn\",\"usage\":{\"input_tokens\":10,\"output_tokens\":1,\"cached_input_tokens\":0,\"cache_write_input_tokens\":0}}}\n"
+            ),
+        );
+        let options = |reach| crate::reader::ScanOptions {
+            since: timestamp(&json!("2026-01-01T00:00:03Z")),
+            reach,
+            ..w.scan_options()
+        };
+        let history = scan(&options(crate::reader::Reach::History)).unwrap();
+        let window = scan(&options(crate::reader::Reach::Window)).unwrap();
+        let owner = &history.profiles.iter().find(|p| p.t3.is_some()).unwrap().id;
+        assert_eq!(history.requests.len(), 1);
+        assert_eq!(history.requests[0].profiles[..], [owner.as_str()]);
+        assert_eq!(window.requests, history.requests);
+        assert_eq!(window.t3[0].unresolved, history.t3[0].unresolved);
+        assert_eq!(window.snapshots.len(), 2);
+    }
+
     #[cfg(unix)]
     #[test]
     fn subagents_of_a_native_only_root_exclude_t3() {

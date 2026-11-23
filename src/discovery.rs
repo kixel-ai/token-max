@@ -15,7 +15,7 @@ use crate::controls::{
 use crate::effort::{claude_effort, codex_catalog, codex_effort, latest_model};
 use crate::model::{
     Agent, BackgroundControl, Billing, Control, ControlValue, Harness, IdleControl, Location,
-    MemoryControl, Millis, PerBucket, Profile, Request, RootOrigin, RootState, RootStatus, Scalar,
+    MemoryControl, PerBucket, Profile, Request, RootOrigin, RootState, RootStatus, Scalar,
     Snapshot, SpeedControl, Ttl, TtlControl,
 };
 use crate::safe::{ScanError, identity, label};
@@ -2152,11 +2152,6 @@ impl Walk {
                             bytes: length,
                             device: key.0,
                             inode: key.1,
-                            modified: info
-                                .modified()
-                                .ok()
-                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                                .map(|d| d.as_millis() as Millis),
                             deferred_bytes: 0,
                             skipped_lines: 0,
                             unreadable: Default::default(),

@@ -38,6 +38,17 @@ pub struct ScanOptions {
     pub discovery: DiscoveryOptions,
     /// Records whose timestamp proves they precede this instant stay outside selected billing.
     pub since: Option<Millis>,
+    /// Which transcripts to read.
+    pub reach: Reach,
+}
+
+/// Which transcripts a scan reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reach {
+    /// Every transcript, since checks read the history before the window too.
+    History,
+    /// Only transcripts the window's requests and sessions depend on.
+    Window,
 }
 
 /// Bytes read per system call; lines longer than this are assembled across chunks.
@@ -397,8 +408,10 @@ fn file_identity(_file: &File) -> std::io::Result<(u64, u64)> {
 ///
 /// Iterating counts lines and unreadable lines on the snapshot; reaching the boundary records
 /// the unterminated final line's size as deferred bytes.
-pub struct Records<'a> {
+pub struct Records<'a, P = fn(&[u8]) -> Option<Map<String, Value>>> {
     snapshot: &'a mut Snapshot,
+    /// Reads one complete line; None counts it unreadable.
+    parse: P,
     /// One shared name for every location in this file.
     file: Text,
     handle: File,
@@ -413,6 +426,16 @@ pub struct Records<'a> {
 
 /// Open a snapshot for reading only newline-terminated records within its frozen byte boundary.
 pub fn read_snapshot(snapshot: &mut Snapshot) -> Result<Records<'_>, ScanError> {
+    read_lines(snapshot, parse, vec![])
+}
+
+/// Open a snapshot as [`read_snapshot`] does, reading each line with `parse` into `buffer`,
+/// which [`Records::into_buffer`] gives back for the next snapshot.
+pub(crate) fn read_lines<T, P: FnMut(&[u8]) -> Option<T>>(
+    snapshot: &mut Snapshot,
+    parse: P,
+    mut buffer: Vec<u8>,
+) -> Result<Records<'_, P>, ScanError> {
     let file = Text::from(snapshot.file.as_str());
     let at = |message: &str| {
         ScanError::at(
@@ -433,13 +456,14 @@ pub fn read_snapshot(snapshot: &mut Snapshot) -> Result<Records<'_>, ScanError> 
     if identity != (snapshot.device, snapshot.inode) || info.len() < snapshot.bytes {
         return Err(at("transcript changed identity or shrank after snapshot"));
     }
-    let size = snapshot.bytes.min(CHUNK as u64) as usize;
+    buffer.resize(snapshot.bytes.min(CHUNK as u64) as usize, 0);
     Ok(Records {
         snapshot,
+        parse,
         file,
         handle,
         position: 0,
-        buffer: vec![0; size],
+        buffer,
         start: 0,
         end: 0,
         pending: Vec::new(),
@@ -447,7 +471,12 @@ pub fn read_snapshot(snapshot: &mut Snapshot) -> Result<Records<'_>, ScanError> 
     })
 }
 
-impl Records<'_> {
+impl<P> Records<'_, P> {
+    /// The read buffer, to reuse for another snapshot.
+    pub(crate) fn into_buffer(self) -> Vec<u8> {
+        self.buffer
+    }
+
     fn fail(&mut self, message: &str) -> ScanError {
         self.done = true;
         ScanError::at(
@@ -460,8 +489,8 @@ impl Records<'_> {
     }
 }
 
-impl Iterator for Records<'_> {
-    type Item = Result<(Map<String, Value>, Location), ScanError>;
+impl<T, P: FnMut(&[u8]) -> Option<T>> Iterator for Records<'_, P> {
+    type Item = Result<(T, Location), ScanError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         while !self.done {
@@ -474,14 +503,14 @@ impl Iterator for Records<'_> {
                 };
                 let line = &rest[..index];
                 let record = if self.pending.is_empty() {
-                    let record = parse(line);
+                    let record = (self.parse)(line);
                     if record.is_none() {
                         self.snapshot.unreadable.observe(line);
                     }
                     record
                 } else {
                     self.pending.extend_from_slice(line);
-                    let record = parse(&self.pending);
+                    let record = (self.parse)(&self.pending);
                     if record.is_none() {
                         self.snapshot.unreadable.observe(&self.pending);
                     }
@@ -523,7 +552,7 @@ impl Iterator for Records<'_> {
 }
 
 /// Parse one line as strict UTF-8 JSON; non-objects are unreadable.
-fn parse(line: &[u8]) -> Option<Map<String, Value>> {
+pub(crate) fn parse(line: &[u8]) -> Option<Map<String, Value>> {
     // A leading byte order mark is not part of the JSON.
     let line = line.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(line);
     let value = match serde_json::from_slice(line) {
@@ -1891,6 +1920,10 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         mut t3,
     } = discover(&options.discovery)?;
     let snapshot_finished_at = iso(now());
+    if let (Reach::Window, Some(since)) = (options.reach, since) {
+        let mut reads = crate::window::reads(&snapshots, since)?.into_iter();
+        snapshots.retain(|_| reads.next().expect("one per snapshot"));
+    }
     let mut native_ids = crate::t3::NativeIds::default();
     let has_t3 = profiles.iter().any(|p| p.t3.is_some());
     let mut reader = Reader {

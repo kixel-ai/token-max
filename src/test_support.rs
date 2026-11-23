@@ -186,6 +186,7 @@ impl Workspace {
                 billing: Default::default(),
             },
             since: None,
+            reach: crate::reader::Reach::History,
         }
     }
 }

@@ -23,7 +23,7 @@ use crate::replay::{AnalyzeOptions, analyze};
 use crate::report::{Listing, ReportOptions, format_report, totals_section};
 use crate::safe::{ScanError, display};
 use crate::sessions::{Session, export};
-use crate::ssh::{self, Reply};
+use crate::ssh::{self, Reply, Scope};
 use crate::terminal::{WrapOptions, wrap_text};
 use crate::totals::Totals;
 use crate::wire::{Format, Job, Request};
@@ -697,6 +697,19 @@ pub fn render(scan: Scan, options: Render<'_>) -> Result<Rendered, ScanError> {
     })
 }
 
+/// Whether options that only the coordinator decides were given to a destination, which scans
+/// with its own discovery while only the window crosses SSH.
+fn chosen_here(values: &Values) -> bool {
+    values.offline
+        || values.include_local
+        || values.prices_file.is_some()
+        || values.price_cache.is_some()
+        || !values.claude_dirs.is_empty()
+        || !values.codex_dirs.is_empty()
+        || !values.t3_dirs.is_empty()
+        || !values.ssh.is_empty()
+}
+
 /// The `--since` bound; an empty value is absent.
 fn window(values: &Values) -> Result<Option<Millis>, ScanError> {
     match values.since.as_deref() {
@@ -748,12 +761,17 @@ fn sessions(args: &[String]) -> Result<(Output, u8), ScanError> {
         || values.details
         || values.defaults
         || values.version
-        || values.ssh_scan
         || values.max_cost_per_use.is_some();
     if report_only {
         return Err(invalid());
     }
     let since = window(&values)?;
+    if values.ssh_scan {
+        if chosen_here(&values) {
+            return Err(invalid());
+        }
+        return Ok((Output::Written, ssh::serve(since, Scope::Sessions)));
+    }
     let (discovery, destinations) = hosts(&mut values)?;
     let replies = gather(Gather {
         since,
@@ -897,6 +915,10 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
         }
     };
     let local = discovery.is_some();
+    let scope = match job {
+        Job::Report { .. } => Scope::Report { defaults },
+        Job::Sessions => Scope::Sessions,
+    };
     let remote = !destinations.is_empty();
     // Each host's report is named once the run covers several.
     let labeled = |host: Option<&str>| match &job {
@@ -924,9 +946,15 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
         let index = hosts.len();
         hosts.push(None);
         let job = move || {
-            panic::catch_unwind(|| scan(&ScanOptions { discovery, since }))
-                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))
-                .map(|scan| Scanned::Local(Box::new(scan)))
+            panic::catch_unwind(|| {
+                scan(&ScanOptions {
+                    discovery,
+                    since,
+                    reach: scope.reach(),
+                })
+            })
+            .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))
+            .map(|scan| Scanned::Local(Box::new(scan)))
         };
         if remote {
             let sender = sender.clone();
@@ -944,10 +972,9 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
         requests.push((request, labeled(Some(&destination))));
         hosts.push(Some(destination.clone()));
         thread::spawn(move || {
-            let result =
-                panic::catch_unwind(|| ssh::audit(&destination, since, defaults, receiver))
-                    .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))
-                    .map(Scanned::Remote);
+            let result = panic::catch_unwind(|| ssh::audit(&destination, since, scope, receiver))
+                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))
+                .map(Scanned::Remote);
             let _ = sender.send(Arrival::Host(index, result));
         });
     }
@@ -1047,22 +1074,22 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
         Some(value) => max_cost_per_use(value)?,
     };
     if values.ssh_scan {
-        // A destination scans with its own discovery; only the window crosses SSH.
-        let other = values.offline
-            || values.plain
+        if values.plain
             || values.details
-            || values.include_local
             || values.max_cost_per_use.is_some()
-            || values.prices_file.is_some()
-            || values.price_cache.is_some()
-            || !values.claude_dirs.is_empty()
-            || !values.codex_dirs.is_empty()
-            || !values.t3_dirs.is_empty()
-            || !values.ssh.is_empty();
-        if other {
+            || chosen_here(&values)
+        {
             return Err(invalid());
         }
-        return Ok((Output::Written, ssh::serve(since, values.defaults)));
+        return Ok((
+            Output::Written,
+            ssh::serve(
+                since,
+                Scope::Report {
+                    defaults: values.defaults,
+                },
+            ),
+        ));
     }
     let (mut discovery, destinations) = hosts(&mut values)?;
     if values.defaults

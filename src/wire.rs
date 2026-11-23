@@ -1,5 +1,5 @@
 //! The private SSH audit stream between this host and a destination's
-//! `token-max doctor --ssh-scan`.
+//! `token-max doctor --ssh-scan` or `token-max sessions --ssh-scan`.
 //!
 //! The destination writes a [`Header`] and starts scanning. This host answers with one
 //! [`Request`] on the destination's stdin, carrying the price catalog and the [`Job`], and the

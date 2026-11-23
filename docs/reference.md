@@ -765,6 +765,21 @@ session. A cost is a lower bound, marked `"complete": false`, when a request
 could not be priced or a transcript had unreadable or unfinished lines.
 Compaction summaries the transcripts never recorded are not estimated here.
 
+With `--since`, only the transcripts the window depends on are read whole, so
+a recent window costs what its own transcripts hold rather than the whole
+history. Every transcript is first scanned for its record times and the
+identifiers it shares with others: sessions, threads and their parents, fork
+sources, requests and their API records, turns, and the record and tool keys
+T3 links. A transcript is read whole when one of its records is timed in the
+window, or is a request with no time, or when it shares an identifier with a
+transcript read whole, such as an earlier copy of a streamed reply, a resumed
+session's earlier branch and directory, or a subagent's parent. The lines
+printed are the ones reading every transcript would print. Modification times
+are not used, since a clock change or a copy can leave a transcript's earlier
+than the records inside. A malformed record in a transcript left unread does not
+fail the export. `doctor` reads every transcript, since its checks use the
+history before the window too.
+
 Each line names its `host`: the `--ssh` destination as given, or null for this
 host. Lines from every host are ordered together by first request; a session
 whose history was copied between hosts is printed once per host, each with its
@@ -988,11 +1003,13 @@ priced session lines.
 token-max doctor --ssh devbox --ssh user@laptop --include-local
 ```
 
-The destination runs `token-max doctor --ssh-scan`, which discovers that host's own
-profiles from its home and environment, reads its transcripts and settings,
-and runs every check there, priced from the one catalog this host loads and
-sends it. Only its finished report comes back, so its transcripts and scan
-never leave it, and this host never holds more than its own scan.
+The destination discovers that host's own profiles from its home and
+environment and reads its transcripts and settings, priced from the one catalog
+this host loads and sends it. For a report it runs `token-max doctor --ssh-scan`,
+which runs every check there and sends back only its finished report. For
+session lines it runs `token-max sessions --ssh-scan`, which sends back only
+the priced session lines of that host's transcripts. Either way its transcripts
+and scan never leave it, and this host never holds more than its own scan.
 
 Each run first asks the destination its OS and architecture, over the
 connection that then runs the audit:

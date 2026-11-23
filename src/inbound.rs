@@ -17,15 +17,9 @@ pub fn inbound_use(
     since: Option<Millis>,
     now: Millis,
 ) -> Vec<InboundUse> {
-    // A T3 instance whose launch arguments may decide it stays apart from a resolved owner.
     let owner = |p: &Profile| {
         let c = p.inbound.as_ref().expect("filtered on an inbound control");
-        format!(
-            "{}:crossSessionInbound\n{:?}\n{}",
-            c.file,
-            c.value,
-            t3_unresolved(p)
-        )
+        format!("{}:crossSessionInbound\n{:?}", c.file, c.value)
     };
     let controlled = scan
         .profiles

@@ -286,7 +286,7 @@ impl Meter {
         }
     }
 
-    /// Show `phase` now, in place of whatever the line showed.
+    /// Show `phase` now, unless the reading bar holds the line.
     fn phase(&self, phase: &'static str) {
         let mut current = self
             .shared
@@ -294,6 +294,11 @@ impl Meter {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         *current = (phase, Instant::now());
+        // While this host still reads, the bar stays; the ticker shows the phase after it.
+        let reading = &self.shared.reading;
+        if reading.read.load(Ordering::Relaxed) < reading.total.load(Ordering::Relaxed) {
+            return;
+        }
         let line = busy(phase, Duration::ZERO, 0, self.shared.look.unicode);
         show_progress(&line, &line);
     }

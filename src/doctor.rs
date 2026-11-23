@@ -1926,19 +1926,29 @@ pub fn opening(found: &[Found], destinations: &[String], style: &Style) -> Strin
     let count_cells = widest(&counts).unwrap_or(0);
     let size_cells = widest(&sizes).unwrap_or(0);
     let mark = if style.unicode { "✓ " } else { "" };
+    let indent = MARGIN + crate::terminal::cells(mark);
+    // "transcripts" is 11 cells, between a space and two.
+    let table = indent + name_cells + 2 + root_cells + 2 + count_cells + 14 + size_cells;
+    // A table wider than the terminal puts each root's figures on the line below it.
+    let stacked = style.width.is_some_and(|w| table > w);
     for (((f, root), files), bytes) in found.iter().zip(&roots).zip(&counts).zip(&sizes) {
         let lead = format!("{:<name_cells$}  {}", name(f.harness), root);
-        let pad = " ".repeat(root_cells - crate::terminal::cells(root));
-        let figures = format!(
-            "{pad}  {files:>count_cells$} {}  {bytes:>size_cells$}",
-            if f.files == 1 {
-                "transcript "
-            } else {
-                "transcripts"
-            }
-        );
-        let spans = [(mark, GREEN), (lead.as_str(), ""), (figures.as_str(), BOLD)];
-        out.push_str(&style.spans(&spans, None, MARGIN, None));
+        let noun = if f.files == 1 {
+            "transcript "
+        } else {
+            "transcripts"
+        };
+        let figures = format!("{files:>count_cells$} {noun}  {bytes:>size_cells$}");
+        if stacked {
+            let spans = [(mark, GREEN), (lead.as_str(), "")];
+            out.push_str(&style.spans(&spans, style.width, MARGIN, Some(indent)));
+            out.push_str(&style.spans(&[(figures.as_str(), BOLD)], None, indent, None));
+        } else {
+            let pad = " ".repeat(root_cells - crate::terminal::cells(root));
+            let figures = format!("{pad}  {figures}");
+            let spans = [(mark, GREEN), (lead.as_str(), ""), (figures.as_str(), BOLD)];
+            out.push_str(&style.spans(&spans, None, MARGIN, None));
+        }
     }
     if destinations.is_empty() {
         out.push_str(&style.spans(
@@ -3990,6 +4000,17 @@ mod tests {
             assert!(!text.contains("█") && !text.contains("<host>"), "{text}");
             assert!(text.contains("\n  + devbox over SSH\n"), "{text}");
         }
+        // A table wider than the terminal puts each root's figures below it.
+        let text = opening(&found, &devbox, &style(true, Some(40)));
+        assert!(text.lines().all(|l| l.chars().count() <= 40), "{text}");
+        assert!(
+            text.contains("\n  ✓ Claude Code  ~/.claude\n    2 transcripts  1.5 GB\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("\n  ✓ Codex        ~/.codex\n    1 transcript      1 B\n"),
+            "{text}"
+        );
         assert!(opening(&[], &[], &style(false, None)).contains("No transcripts found"));
     }
 

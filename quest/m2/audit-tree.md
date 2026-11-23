@@ -11,7 +11,7 @@ holding the project's decision record. The tree was small enough to read in one
 pass without sub-agents.
 
 Check first: the facts the `Waiting` quests and the m0 decision record cite,
-against the live state they name (crates.io, max.kixel.ai, the repository's
+against the live state they name (crates.io, max.kixel.me, the repository's
 environments and secrets), and pointers to finished quests, which should say
 they are in git history.
 

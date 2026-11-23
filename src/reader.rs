@@ -1455,6 +1455,18 @@ impl Reader {
             let turn = if tool_result || is_true(raw, "isCompactSummary") {
                 None
             } else if delivered(raw, m.get("content")) {
+                // Claude Code marks deliveries meta; one that is not stays a prompt as well.
+                if !is_true(raw, "isMeta") {
+                    let e = event(
+                        snapshot,
+                        location,
+                        context,
+                        time,
+                        EventKind::TurnStart,
+                        uuid,
+                    );
+                    self.add_event(e);
+                }
                 selected.then_some(EventKind::PeerTurn)
             } else if !is_true(raw, "isMeta") {
                 Some(EventKind::TurnStart)
@@ -2161,6 +2173,8 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         &snapshot_finished_at,
         since,
     );
+    // After T3 attribution, so each instance reads its own sessions' directory.
+    crate::discovery::discover_inbound(&options.discovery, &mut profiles, &requests)?;
     // What T3 changed holds its own copy of the shared fields; share them again.
     for r in &mut requests {
         if Arc::strong_count(&r.meta) == 1 {

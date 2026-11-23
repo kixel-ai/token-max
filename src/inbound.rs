@@ -9,8 +9,14 @@ use crate::model::{
 use crate::prices::{Catalog, Sample, Sum, price_request};
 use crate::rows::Group;
 
-/// One line per Claude `crossSessionInbound` owner and value, with the window's deliveries.
-pub fn inbound_use(scan: &Scan, catalog: &Catalog, now: Millis) -> Vec<InboundUse> {
+/// One line per Claude `crossSessionInbound` owner and value, with the deliveries from
+/// `since`, else the scan's start, to `now`.
+pub fn inbound_use(
+    scan: &Scan,
+    catalog: &Catalog,
+    since: Option<Millis>,
+    now: Millis,
+) -> Vec<InboundUse> {
     let owner = |p: &Profile| {
         let c = p.inbound.as_ref().expect("filtered on an inbound control");
         format!("{}:crossSessionInbound\n{:?}", c.file, c.value)
@@ -19,25 +25,40 @@ pub fn inbound_use(scan: &Scan, catalog: &Catalog, now: Millis) -> Vec<InboundUs
         .profiles
         .iter()
         .filter(|p| p.harness == Harness::Claude && p.inbound.is_some());
-    let turns = Turns::new(scan, now);
+    let window = |time: Millis| since.is_none_or(|s| time >= s) && time <= now;
+    let turns = Turns::new(scan, &window);
     crate::rows::groups(controlled, owner)
         .iter()
-        .map(|line| line_use(scan, catalog, &turns, line))
+        .map(|line| line_use(scan, catalog, &turns, &window, line))
         .collect()
+}
+
+/// The distinct sessions a record was read in: a forked transcript copies records under
+/// its own session, and the copy read first names the record's `session`.
+fn sessions(e: &StructuralEvent) -> Vec<&str> {
+    let mut found = vec![&*e.session];
+    for o in &e.origins {
+        if !found.contains(&&*o.session) {
+            found.push(&o.session);
+        }
+    }
+    found
 }
 
 /// Each session's turn starts in order, and its subagents by their first request.
 struct Turns<'a> {
-    /// Every record that starts a turn, by session, in time order.
+    /// Every record that starts a turn, by each session it was read in, in time order.
     starts: HashMap<&'a str, Vec<&'a StructuralEvent>>,
-    /// Each session's requests in time order, its main conversation's and any recorded in it.
+    /// Each session's billed requests in time order, its main conversation's and any
+    /// recorded in it.
     requests: HashMap<&'a str, Vec<&'a Request>>,
-    /// Each session's subagent conversations, with when each first sent a request.
+    /// Each session's subagent conversations, with when each first sent a request, even
+    /// before the window.
     subagents: HashMap<&'a str, Vec<(Millis, &'a str)>>,
 }
 
 impl<'a> Turns<'a> {
-    fn new(scan: &'a Scan, now: Millis) -> Self {
+    fn new(scan: &'a Scan, window: &dyn Fn(Millis) -> bool) -> Self {
         let mut starts: HashMap<&str, Vec<&StructuralEvent>> = HashMap::default();
         for e in scan.events.iter().filter(|e| {
             e.harness == Harness::Claude
@@ -46,15 +67,21 @@ impl<'a> Turns<'a> {
                     EventKind::TurnStart | EventKind::PeerTurn | EventKind::AutoTurn
                 )
         }) {
-            starts.entry(&e.session).or_default().push(e);
+            for session in sessions(e) {
+                starts.entry(session).or_default().push(e);
+            }
         }
         let mut requests: HashMap<&str, Vec<&Request>> = HashMap::default();
-        for r in scan
-            .requests
-            .iter()
-            .filter(|r| r.harness == Harness::Claude && r.time <= now)
-        {
-            requests.entry(&r.session).or_default().push(r);
+        let mut first: HashMap<&str, Millis> = HashMap::default();
+        let claude = |r: &&Request| r.harness == Harness::Claude;
+        for r in scan.cache_context.requests.iter().filter(claude) {
+            first.entry(&r.session).or_insert(r.time);
+        }
+        for r in scan.requests.iter().filter(claude) {
+            first.entry(&r.session).or_insert(r.time);
+            if window(r.time) {
+                requests.entry(&r.session).or_default().push(r);
+            }
         }
         let mut subagents: HashMap<&str, Vec<(Millis, &str)>> = HashMap::default();
         for s in scan
@@ -62,20 +89,12 @@ impl<'a> Turns<'a> {
             .iter()
             .filter(|s| s.harness == Harness::Claude)
         {
-            let (Some(parent), Some(first)) = (
-                s.parent.as_deref(),
-                requests.get(&*s.session).and_then(|r| r.first()),
-            ) else {
-                continue;
-            };
-            subagents
-                .entry(parent)
-                .or_default()
-                .push((first.time, &s.session));
-        }
-        // Events and requests are already in time order; subagents follow their sessions'.
-        for list in subagents.values_mut() {
-            list.sort_by_key(|&(time, _)| time);
+            if let (Some(parent), Some(&time)) = (s.parent.as_deref(), first.get(&*s.session)) {
+                subagents
+                    .entry(parent)
+                    .or_default()
+                    .push((time, &s.session));
+            }
         }
         Turns {
             starts,
@@ -84,32 +103,43 @@ impl<'a> Turns<'a> {
         }
     }
 
-    /// The requests of the turn `start` opened: its session's until the next turn starts, and
-    /// every request of each subagent first heard from in that span, which outlives the turn
-    /// when it runs in the background.
+    /// The requests of the turn `start` opened, in each session it was read in: the
+    /// session's until the next record there starts a turn, and every request of each
+    /// subagent first heard from in that span, which outlives the turn when it runs in the
+    /// background. A request may repeat.
     fn requests(&self, start: &StructuralEvent) -> Vec<&'a Request> {
-        let session = &*start.session;
-        let next = self.starts.get(session).and_then(|list| {
-            let at = list.iter().position(|e| e.id == start.id)?;
-            list.get(at + 1).map(|e| e.time)
-        });
-        let within = |time: Millis| time >= start.time && next.is_none_or(|n| time < n);
-        let own = self.requests.get(session).into_iter().flatten();
-        let spawned = self
-            .subagents
-            .get(session)
-            .into_iter()
-            .flatten()
-            .filter(|&&(first, _)| within(first))
-            .flat_map(|(_, s)| self.requests.get(s).into_iter().flatten());
-        own.filter(|r| within(r.time))
-            .chain(spawned)
-            .copied()
-            .collect()
+        let mut found = vec![];
+        for session in sessions(start) {
+            // A delivery also recorded as a prompt is one record, not the next turn.
+            let next = self.starts.get(session).and_then(|list| {
+                let at = list.iter().position(|e| e.id == start.id)?;
+                list[at + 1..]
+                    .iter()
+                    .find(|e| e.location != start.location)
+                    .map(|e| e.time)
+            });
+            let within = |time: Millis| time >= start.time && next.is_none_or(|n| time < n);
+            let own = self.requests.get(session).into_iter().flatten();
+            let spawned = self
+                .subagents
+                .get(session)
+                .into_iter()
+                .flatten()
+                .filter(|&&(first, _)| within(first))
+                .flat_map(|(_, s)| self.requests.get(s).into_iter().flatten());
+            found.extend(own.filter(|r| within(r.time)).chain(spawned).copied());
+        }
+        found
     }
 }
 
-fn line_use(scan: &Scan, catalog: &Catalog, turns: &Turns<'_>, line: &Group<'_>) -> InboundUse {
+fn line_use(
+    scan: &Scan,
+    catalog: &Catalog,
+    turns: &Turns<'_>,
+    window: &dyn Fn(Millis) -> bool,
+    line: &Group<'_>,
+) -> InboundUse {
     let mut control: InboundControl = line
         .lead
         .inbound
@@ -125,7 +155,9 @@ fn line_use(scan: &Scan, catalog: &Catalog, turns: &Turns<'_>, line: &Group<'_>)
     {
         control.unresolved = Some("the T3 instance's launch arguments, a secret environment value or machine policy can set it, and which apply is unresolved".into());
     }
-    let mine = |e: &&StructuralEvent| e.harness == Harness::Claude && line.covers(&e.profiles);
+    let mine = |e: &&StructuralEvent| {
+        e.harness == Harness::Claude && line.covers(&e.profiles) && window(e.time)
+    };
     let mut idle = 0;
     let mut busy = 0;
     // A request in two message-started turns, as a subagent resumed by a later one, counts once.
@@ -308,6 +340,9 @@ mod tests {
         // Spawned in the message's turn, it counts even after that turn ends.
         subagent("spawned", &[(15, "spawned-1"), (50, "spawned-2")]);
         subagent("other", &[(22, "other-1")]);
+        // Started before the message, so even its requests inside that turn are not the
+        // message's, whether or not the window starts between them.
+        subagent("old", &[(5, "old-1"), (11, "old-2")]);
         std::fs::write(
             w.claude.join("settings.json"),
             r#"{"crossSessionInbound": "accept"}"#,
@@ -321,7 +356,7 @@ mod tests {
         let data = scan(&w.scan_options()).unwrap();
         assert!(!format!("{data:?}").contains("SYNTHETIC_PRIVATE"));
         let catalog = prices();
-        let lines = inbound_use(&data, &catalog, START + 3_600_000);
+        let lines = inbound_use(&data, &catalog, None, START + 3_600_000);
         assert_eq!(lines.len(), 1, "Codex gets no line");
         let u = &lines[0];
         assert_eq!((u.idle, u.busy, u.requests), (2, 1, 5));
@@ -331,6 +366,16 @@ mod tests {
         let priced = price_request(&catalog, &data.requests[0]);
         let one = priced.total_usd.unwrap_or_else(|| panic!("{priced:?}"));
         assert_eq!(u.cost.total_usd, Some(one + one + one + one + one));
+
+        let counts = |u: &InboundUse| (u.idle, u.busy, u.requests);
+        let mut windowed = w.scan_options();
+        windowed.since = Some(START + 8_000);
+        let windowed = scan(&windowed).unwrap();
+        let lines = inbound_use(&windowed, &catalog, None, START + 3_600_000);
+        assert_eq!(counts(&lines[0]), (2, 1, 5));
+        // A later analysis bound counts only the deliveries and requests after it.
+        let lines = inbound_use(&data, &catalog, Some(START + 25_000), START + 3_600_000);
+        assert_eq!(counts(&lines[0]), (1, 0, 1));
 
         // The line has no verdict, changes nothing and offers nothing.
         let report = crate::replay::analyze(crate::replay::AnalyzeOptions {
@@ -355,5 +400,44 @@ mod tests {
             "{}",
             line.setting
         );
+    }
+
+    #[test]
+    fn a_t3_instance_reads_its_own_latest_sessions_project_settings() {
+        let w = Workspace::new();
+        let project = w.home.join("t3-project");
+        std::fs::create_dir_all(project.join(".claude")).unwrap();
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        let local = project.join(".claude/settings.local.json");
+        std::fs::write(&local, r#"{"crossSessionInbound": "refuse"}"#).unwrap();
+        let root = w.claude.to_str().unwrap();
+        let mut profiles = vec![
+            crate::test_support::make_profile("native", root),
+            crate::test_support::make_t3_profile("agent", root),
+        ];
+        for p in &mut profiles {
+            p.settings_file = format!("{root}/settings.json");
+        }
+        std::fs::write(
+            &profiles[0].settings_file,
+            r#"{"crossSessionInbound": "accept"}"#,
+        )
+        .unwrap();
+        let mut request = crate::test_support::make_request();
+        request.profiles = vec!["agent".to_string()].into();
+        request.cwd = Some(project.to_str().unwrap().into());
+        crate::discovery::discover_inbound(&w.scan_options().discovery, &mut profiles, &[request])
+            .unwrap();
+        let control = |i: usize| {
+            let c = profiles[i].inbound.clone().unwrap();
+            (c.value, c.file)
+        };
+        // The native profile recorded no session there, so its user file decides.
+        assert_eq!(
+            control(0),
+            (Some(Inbound::Accept), profiles[0].settings_file.clone())
+        );
+        let local = local.to_str().unwrap().to_string();
+        assert_eq!(control(1), (Some(Inbound::Refuse), local));
     }
 }

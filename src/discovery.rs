@@ -1046,6 +1046,59 @@ pub(crate) fn claude_project_files(
     ])
 }
 
+/// Resolve each Claude profile's `crossSessionInbound` at its latest main-session request's
+/// directory, as auto memory's is; without an existing one, user and managed settings decide.
+/// It runs once T3 has attributed requests, so an instance reads its own sessions' directory.
+pub fn discover_inbound(
+    options: &DiscoveryOptions,
+    profiles: &mut [Profile],
+    requests: &[Request],
+) -> Result<(), ScanError> {
+    let managed_file = options.managed_settings_file.as_str();
+    let managed = settings(managed_file, Harness::Claude)?;
+    for profile in profiles.iter_mut().filter(|p| p.harness == Harness::Claude) {
+        let user = options.settings(&profile.settings_file, Harness::Claude)?;
+        let mine: Vec<&Request> = requests
+            .iter()
+            .filter(|r| r.profiles.contains(&profile.id))
+            .collect();
+        let latest = crate::memory::deciding_request(&mine).and_then(|r| r.cwd.as_deref());
+        let directory = match latest {
+            Some(cwd) if existing_directory(cwd)? => Some(cwd),
+            _ => None,
+        };
+        let mut repository = vec![];
+        if let Some(cwd) = directory {
+            // A session in the home directory reads the user's own file as its project's.
+            for file in claude_project_files(cwd, options)? {
+                if !same_file(&file, &profile.settings_file) {
+                    let config = options.settings(&file, Harness::Claude)?;
+                    repository.push((file, config));
+                }
+            }
+        }
+        let scopes: Vec<SettingsScope> = repository
+            .iter()
+            .map(|(file, config)| SettingsScope { config, file })
+            .collect();
+        profile.inbound = Some(InboundControl {
+            directory: directory.map(String::from),
+            ..claude_inbound(
+                SettingsScope {
+                    config: &managed,
+                    file: managed_file,
+                },
+                SettingsScope {
+                    config: &user,
+                    file: &profile.settings_file,
+                },
+                &scopes,
+            )?
+        });
+    }
+    Ok(())
+}
+
 /// Resolve current project/local controls at recorded directories, preserving every owner.
 pub fn discover_claude_controls(
     options: &DiscoveryOptions,
@@ -1199,16 +1252,6 @@ pub fn discover_claude_controls(
                     local_env,
                     recorded,
                 )?);
-                // A session in the home directory reads the user's own file as its project's.
-                let repository: Vec<SettingsScope> = [&scopes[3], &scopes[2], &scopes[1]]
-                    .into_iter()
-                    .filter(|s| !same_file(s.file, &profile.settings_file))
-                    .copied()
-                    .collect();
-                profile.inbound = Some(InboundControl {
-                    directory: Some(cwd.into()),
-                    ..claude_inbound(scopes[4], scopes[0], &repository)?
-                });
             }
             let settings_env = scoped_environment(&scopes, &empty);
             let launch_conflict = CLAUDE_BACKGROUND_ENV.iter().any(|key| {
@@ -2412,11 +2455,6 @@ pub(crate) fn profile(
     } else {
         codex_background(&speed_scopes)?
     };
-    let inbound = if claude {
-        Some(claude_inbound(speed_scopes[1], speed_scopes[0], &[])?)
-    } else {
-        None
-    };
     let memory = if claude {
         claude_memory(&speed_scopes, local_env)?
     } else {
@@ -2452,7 +2490,7 @@ pub(crate) fn profile(
         background_directories: IndexMap::default(),
         background_requests: IndexMap::default(),
         memory: Some(memory),
-        inbound,
+        inbound: None,
         t3: None,
         agents: crate::model::AgentControls::default(),
         instruction_budget_file,

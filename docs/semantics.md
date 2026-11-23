@@ -1479,8 +1479,13 @@ one of those meta turns. A compaction summary carries its turn's `turnOrigin`
 but continues that turn, so it starts none, for every check. The turn's
 requests are its session's in that span, an unlinked API attempt among them
 as unpriced, and every request of each subagent whose first request falls in
-it, since a background subagent outlives the turn that started it. A request
-in two such turns, as a subagent resumed by a later one, counts once. The
+it, since a background subagent outlives the turn that started it; its first
+request is found in earlier history too, so one started before the window is
+never taken for the message's. A turn read in several sessions, as a forked
+transcript copies it, gathers its requests in each, and a request in two such
+turns, as a subagent resumed by a later one, counts once. Only deliveries and
+requests in the analysis window count. A delivery not marked meta, which no
+recorded client writes, also starts a prompt turn for the other checks. The
 cost extrapolates over unpriced requests as other figures do.
 
 `crossSessionInbound` resolves as the settings reference gives it: managed
@@ -1490,7 +1495,8 @@ repository value as strict as the user's names the repository file, as Claude
 Code does; one as strict as managed settings' leaves them named. A value
 Claude Code does not recognize fails the scan in the file that sets it.
 Project and local files are read at the latest main-session request's working
-directory, as auto memory's are; without one, user and managed settings
-decide. A `--settings` flag outranks the user's file and is not recorded, and
+directory, as auto memory's are, once T3 has attributed requests, so a T3
+instance reads its own sessions' directory; without an existing one, user and
+managed settings decide. A `--settings` flag outranks the user's file and is not recorded, and
 a T3 instance whose launch settings are unresolved gets the line unknown.
 

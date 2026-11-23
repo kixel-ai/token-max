@@ -4,8 +4,9 @@
 
 `token-max vibes` suggests a main-session default of Claude Opus 5.5 at
 `medium` effort for Claude Code, and Sol 6.2 at `high` for Codex, whenever a
-settings file's default model or effort differs. It offers the edit to the
-file that sets the default. The card names the maintainer's pick as its
+settings file's default is neither the pick nor an accepted alternative:
+Opus 5.5 at `high`, or Sol 6.2 at `xhigh`. It offers the edit to the file
+that sets the default. The card names the maintainer's pick as its
 source, cites the provider guides the effort warning cites today, and shows
 the effort line's measured cost by model and effort.
 
@@ -22,14 +23,17 @@ Decision prompts, chosen options marked ✅ (maintainer, 2026-11-23):
 - Trigger: ✅ whenever the default model or effort differs from the pick
   (rejected: only above `high`, which never reaches a Fable or Sonnet
   default). `vibes` is opt-in advice, so a small difference costs one "n".
+  The maintainer then added: don't fire for Opus 5.5 at `high` or Sol 6.2 at
+  `xhigh`, which are fine defaults too.
 
 Recommendations:
 
 - This card replaces the effort warning that
-  [the command quest](/quest/m1/vibes/command.md) moves into `vibes`: every
-  default above `high` differs from the pick. `doctor`'s effort line stays
-  evidence only.
-- Keep the picks in one table, so changing them is a one-line edit.
+  [the command quest](/quest/m1/vibes/command.md) moves into `vibes`, so Sol
+  6.2 at `xhigh` no longer gets OpenAI's xhigh caution. Every other default
+  above `high` gets this card. `doctor`'s effort line stays evidence only.
+- Keep the picks and accepted alternatives in one table, so changing them is
+  a one-line edit.
 - Confirm Sol 6.2's model ID before writing it. This host's Codex sessions
   record `gpt-6.1-sol` and `gpt-6.2-astra`, but no Sol 6.2.
 - Write the setting that `doctor`'s effort line already names as owning the

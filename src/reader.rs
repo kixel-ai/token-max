@@ -1927,12 +1927,15 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         sessions: Sessions::default(),
     };
     reader.exposure.roots(&profiles);
+    // Bytes in the transcripts already read.
+    let mut finished = 0;
     for snapshot in &mut snapshots {
         // Records update the snapshot's counters while records are consumed against its metadata.
         let view = snapshot.clone();
         let mut file = FileState::new(&view, &mut reader.strings);
         let mut ids = ToolIds::default();
-        for record in read_snapshot(snapshot)? {
+        let mut records = read_snapshot(snapshot)?;
+        while let Some(record) = records.next() {
             let (raw, location) = record?;
             reader
                 .consume(&view, &mut file, &raw, &location)
@@ -1941,10 +1944,16 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
             if has_t3 {
                 native_ids.observe(&raw, view.harness, &file.context.session);
             }
+            // Counted by the chunk, so one large transcript still moves the bar.
+            if let Some(reading) = &options.reading {
+                let read = finished + records.position;
+                reading.read.store(read, Ordering::Relaxed);
+            }
         }
         snapshot.unreadable.finish(&ids, snapshot.skipped_lines);
+        finished += snapshot.bytes;
         if let Some(reading) = &options.reading {
-            reading.read.fetch_add(snapshot.bytes, Ordering::Relaxed);
+            reading.read.store(finished, Ordering::Relaxed);
         }
     }
     let Reader {

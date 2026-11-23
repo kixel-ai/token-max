@@ -170,16 +170,17 @@ static PHASE: Mutex<Phase> = Mutex::new(Phase::Running);
 /// zero when none is showing.
 static PROGRESS: Mutex<usize> = Mutex::new(0);
 
-/// Replace the progress line on stderr with `line`. Spaces, not escapes, blank what a
-/// longer line left, so this works on any terminal and under `--plain`. The line is cut to
-/// fit one row, since a carriage return cannot reach a row the line wrapped onto; `cells` is
-/// how many of them it fills, since color escapes fill none.
-fn show_progress(line: &str, cells: usize) {
+/// Replace the progress line on stderr with `line`, whose text without color is `plain`.
+/// Spaces, not escapes, blank what a longer line left, so this works on any terminal and
+/// under `--plain`. A line too wide for one row shows `plain` cut to fit, since a carriage
+/// return cannot reach a row the line wrapped onto, and a cut could split a color escape.
+fn show_progress(line: &str, plain: &str) {
     let mut shown = PROGRESS.lock().unwrap_or_else(PoisonError::into_inner);
     let room = progress_room();
+    let cells = crate::terminal::cells(plain);
     let (text, cells) = if cells > room {
-        let plain = crate::terminal::fit(line, room);
-        (plain, crate::terminal::cells(plain))
+        let cut = crate::terminal::fit(plain, room);
+        (cut, crate::terminal::cells(cut))
     } else {
         (line, cells)
     };
@@ -214,9 +215,6 @@ struct Look {
     unicode: bool,
 }
 
-/// The start of the phase whose progress line is a bar while this host's transcripts are read.
-const SCANNING: &str = "Scanning";
-
 /// The progress line, redrawn on its own thread so the reading bar moves while the scan holds
 /// the thread that started it. Dropping it stops that thread and clears the line.
 struct Meter {
@@ -245,6 +243,7 @@ impl Meter {
             let shared = shared.clone();
             thread::spawn(move || {
                 let mut began = None;
+                let mut read_end = None;
                 let mut tick = 0;
                 while let Err(mpsc::RecvTimeoutError::Timeout) =
                     stopped.recv_timeout(Duration::from_millis(100))
@@ -257,13 +256,21 @@ impl Meter {
                     }
                     let total = shared.reading.total.load(Ordering::Relaxed);
                     let read = shared.reading.read.load(Ordering::Relaxed);
-                    let (line, cells) = if name.starts_with(SCANNING) && read < total {
+                    // The local scan may still be reading after the phase moves on, as
+                    // when SSH hosts' prices or reports arrive first.
+                    let (line, plain) = if read < total {
                         let began = *began.get_or_insert_with(Instant::now);
                         bar(read, total, began.elapsed(), shared.look)
                     } else {
-                        busy(name, since.elapsed(), tick, shared.look.unicode)
+                        // A phase that began under the bar is timed from when reading ended.
+                        let since = match total {
+                            0 => since,
+                            _ => since.max(*read_end.get_or_insert_with(Instant::now)),
+                        };
+                        let line = busy(name, since.elapsed(), tick, shared.look.unicode);
+                        (line.clone(), line)
                     };
-                    show_progress(&line, cells);
+                    show_progress(&line, &plain);
                 }
             })
         };
@@ -282,8 +289,8 @@ impl Meter {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         *current = (phase, Instant::now());
-        let (line, cells) = busy(phase, Duration::ZERO, 0, self.shared.look.unicode);
-        show_progress(&line, cells);
+        let line = busy(phase, Duration::ZERO, 0, self.shared.look.unicode);
+        show_progress(&line, &line);
     }
 }
 
@@ -297,9 +304,9 @@ impl Drop for Meter {
     }
 }
 
-/// A phase's progress line and its cells: after its first second, a spinner on `tick` and
-/// how long it has run, so a long phase shows it has not stalled.
-fn busy(phase: &str, elapsed: Duration, tick: usize, unicode: bool) -> (String, usize) {
+/// A phase's progress line: after its first second, a spinner on `tick` and how long it has
+/// run, so a long phase shows it has not stalled.
+fn busy(phase: &str, elapsed: Duration, tick: usize, unicode: bool) -> String {
     let mut line = format!("token-max: {phase}...");
     if elapsed >= Duration::from_secs(1) {
         let frames: &[&str] = if unicode {
@@ -310,16 +317,15 @@ fn busy(phase: &str, elapsed: Duration, tick: usize, unicode: bool) -> (String, 
         let seconds = elapsed.as_secs();
         line.push_str(&format!(" {} {seconds}s", frames[tick % frames.len()]));
     }
-    let cells = crate::terminal::cells(&line);
-    (line, cells)
+    line
 }
 
 /// Cells in the reading bar's track.
 const BAR_CELLS: usize = 24;
 
 /// The reading bar: how much of `total` bytes is read, and when the rest should be, from the
-/// rate since reading `began`. Returns the line and the cells it fills.
-fn bar(read: u64, total: u64, elapsed: Duration, look: Look) -> (String, usize) {
+/// rate since reading `began`. Returns the line and its text without color.
+fn bar(read: u64, total: u64, elapsed: Duration, look: Look) -> (String, String) {
     let fraction = read as f64 / total as f64;
     // Eighths of a cell, so the bar moves smoothly on a Unicode terminal.
     let eighths = (fraction * (BAR_CELLS * 8) as f64) as usize;
@@ -345,17 +351,13 @@ fn bar(read: u64, total: u64, elapsed: Duration, look: Look) -> (String, usize) 
         rest.push_str(&format!("  ~{} left to read", duration(left)));
     }
     let lead = "token-max: Reading ";
-    let cells = crate::terminal::cells(lead)
-        + open.len()
-        + BAR_CELLS
-        + close.len()
-        + crate::terminal::cells(&rest);
+    let plain = format!("{lead}{open}{done}{todo}{close}{rest}");
     let line = if look.color {
         format!("{lead}{open}\x1b[35m{done}\x1b[2m{todo}\x1b[0m{close}{rest}")
     } else {
-        format!("{lead}{open}{done}{todo}{close}{rest}")
+        plain.clone()
     };
-    (line, cells)
+    (line, plain)
 }
 
 /// Whole seconds as `42s` or `3m 05s`.
@@ -1605,12 +1607,12 @@ mod tests {
         };
         let second = Duration::from_secs(1);
         // 1/64 of 24 cells is 3/8 of the first one.
-        let (line, cells) = bar(1, 64, second, unicode);
+        let (line, plain) = bar(1, 64, second, unicode);
         assert_eq!(
             line,
             format!("token-max: Reading ▍{}   1%  1 B of 64 B", "░".repeat(23))
         );
-        assert_eq!(cells, crate::terminal::cells(&line));
+        assert_eq!(plain, line);
         let (line, _) = bar(500, 1000, Duration::from_millis(999), unicode);
         assert!(line.ends_with(" 50%  500 B of 1.0 kB"), "{line}");
         let (line, _) = bar(500, 1000, 4 * second, unicode);
@@ -1619,21 +1621,20 @@ mod tests {
             color: false,
             unicode: false,
         };
-        let (line, cells) = bar(999, 1000, 100 * second, plain);
+        let (line, _) = bar(999, 1000, 100 * second, plain);
         let track = format!("[{}-]", "#".repeat(23));
         assert!(line.contains(&track), "{line}");
         assert!(
             line.ends_with(" 99%  999 B of 1.0 kB  ~1s left to read"),
             "{line}"
         );
-        assert_eq!(cells, line.len());
         let color = Look {
             color: true,
             unicode: true,
         };
-        let (line, cells) = bar(1, 2, second, color);
-        assert!(line.contains('\x1b'));
-        assert_eq!(cells, bar(1, 2, second, unicode).1);
+        let (line, plain) = bar(1, 2, second, color);
+        assert!(line.contains('\x1b') && !plain.contains('\x1b'));
+        assert_eq!(plain, bar(1, 2, second, unicode).0);
     }
 
     #[test]
@@ -1654,11 +1655,11 @@ mod tests {
     #[test]
     fn a_phase_shows_a_spinner_only_after_its_first_second() {
         assert_eq!(
-            busy("Checking settings", Duration::from_millis(999), 3, true).0,
+            busy("Checking settings", Duration::from_millis(999), 3, true),
             "token-max: Checking settings..."
         );
         assert_eq!(
-            busy("Checking settings", Duration::from_secs(12), 3, false).0,
+            busy("Checking settings", Duration::from_secs(12), 3, false),
             "token-max: Checking settings... \\ 12s"
         );
     }

@@ -1003,12 +1003,13 @@ priced session lines.
 token-max doctor --ssh devbox --ssh user@laptop --include-local
 ```
 
-The destination runs `token-max doctor --ssh-scan`, or
-`token-max sessions --ssh-scan` for session lines, which discovers that host's own
-profiles from its home and environment, reads its transcripts and settings,
-and runs every check there, priced from the one catalog this host loads and
-sends it. Only its finished report comes back, so its transcripts and scan
-never leave it, and this host never holds more than its own scan.
+The destination discovers that host's own profiles from its home and
+environment and reads its transcripts and settings, priced from the one catalog
+this host loads and sends it. For a report it runs `token-max doctor --ssh-scan`,
+which runs every check there and sends back only its finished report. For
+session lines it runs `token-max sessions --ssh-scan`, which sends back only
+the priced session lines of that host's transcripts. Either way its transcripts
+and scan never leave it, and this host never holds more than its own scan.
 
 Each run first asks the destination its OS and architecture, over the
 connection that then runs the audit:

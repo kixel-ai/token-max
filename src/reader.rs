@@ -1921,7 +1921,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     } = discover(&options.discovery)?;
     let snapshot_finished_at = iso(now());
     if let (Reach::Window, Some(since)) = (options.reach, since) {
-        let mut reads = crate::window::reads(&snapshots, since).into_iter();
+        let mut reads = crate::window::reads(&snapshots, since)?.into_iter();
         snapshots.retain(|_| reads.next().expect("one per snapshot"));
     }
     let mut native_ids = crate::t3::NativeIds::default();

@@ -1,9 +1,10 @@
 //! Audits of selected SSH destinations, each run by this build of `token-max` there.
 //!
 //! The coordinator runs `token-max doctor --ssh-scan`, or `token-max sessions --ssh-scan` for
-//! session lines, on each destination through the local OpenSSH client, with its configuration, authentication and host keys. The destination reads its own
-//! histories and settings, prices them with the coordinator's catalog, and sends back only its
-//! printed report or its session lines (see [`crate::wire`]); its scan never leaves it.
+//! session lines, on each destination through the local OpenSSH client, with its configuration,
+//! authentication and host keys. The destination reads its own histories and settings, prices
+//! them with the coordinator's catalog, and sends back only its printed report or its session
+//! lines (see [`crate::wire`]); its scan never leaves it.
 //!
 //! For a walk through a report's changes, the audit stays open: the destination keeps the
 //! settings files it read, and this host sends it the person's answers and their confirm, so

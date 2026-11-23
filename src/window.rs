@@ -17,7 +17,7 @@ use serde_json::Value;
 use crate::collections::HashSet;
 use crate::model::{Harness, Millis, Snapshot};
 use crate::reader::read_lines;
-use crate::safe::timestamp;
+use crate::safe::{ScanError, timestamp};
 
 /// The most threads that summarize transcripts at once.
 const THREADS: usize = 8;
@@ -31,10 +31,11 @@ struct Summary {
     joins: Vec<u64>,
 }
 
-/// Whether each snapshot must be read for the requests at or after `since`.
-pub fn reads(snapshots: &[Snapshot], since: Millis) -> Vec<bool> {
+/// Whether each snapshot must be read for the requests at or after `since`. A transcript
+/// that cannot be read fails the scan, since its joins are unknown.
+pub fn reads(snapshots: &[Snapshot], since: Millis) -> Result<Vec<bool>, ScanError> {
     let hasher = foldhash::fast::RandomState::default();
-    let summaries = summarize(snapshots, since, &hasher);
+    let summaries = summarize(snapshots, since, &hasher)?;
     let mut read: Vec<bool> = summaries.iter().map(|s| s.reaches).collect();
     let mut joined: HashSet<u64> = HashSet::default();
     for (s, _) in summaries.iter().zip(&read).filter(|(_, read)| **read) {
@@ -52,7 +53,7 @@ pub fn reads(snapshots: &[Snapshot], since: Millis) -> Vec<bool> {
             }
         }
         if !grew {
-            return read;
+            return Ok(read);
         }
     }
 }
@@ -62,9 +63,10 @@ fn summarize(
     snapshots: &[Snapshot],
     since: Millis,
     hasher: &foldhash::fast::RandomState,
-) -> Vec<Summary> {
+) -> Result<Vec<Summary>, ScanError> {
     let next = AtomicUsize::new(0);
-    let done: Vec<Mutex<Option<Summary>>> = snapshots.iter().map(|_| Mutex::new(None)).collect();
+    let done: Vec<Mutex<Option<Result<Summary, ScanError>>>> =
+        snapshots.iter().map(|_| Mutex::new(None)).collect();
     // Past eight threads, summaries finished no sooner on 32 cores, and each thread holds
     // several megabytes of allocator pages.
     let threads = std::thread::available_parallelism()
@@ -111,7 +113,7 @@ struct Summarizer<'h> {
 
 impl Summarizer<'_> {
     /// Read one transcript's lines as the reader would, keeping only what decides its reach.
-    fn summary(&mut self, snapshot: &Snapshot) -> Summary {
+    fn summary(&mut self, snapshot: &Snapshot) -> Result<Summary, ScanError> {
         let Self {
             since,
             hasher,
@@ -136,28 +138,16 @@ impl Summarizer<'_> {
                 None => found.untimed_matters,
             })
         };
-        // A transcript the reader fails on is read, so the reader names why.
-        let Ok(mut lines) = read_lines(&mut copy, read, std::mem::take(buffer)) else {
-            return Summary {
-                reaches: true,
-                joins: vec![],
-            };
-        };
+        let mut lines = read_lines(&mut copy, read, std::mem::take(buffer))?;
         let mut reaches = false;
         for line in &mut lines {
-            match line {
-                Ok((inside, _)) => reaches |= inside,
-                Err(_) => {
-                    reaches = true;
-                    break;
-                }
-            }
+            reaches |= line?.0;
         }
         *buffer = lines.into_buffer();
-        Summary {
+        Ok(Summary {
             reaches,
             joins: joins.iter().copied().collect(),
-        }
+        })
     }
 }
 
@@ -520,5 +510,24 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn a_transcript_the_scan_cannot_read_fails_the_window() {
+        let w = crate::test_support::Workspace::new();
+        let path = w.claude.join("projects/project/session.jsonl");
+        let line = r#"{"type":"user","sessionId":"s","timestamp":"2026-11-01T00:00:00Z"}"#;
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+        let options = w.scan_options();
+        let snapshots = crate::discovery::discover(&options.discovery)
+            .unwrap()
+            .snapshots;
+        assert_eq!(reads(&snapshots, 0).unwrap(), [true]);
+        // Replaced after discovery, so its identifiers are unknown. The replacement is written
+        // while the original exists, so it cannot reuse the original's inode.
+        let replacement = path.with_extension("new");
+        std::fs::write(&replacement, format!("{line}\n")).unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        assert!(reads(&snapshots, 0).is_err());
     }
 }

@@ -59,7 +59,8 @@ run. `tests/run_script.rs` runs the run script for the host (`run.ps1` on the
 Windows CI job) against fixture releases on a local server.
 
 The page is the maintainer's personal project: its header holds their avatar,
-`avatar.webp` (their GitHub avatar at 96 pixels), and inline icons from
+`avatar.webp` (their GitHub avatar at 96 pixels) linking to kixel.me, and
+inline icons from
 [Simple Icons](https://simpleicons.org) (CC0), since `_headers` allows only the
 page's own origin.
 

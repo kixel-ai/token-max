@@ -46,17 +46,16 @@ code { font-family: var(--mono); font-size: 0.9em; }
 	padding-top: 1.75rem;
 }
 .logo { height: 2.4rem; width: auto; max-width: 65%; }
-.me { display: flex; align-items: center; gap: 0.75rem; font-weight: 600; }
-.me .avatar { width: 2.4rem; height: 2.4rem; border-radius: 50%; }
-.me a { display: grid; place-items: center; width: 2.1rem; height: 2.1rem; border-radius: 50%; }
+.me { display: flex; align-items: center; gap: 0.75rem; }
+.me .avatar img { display: block; width: 2.4rem; height: 2.4rem; border-radius: 50%; }
+.me a:not(.avatar) { display: grid; place-items: center; width: 2.1rem; height: 2.1rem; border-radius: 50%; }
 .me svg { width: 1.1rem; height: 1.1rem; fill: currentColor; }
 @media (max-width: 40rem) {
 	.top { gap: 0.75rem; }
 	.logo { max-width: 48%; }
 	.me { gap: 0.3rem; }
-	.me .name { display: none; }
-	.me .avatar { width: 2rem; height: 2rem; }
-	.me a { width: 1.9rem; height: 1.9rem; }
+	.me .avatar img { width: 2rem; height: 2rem; }
+	.me a:not(.avatar) { width: 1.9rem; height: 1.9rem; }
 	.me svg { width: 0.95rem; height: 0.95rem; }
 }
 
@@ -105,6 +104,9 @@ h1 { margin: 0; text-wrap: balance; }
 	border-radius: 0.35rem;
 }
 .copy:hover, .replay:hover { border-color: var(--term-ink); }
+.also { margin: 1.5rem 0 0.5rem; font-size: 0.95rem; }
+.run.more { padding: 0.8rem 1.1rem; }
+.run.more code { font-size: clamp(0.85rem, 2vw, 0.95rem); overflow-wrap: normal; }
 .note { margin: 0.9rem 0 0; font-size: 0.95rem; }
 
 /* The terminal: real doctor output from assets/demo/site.py. */
@@ -270,9 +272,10 @@ body {
 .glow { position: absolute; inset: 0 0 auto; height: 60rem; pointer-events: none;
 	background: radial-gradient(40rem 28rem at 18% 8%, #8b5cf640, transparent 70%), radial-gradient(34rem 24rem at 85% 30%, #22c55e26, transparent 70%); }
 .top { z-index: 1; }
-.me .avatar { box-shadow: 0 0 0 2px #8b5cf6aa; }
-.me a { color: var(--ink); border: 1px solid #ffffff26; background: #ffffff0a; }
-.me a:hover { border-color: var(--violet); }
+.me .avatar img { box-shadow: 0 0 0 2px #8b5cf6aa; }
+.me .avatar:hover img { box-shadow: 0 0 0 2px var(--violet); }
+.me a:not(.avatar) { color: var(--ink); border: 1px solid #ffffff26; background: #ffffff0a; }
+.me a:not(.avatar):hover { border-color: var(--violet); }
 .eyebrow { color: var(--green); }
 .eyebrow::before { content: ""; display: inline-block; width: 0.5em; height: 0.5em; margin-right: 0.6em; vertical-align: 0.1em; border-radius: 50%; background: var(--green); box-shadow: 0 0 12px var(--green); }
 h1 { font-size: clamp(3rem, 9vw, 7rem); font-weight: 700; line-height: 0.95; letter-spacing: -0.045em; padding-bottom: 0.15em;
@@ -282,7 +285,8 @@ h1 { font-size: clamp(3rem, 9vw, 7rem); font-weight: 700; line-height: 0.95; let
 .tabs label { color: var(--muted); border-radius: 0.5rem 0.5rem 0 0; }
 .run { border: 1px solid #ffffff1f; border-radius: 0 0.75rem 0.75rem 0.75rem; box-shadow: 0 0 0 1px #8b5cf633, 0 20px 60px -10px #8b5cf666; }
 .copy { border-radius: 99px; }
-.note { color: var(--muted); }
+.note, .also { color: var(--muted); }
+.run.more { border-radius: 0.75rem; box-shadow: none; }
 .term { border: 1px solid #ffffff1f; border-radius: 0.9rem; box-shadow: 0 30px 120px -30px #8b5cf6aa, 0 0 0 1px #8b5cf622; }
 .bar { border-bottom: 1px solid #ffffff12; }
 h2 { font-size: clamp(1.8rem, 4vw, 2.6rem); font-weight: 700; letter-spacing: -0.03em; }

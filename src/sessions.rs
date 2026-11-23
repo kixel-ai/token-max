@@ -561,11 +561,18 @@ mod tests {
             ..options.clone()
         })
         .unwrap();
+        let reading = std::sync::Arc::new(crate::reader::Reading::default());
         let window = scan(&crate::reader::ScanOptions {
             reach: Reach::Window,
+            reading: Some(reading.clone()),
             ..options
         })
         .unwrap();
+        // The bar counts only the transcripts the window reads, and ends full.
+        let bytes: u64 = window.snapshots.iter().map(|s| s.bytes).sum();
+        let total = reading.total.load(std::sync::atomic::Ordering::Relaxed);
+        let read = reading.read.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!((total, read), (bytes, bytes));
         assert_eq!(window.requests, history.requests);
         assert_eq!(
             export(&window, &prices()).unwrap(),

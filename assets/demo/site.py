@@ -34,7 +34,7 @@ WIDE = 10000
 # Every question ends in its dim choices, then ": ".
 PROMPT = re.compile(rb"\x1b\[0m: $")
 SGR = re.compile(r"\x1b\[([0-9;]*)m")
-CLASSES = {"1": "b", "2": "d", "31": "r", "32": "g", "33": "y"}
+CLASSES = {"1": "b", "2": "d", "31": "r", "32": "g", "33": "y", "35": "p"}
 # A report section opens with its bold uppercase heading.
 HEADING = re.compile(r"^  [A-Z][A-Z ]+[A-Z]  ")
 CUT = "EVERYTHING ELSE"
@@ -172,9 +172,24 @@ def steps(transcript: str) -> tuple[list[list[str]], int]:
             step = step[:-1]
         if step:
             tidy.append(step if len(tidy) < questions else [""] + step)
+    tidy = [art(step) for step in tidy]
     if rests != 1:
         sys.exit(f"expected one line for the run to rest on, matching {rest.pattern!r}, found {rests}")
     return tidy, questions
+
+
+def art(step: list[str]) -> list[str]:
+    """Join each run of block-letter lines into one tight span, so the page's line height
+    leaves no gap between the halves of the wordmark."""
+    out: list[str] = []
+    for line in step:
+        if "█" in line and out and out[-1].startswith('<span class="art">'):
+            out[-1] = out[-1][: -len("</span>")] + "\n" + line + "</span>"
+        elif "█" in line:
+            out.append(f'<span class="art">{line}</span>')
+        else:
+            out.append(line)
+    return out
 
 
 def timing(typed: str, count: int, questions: int) -> str:

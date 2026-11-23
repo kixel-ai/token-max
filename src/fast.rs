@@ -685,6 +685,7 @@ mod tests {
                 discovery,
                 since: None,
                 reach: crate::reader::Reach::History,
+                reading: None,
             })
             .unwrap()
         }

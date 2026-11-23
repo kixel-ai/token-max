@@ -4,8 +4,10 @@ use std::io::{self, IsTerminal, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::{Mutex, PoisonError, mpsc};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, mpsc};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::ser::Formatter;
@@ -13,12 +15,12 @@ use serde_json::ser::Formatter;
 use crate::collections::IndexSet;
 use crate::discovery::{DiscoveryOptions, discover};
 use crate::doctor::{
-    Confirm, Fix, Offers, Owner, Selection, Style, Walking, ask, ask_billing, confirm, finish,
-    preview, write, wrote,
+    Confirm, Fix, Found, Offers, Owner, Selection, Style, Walking, ask, ask_billing, confirm,
+    finish, opening, preview, write, wrote,
 };
 use crate::model::{Harness, Location, Millis, Scan, Verdict};
 use crate::prices::{Catalog, PriceOptions, cancel_downloads, load_prices};
-use crate::reader::{ScanOptions, scan};
+use crate::reader::{Reading, ScanOptions, scan};
 use crate::replay::{AnalyzeOptions, analyze};
 use crate::report::{Listing, ReportOptions, format_report, totals_section};
 use crate::safe::{ScanError, display};
@@ -53,8 +55,7 @@ Usage: token-max doctor [options]
   --claude-dir DIR        Select a Claude profile (repeatable)
   --codex-dir DIR         Select a Codex home, including archived sessions (repeatable)
   --t3-dir DIR            Select a T3 state directory (repeatable)
-  --ssh HOST              Audit an SSH destination, putting this build there first if needed (repeatable)
-  --include-local         Also audit this host when --ssh is given
+  --ssh HOST              Also audit an SSH destination, putting this build there first if needed (repeatable)
   --max-cost-per-use USD  Suggest turning off a used tool, skill or MCP server that cost more than this per use (default: 1)
   --details               Show grouped check evidence, assumptions, uncertainty and sources
   --defaults              Report as a user with no settings files would see it, offering nothing
@@ -80,11 +81,10 @@ default and every tool, skill and MCP server is on; managed and system policy st
 It prints that report and edits nothing, even on a terminal.
 
 Without profile flags, discover local Claude/Codex profiles and T3 instances. Explicit profiles
-limit the entire run. Directory flags select local profiles only; with --ssh
-they need --include-local. Each SSH destination discovers its own profiles
-with this build of token-max, copied there or downloaded there from this version's release
-and cached; it prices its own history with this host's
-prices, and only its report and its totals cross SSH, never its scan. Several hosts get one
+limit the entire run. This host is always audited, and directory flags select its profiles
+only. Each SSH destination discovers its own profiles with this build of token-max, copied
+there or downloaded there from this version's release and cached; it prices its own history
+with this host's prices, and only its report and its totals cross SSH, never its scan. Several hosts get one
 total, their figures added as they are. Its changes are listed to make there. Current
 settings are applied to the selected history; checks can use different windows and
 baselines. Independent savings do not add.
@@ -93,7 +93,7 @@ Examples:
   token-max doctor --since 2026-11-01
   token-max doctor --claude-dir ~/.claude-work --codex-dir ~/.codex --details
   token-max doctor --offline --plain
-  token-max doctor --ssh devbox --ssh user@laptop --include-local
+  token-max doctor --ssh devbox --ssh user@laptop
 
 Dollars are public API prices, not an invoice: the closest public measure of what a request
 uses of a Claude or ChatGPT plan's limits, and what Claude's usage credits bill past them. A
@@ -123,8 +123,7 @@ Usage: token-max vibes [options]
   --claude-dir DIR        Select a Claude profile (repeatable)
   --codex-dir DIR         Select a Codex home, including archived sessions (repeatable)
   --t3-dir DIR            Select a T3 state directory (repeatable)
-  --ssh HOST              Read an SSH destination, putting this build there first if needed (repeatable)
-  --include-local         Also read this host when --ssh is given
+  --ssh HOST              Also read an SSH destination, putting this build there first if needed (repeatable)
   --plain                 Plain text without color or decorative Unicode
   --offline               Use cached public prices without network access
   --prices-file FILE      Use a local models.dev catalog without network access
@@ -160,7 +159,6 @@ Usage: token-max sessions [options]
   --codex-dir DIR         Select a Codex home, including archived sessions (repeatable)
   --t3-dir DIR            Select a T3 state directory (repeatable)
   --ssh HOST              Also export an SSH destination's sessions, putting this build there first if needed (repeatable)
-  --include-local         Also export this host's sessions when --ssh is given
   --offline               Use cached public prices without network access
   --prices-file FILE      Use a local models.dev catalog without network access
   --price-cache FILE      Cache path (default: ~/.cache/token-max/models.json)
@@ -183,10 +181,10 @@ skippedLines, the unreadable lines in its files; files. A cost is a lower bound 
 complete is false: a request could not be priced, or a file had unreadable or unfinished
 lines.
 
-Directory flags select local profiles only; with --ssh they need --include-local. Each SSH
-destination exports its own sessions with this host's prices, and only its session lines
-cross SSH. A session found on several hosts is printed once per host. Any failed host fails
-the whole run.
+This host's sessions are always exported, and directory flags select its profiles only.
+Each SSH destination exports its own sessions with this host's prices, and only its session
+lines cross SSH. A session found on several hosts is printed once per host. Any failed host
+fails the whole run.
 
 Costs are public API prices, not an invoice. Reads transcripts and Git config only
 and prints no prompt or reply text. Errors go to stderr as JSON.
@@ -214,15 +212,20 @@ static PHASE: Mutex<Phase> = Mutex::new(Phase::Running);
 /// zero when none is showing.
 static PROGRESS: Mutex<usize> = Mutex::new(0);
 
-/// Replace the progress line on stderr with `message`. Spaces, not escapes, blank what a
-/// longer line left, so this works on any terminal and under `--plain`. The line is cut to
-/// fit one row, since a carriage return cannot reach a row the line wrapped onto.
-fn show_progress(message: &str) {
+/// Replace the progress line on stderr with `line`, whose text without color is `plain`.
+/// Spaces, not escapes, blank what a longer line left, so this works on any terminal and
+/// under `--plain`. A line too wide for one row shows `plain` cut to fit, since a carriage
+/// return cannot reach a row the line wrapped onto, and a cut could split a color escape.
+fn show_progress(line: &str, plain: &str) {
     let mut shown = PROGRESS.lock().unwrap_or_else(PoisonError::into_inner);
     let room = progress_room();
-    let line = format!("token-max: {message}...");
-    let text = crate::terminal::fit(&line, room);
-    let cells = crate::terminal::cells(text);
+    let cells = crate::terminal::cells(plain);
+    let (text, cells) = if cells > room {
+        let cut = crate::terminal::fit(plain, room);
+        (cut, crate::terminal::cells(cut))
+    } else {
+        (line, cells)
+    };
     let pad = " ".repeat((*shown).min(room).saturating_sub(cells));
     eprint!("\r{text}{pad}");
     *shown = cells;
@@ -236,12 +239,201 @@ fn progress_room() -> usize {
     columns.max(2) - 1
 }
 
-/// Clear the progress line, if one is showing, so what follows starts on a clean row.
-fn clear_progress() {
+/// Clear the progress line, if one is showing, so what follows starts on a clean row. The
+/// returned lock keeps another thread from drawing one again while it is held.
+fn clear_progress() -> MutexGuard<'static, usize> {
     let mut shown = PROGRESS.lock().unwrap_or_else(PoisonError::into_inner);
     if *shown > 0 {
         eprint!("\r{}\r", " ".repeat((*shown).min(progress_room())));
         *shown = 0;
+    }
+    shown
+}
+
+/// How the progress line draws.
+#[derive(Clone, Copy)]
+struct Look {
+    color: bool,
+    unicode: bool,
+}
+
+/// The progress line, redrawn on its own thread so the reading bar moves while the scan holds
+/// the thread that started it. Dropping it stops that thread and clears the line.
+struct Meter {
+    shared: Arc<Shown>,
+    stop: Option<mpsc::Sender<()>>,
+    ticker: Option<thread::JoinHandle<()>>,
+}
+
+/// What the progress line shows: the current phase and when it began, and how far the local
+/// scan has read.
+struct Shown {
+    phase: Mutex<(&'static str, Instant)>,
+    reading: Arc<Reading>,
+    look: Look,
+}
+
+impl Meter {
+    fn start(look: Look, reading: Arc<Reading>) -> Self {
+        let shared = Arc::new(Shown {
+            phase: Mutex::new(("", Instant::now())),
+            reading,
+            look,
+        });
+        let (stop, stopped) = mpsc::channel::<()>();
+        let ticker = {
+            let shared = shared.clone();
+            thread::spawn(move || {
+                let mut began = None;
+                let mut read_end = None;
+                let mut tick = 0;
+                while let Err(mpsc::RecvTimeoutError::Timeout) =
+                    stopped.recv_timeout(Duration::from_millis(100))
+                {
+                    tick += 1;
+                    let phase = shared.phase.lock().unwrap_or_else(PoisonError::into_inner);
+                    let (name, since) = *phase;
+                    if name.is_empty() {
+                        continue;
+                    }
+                    let total = shared.reading.total.load(Ordering::Relaxed);
+                    let read = shared.reading.read.load(Ordering::Relaxed);
+                    // The local scan may still be reading after the phase moves on, as
+                    // when SSH hosts' prices or reports arrive first.
+                    let (line, plain) = if read < total {
+                        let began = *began.get_or_insert_with(Instant::now);
+                        let progress = Progress {
+                            read,
+                            total,
+                            elapsed: began.elapsed(),
+                        };
+                        bar(&progress, shared.look, progress_room())
+                    } else {
+                        // A phase that began under the bar is timed from when reading ended.
+                        let since = match total {
+                            0 => since,
+                            _ => since.max(*read_end.get_or_insert_with(Instant::now)),
+                        };
+                        let line = busy(name, since.elapsed(), tick, shared.look.unicode);
+                        (line.clone(), line)
+                    };
+                    show_progress(&line, &plain);
+                }
+            })
+        };
+        Self {
+            shared,
+            stop: Some(stop),
+            ticker: Some(ticker),
+        }
+    }
+
+    /// Show `phase` now, unless the reading bar holds the line.
+    fn phase(&self, phase: &'static str) {
+        let mut current = self
+            .shared
+            .phase
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *current = (phase, Instant::now());
+        // While this host still reads, the bar stays; the ticker shows the phase after it.
+        let reading = &self.shared.reading;
+        if reading.read.load(Ordering::Relaxed) < reading.total.load(Ordering::Relaxed) {
+            return;
+        }
+        let line = busy(phase, Duration::ZERO, 0, self.shared.look.unicode);
+        show_progress(&line, &line);
+    }
+}
+
+impl Drop for Meter {
+    fn drop(&mut self) {
+        drop(self.stop.take());
+        if let Some(ticker) = self.ticker.take() {
+            let _ = ticker.join();
+        }
+        drop(clear_progress());
+    }
+}
+
+/// A phase's progress line: after its first second, a spinner on `tick` and how long it has
+/// run, so a long phase shows it has not stalled.
+fn busy(phase: &str, elapsed: Duration, tick: usize, unicode: bool) -> String {
+    let mut line = format!("token-max: {phase}...");
+    if elapsed >= Duration::from_secs(1) {
+        let frames: &[&str] = if unicode {
+            &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        } else {
+            &["|", "/", "-", "\\"]
+        };
+        let seconds = elapsed.as_secs();
+        line.push_str(&format!(" {} {seconds}s", frames[tick % frames.len()]));
+    }
+    line
+}
+
+/// The widest and narrowest the reading bar's track gets.
+const TRACK_CELLS: (usize, usize) = (24, 8);
+
+/// How far reading has come: bytes `read` of `total`, `elapsed` since reading began.
+struct Progress {
+    read: u64,
+    total: u64,
+    elapsed: Duration,
+}
+
+/// The reading bar, its track narrowed to fit `room` cells: how much is read, and when the
+/// rest should be, from the rate so far. Returns the line and its text without color.
+fn bar(progress: &Progress, look: Look, room: usize) -> (String, String) {
+    let Progress {
+        read,
+        total,
+        elapsed,
+    } = *progress;
+    let fraction = read as f64 / total as f64;
+    let mut rest = format!(
+        " {:>3.0}%  {} of {}",
+        (fraction * 100.0).floor(),
+        crate::report::size(read),
+        crate::report::size(total)
+    );
+    // A rate needs a second of reading, and a few percent, to mean anything.
+    if elapsed >= Duration::from_secs(1) && fraction >= 0.02 {
+        let left = elapsed.as_secs_f64() * (1.0 - fraction) / fraction;
+        rest.push_str(&format!("  ~{} left to read", duration(left)));
+    }
+    let lead = "token-max: Reading ";
+    let (open, close) = if look.unicode { ("", "") } else { ("[", "]") };
+    let used = crate::terminal::cells(lead) + open.len() + close.len() + rest.len();
+    let track = room
+        .saturating_sub(used)
+        .clamp(TRACK_CELLS.1, TRACK_CELLS.0);
+    // Eighths of a cell, so the bar moves smoothly on a Unicode terminal.
+    let eighths = (fraction * (track * 8) as f64) as usize;
+    let (full, part) = (eighths / 8, eighths % 8);
+    let (done, todo) = if look.unicode {
+        let partial = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"][part];
+        let filled = format!("{}{partial}", "█".repeat(full));
+        let left = track - full - usize::from(!partial.is_empty());
+        (filled, "░".repeat(left))
+    } else {
+        ("#".repeat(full), "-".repeat(track - full))
+    };
+    let plain = format!("{lead}{open}{done}{todo}{close}{rest}");
+    let line = if look.color {
+        format!("{lead}{open}\x1b[35m{done}\x1b[2m{todo}\x1b[0m{close}{rest}")
+    } else {
+        plain.clone()
+    };
+    (line, plain)
+}
+
+/// Whole seconds as `42s` or `3m 05s`.
+fn duration(seconds: f64) -> String {
+    let seconds = seconds.ceil() as u64;
+    match seconds {
+        0..60 => format!("{seconds}s"),
+        _ => format!("{}m {:02}s", seconds / 60, seconds % 60),
     }
 }
 
@@ -265,7 +457,6 @@ struct Values {
     codex_dirs: Vec<String>,
     t3_dirs: Vec<String>,
     ssh: Vec<String>,
-    include_local: bool,
     /// Run as an SSH audit destination; the coordinator passes this, not people.
     ssh_scan: bool,
     prices_file: Option<String>,
@@ -297,7 +488,6 @@ impl Values {
             "defaults" => &mut self.defaults,
             "version" => &mut self.version,
             "help" => &mut self.help,
-            "include-local" => &mut self.include_local,
             "ssh-scan" => &mut self.ssh_scan,
             _ => return None,
         })
@@ -588,7 +778,8 @@ fn diagnose(json: bool, error: &ScanError) {
         #[serde(skip_serializing_if = "Option::is_none")]
         location: Option<&'a Location>,
     }
-    clear_progress();
+    // Held while the diagnostic prints, so no progress line is drawn over it.
+    let _progress = clear_progress();
     let mut stderr = io::stderr().lock();
     let _ = if json {
         write_json(
@@ -793,7 +984,6 @@ pub fn render(scan: Scan, options: Render<'_>) -> Result<Rendered, ScanError> {
 /// with its own discovery while only the window crosses SSH.
 fn chosen_here(values: &Values) -> bool {
     values.offline
-        || values.include_local
         || values.prices_file.is_some()
         || values.price_cache.is_some()
         || !values.claude_dirs.is_empty()
@@ -873,7 +1063,7 @@ fn sessions(args: &[String]) -> Result<(Output, u8), ScanError> {
         prices: price_options(values.prices_file, values.price_cache, values.offline)?,
         job: Job::Sessions,
         home: None,
-        progress: false,
+        progress: None,
     })?;
     let mut sessions: Vec<(jiff::Timestamp, Session)> = vec![];
     for (host, reply) in replies {
@@ -932,10 +1122,10 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
     Err(invalid())
 }
 
-/// The selected hosts: this host's discovery when it is selected, and the SSH destinations.
+/// The selected hosts: this host's discovery, and the SSH destinations.
 ///
 /// Takes the directory flags, which select this host's profiles.
-fn hosts(values: &mut Values) -> Result<(Option<DiscoveryOptions>, Vec<String>), ScanError> {
+fn hosts(values: &mut Values) -> Result<(DiscoveryOptions, Vec<String>), ScanError> {
     for (index, destination) in values.ssh.iter().enumerate() {
         ssh::destination(destination)?;
         if values.ssh[..index].contains(destination) {
@@ -944,29 +1134,10 @@ fn hosts(values: &mut Values) -> Result<(Option<DiscoveryOptions>, Vec<String>),
             )));
         }
     }
-    let remote = !values.ssh.is_empty();
-    if values.include_local && !remote {
-        return Err(ScanError::new("--include-local requires --ssh"));
-    }
-    let local = !remote || values.include_local;
-    if !local
-        && !(values.claude_dirs.is_empty()
-            && values.codex_dirs.is_empty()
-            && values.t3_dirs.is_empty())
-    {
-        return Err(ScanError::new(
-            "--claude-dir, --codex-dir and --t3-dir select local profiles; add --include-local to read them with --ssh",
-        ));
-    }
-    let discovery = if local {
-        let mut discovery = DiscoveryOptions::host()?;
-        discovery.claude_dirs = std::mem::take(&mut values.claude_dirs);
-        discovery.codex_dirs = std::mem::take(&mut values.codex_dirs);
-        discovery.t3_dirs = std::mem::take(&mut values.t3_dirs);
-        Some(discovery)
-    } else {
-        None
-    };
+    let mut discovery = DiscoveryOptions::host()?;
+    discovery.claude_dirs = std::mem::take(&mut values.claude_dirs);
+    discovery.codex_dirs = std::mem::take(&mut values.codex_dirs);
+    discovery.t3_dirs = std::mem::take(&mut values.t3_dirs);
     Ok((discovery, std::mem::take(&mut values.ssh)))
 }
 
@@ -975,16 +1146,16 @@ struct Gather {
     since: Option<Millis>,
     /// Pretend the settings files away on every host, for `doctor --defaults`.
     defaults: bool,
-    /// This host, when it is selected.
-    discovery: Option<DiscoveryOptions>,
+    /// This host's discovery.
+    discovery: DiscoveryOptions,
     destinations: Vec<String>,
     prices: PriceOptions,
     /// What every host makes of its scan; a report's host label is set per host.
     job: Job,
     /// This host's home directory, which its report shows as `~`.
     home: Option<String>,
-    /// Print each phase to stderr.
-    progress: bool,
+    /// Show each phase, and a bar while this host's transcripts are read, on stderr.
+    progress: Option<Look>,
 }
 
 /// Scan every selected host and load prices at once, then run the job on each, failing on the
@@ -1002,12 +1173,13 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
         home,
         progress,
     } = run;
-    let phase = |message: &str| {
-        if progress {
-            show_progress(message);
+    let reading = Arc::new(Reading::default());
+    let meter = progress.map(|look| Meter::start(look, reading.clone()));
+    let phase = |message: &'static str| {
+        if let Some(meter) = &meter {
+            meter.phase(message);
         }
     };
-    let local = discovery.is_some();
     let scope = match job {
         Job::Report { .. } => Scope::Report { defaults },
         Job::Sessions => Scope::Sessions,
@@ -1037,19 +1209,19 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
     // A lone local scan runs on this thread, so the analysis reuses the memory the scan
     // frees rather than leaving it to another thread's allocator arena.
     let mut inline = None;
-    if let Some(discovery) = discovery {
+    {
         let index = hosts.len();
         hosts.push(None);
+        let options = ScanOptions {
+            discovery,
+            since,
+            reach: scope.reach(),
+            reading: Some(reading),
+        };
         let job = move || {
-            panic::catch_unwind(|| {
-                scan(&ScanOptions {
-                    discovery,
-                    since,
-                    reach: scope.reach(),
-                })
-            })
-            .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))
-            .map(|scan| Scanned::Local(Box::new(scan)))
+            panic::catch_unwind(|| scan(&options))
+                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))
+                .map(|scan| Scanned::Local(Box::new(scan)))
         };
         if remote {
             let sender = sender.clone();
@@ -1073,10 +1245,10 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
             let _ = sender.send(Arrival::Host(index, result));
         });
     }
-    phase(match (local, remote) {
-        (true, false) => "Scanning local histories",
-        (true, true) => "Scanning local histories and SSH hosts",
-        (false, _) => "Scanning SSH hosts",
+    phase(if remote {
+        "Scanning local histories and SSH hosts"
+    } else {
+        "Scanning local histories"
     });
     let local_job = labeled(remote.then_some("this host"));
     let mut replies: Vec<Option<Reply>> = hosts.iter().map(|_| None).collect();
@@ -1140,7 +1312,7 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
         }
         Ok(())
     })();
-    clear_progress();
+    drop(meter);
     gathered.inspect_err(|_| {
         cancel_downloads();
         ssh::cancel();
@@ -1205,9 +1377,7 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
         ));
     }
     let (mut discovery, destinations) = hosts(&mut values)?;
-    if values.defaults
-        && let Some(discovery) = &mut discovery
-    {
+    if values.defaults {
         discovery.pretend_defaults();
     }
     let stdout = io::stdout().is_terminal();
@@ -1233,11 +1403,19 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
     };
     let home = std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned());
     let style = format.style(home.clone());
-    // This host's Claude profiles on the Anthropic API whose billing picks the main TTL's
-    // default, asked before the scan; without a terminal the report names both defaults.
-    if terminal && let Some(discovery) = &mut discovery {
+    // On a terminal, open with what the run is about to read, then ask how each of this
+    // host's Claude profiles on the Anthropic API pays, which picks its main TTL's default;
+    // without a terminal the report names both defaults.
+    if terminal {
+        let found = discover(&discovery)?;
+        let failed = |_| ScanError::new("cannot use the terminal; no report produced");
+        let opening = opening(&Found::list(&found), &destinations, &style);
+        io::stdout()
+            .lock()
+            .write_all(opening.as_bytes())
+            .map_err(failed)?;
         // T3 Code's instances share a native root, and so its account and answer.
-        let roots: Vec<String> = discover(discovery)?
+        let roots: Vec<String> = found
             .profiles
             .into_iter()
             .filter(|p| {
@@ -1247,7 +1425,6 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
             .collect::<IndexSet<_>>()
             .into_iter()
             .collect();
-        let failed = |_| ScanError::new("cannot use the terminal; no report produced");
         enter(Phase::Asking);
         discovery.billing = ask_billing(
             &roots,
@@ -1271,7 +1448,8 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
             vibes: advice,
         },
         home: home.clone(),
-        progress: stdout && io::stderr().is_terminal() && !term_dumb,
+        progress: (stdout && io::stderr().is_terminal() && !term_dumb)
+            .then_some(Look { color, unicode }),
     })?;
     let sections = replies.len();
     let mut code = 0;
@@ -1762,6 +1940,86 @@ pub fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_reading_bar_fills_by_eighths_fits_its_row_and_estimates_only_after_a_second() {
+        let unicode = Look {
+            color: false,
+            unicode: true,
+        };
+        let plain = Look {
+            color: false,
+            unicode: false,
+        };
+        let second = Duration::from_secs(1);
+        let at = |read, total, elapsed, look, room| {
+            let progress = Progress {
+                read,
+                total,
+                elapsed,
+            };
+            bar(&progress, look, room)
+        };
+        // 1/64 of 24 cells is 3/8 of the first one.
+        let (line, text) = at(1, 64, second, unicode, 200);
+        assert_eq!(
+            line,
+            format!("token-max: Reading ▍{}   1%  1 B of 64 B", "░".repeat(23))
+        );
+        assert_eq!(text, line);
+        let (line, _) = at(500, 1000, Duration::from_millis(999), unicode, 200);
+        assert!(line.ends_with(" 50%  500 B of 1.0 kB"), "{line}");
+        let (line, _) = at(500, 1000, 4 * second, unicode, 200);
+        assert!(line.ends_with("  ~4s left to read"), "{line}");
+        let (line, _) = at(999, 1000, 100 * second, plain, 200);
+        assert!(line.contains(&format!("[{}-]", "#".repeat(23))), "{line}");
+        assert!(
+            line.ends_with(" 99%  999 B of 1.0 kB  ~1s left to read"),
+            "{line}"
+        );
+        // A GB-scale line narrows its track to keep the estimate on an 80-column row, down
+        // to eight cells, past which the line is cut instead.
+        let gb = 1_000_000_000;
+        let (line, _) = at(3 * gb, 8 * gb, 60 * second, unicode, 79);
+        assert_eq!(crate::terminal::cells(&line), 79, "{line}");
+        assert!(line.ends_with("  ~1m 40s left to read"), "{line}");
+        let (line, _) = at(3 * gb, 8 * gb, 60 * second, plain, 10);
+        assert!(line.contains("[###-----]"), "{line}");
+        let color = Look {
+            color: true,
+            unicode: true,
+        };
+        let (line, text) = at(1, 2, second, color, 200);
+        assert!(line.contains('\x1b') && !text.contains('\x1b'));
+        assert_eq!(text, at(1, 2, second, unicode, 200).0);
+    }
+
+    #[test]
+    fn sizes_and_durations_round_at_their_unit_boundaries() {
+        use crate::report::size;
+        assert_eq!(size(999), "999 B");
+        assert_eq!(size(1_000), "1.0 kB");
+        assert_eq!(size(999_499), "999 kB");
+        assert_eq!(size(999_500), "1.0 MB");
+        assert_eq!(size(9_949_999_999), "9.9 GB");
+        assert_eq!(size(9_950_000_000), "10 GB");
+        assert_eq!(duration(0.2), "1s");
+        assert_eq!(duration(59.0), "59s");
+        assert_eq!(duration(59.5), "1m 00s");
+        assert_eq!(duration(125.0), "2m 05s");
+    }
+
+    #[test]
+    fn a_phase_shows_a_spinner_only_after_its_first_second() {
+        assert_eq!(
+            busy("Checking settings", Duration::from_millis(999), 3, true),
+            "token-max: Checking settings..."
+        );
+        assert_eq!(
+            busy("Checking settings", Duration::from_secs(12), 3, false),
+            "token-max: Checking settings... \\ 12s"
+        );
+    }
 
     #[test]
     fn json_lines_escape_every_terminal_control() {

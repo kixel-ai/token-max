@@ -138,6 +138,7 @@ fn options(w: &Workspace, since: Option<Millis>) -> ScanOptions {
         },
         since,
         reach: crate::reader::Reach::History,
+        reading: None,
     }
 }
 

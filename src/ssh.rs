@@ -747,7 +747,11 @@ pub fn serve(since: Option<Millis>, defaults: bool) -> u8 {
         if defaults {
             discovery.pretend_defaults();
         }
-        let scan = scan(&ScanOptions { discovery, since })?;
+        let scan = scan(&ScanOptions {
+            discovery,
+            since,
+            reading: None,
+        })?;
         // The stdin thread keeps the sender until it exits this process.
         let Ok(Incoming::Request(request)) = incoming.recv() else {
             unreachable!("the request comes first")

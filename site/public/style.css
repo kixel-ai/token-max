@@ -128,6 +128,7 @@ h1 { margin: 0; text-wrap: balance; }
 .screen .r { color: var(--term-red); }
 .screen .g { color: var(--term-green); }
 .screen .y { color: var(--term-yellow); }
+.screen .p { color: var(--violet); }
 .screen .elided { color: var(--term-dim); font-style: italic; }
 .cur { display: none; }
 

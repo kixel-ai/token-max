@@ -8,6 +8,7 @@ use std::fs::File;
 use std::hash::BuildHasher;
 use std::io::{ErrorKind, Read};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
@@ -38,6 +39,17 @@ pub struct ScanOptions {
     pub discovery: DiscoveryOptions,
     /// Records whose timestamp proves they precede this instant stay outside selected billing.
     pub since: Option<Millis>,
+    /// Where the scan counts the transcript bytes it has read, for a progress line.
+    pub reading: Option<Arc<Reading>>,
+}
+
+/// How far a scan has read its transcripts, which another thread may watch.
+#[derive(Debug, Default)]
+pub struct Reading {
+    /// Bytes in every transcript the scan reads; zero until discovery finishes.
+    pub total: AtomicU64,
+    /// Bytes in the transcripts read so far.
+    pub read: AtomicU64,
 }
 
 /// Bytes read per system call; lines longer than this are assembled across chunks.
@@ -1891,6 +1903,10 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         mut t3,
     } = discover(&options.discovery)?;
     let snapshot_finished_at = iso(now());
+    if let Some(reading) = &options.reading {
+        let total = snapshots.iter().map(|s| s.bytes).sum();
+        reading.total.store(total, Ordering::Relaxed);
+    }
     let mut native_ids = crate::t3::NativeIds::default();
     let has_t3 = profiles.iter().any(|p| p.t3.is_some());
     let mut reader = Reader {
@@ -1927,6 +1943,9 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
             }
         }
         snapshot.unreadable.finish(&ids, snapshot.skipped_lines);
+        if let Some(reading) = &options.reading {
+            reading.read.fetch_add(snapshot.bytes, Ordering::Relaxed);
+        }
     }
     let Reader {
         exposure,

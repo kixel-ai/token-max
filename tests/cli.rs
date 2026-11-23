@@ -254,6 +254,7 @@ fn analysis(
         scan: scan(&ScanOptions {
             discovery,
             since: None,
+            reading: None,
         })
         .unwrap(),
         catalog: &catalog,
@@ -874,6 +875,7 @@ fn explicit_windows_match_the_library_replay() {
                 billing: Default::default(),
             },
             since: Some(since),
+            reading: None,
         })
         .unwrap();
         let report = analyze(AnalyzeOptions {
@@ -1350,12 +1352,13 @@ mod unix {
                 .find(text)
                 .unwrap_or_else(|| panic!("{text:?} in {stdout}"))
         };
-        // How the profile pays is asked before the scan, then the header names what was
-        // read, then the walk asks its questions.
-        assert!(
-            stdout.starts_with("  Claude Code caches the main conversation for 1h on a Claude"),
-            "{stdout}"
-        );
+        // The opening names what the scan will read and how to add a host, then how the
+        // profile pays is asked before the scan, then the header names what was read, then
+        // the walk asks its questions.
+        assert!(stdout.starts_with("\n  token-max "), "{stdout}");
+        let found = at("\n  Claude Code  ~/.claude  1 transcript  ");
+        let hint = at("\n  + other machines: token-max doctor --ssh <host>\n\n  How is ");
+        assert!(found < hint, "{stdout}");
         // The answer echoes on the input terminal, so a separate stdout shows only the
         // blank line that ends the questions.
         at(

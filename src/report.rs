@@ -139,8 +139,24 @@ fn approx_estimate(value: Option<Estimate>) -> String {
     value.map_or_else(|| "unknown".into(), |e| approx_usd(e.usd, e.margin))
 }
 
+/// Bytes in decimal units, with one decimal below ten, such as `8.1 GB` or `512 kB`.
+pub(crate) fn size(bytes: u64) -> String {
+    let units = ["B", "kB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 999.5 && unit < units.len() - 1 {
+        value /= 1000.0;
+        unit += 1;
+    }
+    match unit {
+        0 => format!("{bytes} B"),
+        _ if value < 9.95 => format!("{value:.1} {}", units[unit]),
+        _ => format!("{value:.0} {}", units[unit]),
+    }
+}
+
 /// A whole number with commas between groups of three digits.
-fn count(value: impl Into<i128>) -> String {
+pub(crate) fn count(value: impl Into<i128>) -> String {
     let value = value.into();
     let digits = value.unsigned_abs().to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3 + 1);

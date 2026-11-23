@@ -684,6 +684,7 @@ mod tests {
             scan(&ScanOptions {
                 discovery,
                 since: None,
+                reading: None,
             })
             .unwrap()
         }

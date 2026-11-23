@@ -1817,6 +1817,152 @@ fn answer(
     }
 }
 
+/// One profile root's transcripts, as the opening lists them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Found {
+    pub harness: Harness,
+    pub root: String,
+    pub files: u64,
+    pub bytes: u64,
+}
+
+impl Found {
+    /// Each profile root's transcripts in `discovery`, a file shared by several profiles
+    /// counted once, under the first; roots with no transcript are left out.
+    pub fn list(discovery: &crate::discovery::Discovery) -> Vec<Found> {
+        let roots: IndexMap<&str, (Harness, &str)> = discovery
+            .profiles
+            .iter()
+            .map(|p| (p.id.as_str(), (p.harness, p.root.as_str())))
+            .collect();
+        let mut found: IndexMap<(Harness, &str), (u64, u64)> = IndexMap::default();
+        for snapshot in &discovery.snapshots {
+            let Some(&key) = snapshot
+                .profiles
+                .first()
+                .and_then(|id| roots.get(id.as_str()))
+            else {
+                continue;
+            };
+            let (files, bytes) = found.entry(key).or_default();
+            *files += 1;
+            *bytes += snapshot.bytes;
+        }
+        found
+            .into_iter()
+            .map(|((harness, root), (files, bytes))| Found {
+                harness,
+                root: root.to_string(),
+                files,
+                bytes,
+            })
+            .collect()
+    }
+}
+
+/// The wordmark's two rows: `token` in bold, `-max` in the logo's purple.
+const WORDMARK: [(&str, &str); 2] = [
+    ("▀█▀ █▀█ █▄▀ █▀▀ █▄ █ ", "▄▄ █▀▄▀█ ▄▀█ ▀▄▀"),
+    (" █  █▄█ █ █ ██▄ █ ▀█ ", "   █ ▀ █ █▀█ █ █"),
+];
+/// The logo's purple.
+const PURPLE: &str = "35";
+
+/// What doctor shows on a terminal before it asks anything: its name, what it is about to
+/// do, the transcripts it found on this host, and the SSH destinations it adds, or how to
+/// add one.
+pub fn opening(found: &[Found], destinations: &[String], style: &Style) -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    let mut out = String::from("\n");
+    let art = crate::terminal::cells(WORDMARK[0].0) + crate::terminal::cells(WORDMARK[0].1);
+    let fits = style
+        .width
+        .is_none_or(|w| w >= MARGIN + art + 3 + version.len());
+    if style.unicode && fits {
+        let tails = [("●", GREEN), (version, DIM)];
+        for ((token, max), (tail, tail_style)) in WORDMARK.iter().zip(tails) {
+            let spans = [
+                (*token, BOLD),
+                (*max, PURPLE),
+                ("  ", ""),
+                (tail, tail_style),
+            ];
+            out.push_str(&style.spans(&spans, None, MARGIN, None));
+        }
+    } else {
+        let spans = [("token", BOLD), ("-max", PURPLE), (" ", ""), (version, DIM)];
+        out.push_str(&style.spans(&spans, style.width, MARGIN, None));
+    }
+    out.push('\n');
+    out.push_str(
+        &style
+            .line("About to scan this host's Claude Code and Codex transcripts for cost savings."),
+    );
+    out.push_str(&style.dim("Replays them at public API prices; prints no prompt or reply text."));
+    out.push('\n');
+    if found.is_empty() {
+        out.push_str(&style.dim("No transcripts found on this host."));
+    }
+    let name = |harness| match harness {
+        Harness::Claude => "Claude Code",
+        Harness::Codex => "Codex",
+    };
+    let roots: Vec<String> = found
+        .iter()
+        .map(|f| home_in(&f.root, style.home.as_deref()))
+        .collect();
+    let counts: Vec<String> = found
+        .iter()
+        .map(|f| crate::report::count(f.files))
+        .collect();
+    let sizes: Vec<String> = found.iter().map(|f| crate::report::size(f.bytes)).collect();
+    let widest = |column: &[String]| column.iter().map(|c| crate::terminal::cells(c)).max();
+    let name_cells = found
+        .iter()
+        .map(|f| name(f.harness).len())
+        .max()
+        .unwrap_or(0);
+    let root_cells = widest(&roots).unwrap_or(0);
+    let count_cells = widest(&counts).unwrap_or(0);
+    let size_cells = widest(&sizes).unwrap_or(0);
+    let mark = if style.unicode { "✓ " } else { "" };
+    for (((f, root), files), bytes) in found.iter().zip(&roots).zip(&counts).zip(&sizes) {
+        let lead = format!("{:<name_cells$}  {}", name(f.harness), root);
+        let pad = " ".repeat(root_cells - crate::terminal::cells(root));
+        let figures = format!(
+            "{pad}  {files:>count_cells$} {}  {bytes:>size_cells$}",
+            if f.files == 1 {
+                "transcript "
+            } else {
+                "transcripts"
+            }
+        );
+        let spans = [(mark, GREEN), (lead.as_str(), ""), (figures.as_str(), BOLD)];
+        out.push_str(&style.spans(&spans, None, MARGIN, None));
+    }
+    if destinations.is_empty() {
+        out.push_str(&style.spans(
+            &[
+                ("+ other machines: ", DIM),
+                ("token-max doctor --ssh <host>", ""),
+            ],
+            style.width,
+            MARGIN,
+            None,
+        ));
+    }
+    for destination in destinations {
+        out.push_str(&style.spans(
+            &[("+ ", DIM), (destination, ""), (" over SSH", DIM)],
+            style.width,
+            MARGIN,
+            None,
+        ));
+    }
+    out.push('\n');
+    out
+}
+
 /// Ask how each Claude profile at `roots` pays, before the report, so its main conversation's
 /// cache TTL is priced against the one default that applies. A skip leaves a profile naming
 /// both defaults, and end of input skips the rest. Nothing is stored: the next run asks again.
@@ -1830,12 +1976,6 @@ pub fn ask_billing(
     if roots.is_empty() {
         return Ok(answers);
     }
-    write!(
-        output,
-        "{}{}",
-        style.line("Claude Code caches the main conversation for 1h on a Claude plan and 5m on an API key or usage credits. Which pays can't be read from the transcripts, so say which to price each profile against its own default."),
-        style.dim("Nothing is saved; the next run asks again."),
-    )?;
     'roots: for root in roots {
         let question = format!("How is {} paid for?", home_in(root, style.home.as_deref()));
         let prompt = style.ask(&question, "[p]lan, [a]PI key or usage credits, [s]kip");
@@ -3782,6 +3922,75 @@ mod tests {
                 .is_empty()
         );
         assert!(printed.is_empty(), "nothing to ask prints nothing");
+    }
+
+    #[test]
+    fn the_opening_counts_each_file_once_under_its_first_root() {
+        use crate::test_support::{make_profile, make_snapshot, make_t3_profile};
+        let snapshot = |profiles: &[&str], bytes| crate::model::Snapshot {
+            profiles: profiles.iter().map(|p| p.to_string()).collect(),
+            bytes,
+            ..make_snapshot("", &[], 0)
+        };
+        let mut codex = make_profile("codex", "/home/u/.codex");
+        codex.harness = Harness::Codex;
+        let discovery = crate::discovery::Discovery {
+            roots: vec![],
+            // T3's instance shares the native root, and so its files.
+            profiles: vec![
+                make_profile("claude", "/home/u/.claude"),
+                make_t3_profile("t3", "/home/u/.claude"),
+                codex,
+            ],
+            snapshots: vec![
+                snapshot(&["claude", "t3"], 1_500_000_000),
+                snapshot(&["t3"], 500),
+                snapshot(&["codex"], 1),
+            ],
+            t3: vec![],
+        };
+        let found = Found::list(&discovery);
+        let claude = Found {
+            harness: Harness::Claude,
+            root: "/home/u/.claude".into(),
+            files: 2,
+            bytes: 1_500_000_500,
+        };
+        let codex = Found {
+            harness: Harness::Codex,
+            root: "/home/u/.codex".into(),
+            files: 1,
+            bytes: 1,
+        };
+        assert_eq!(found, [claude, codex]);
+
+        let style = |unicode, width| Style {
+            color: false,
+            unicode,
+            width,
+            home: Some("/home/u".into()),
+            host: None,
+        };
+        let text = opening(&found, &[], &style(true, Some(100)));
+        assert!(text.contains("  ▀█▀ █▀█"), "{text}");
+        assert!(
+            text.contains("\n  ✓ Claude Code  ~/.claude  2 transcripts  1.5 GB\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("\n  ✓ Codex        ~/.codex   1 transcript      1 B\n"),
+            "{text}"
+        );
+        assert!(text.contains("token-max doctor --ssh <host>"), "{text}");
+        // A narrow or plain terminal gets the name as text, and SSH destinations replace the hint.
+        let devbox = ["devbox".to_string()];
+        for narrow in [style(true, Some(40)), style(false, None)] {
+            let text = opening(&found, &devbox, &narrow);
+            assert!(text.starts_with("\n  token-max "), "{text}");
+            assert!(!text.contains("█") && !text.contains("<host>"), "{text}");
+            assert!(text.contains("\n  + devbox over SSH\n"), "{text}");
+        }
+        assert!(opening(&[], &[], &style(false, None)).contains("No transcripts found"));
     }
 
     #[test]

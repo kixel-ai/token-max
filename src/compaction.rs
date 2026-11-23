@@ -4807,6 +4807,7 @@ mod tests {
                     billing: Default::default(),
                 },
                 since: None,
+                reading: None,
             }
         }
 

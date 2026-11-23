@@ -28,7 +28,7 @@ COLUMNS = 100
 # Every question ends in its dim choices, then ": ".
 PROMPT = re.compile(rb"\x1b\[0m: $")
 SGR = re.compile(r"\x1b\[([0-9;]*)m")
-CLASSES = {"1": "b", "2": "d", "31": "r", "32": "g", "33": "y"}
+CLASSES = {"1": "b", "2": "d", "31": "r", "32": "g", "33": "y", "35": "p"}
 # A report section opens with its bold uppercase heading.
 HEADING = re.compile(r"^  [A-Z][A-Z ]+[A-Z]  ")
 CUT = "EVERYTHING ELSE"

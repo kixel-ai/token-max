@@ -131,6 +131,15 @@ fn approx_usd(value: f64, margin: Option<Margin>) -> String {
     }
 }
 
+/// Whether `text` quotes a figure [`approx_usd`] marked as extrapolated.
+pub(crate) fn sampled(text: &str) -> bool {
+    text.match_indices('~').any(|(at, _)| {
+        let rest = &text[at + 1..];
+        let rest = rest.strip_prefix('-').unwrap_or(rest);
+        rest.strip_prefix('<').unwrap_or(rest).starts_with('$')
+    })
+}
+
 fn estimate(value: Option<f64>) -> String {
     value.map_or_else(|| "unknown".into(), usd)
 }
@@ -4267,9 +4276,9 @@ fn bash_item(cap: &BashCap, profile: &str, how: Option<How>, out: &Out<'_>) -> I
                 )
             } else {
                 // A cap raised for a TTL that is not set yet outlasts the one that is.
-                let first = if cap.ttl_pending {
+                let first = if cap.needs_ttl {
                     format!(
-                        " Take doctor's cache TTL change with it: a {to} wait outlasts the cache under the TTL set now."
+                        " Take doctor's cache TTL change first: a {to} wait outlasts the cache set now."
                     )
                 } else {
                     String::new()

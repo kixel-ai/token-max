@@ -93,7 +93,7 @@ fn title(hosts: &[Host<'_>], style: &Style) -> String {
     let extrapolated = hosts
         .iter()
         .flat_map(|h| h.items)
-        .any(|i| i.text.contains("~$"));
+        .any(|i| crate::report::sampled(&i.text));
     if extrapolated {
         text += &style.dim(
             "A ~ marks a figure extrapolated from the requests that could be priced to those that could not, assuming they resemble each other, followed by its 95% margin of error.",
@@ -471,8 +471,16 @@ mod tests {
             text: "It cost ~$2.00 \u{b1} $0.50.".into(),
             ..card("Sampled")
         };
-        let printed = print(&[exact, sampled.clone(), sampled]);
+        let printed = print(&[exact.clone(), sampled.clone(), sampled]);
         assert_eq!(printed.matches(ASSUMED).count(), 1, "{printed}");
+        // A figure under a cent, or a negative one, is marked the same way.
+        for figure in ["~<$0.01", "~-$2.00", "~-<$0.01"] {
+            let small = Item {
+                text: format!("It cost {figure}, margin unknown."),
+                ..card("Small")
+            };
+            assert!(print(&[exact.clone(), small]).contains(ASSUMED), "{figure}");
+        }
     }
 
     #[test]

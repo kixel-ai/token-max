@@ -61,34 +61,38 @@ pub(crate) fn owner(p: &Profile) -> Option<String> {
     ))
 }
 
-/// The main-agent TTL the cap must stay under, and where it came from.
+/// The main-agent TTL the cap must stay under, where it came from, and, when it is a change
+/// `doctor` recommends, the TTL set now that it replaces (None inside when unknown).
 fn evaluation_ttl(
     ttls: &[&TtlCheck],
     profile: &Profile,
     requests: &[&Request],
-) -> (Option<Ttl>, &'static str, bool) {
+) -> (Option<Ttl>, &'static str, Option<Option<Ttl>>) {
     // No one TTL holds across projects that set it differently, so no fallback stands in.
     if profile.ttl.main.varies {
         return (
             None,
             "recorded projects set the main-agent cache TTL differently",
-            false,
+            None,
         );
     }
     let verdict = ttls
         .iter()
         .find(|t| t.base.profiles.contains(&profile.id) && t.bucket == Bucket::Main)
         .filter(|t| t.base.action != Action::Advisory)
-        .and_then(|t| Some((t.base.recommended?, t.base.action == Action::Change)));
-    if let Some((ttl, pending)) = verdict {
+        .and_then(|t| {
+            let replaces = (t.base.action == Action::Change).then_some(t.base.current);
+            Some((t.base.recommended?, replaces))
+        });
+    if let Some((ttl, replaces)) = verdict {
         return (
             Some(ttl),
             "the main-agent cache TTL doctor recommends",
-            pending,
+            replaces,
         );
     }
     if let Some(ttl) = profile.ttl.main.one().value {
-        return (Some(ttl), "the current main-agent cache TTL setting", false);
+        return (Some(ttl), "the current main-agent cache TTL setting", None);
     }
     let observed = requests
         .iter()
@@ -99,9 +103,9 @@ fn evaluation_ttl(
         Some(ttl) => (
             Some(ttl),
             "the cache lifetime the latest main-agent request wrote",
-            false,
+            None,
         ),
-        None => (None, "the main-agent cache TTL is unresolved", false),
+        None => (None, "the main-agent cache TTL is unresolved", None),
     }
 }
 
@@ -160,7 +164,7 @@ fn check(
     for &r in &requests {
         sessions.entry(&r.session).or_default().push(r);
     }
-    let (ttl, ttl_basis, ttl_pending) = evaluation_ttl(ttls, profile, &requests);
+    let (ttl, ttl_basis, replaces) = evaluation_ttl(ttls, profile, &requests);
 
     let mine = |e: &&StructuralEvent| line.covers(&e.profiles) && selected(e.time);
     let mut ends: HashMap<(&str, &Id), &StructuralEvent> = HashMap::default();
@@ -238,6 +242,10 @@ fn check(
         })
         .or_else(|| ttl.is_none().then(|| ttl_basis.into()));
     let suggested = ttl.map(safe_cap).filter(|_| unresolved.is_none());
+    // A cap raised past the margin under the TTL set now fits only the recommended one.
+    let needs_ttl = suggested.is_some_and(|to| {
+        to > control.value && replaces.is_some_and(|set| set.is_none_or(|set| to > safe_cap(set)))
+    });
     let cap = suggested.unwrap_or(control.value);
     let mut replacement = format!("env.BASH_MAX_TIMEOUT_MS: \"{cap}\"");
     // A default above the cap raises the cap again, so it comes down too.
@@ -252,7 +260,7 @@ fn check(
         owner: control.owner.clone(),
         ttl,
         ttl_basis: ttl_basis.into(),
-        ttl_pending,
+        needs_ttl,
         unresolved,
         replacement,
         waits: BashWaits {
@@ -448,7 +456,20 @@ mod tests {
         let check = &report.bash[0];
         assert_eq!(check.ttl, verdict.base.recommended);
         assert!(check.ttl_basis.contains("recommends"));
-        assert_eq!(check.ttl_pending, verdict.base.action == Action::Change);
+        // The default 10m cap would rise to 55m, past the 5m cache set now.
+        assert_eq!(
+            (
+                verdict.base.current,
+                verdict.base.recommended,
+                verdict.base.action
+            ),
+            (Some(Ttl::FiveMinutes), Some(Ttl::OneHour), Action::Change)
+        );
+        assert!(check.needs_ttl);
+        assert!(matches!(
+            card(&report).how,
+            Some(crate::doctor::How::Manual { .. })
+        ));
     }
 
     #[test]
@@ -586,15 +607,21 @@ mod tests {
             "{}",
             item.text
         );
-        // Raised for a TTL that is not set yet, the cap waits on that change.
-        low.bash[0].ttl_pending = true;
+        assert!(matches!(item.how, Some(crate::doctor::How::Edit(_))));
+        // Raised past the cache set now, the cap waits on the TTL change and is no edit.
+        low.bash[0].needs_ttl = true;
         let item = card(&low);
         assert!(
             item.text.contains(
-                "check-ins. Take doctor's cache TTL change with it: a 4m wait outlasts the cache under the TTL set now. 1 foreground"
+                "check-ins. Take doctor's cache TTL change first: a 4m wait outlasts the cache set now. 1 foreground"
             ),
             "{}",
             item.text
+        );
+        assert!(
+            matches!(&item.how, Some(crate::doctor::How::Manual { reason, .. }) if reason.contains("cache TTL change")),
+            "{:?}",
+            item.how
         );
         // The default timeout raises the effective cap, so both come down in the one edit.
         let both = report(

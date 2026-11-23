@@ -643,6 +643,13 @@ pub(crate) fn bash_how(cap: &BashCap, profile: &Profile) -> Option<How> {
     let to = cap.suggested.filter(|to| *to != cap.current)?.to_string();
     let file = profile.settings_file.as_str();
     let step = format!("set {}", cap.replacement);
+    // Written before the TTL it fits, the cap would outlast the cache on every long wait.
+    if cap.needs_ttl {
+        return Some(How::Manual {
+            step,
+            reason: "it fits only after doctor's cache TTL change".into(),
+        });
+    }
     let max = "BASH_MAX_TIMEOUT_MS";
     let mut how = owned(
         &cap.owner,

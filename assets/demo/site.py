@@ -352,7 +352,7 @@ def results(plan: str, api: str, paid: set[str], since: date, today: date) -> tu
         # The bars are decorative, so a screen reader hears the split they draw as text.
         if on_plan < 0.005:
             split = ""
-        elif whole - on_plan < 0.005:
+        elif usd(on_plan, about) == usd(whole, about):
             split = '<span class="sr">, all of it on my subscription too</span>'
         else:
             split = f'<span class="sr">, {usd(on_plan, about)}/mo of it on my subscription too</span>'

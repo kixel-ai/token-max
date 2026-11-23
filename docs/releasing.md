@@ -69,9 +69,11 @@ the last 30 days across their hosts, run from `nixos` with `--ssh` for the
 others, as HTML, with each host's EVERYTHING ELSE section cut to one line,
 since that section is long and names project files that can belong to private
 repositories. The results section below it comes from the same run's total and
-a second run that answers every profile as API: the first gives the saving on
-the subscription, the second the saving at API rates and the breakdown by
-setting. Each line's bar is green for what the first run saved on profiles
+a second run that answers every profile as API. The first gives the usage boxes
+(the hosts' tokens, requests, and spend at API prices over this host's window;
+a spend with unpriced requests stops the script) and the saving on the
+subscription, also in dollars at API rates. The second gives the saving at API
+rates and the breakdown by setting. Each line's bar is green for what the first run saved on profiles
 not answered as API, and violet for the rest; a line with no green is tagged
 "API only".
 The subscription column is the first run's total, as the maintainer pays, so

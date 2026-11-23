@@ -199,13 +199,15 @@ h1 { margin: 0; text-wrap: balance; }
 
 /* Findings */
 h2 { margin: 6rem 0 0; text-wrap: balance; }
-.aside { margin: 0.4rem 0 0; font-size: 0.9rem; }
-.context { margin: 2rem 0 1rem; font: 600 0.9rem/1.4 var(--mono); }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 1rem; margin-top: 2rem; }
+.stat { padding: 1.1rem 1.3rem; }
+.stat p { margin: 0.5rem 0 0; font-size: 2rem; font-weight: 700; line-height: 1.1; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
 .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: 1rem; }
 .col { padding: 1.4rem 1.5rem; }
-.col h3 { margin: 0; font: 600 0.8rem/1.2 var(--mono); text-transform: uppercase; letter-spacing: 0.1em; }
+.stat h3, .col h3 { margin: 0; font: 600 0.8rem/1.2 var(--mono); text-transform: uppercase; letter-spacing: 0.1em; }
 .col p { margin: 0.5rem 0 0; }
 .col .big { margin-top: 0.7rem; font-size: 3.6rem; font-weight: 700; line-height: 1; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
+.col .big small { margin-left: 0.2em; font-size: 0.45em; font-weight: 600; letter-spacing: 0; }
 
 .where { margin: 2.5rem 0 1rem; font: 600 0.8rem/1.2 var(--mono); text-transform: uppercase; letter-spacing: 0.1em; }
 .breakdown { margin: 0; padding: 0; list-style: none; }
@@ -290,14 +292,12 @@ h1 { font-size: clamp(3rem, 9vw, 7rem); font-weight: 700; line-height: 0.95; let
 .term { border: 1px solid #ffffff1f; border-radius: 0.9rem; box-shadow: 0 30px 120px -30px #8b5cf6aa, 0 0 0 1px #8b5cf622; }
 .bar { border-bottom: 1px solid #ffffff12; }
 h2 { font-size: clamp(1.8rem, 4vw, 2.6rem); font-weight: 700; letter-spacing: -0.03em; }
-.aside { color: var(--muted); }
-.context { color: var(--muted); }
-.col { background: linear-gradient(180deg, #ffffff0d, #ffffff05); border: 1px solid #ffffff1a; border-radius: 1rem; }
+.stat h3 { color: var(--muted); }
+.stat, .col { background: linear-gradient(180deg, #ffffff0d, #ffffff05); border: 1px solid #ffffff1a; border-radius: 1rem; }
 .col h3, .col p { color: var(--muted); }
 .col.plan .big { color: var(--ink); }
 .col.api { border-color: #4ade8066; background: linear-gradient(180deg, #4ade801f, #4ade8008); box-shadow: 0 0 60px -20px #4ade8088; }
 .col.api .big { color: var(--green); text-shadow: 0 0 28px #4ade8080; }
-.nope { color: var(--ink); font-weight: 700; }
 .where { color: var(--muted); }
 .breakdown li { border-bottom: 1px solid #ffffff12; }
 .breakdown .amt { color: var(--green); }

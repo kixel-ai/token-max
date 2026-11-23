@@ -251,10 +251,16 @@ def changes(transcript: str, api: set[str], api_rates: bool) -> dict[str, list]:
     return rows
 
 
-# The hosts' total, which --ssh prints, then what their changes offer.
+# The hosts' total, which --ssh prints, with what they spent at API prices, then what their
+# changes offer.
 TOTAL_LINE = re.compile(
-    r"token-max: total over (\d+) hosts\s+([\d,]+) requests and ([\d,]+) tokens in [\d,]+ sessions?"
+    r"token-max: total over (\d+) hosts\s+([\d,]+) requests and ([\d,]+) tokens in [\d,]+ sessions?, "
+    r"(.*?) at API prices"
 )
+# A whole spend, as doctor prints it without unpriced requests: an amount, perhaps with a margin.
+SPENT = re.compile(r"(~?)\$([\d,.]+)(?: ± \$[\d,.]+|, margin unknown)?")
+# This host's window, from its report's title line.
+WINDOW = re.compile(r"token-max: this host\s+[\d,]+ requests in [\d,]+ sessions? from \S+ to \S+ \((\d+ days?)\)")
 # One part of the "Changes offered" sentence: its amount and its percent of the hosts' spend.
 AMOUNT = re.compile(r"^(?:up to )?(?:about )?(~?)(<?)\$([\d,.]+)/mo.*?, (<?)(\d+)% of these hosts' spend")
 
@@ -291,7 +297,7 @@ def usd(value: float, about: bool) -> str:
 
 
 def billions(tokens: int) -> str:
-    return f"{tokens / 1e9:.1f} billion" if tokens >= 1e9 else f"{tokens / 1e6:.0f} million"
+    return f"{tokens / 1e9:.1f}B" if tokens >= 1e9 else f"{tokens / 1e6:.0f}M"
 
 
 # The breakdown names this many settings, then one row for every other one.
@@ -305,8 +311,14 @@ def results(plan: str, api: str, paid: set[str]) -> tuple[str, str]:
     for a change to 1h "up to" prices it against the API's 5m, so it counts in full at API rates.
     A destination's profiles count as the subscription, since their billing is unknown."""
     total, plan_offer = offered(plan)
-    hosts, requests, tokens = total.groups()
-    plan_pct = plan_offer["measured"][2]
+    hosts, requests, tokens, spent_text = total.groups()
+    spent = SPENT.fullmatch(spent_text)
+    if not spent:
+        sys.exit(f"the usage boxes need a whole spend, not {spent_text!r}")
+    window = WINDOW.search(" ".join(line.strip() for line in plain_lines(plan)))
+    if not window:
+        sys.exit("the usage boxes need this host's window, which its report's title gives")
+    plan_usd, plan_about, plan_pct = plan_offer["measured"]
     _, api_offer = offered(api)
     api_about = api_offer["measured"][1] or api_offer["up to"][1]
     api_usd = api_offer["measured"][0] + api_offer["up to"][0]
@@ -360,17 +372,22 @@ def results(plan: str, api: str, paid: set[str]) -> tuple[str, str]:
   <p class="key"><span class="k-plan">saves on my subscription too</span><span class="k-api">saves only at API rates</span></p>
 """ if items else ""
     fragment = f"""
-  <p class="context">{billions(int(tokens.replace(",", "")))} tokens in {requests} requests on {hosts} machines</p>
+  <div class="stats">
+    <div class="stat"><h3>Tokens</h3><p>{billions(int(tokens.replace(",", "")))}</p></div>
+    <div class="stat"><h3>Requests</h3><p>{requests}</p></div>
+    <div class="stat"><h3>API price, {window[1]}</h3><p>{spent[1]}${spent[2]}</p></div>
+  </div>
+  <h3 class="where">What token-max saves</h3>
   <div class="cols">
     <div class="col plan">
       <h3>On my subscription</h3>
-      <p class="big">{plan_pct}%</p>
-      <p>less of my usage limits, so they last longer</p>
+      <p class="big">{plan_pct}%<small> saved</small></p>
+      <p>{usd(plan_usd, plan_about)}/mo at API rates</p>
     </div>
     <div class="col api">
       <h3>If I paid API rates</h3>
-      <p class="big">{api_pct}%</p>
-      <p>saved, {usd(api_usd, api_about)}/mo <span class="nope">(hell no)</span></p>
+      <p class="big">{api_pct}%<small> saved</small></p>
+      <p>{usd(api_usd, api_about)}/mo</p>
     </div>
   </div>
 {breakdown}  <p class="fine">Replayed at public API prices on {hosts} of my machines on {date.today().isoformat()}, each change

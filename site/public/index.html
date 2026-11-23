@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>token-max: optimize your settings</title>
+<title>token-max: maximize your tokens</title>
 <meta name="description" content="token-max replays your Claude Code and Codex transcripts, computes the price of different settings, and suggests which ones to change.">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="style.css">
@@ -12,13 +12,13 @@
 <link rel="preload" href="fonts/SpaceGrotesk.woff2" as="font" type="font/woff2" crossorigin>
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://max.kixel.me/">
-<meta property="og:title" content="Optimize your settings">
+<meta property="og:title" content="Maximize your tokens">
 <meta property="og:description" content="token-max replays your Claude Code and Codex transcripts, computes the price of different settings, and suggests which ones to change. All recommendations based on math, not vibes.">
 <!-- og.png is a 1200x630 screenshot of this page's top; retake it after changing that part (docs/releasing.md). -->
 <meta property="og:image" content="https://max.kixel.me/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="token-max: optimize your settings. Run curl -LsSf https://max.kixel.me/run.sh | sh">
+<meta property="og:image:alt" content="token-max: maximize your tokens. Run curl -LsSf https://max.kixel.me/run.sh | sh">
 <meta name="twitter:card" content="summary_large_image">
 </head>
 <body>
@@ -38,7 +38,7 @@
 <main>
 <section class="hero">
   <p class="eyebrow">For Claude Code and Codex</p>
-  <h1>Optimize your settings</h1>
+  <h1>Maximize your tokens</h1>
   <p class="lede">token-max replays your Claude Code and Codex transcripts, computes
   the price of different settings, and suggests which ones to change.
   <strong>All recommendations based on math, not vibes.</strong></p>
@@ -562,20 +562,24 @@
 
 <!-- assets/demo/site.py fills the figures from the terminal's run above and a second run with every profile on API rates. -->
 <section class="findings" aria-labelledby="found">
-  <h2 id="found">For example, on my devices across the last&nbsp;30&nbsp;days:</h2>
-  <p class="aside">Yes i do a lot of vibe coding</p>
+  <h2 id="found">My usage:</h2>
   <!-- results -->
-  <p class="context">163.7 billion tokens in 1,144,077 requests on 3 machines</p>
+  <div class="stats">
+    <div class="stat"><h3>Tokens</h3><p>163.7B</p></div>
+    <div class="stat"><h3>Requests</h3><p>1,144,077</p></div>
+    <div class="stat"><h3>API price, 29 days</h3><p>~$65,000</p></div>
+  </div>
+  <h3 class="where">What token-max saves</h3>
   <div class="cols">
     <div class="col plan">
       <h3>On my subscription</h3>
-      <p class="big">7%</p>
-      <p>less of my usage limits, so they last longer</p>
+      <p class="big">7%<small> saved</small></p>
+      <p>~$4,653/mo at API rates</p>
     </div>
     <div class="col api">
       <h3>If I paid API rates</h3>
-      <p class="big">28%</p>
-      <p>saved, ~$18,571/mo <span class="nope">(hell no)</span></p>
+      <p class="big">28%<small> saved</small></p>
+      <p>~$18,571/mo</p>
     </div>
   </div>
   <h3 class="where">Where it comes from, at API rates</h3>

@@ -1054,6 +1054,10 @@ pub fn discover_inbound(
     profiles: &mut [Profile],
     requests: &[Request],
 ) -> Result<(), ScanError> {
+    // Read only for Claude profiles: a Codex-only scan never reads Claude's policy.
+    if !profiles.iter().any(|p| p.harness == Harness::Claude) {
+        return Ok(());
+    }
     let managed_file = options.managed_settings_file.as_str();
     let managed = settings(managed_file, Harness::Claude)?;
     for profile in profiles.iter_mut().filter(|p| p.harness == Harness::Claude) {

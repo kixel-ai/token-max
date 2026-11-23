@@ -4266,8 +4266,16 @@ fn bash_item(cap: &BashCap, profile: &str, how: Option<How>, out: &Out<'_>) -> I
                     "A foreground wait at or past the {ttl} cache TTL, {basis}, lets the cache expire before Claude replies, and a {to} cap leaves room under it. {waits} What a lower cap saves is not measured, and the {to} margin is a guess. {BACKGROUND} Some commands need longer in the foreground; keep the cap if yours do."
                 )
             } else {
+                // A cap raised for a TTL that is not set yet outlasts the one that is.
+                let first = if cap.ttl_pending {
+                    format!(
+                        " Take doctor's cache TTL change with it: a {to} wait outlasts the cache under the TTL set now."
+                    )
+                } else {
+                    String::new()
+                };
                 format!(
-                    "A {current} cap moves commands to the background sooner than the {ttl} cache, {basis}, needs. Raising it to {to} trades longer foreground waits for fewer background check-ins. {waits} What a higher cap saves is not measured, and the {to} margin is a guess. {BACKGROUND}"
+                    "A {current} cap moves commands to the background sooner than the {ttl} cache, {basis}, needs. Raising it to {to} trades longer foreground waits for fewer background check-ins.{first} {waits} What a higher cap saves is not measured, and the {to} margin is a guess. {BACKGROUND}"
                 )
             };
             (format!("{current} {} {to}", out.arrow), trade)

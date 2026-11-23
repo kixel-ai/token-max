@@ -66,24 +66,29 @@ fn evaluation_ttl(
     ttls: &[&TtlCheck],
     profile: &Profile,
     requests: &[&Request],
-) -> (Option<Ttl>, &'static str) {
+) -> (Option<Ttl>, &'static str, bool) {
     // No one TTL holds across projects that set it differently, so no fallback stands in.
     if profile.ttl.main.varies {
         return (
             None,
             "recorded projects set the main-agent cache TTL differently",
+            false,
         );
     }
     let verdict = ttls
         .iter()
         .find(|t| t.base.profiles.contains(&profile.id) && t.bucket == Bucket::Main)
         .filter(|t| t.base.action != Action::Advisory)
-        .and_then(|t| t.base.recommended);
-    if let Some(ttl) = verdict {
-        return (Some(ttl), "the main-agent cache TTL doctor recommends");
+        .and_then(|t| Some((t.base.recommended?, t.base.action == Action::Change)));
+    if let Some((ttl, pending)) = verdict {
+        return (
+            Some(ttl),
+            "the main-agent cache TTL doctor recommends",
+            pending,
+        );
     }
     if let Some(ttl) = profile.ttl.main.one().value {
-        return (Some(ttl), "the current main-agent cache TTL setting");
+        return (Some(ttl), "the current main-agent cache TTL setting", false);
     }
     let observed = requests
         .iter()
@@ -94,8 +99,9 @@ fn evaluation_ttl(
         Some(ttl) => (
             Some(ttl),
             "the cache lifetime the latest main-agent request wrote",
+            false,
         ),
-        None => (None, "the main-agent cache TTL is unresolved"),
+        None => (None, "the main-agent cache TTL is unresolved", false),
     }
 }
 
@@ -154,7 +160,7 @@ fn check(
     for &r in &requests {
         sessions.entry(&r.session).or_default().push(r);
     }
-    let (ttl, ttl_basis) = evaluation_ttl(ttls, profile, &requests);
+    let (ttl, ttl_basis, ttl_pending) = evaluation_ttl(ttls, profile, &requests);
 
     let mine = |e: &&StructuralEvent| line.covers(&e.profiles) && selected(e.time);
     let mut ends: HashMap<(&str, &Id), &StructuralEvent> = HashMap::default();
@@ -246,6 +252,7 @@ fn check(
         owner: control.owner.clone(),
         ttl,
         ttl_basis: ttl_basis.into(),
+        ttl_pending,
         unresolved,
         replacement,
         waits: BashWaits {
@@ -399,7 +406,7 @@ mod tests {
         let mut profile = crate::test_support::make_profile("p", "root");
         profile.ttl.main.value = Some(Ttl::OneHour);
         profile.ttl.main.varies = true;
-        let (ttl, basis) = evaluation_ttl(&[], &profile, &[]);
+        let (ttl, basis, _) = evaluation_ttl(&[], &profile, &[]);
         assert_eq!(ttl, None);
         assert!(basis.contains("differently"));
     }
@@ -441,6 +448,7 @@ mod tests {
         let check = &report.bash[0];
         assert_eq!(check.ttl, verdict.base.recommended);
         assert!(check.ttl_basis.contains("recommends"));
+        assert_eq!(check.ttl_pending, verdict.base.action == Action::Change);
     }
 
     #[test]
@@ -568,12 +576,22 @@ mod tests {
         let near = report(r#"{"promptCacheTtl":"5m","env":{"BASH_MAX_TIMEOUT_MS":"270000"}}"#);
         assert_eq!(card(&near).value, "270s -> 4m");
         // A low cap is raised, and says what that trades.
-        let low = report(r#"{"promptCacheTtl":"5m","env":{"BASH_MAX_TIMEOUT_MS":"120000"}}"#);
+        let mut low = report(r#"{"promptCacheTtl":"5m","env":{"BASH_MAX_TIMEOUT_MS":"120000"}}"#);
         let item = card(&low);
         assert_eq!(item.value, "2m -> 4m");
         assert!(
             item.text.contains(
-                "Raising it to 4m trades longer foreground waits for fewer background check-ins."
+                "Raising it to 4m trades longer foreground waits for fewer background check-ins. 1 foreground"
+            ),
+            "{}",
+            item.text
+        );
+        // Raised for a TTL that is not set yet, the cap waits on that change.
+        low.bash[0].ttl_pending = true;
+        let item = card(&low);
+        assert!(
+            item.text.contains(
+                "check-ins. Take doctor's cache TTL change with it: a 4m wait outlasts the cache under the TTL set now. 1 foreground"
             ),
             "{}",
             item.text

@@ -406,7 +406,7 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     assert!(!report.contains("WARNINGS"), "{report}");
     assert!(
         report.ends_with(
-            "\n\n  token-max vibes has 1 piece of advice the transcripts can't price. Run token-max vibes to see it.\n"
+            "\n\n  token-max vibes has 1 piece of advice the transcripts can't price. Run token-max vibes over the same profiles, hosts and window to see it.\n"
         ),
         "{report}"
     );

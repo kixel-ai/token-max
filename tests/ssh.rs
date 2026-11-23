@@ -533,7 +533,7 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     assert!(!stdout.contains("BASH_MAX_TIMEOUT_MS"), "{stdout}");
     assert!(
         stdout.ends_with(
-            "\n  token-max vibes has 2 pieces of advice the transcripts can't price. Run token-max vibes to see it.\n"
+            "\n  token-max vibes has 2 pieces of advice the transcripts can't price. Run token-max vibes over the same profiles, hosts and window to see it.\n"
         ),
         "{stdout}"
     );

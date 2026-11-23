@@ -76,7 +76,8 @@ pub struct Host<'a> {
 }
 
 /// The heading over `count` cards.
-fn title(count: usize, style: &Style) -> String {
+fn title(hosts: &[Host<'_>], style: &Style) -> String {
+    let count: usize = hosts.iter().map(|h| h.items.len()).sum();
     let head = match count {
         0 => "token-max vibes: no advice for these settings.".to_string(),
         1 => "token-max vibes: 1 piece of advice the transcripts can't price.".to_string(),
@@ -86,6 +87,16 @@ fn title(count: usize, style: &Style) -> String {
     if count > 0 {
         text += &style.dim(
             "None of it is measured, so none of it is a verdict. Each card names whose advice it is.",
+        );
+    }
+    // Said once, as `doctor` does, for every extrapolated figure a card quotes.
+    let extrapolated = hosts
+        .iter()
+        .flat_map(|h| h.items)
+        .any(|i| i.text.contains("~$"));
+    if extrapolated {
+        text += &style.dim(
+            "A ~ marks a figure extrapolated from the requests that could be priced to those that could not, assuming they resemble each other, followed by its 95% margin of error.",
         );
     }
     text
@@ -134,7 +145,7 @@ fn named(how: &How, style: &Style) -> String {
 /// Every host's cards as `vibes` prints them off a terminal, each change named and none made.
 pub fn text(hosts: &[Host<'_>], style: &Style) -> String {
     let count: usize = hosts.iter().map(|h| h.items.len()).sum();
-    let mut text = title(count, style);
+    let mut text = title(hosts, style);
     let mut n = 0;
     for host in hosts {
         let fixes = fixes(host.items);
@@ -160,7 +171,7 @@ pub fn ask(
     output: &mut impl Write,
 ) -> io::Result<Vec<Selection>> {
     let count: usize = hosts.iter().map(|h| h.items.len()).sum();
-    write!(output, "{}", title(count, style))?;
+    write!(output, "{}", title(hosts, style))?;
     let offered = hosts
         .iter()
         .any(|h| h.offers.is_some_and(|o| o.offered() > 0));
@@ -434,6 +445,34 @@ mod tests {
         assert!(text.contains("        Change  by hand, since "), "{text}");
         assert!(!text.contains("Accept?") && !text.contains("Nothing is written"));
         assert_eq!(events, []);
+    }
+
+    #[test]
+    fn an_extrapolated_figure_on_a_card_states_its_assumption_once() {
+        let w = Workspace::new();
+        let style = style(&w);
+        let print = |items: &[Item]| {
+            let hosts = [Host {
+                label: None,
+                items,
+                offers: None,
+                style: &style,
+            }];
+            text(&hosts, &style)
+        };
+        const ASSUMED: &str = "assuming they resemble each other";
+        // A path under ~ is no figure.
+        let exact = Item {
+            text: "It cost $2.00, set in ~/.claude/settings.json.".into(),
+            ..card("Exact")
+        };
+        assert!(!print(std::slice::from_ref(&exact)).contains(ASSUMED));
+        let sampled = Item {
+            text: "It cost ~$2.00 \u{b1} $0.50.".into(),
+            ..card("Sampled")
+        };
+        let printed = print(&[exact, sampled.clone(), sampled]);
+        assert_eq!(printed.matches(ASSUMED).count(), 1, "{printed}");
     }
 
     #[test]

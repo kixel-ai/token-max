@@ -1438,7 +1438,10 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
     };
     // Off a terminal, the advice this report leaves out is one command away.
     let hint = if pending > 0 {
-        let hint = format!("{} Run token-max vibes to see it.", vibes::hint(pending));
+        let hint = format!(
+            "{} Run token-max vibes over the same profiles, hosts and window to see it.",
+            vibes::hint(pending)
+        );
         format!("\n{}", style.line(&hint))
     } else {
         String::new()

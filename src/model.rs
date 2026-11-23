@@ -1945,6 +1945,8 @@ pub struct BashCap {
     pub ttl: Option<Ttl>,
     /// Where `ttl` came from.
     pub ttl_basis: String,
+    /// `ttl` is a change `doctor` recommends, not the TTL set now.
+    pub ttl_pending: bool,
     /// Why no cap is suggested: no TTL to compare with, or an owner that is not settled.
     pub unresolved: Option<String>,
     /// The settings that make the suggested cap, such as `env.BASH_MAX_TIMEOUT_MS: "240000"`.

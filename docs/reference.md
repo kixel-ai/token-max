@@ -1209,7 +1209,8 @@ rewrites the whole prefix.
 
 The card compares the cap with the main-agent TTL: the one `doctor`
 recommends, else the current setting, else the lifetime the latest main-agent
-request wrote. It advises 240000 ms under a 5m cache and 3300000 ms under 1h,
+request wrote. A cap raised for a TTL `doctor` recommends changing to says to
+take that change with it, since the longer wait outlasts the TTL set now. It advises 240000 ms under a 5m cache and 3300000 ms under 1h,
 a margin that leaves room for the model's reply on either side of the wait,
 whenever the cap is anything else: a higher cap comes down, and a lower one
 goes up. That margin is the maintainer's pick, not a measurement, and the card

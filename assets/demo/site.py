@@ -201,15 +201,16 @@ def dollars(text: str) -> float:
 
 # One change in a report's CHANGES section: its setting, the saving's verb, ~ and amount.
 CHANGE = re.compile(
-    r"^  ● (?P<name>\S.*?\S)\s{2,}\S.*?\s{2,}saves\s+(?P<verb>up to |at least )?"
+    r"^  ● (?P<name>\S.*?\S)\s{2,}\S.*?→ (?P<to>\S+).*?\s{2,}saves\s+(?P<verb>up to\s+|at least\s+)?"
     r"(?P<about>~?)(?P<lt><?)\$(?P<usd>[\d,.]+)/mo"
 )
 
 
-def changes(transcript: str, api: set[str]) -> dict[str, list]:
+def changes(transcript: str, api: set[str], api_rates: bool) -> dict[str, list]:
     """Each setting's offered saving summed over every host's CHANGES section, as
     [measured $/mo, $/mo that depends on how a profile pays, whether any part has a ~,
-    how many lines, the measured $/mo outside this host's profiles in `api`]."""
+    how many lines, the measured $/mo outside this host's profiles in `api`]. `api_rates` says
+    every profile doctor asked about was answered as API."""
     rows: dict[str, list] = {}
     section, here = None, False
     lines = plain_lines(transcript)
@@ -219,22 +220,33 @@ def changes(transcript: str, api: set[str]) -> dict[str, list]:
         elif HEADING.match(plain):
             section = plain.split()[0]
         elif section == "CHANGES" and plain.startswith("  ● "):
-            if plain.rstrip().endswith("saving not measured"):
+            # A change whose saving was not measured, or one priced only as what it costs,
+            # such as a Codex catalog skill's listing, promises no saving.
+            if not re.search(r"\ssaves\s", plain):
+                if not re.search(r"saving not measured$|\scosts\s", plain.rstrip()):
+                    sys.exit(f"unparsed change line {plain.strip()!r}")
                 continue
             m = CHANGE.match(plain)
             if not m:
                 sys.exit(f"unparsed change line {plain.strip()!r}")
-            # The line after a change names the file it edits, such as [~/.claude/settings.json].
+            up_to = bool(m["verb"]) and m["verb"].startswith("up to")
+            # "Up to" prices an unset main TTL against the default it would replace, which the
+            # API's 5m is only for a change to 1h.
+            if api_rates and up_to and m["to"] != "1h":
+                sys.exit(f"cannot price {plain.strip()!r} at API rates without that profile's billing")
+            # The line after a change names the file it edits, such as [~/.claude/settings.json],
+            # unless its host has one profile.
             path = re.match(r"^    \[([^\]]+)\]", lines[i + 1] if i + 1 < len(lines) else "")
-            if not path:
-                sys.exit(f"no file under change line {plain.strip()!r}")
+            paid = here and (
+                any(path[1].startswith(root + "/") for root in api) if path else bool(api)
+            )
             # "<$0.01" counts as nothing.
             usd = 0.0 if m["lt"] else dollars(m["usd"])
             row = rows.setdefault(m["name"], [0.0, 0.0, False, 0, 0.0])
-            row[1 if m["verb"] == "up to " else 0] += usd
+            row[1 if up_to else 0] += usd
             row[2] |= bool(m["about"])
             row[3] += 1
-            if not m["verb"] == "up to " and not (here and any(path[1].startswith(root + "/") for root in api)):
+            if not up_to and not paid:
                 row[4] += usd
     if not rows:
         sys.exit("the run offered no change with a saving")
@@ -275,7 +287,8 @@ def results(plan: str, api: str, paid: set[str]) -> tuple[str, str]:
     """The results section and its bars' CSS: the plan run as the maintainer pays, and the
     run with every profile answered as API. Doctor asks only about this host's profiles, so a
     destination's main-TTL change stays "up to"; billing picks only that change's default, and
-    "up to" prices it against the API's, so it counts in full at API rates."""
+    for a change to 1h "up to" prices it against the API's 5m, so it counts in full at API rates.
+    A destination's profiles count as the subscription, since their billing is unknown."""
     total, plan_offer = offered(plan)
     hosts, requests, tokens = total.groups()
     plan_pct = plan_offer[3]
@@ -284,7 +297,7 @@ def results(plan: str, api: str, paid: set[str]) -> tuple[str, str]:
     api_usd = dollars(api_offer[2]) + (dollars(api_offer[5]) if api_offer[5] else 0)
     # Each percent is of the same spend, so they add; each was rounded, so the sum may be one off.
     api_pct = int(api_offer[3]) + int(api_offer[6] or 0)
-    plan_rows, api_rows = changes(plan, paid), changes(api, set())
+    plan_rows, api_rows = changes(plan, paid, False), changes(api, set(), True)
     # The rows must add up to the totals, each rounded to at most a dollar's half.
     for rows_, offer in ((plan_rows, plan_offer), (api_rows, api_offer)):
         slack = 0.5 * (sum(r[3] for r in rows_.values()) + 1)
@@ -299,8 +312,8 @@ def results(plan: str, api: str, paid: set[str]) -> tuple[str, str]:
         # A 1h main TTL makes cache writes dearer, so a change can save more on the plan.
         on_plan = min(plan_rows.get(name, [0.0] * 5)[4], measured + up_to)
         rows.append((measured + up_to, on_plan, about, name))
-    if missing := set(plan_rows) - set(api_rows):
-        sys.exit(f"the API run offers no saving for {', '.join(sorted(missing))}")
+    # A change only the plan run offers, such as a 1h main TTL moved to 5m, saves nothing at
+    # API rates, so the breakdown leaves it out.
     rows.sort(key=lambda r: (-r[0], r[3]))
     listed, rest = rows[:LISTED], rows[LISTED:]
     if rest:

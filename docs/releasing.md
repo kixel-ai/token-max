@@ -73,9 +73,13 @@ the subscription, the second the saving at API rates and the breakdown by
 setting. Each line's bar is green for what the first run saved on profiles
 not answered as API, and violet for the rest; a line with no green is tagged
 "API only".
-Doctor asks only how this host's profiles pay, so a destination's main-agent
-cache TTL change stays "saves up to"; billing picks only that change's default
-and "up to" prices it against the API's, so the second run counts it in full.
+The subscription column is the first run's total, as the maintainer pays, so
+it includes what the profiles they answered as API save; the bars leave those
+out. Doctor asks only how this host's profiles pay, so a destination's profiles
+count as the subscription, and its main-agent cache TTL change stays "saves up
+to". Billing picks only that change's default, and for a change to 1h "up to"
+prices it against the API's 5m, so the second run counts it in full; a change
+to 5m there stops the script, since only that profile's billing could price it.
 The API column's percent adds the total's two rounded percents, so it can be
 one point off; `docs/results.md` and the README's top are
 an earlier, fuller replay and need not match it. After a change to doctor's

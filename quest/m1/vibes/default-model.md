@@ -13,18 +13,22 @@ the effort line's measured cost by model and effort.
 
 Decision prompts, chosen options marked ✅ (maintainer, 2026-11-23):
 
-- Item: ✅ a suggested default for effort above `high` (rejected for now:
-  cache habits).
+- Item: ✅ a suggested default, first offered as a fix for effort above
+  `high` (rejected for now: cache habits).
 - Target: ✅ Opus 5.5 at `medium` and Sol 6.2 at `high`, the maintainer's
   own answer (rejected: `high` for both, the warning's threshold; one step
   down, as the offer [#192](https://github.com/kixel-ai/token-max/pull/192)
   removed did for `max`).
+- Trigger: ✅ whenever the default model or effort differs from the pick
+  (rejected: only above `high`, which never reaches a Fable or Sonnet
+  default). `vibes` is opt-in advice, so a small difference costs one "n".
 
 Recommendations:
 
 - This card replaces the effort warning that
-  [the command quest](/quest/m1/vibes/command.md) moves into `vibes`, since the
-  pick sits at or below `high`. `doctor`'s effort line stays evidence only.
+  [the command quest](/quest/m1/vibes/command.md) moves into `vibes`: every
+  default above `high` differs from the pick. `doctor`'s effort line stays
+  evidence only.
 - Keep the picks in one table, so changing them is a one-line edit.
 - Confirm Sol 6.2's model ID before writing it. This host's Codex sessions
   record `gpt-6.1-sol` and `gpt-6.2-astra`, but no Sol 6.2.

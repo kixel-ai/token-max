@@ -40,6 +40,7 @@ mod terminal;
 mod totals;
 mod unreadable;
 mod version;
+mod vibes;
 mod window;
 mod wire;
 

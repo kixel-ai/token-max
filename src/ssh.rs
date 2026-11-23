@@ -17,17 +17,19 @@
 use std::io::{self, BufRead, BufReader, BufWriter, Read};
 use std::panic::{self, AssertUnwindSafe};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError, mpsc};
 
 use sha2::{Digest, Sha256};
 
 use crate::cli::{Printed, Render, Rendered, render};
 use crate::discovery::DiscoveryOptions;
-use crate::doctor::{Event, Offers, Owner, Style, Written, preview, write};
+use crate::doctor::{Event, Offers, Owner, Plan, Style, Written, preview, write as write_plan};
 use crate::model::Millis;
 use crate::reader::{Reach, ScanOptions, scan};
 use crate::safe::{ScanError, iso, terminal_text};
 use crate::sessions::{self, export};
+use crate::vibes::Item;
 use crate::wire::{self, Answer, Header, Job, Outcome, Request, Stream};
 
 /// Reject a destination OpenSSH would read as an option or that cannot be printed whole.
@@ -295,8 +297,19 @@ pub enum Reply {
         offers: Box<Offers>,
         remote: Remote,
     },
+    /// A destination's advice for `vibes`.
+    Vibes(Advice),
     /// Its sessions, ordered by first request, each without a host.
     Sessions(Vec<sessions::Session>),
+}
+
+/// What `vibes` has on a destination.
+pub struct Advice {
+    pub items: Vec<Item>,
+    /// The destination's home directory, which its files are named from.
+    pub home: Option<String>,
+    /// The changes the items name and the destination's open audit, for a walk.
+    pub walk: Option<(Box<Offers>, Remote)>,
 }
 
 /// Start `command` on `destination` with `stdin`, registered so cancellation can stop it.
@@ -523,14 +536,15 @@ pub fn audit(
         let outcome = stream.value();
         let _ = steps.send(Step::Outcome(outcome, Box::new(stream)));
     });
-    // What the job asked for, once it is sent: sessions, or a report and whether it is walked.
+    // What the job asked for, once it is sent: sessions, or whether it is walked and whether
+    // it is `vibes`' advice instead of the report.
     let mut requested = None;
     let (outcome, mut stream) = loop {
         match arrived.recv() {
             Ok(Step::Request(request)) => {
                 requested = Some(match request.job {
                     Job::Sessions => None,
-                    Job::Report { walk, .. } => Some(walk),
+                    Job::Report { walk, vibes, .. } => Some((walk, vibes)),
                 });
                 if let Some(stdin) = session.stdin.as_mut() {
                     // A destination that already failed has stopped reading; its outcome says why.
@@ -549,23 +563,42 @@ pub fn audit(
             _ => invalid_stream(&error, status, None),
         })
     };
-    let (scanned, reply, offers) = match outcome {
+    // The window scanned, the reply, the offers of a walk, and whether it is `vibes`' advice.
+    let (scanned, reply, offers, vibes) = match outcome {
         Ok(Outcome::Report {
             since,
             text,
             change,
             totals,
             offers,
+            vibes,
         }) => (
             since,
             Reply::Report(Printed {
                 text,
                 change,
                 totals: Box::new(totals),
+                vibes,
             }),
             offers,
+            false,
         ),
-        Ok(Outcome::Sessions { since, sessions }) => (since, Reply::Sessions(sessions), None),
+        Ok(Outcome::Vibes {
+            since,
+            items,
+            home,
+            offers,
+        }) => {
+            let advice = Advice {
+                items,
+                home,
+                walk: None,
+            };
+            (since, Reply::Vibes(advice), offers, true)
+        }
+        Ok(Outcome::Sessions { since, sessions }) => {
+            (since, Reply::Sessions(sessions), None, false)
+        }
         Ok(Outcome::Reviewed { .. } | Outcome::Wrote { .. }) => {
             return Err(session.wrong_result(None));
         }
@@ -583,20 +616,29 @@ pub fn audit(
                 "token-max sent its result before its request".into()
             }));
         }
-        (Some(Some(true)), Reply::Report(_), Some(offers)) => {
+        (Some(Some((true, asked))), Reply::Report(_) | Reply::Vibes(_), Some(offers))
+            if asked == vibes =>
+        {
             if let Err(error) = offers.check() {
                 return Err(session.fail(true, |_| format!("token-max there {error}")));
             }
-            let Reply::Report(printed) = reply else {
-                unreachable!("matched a report")
-            };
-            return Ok(Reply::Walk {
-                printed,
-                offers,
-                remote: Remote { session, stream },
+            let remote = Remote { session, stream };
+            return Ok(match reply {
+                Reply::Report(printed) => Reply::Walk {
+                    printed,
+                    offers,
+                    remote,
+                },
+                Reply::Vibes(mut advice) => {
+                    advice.walk = Some((offers, remote));
+                    Reply::Vibes(advice)
+                }
+                _ => unreachable!("matched a report or advice"),
             });
         }
-        (Some(None), Reply::Sessions(_), None) | (Some(Some(false)), Reply::Report(_), None) => {}
+        (Some(None), Reply::Sessions(_), None) => {}
+        (Some(Some((false, asked))), Reply::Report(_) | Reply::Vibes(_), None)
+            if asked == vibes => {}
         _ => return Err(session.wrong_result(None)),
     }
     if let Err(error) = stream.end() {
@@ -661,36 +703,63 @@ impl Remote {
         }
     }
 
-    /// Write the reviewed changes there, returning each file it reported written, and how the
-    /// audit failed, before or after that report.
-    pub fn write(mut self) -> (Vec<Written>, Option<ScanError>) {
-        let doing = "while it was writing, so it may have changed its settings files; check them and their .token-max.bak backups";
-        let written = match self.exchange(&Answer::Write, doing) {
-            Ok(Outcome::Wrote { written }) => written,
-            Ok(_) => return (vec![], Some(self.session.wrong_result(Some(doing)))),
-            Err(error) => return (vec![], Some(error)),
-        };
-        // Its report stands: the files it names were written, whatever follows.
-        let error = if self.stream.end().is_err() {
-            Some(self.session.fail(true, |_| {
+    /// Write the reviewed changes there, returning each file it reported written. The audit
+    /// stays open for [`Remote::vibes`] or [`Remote::end`].
+    pub fn write(&mut self) -> Result<Vec<Written>, ScanError> {
+        match self.exchange(&Answer::Write, WRITING)? {
+            Outcome::Wrote { written } => Ok(written),
+            _ => Err(self.session.wrong_result(Some(WRITING))),
+        }
+    }
+
+    /// What `vibes` has there after `doctor`'s walk, from the same scan: its advice, and the
+    /// changes it offers against its files as they are now.
+    pub fn vibes(&mut self) -> Result<(Vec<Item>, Box<Offers>), ScanError> {
+        let doing = "before its advice arrived; no further settings were changed there";
+        match self.exchange(&Answer::Vibes, doing)? {
+            Outcome::Vibes {
+                items,
+                offers: Some(offers),
+                ..
+            } => match offers.check() {
+                Ok(()) => Ok((items, offers)),
+                Err(error) => Err(self
+                    .session
+                    .fail(true, |_| format!("token-max there {error}"))),
+            },
+            _ => Err(self.session.wrong_result(None)),
+        }
+    }
+
+    /// End the audit after its writes, and check that the destination ended it cleanly: its
+    /// reports of what it wrote stand either way.
+    pub fn end(mut self) -> Result<(), ScanError> {
+        let sent = self
+            .session
+            .stdin
+            .as_mut()
+            .map(|stdin| wire::write(&mut BufWriter::new(stdin), &Answer::Done));
+        if !matches!(sent, Some(Ok(()))) || self.stream.end().is_err() {
+            return Err(self.session.fail(true, |_| {
                 "token-max sent more than its result after writing".into()
-            }))
-        } else {
-            match self.session.stop(false).and_then(|s| s.code()) {
-                Some(0) => None,
-                // Ctrl-C stopped the client after its report and clean end, which already
-                // confirm the write; the signal cut nothing short.
-                None if cancelled() => None,
-                status => Some(ScanError::new(format!(
-                    "{}: token-max failed after writing ({})",
-                    self.session.destination,
-                    exit(status)
-                ))),
-            }
-        };
-        (written, error)
+            }));
+        }
+        match self.session.stop(false).and_then(|s| s.code()) {
+            Some(0) => Ok(()),
+            // Ctrl-C stopped the client after its report and clean end, which already
+            // confirm the write; the signal cut nothing short.
+            None if cancelled() => Ok(()),
+            status => Err(ScanError::new(format!(
+                "{}: token-max failed after writing ({})",
+                self.session.destination,
+                exit(status)
+            ))),
+        }
     }
 }
+
+/// What a broken stream cut short once a destination was asked to write.
+const WRITING: &str = "while it was writing, so it may have changed its settings files; check them and their .token-max.bak backups";
 
 /// A destination's stream that is not what this build writes, and the step it cut short.
 fn invalid_stream(error: &serde_json::Error, status: Option<i32>, doing: Option<&str>) -> String {
@@ -718,13 +787,44 @@ enum Incoming {
 /// A destination's side of a walk: its files as it read them, its report, and how to print.
 struct Walked {
     owner: Owner,
-    listing: Box<crate::report::Listing>,
+    /// The report `doctor`'s walk reviews; none once the walk is `vibes`'.
+    listing: Option<Box<crate::report::Listing>>,
     style: Style,
+    /// What `vibes` has here, from the same scan.
+    vibes: Vec<Item>,
+    home: Option<String>,
+    /// This host's spend every 30 days.
+    monthly: f64,
+    since: Option<Millis>,
 }
 
+impl Walked {
+    /// `vibes`' advice and the changes it offers, checked against the files as they are
+    /// now, which the walk goes on with.
+    fn advise(&mut self) -> Outcome {
+        self.owner = Owner::new(
+            crate::vibes::fixes(&self.vibes),
+            vec![],
+            self.home.clone(),
+            self.monthly,
+        );
+        self.listing = None;
+        Outcome::Vibes {
+            since: self.since,
+            items: self.vibes.clone(),
+            home: self.home.clone(),
+            offers: Some(Box::new(self.owner.offers().clone())),
+        }
+    }
+}
+
+/// Writes the coordinator asked for that are not finished, which a closed stdin must not cut
+/// short.
+static WRITES: AtomicUsize = AtomicUsize::new(0);
+
 /// Run as an SSH audit destination: scan this host, stream what the coordinator's job asks for
-/// to stdout and return the exit code. For a walk, then answer the coordinator's review and
-/// write the changes it confirms.
+/// to stdout and return the exit code. For a walk, then answer the coordinator's reviews,
+/// write the changes it confirms, and go on to `vibes`' walk when it asks, until it is done.
 ///
 /// Diagnostics travel in the stream, since the coordinator discards this host's stderr. The
 /// coordinator's request arrives on stdin while this host scans, and the audit stops when stdin
@@ -742,15 +842,22 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
         let walk = matches!(request.job, Job::Report { walk: true, .. });
         let _ = sender.send(Incoming::Request(request));
         if walk {
-            // Ends with the write, or exits once stdin closes.
+            // Ends when the coordinator is done, or exits once stdin closes.
             loop {
                 let Ok(answer) = stream.value::<Answer>() else {
+                    // Once asked to write, the write finishes even if the coordinator goes:
+                    // the walk then finds this channel closed.
+                    if WRITES.load(Ordering::SeqCst) > 0 {
+                        return;
+                    }
                     std::process::exit(2);
                 };
-                // Once asked to write, the write finishes even if the coordinator goes.
-                let write = matches!(answer, Answer::Write);
+                if matches!(answer, Answer::Write) {
+                    WRITES.fetch_add(1, Ordering::SeqCst);
+                }
+                let done = matches!(answer, Answer::Done);
                 let _ = sender.send(Incoming::Answer(answer));
-                if write {
+                if done {
                     return;
                 }
             }
@@ -786,12 +893,13 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
                 "the coordinator asked for another job than this host scanned for",
             ));
         }
-        let (max_cost_per_use_usd, format, walk) = match &request.job {
+        let (max_cost_per_use_usd, format, walk, advice) = match &request.job {
             Job::Report {
                 max_cost_per_use_usd,
                 format,
                 walk,
-            } => (*max_cost_per_use_usd, format, *walk),
+                vibes,
+            } => (*max_cost_per_use_usd, format, *walk, *vibes),
             Job::Sessions => {
                 let sessions = export(&scan, &request.catalog)?;
                 return Ok((Outcome::Sessions { since, sessions }, None));
@@ -804,10 +912,12 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
                     text,
                     change,
                     totals,
+                    vibes: pending,
                 },
             fixes,
             listing,
             turned_off,
+            vibes,
         } = render(
             scan,
             Render {
@@ -819,18 +929,31 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
                 home: home.as_deref(),
             },
         )?;
-        let walked = walk.then(|| Walked {
+        let mut walked = walk.then(|| Walked {
             owner: Owner::new(fixes, turned_off, home.clone(), totals.monthly),
-            listing,
-            style: format.style(home),
-        });
-        let offers = walked.as_ref().map(|w| Box::new(w.owner.offers().clone()));
-        let outcome = Outcome::Report {
+            listing: Some(listing),
+            style: format.style(home.clone()),
+            vibes: vibes.clone(),
+            home: home.clone(),
+            monthly: totals.monthly,
             since,
-            text,
-            change,
-            totals: *totals,
-            offers,
+        });
+        let outcome = match (advice, &mut walked) {
+            (true, Some(walked)) => walked.advise(),
+            (true, None) => Outcome::Vibes {
+                since,
+                items: vibes,
+                home,
+                offers: None,
+            },
+            (false, walked) => Outcome::Report {
+                since,
+                text,
+                change,
+                totals: *totals,
+                offers: walked.as_ref().map(|w| Box::new(w.owner.offers().clone())),
+                vibes: pending,
+            },
         };
         Ok((outcome, walked))
     }))
@@ -844,60 +967,74 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
         return 2;
     }
     match walked {
-        Some(walked) => walk_here(&walked, &incoming, &mut stdout),
+        Some(walked) => walk_here(walked, &incoming, &mut stdout),
         None => 0,
     }
 }
 
-/// Answer the coordinator's review of this host's changes, then write them once it confirms.
+/// Answer the coordinator's reviews of this host's changes and write each one it confirms,
+/// `doctor`'s and then `vibes`' when it asks for them, until it is done.
 fn walk_here(
-    walked: &Walked,
+    mut walked: Walked,
     incoming: &mpsc::Receiver<Incoming>,
     stdout: &mut impl io::Write,
 ) -> u8 {
-    let reviewed = panic::catch_unwind(AssertUnwindSafe(|| {
-        let Ok(Incoming::Answer(Answer::Review { events })) = incoming.recv() else {
-            return Err(ScanError::new(
-                "the walk sent no answers; no settings were changed",
-            ));
+    // The changes last reviewed, which a confirm writes.
+    let mut plan: Option<Plan> = None;
+    loop {
+        // A coordinator that leaves without saying it is done closes stdin, which exits this
+        // process unless a write was under way.
+        let Ok(Incoming::Answer(answer)) = incoming.recv() else {
+            return 2;
         };
-        let plan = walked.owner.plan(&events)?;
-        // Under its own header, which this host prints only for its own report.
-        let listing = &walked.listing;
-        let report = format!(
-            "{}{}",
-            listing.title(),
-            listing.review(plan.choices(), &plan.total("Accepted"))
-        );
-        let preview = preview(&plan, &walked.style);
-        Ok((plan, Outcome::Reviewed { report, preview }))
-    }))
-    .unwrap_or_else(|_| Err(ScanError::new("doctor failed while reviewing changes")));
-    let plan = match reviewed {
-        Ok((plan, outcome)) => {
-            if wire::write(stdout, &outcome).is_err() {
-                return 2;
+        let write = matches!(answer, Answer::Write);
+        let outcome = panic::catch_unwind(AssertUnwindSafe(|| match answer {
+            Answer::Done => Ok(None),
+            Answer::Review { events } => {
+                let reviewed = walked.owner.plan(&events)?;
+                // Under its own header, which this host prints only for its own report.
+                let report = walked.listing.as_ref().map_or_else(String::new, |listing| {
+                    format!(
+                        "{}{}",
+                        listing.title(),
+                        listing.review(reviewed.choices(), &reviewed.total("Accepted"))
+                    )
+                });
+                let preview = preview(&reviewed, &walked.style);
+                plan = Some(reviewed);
+                Ok(Some(Outcome::Reviewed { report, preview }))
             }
-            plan
+            Answer::Write => match plan.take() {
+                Some(plan) => write_plan(&plan).map(|written| Some(Outcome::Wrote { written })),
+                None => Err(ScanError::new(
+                    "the walk confirmed changes it had not reviewed; no settings were changed",
+                )),
+            },
+            Answer::Vibes => {
+                plan = None;
+                Ok(Some(walked.advise()))
+            }
+        }))
+        .unwrap_or_else(|_| {
+            Err(ScanError::new(if write {
+                "doctor failed while applying changes"
+            } else {
+                "doctor failed while reviewing changes"
+            }))
+        });
+        let outcome = match outcome {
+            Ok(None) => return 0,
+            Ok(Some(outcome)) => outcome,
+            Err(error) => Outcome::Error(error),
+        };
+        let failed = matches!(outcome, Outcome::Error(_));
+        let sent = wire::write(stdout, &outcome);
+        if write {
+            WRITES.fetch_sub(1, Ordering::SeqCst);
         }
-        Err(error) => {
-            let _ = wire::write(stdout, &Outcome::Error(error));
+        if sent.is_err() || failed {
             return 2;
         }
-    };
-    // A coordinator that does not confirm closes stdin, which exits this process.
-    let Ok(Incoming::Answer(Answer::Write)) = incoming.recv() else {
-        let error = ScanError::new("the walk sent another answer than a confirm");
-        let _ = wire::write(stdout, &Outcome::Error(error));
-        return 2;
-    };
-    let outcome = panic::catch_unwind(AssertUnwindSafe(|| write(&plan)))
-        .unwrap_or_else(|_| Err(ScanError::new("doctor failed while applying changes")))
-        .map_or_else(Outcome::Error, |written| Outcome::Wrote { written });
-    let failed = matches!(outcome, Outcome::Error(_));
-    match wire::write(stdout, &outcome) {
-        Ok(()) if !failed => 0,
-        _ => 2,
     }
 }
 

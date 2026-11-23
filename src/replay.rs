@@ -3,7 +3,7 @@
 use crate::collections::{HashMap, HashSet, IndexMap, IndexSet};
 
 use crate::background::{BackgroundInput, background_checks};
-use crate::bash::{BashInput, bash_checks};
+use crate::bash::{BashInput, bash_caps};
 use crate::cache::{CacheBoundaries, observed_ttl};
 use crate::compaction::{CompactionOptions, compaction_checks, skipped_lines};
 use crate::context::{ContextInput, context_costs};
@@ -1025,16 +1025,12 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         now,
         max_cost_per_use_usd,
     });
-    let mut bash = bash_checks(&BashInput {
+    let bash = bash_caps(&BashInput {
         scan: &scan,
         catalog,
         ttls: &ttl_refs,
         since,
-        now,
     });
-    for check in &mut bash {
-        crate::t3::constrain(&mut check.base, &scan.profiles);
-    }
     let t3_idle = crate::idle::t3_idle_checks(&IdleOptions {
         scan: &scan,
         catalog,
@@ -1076,7 +1072,6 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         .chain(keepalive.into_iter().map(CheckResult::Keepalive))
         .chain(speed.into_iter().map(CheckResult::Speed))
         .chain(background.into_iter().map(CheckResult::Background))
-        .chain(bash.into_iter().map(CheckResult::BashCap))
         .chain(memory.into_iter().map(CheckResult::Memory))
         .chain(effort.into_iter().map(CheckResult::Effort))
         .collect();
@@ -1109,6 +1104,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         subagents: crate::subagents::subagent_costs(&scan, catalog),
         fable: crate::fable::fable_use(&scan, catalog, since, now),
         checks,
+        bash,
         assumptions: [
             "host-local read-only analysis; network access is only for public prices",
             "measured usage is replayed at present public API rates, the closest public measure of a plan's usage, not historical invoices",

@@ -2688,12 +2688,11 @@ mod tests {
             write(w.claude.join("projects/p/early.jsonl"), format!("{row}\n"));
             let data = scan(&w.scan_options()).unwrap();
             assert_eq!(data.requests[0].profiles.len(), 2, "{env}");
-            let checks = crate::bash::bash_checks(&crate::bash::BashInput {
+            let checks = crate::bash::bash_caps(&crate::bash::BashInput {
                 scan: &data,
                 catalog: &crate::test_support::prices(),
                 ttls: &[],
                 since: None,
-                now: timestamp(&json!("2026-01-02T00:00:00Z")).unwrap(),
             });
             // One file's cap is the cap whichever owner ran the request; the instance's own
             // cap leaves both lines' requests to an unknown cap.
@@ -2708,17 +2707,15 @@ mod tests {
             }
             for c in &checks {
                 if open {
-                    assert_eq!(c.base.action, Action::Advisory, "{env}");
-                    assert_eq!(c.base.recommended, None);
+                    assert_eq!(c.suggested, None, "{env}");
                     assert!(
-                        c.base
-                            .uncertainty
-                            .iter()
-                            .any(|u| u.contains("unresolved T3 control ownership"))
+                        c.unresolved
+                            .as_deref()
+                            .is_some_and(|u| u.contains("unresolved T3 control ownership"))
                     );
                 }
             }
-            // The whole doctor report renders an advisory cap that still has a TTL.
+            // The whole doctor report renders beside a cap that suggests nothing but has a TTL.
             let report = crate::replay::analyze(crate::replay::AnalyzeOptions {
                 scan: data,
                 catalog: &crate::test_support::prices(),
@@ -2727,12 +2724,7 @@ mod tests {
                 max_cost_per_use_usd: 1.0,
             })
             .unwrap();
-            let bash = report.checks.iter().find_map(|c| match c {
-                crate::model::CheckResult::BashCap(b) if b.base.action == Action::Advisory => {
-                    Some(b)
-                }
-                _ => None,
-            });
+            let bash = report.bash.iter().find(|b| b.suggested.is_none());
             // An unresolved machine policy, as on Windows, opens the TTL too, so the cap has no
             // TTL there; only the instance's own variable leaves the TTL known and opens the cap.
             let ownership_only = env && !managed_policy_unresolved();
@@ -2741,6 +2733,8 @@ mod tests {
                 ownership_only,
                 "{env}"
             );
+            // The measured report says nothing of the cap, and its card says why it suggests
+            // none: it never claims a margin under the TTL.
             for details in [false, true] {
                 let text = crate::report::rendered(
                     &report,
@@ -2749,16 +2743,17 @@ mod tests {
                         ..Default::default()
                     },
                 );
-                assert_eq!(
-                    text.contains("may have run under another owner's cap"),
-                    ownership_only && details,
-                    "{env} {details}"
-                );
-                // An advisory cap never claims to be under the TTL.
-                assert!(
-                    !(ownership_only && text.contains("The cap is under")),
-                    "{env} {details}"
-                );
+                assert!(!text.contains("Bash timeout cap"), "{env} {details}");
+            }
+            let cards = crate::report::advice(&report, Default::default());
+            let unowned = cards
+                .iter()
+                .filter(|c| c.text.contains("unresolved T3 control ownership"))
+                .collect::<Vec<_>>();
+            assert_eq!(!unowned.is_empty(), open, "{env}");
+            for card in unowned {
+                assert!(card.quiet && card.how.is_none(), "{env}");
+                assert!(card.text.contains("No cap is suggested"), "{env}");
             }
         }
     }

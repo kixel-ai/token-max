@@ -6,9 +6,10 @@
 //! destination analyzes its own scan and writes one [`Outcome`]: its finished report, its
 //! priced session lines, or a diagnostic, never the scan. Each value is one JSON line.
 //!
-//! A report for a walk also carries the destination's offers and leaves the stream open: this
+//! A job for a walk also carries the destination's offers and leaves the stream open: this
 //! host walks through them, sends the [`Answer`]s, and the destination replies to each with
-//! another [`Outcome`], so its files are read and written only there.
+//! another [`Outcome`], so its files are read and written only there. After `doctor`'s walk
+//! the same stream carries `vibes`' walk, from the same scan, until [`Answer::Done`].
 
 use std::io::{Read, Write};
 
@@ -22,6 +23,7 @@ use crate::report::{Host, ReportOptions};
 use crate::safe::ScanError;
 use crate::sessions::Session;
 use crate::totals::Totals;
+use crate::vibes::Item;
 
 /// This build's identity: the package version and a fingerprint of the types a stream carries,
 /// the price catalog, report and session lines included.
@@ -44,6 +46,8 @@ pub fn build() -> String {
             include_str!("report.rs"),
             // Its `ScanError` is the stream's error outcome.
             include_str!("safe.rs"),
+            // Its items are what `vibes` carries.
+            include_str!("vibes.rs"),
         ]
         .concat(),
     );
@@ -74,13 +78,15 @@ pub struct Request {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Job {
-    /// `token-max doctor`'s report.
+    /// `token-max doctor`'s report, or `token-max vibes`' advice from the same analysis.
     #[serde(rename_all = "camelCase")]
     Report {
         max_cost_per_use_usd: f64,
         format: Format,
-        /// Whether this host walks through the report's changes, which keeps the stream open.
+        /// Whether this host walks through the changes, which keeps the stream open.
         walk: bool,
+        /// Answer with [`Outcome::Vibes`] instead of the report.
+        vibes: bool,
     },
     /// `token-max sessions`' lines.
     Sessions,
@@ -138,11 +144,25 @@ pub enum Outcome {
         totals: Totals,
         /// The changes the destination offers, when this host walks through them.
         offers: Option<Box<Offers>>,
+        /// How many pieces of advice `vibes` has there, which `doctor` offers to show.
+        vibes: usize,
+    },
+    /// `vibes`' advice: the job's result, or the destination's answer to [`Answer::Vibes`].
+    #[serde(rename_all = "camelCase")]
+    Vibes {
+        /// The window the destination scanned, which must be the one requested.
+        since: Option<Millis>,
+        items: Vec<Item>,
+        /// The destination's home directory, which its files are named from.
+        home: Option<String>,
+        /// The changes the items name, checked against its files as they are now, when this
+        /// host walks through them.
+        offers: Option<Box<Offers>>,
     },
     /// The destination's answer to [`Answer::Review`].
     #[serde(rename_all = "camelCase")]
     Reviewed {
-        /// The report again, each change marked as the walk answered it.
+        /// The report again, each change marked as the walk answered it; empty for `vibes`.
         report: String,
         /// Each file's text as the accepted changes would change it, for the confirm.
         preview: String,
@@ -169,6 +189,10 @@ pub enum Answer {
     Review { events: Vec<Event> },
     /// The person confirmed: write the reviewed changes.
     Write,
+    /// `doctor`'s walk is over: offer `vibes`' changes next, from the files as they are now.
+    Vibes,
+    /// Nothing more follows: end the audit, which a closed stream would cancel instead.
+    Done,
 }
 
 /// Write one JSON value followed by a newline.
@@ -230,6 +254,7 @@ mod tests {
                     host: Some("devbox".into()),
                 },
                 walk: false,
+                vibes: false,
             },
         }
     }
@@ -246,6 +271,7 @@ mod tests {
                 max_cost_per_use_usd: 0.5,
                 format: Format { host: Some(host), width: Some(80), .. },
                 walk: false,
+                vibes: false,
             } if host == "devbox"
         ));
     }
@@ -305,6 +331,7 @@ mod tests {
                 change: true,
                 totals: Totals::default(),
                 offers: None,
+                vibes: 0,
             },
         )
         .unwrap();

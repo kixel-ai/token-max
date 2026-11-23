@@ -1,22 +1,22 @@
-//! Whether Claude's foreground Bash timeout cap lets the prompt cache expire, and what long waits cost.
+//! Claude's foreground Bash timeout cap beside the cache TTL, and what long waits under it cost.
 
-use crate::collections::{HashMap, IndexSet};
+use crate::collections::HashMap;
 
 use crate::cache::{observed_ttl, ttl_milliseconds};
 use crate::model::{
-    Action, BashCapCheck, BashCapControl, BashWaits, Bucket, CheckBase, Cost, EventKind, Evidence,
-    Harness, Id, Millis, Profile, Request, RequestEvidence, Scan, StructuralEvent, Ttl, TtlCheck,
-    Usd,
+    Action, BashCap, BashCapControl, BashWaits, Bucket, Cost, EventKind, Harness, Id, Millis,
+    Profile, Request, RequestEvidence, Scan, StructuralEvent, Ttl, TtlCheck, Usd,
 };
 use crate::prices::{Catalog, Sample, add_costs, known_cost, unit_rates, unknown_cost, zero_cost};
 
-const SOURCES: [&str; 3] = [
-    "https://code.claude.com/docs/en/env-vars (2026-11-08)",
-    "https://code.claude.com/docs/en/tools-reference (2026-11-08)",
-    "https://code.claude.com/docs/en/prompt-caching (2026-11-08)",
+/// Claude Code's pages on the timeout variables, the Bash tool and the cache's lifetime.
+pub(crate) const SOURCES: [&str; 3] = [
+    "https://code.claude.com/docs/en/env-vars",
+    "https://code.claude.com/docs/en/tools-reference",
+    "https://code.claude.com/docs/en/prompt-caching",
 ];
 
-/// The largest cap that still leaves the cache warm when the model replies.
+/// The cap suggested under a cache TTL: a guessed margin, not a measured one.
 ///
 /// The TTL runs from the request that started the call, so the cap leaves room
 /// for that request's output and the reply after the wait.
@@ -37,13 +37,11 @@ pub struct BashInput<'a> {
     pub ttls: &'a [&'a TtlCheck],
     /// The explicit window start; None uses the first request.
     pub since: Option<Millis>,
-    /// The window end.
-    pub now: Millis,
 }
 
-/// One check per line of Claude profiles that share the cap's owners, comparing the current
-/// cap with the main-agent cache TTL.
-pub fn bash_checks(input: &BashInput<'_>) -> Vec<BashCapCheck> {
+/// One cap per line of Claude profiles that share the cap's owners, compared with the
+/// main-agent cache TTL.
+pub fn bash_caps(input: &BashInput<'_>) -> Vec<BashCap> {
     let capped = input.scan.profiles.iter().filter(|p| p.bash.is_some());
     crate::rows::groups(capped, |p| owner(p).expect("filtered on a cap"))
         .iter()
@@ -136,14 +134,13 @@ fn check(
     input: &BashInput<'_>,
     line: &crate::rows::Group<'_>,
     control: &BashCapControl,
-) -> BashCapCheck {
+) -> BashCap {
     let profile = line.lead;
     let BashInput {
         scan,
         catalog,
         ttls,
         since,
-        now,
     } = *input;
     let selected = |time: Millis| since.is_none_or(|s| time >= s);
     let mut requests: Vec<&Request> = scan
@@ -226,69 +223,30 @@ fn check(
     }
     let miss_estimate = sample.estimate(costs.len() as u64);
 
-    let (action, recommended) = match ttl {
-        // A request T3 could not settle may have run under another owner's cap.
-        _ if control.unresolved.is_some() => (Action::Advisory, None),
-        None => (Action::Advisory, None),
-        Some(t) if control.value >= ttl_milliseconds(t) => (Action::Change, Some(safe_cap(t))),
-        Some(_) => (Action::Keep, Some(control.value)),
-    };
-    let mut replacement = format!(
-        "env.BASH_MAX_TIMEOUT_MS: \"{}\"",
-        recommended.unwrap_or(control.value)
-    );
-    if let Some(cap) = recommended.filter(|cap| control.default_timeout > *cap) {
+    // A request T3 could not settle may have run under another owner's cap.
+    let unresolved = control
+        .unresolved
+        .clone()
+        .or_else(|| {
+            (!crate::t3::settled(&scan.profiles, &line.ids)).then(|| crate::t3::UNOWNED.into())
+        })
+        .or_else(|| ttl.is_none().then(|| ttl_basis.into()));
+    let suggested = ttl.map(safe_cap).filter(|_| unresolved.is_none());
+    let cap = suggested.unwrap_or(control.value);
+    let mut replacement = format!("env.BASH_MAX_TIMEOUT_MS: \"{cap}\"");
+    // A default above the cap raises the cap again, so it comes down too.
+    if suggested.is_some_and(|cap| control.default_timeout > cap) {
         replacement += &format!(" and env.BASH_DEFAULT_TIMEOUT_MS: \"{cap}\"");
     }
-    let history_profiles: IndexSet<&String> =
-        requests.iter().flat_map(|r| r.profiles.iter()).collect();
-    let mut uncertainty = vec![
-        "project/local settings and launch environments are not read; only user/managed settings and the active profile's environment".into(),
-    ];
-    if ttl.is_none() {
-        uncertainty.push(ttl_basis.into());
-    }
-    uncertainty.extend(control.unresolved.clone());
-    uncertainty.extend(miss_cost.unknown.iter().cloned());
-    BashCapCheck {
-        base: CheckBase {
-            profile: profile.id.clone(),
-            profiles: line.ids.clone(),
-            history_profiles: history_profiles.into_iter().cloned().collect(),
-            evidence: Evidence::Guidance,
-            action,
-            current: Some(control.value),
-            recommended,
-            owner: control.owner.clone(),
-            since: since.or(requests.first().map(|r| r.time)),
-            until: Some(now),
-            window_basis: if since.is_none() {
-                "available selected usage; current files applied to history"
-            } else {
-                "explicit --since; current files applied to history"
-            }
-            .into(),
-            baseline: "current cap and main-agent cache TTL; the recorded waits are measured, not replayed under another cap".into(),
-            requests: requests.len() as u64,
-            coverage: None,
-            savings_usd: None,
-            margin: None,
-            monthly_savings_usd: None,
-            break_even: None,
-            assumptions: [
-                "a foreground Bash wait at or past the cache TTL lets the cache expire before the model replies",
-                "a cap under the TTL moves longer commands to the background, where checking on them reads the cache instead of rewriting it",
-                "a wait's miss is the prefix the next request wrote instead of read, priced at write minus read rates",
-                "the cap is compared with the main-agent TTL; Claude Code 2.1.319 already backgrounds commands after 3 minutes in async subagents with a 5m cache",
-            ]
-            .map(String::from)
-            .into(),
-            uncertainty,
-            sources: SOURCES.map(String::from).into(),
-        },
-        bucket: "all",
+    BashCap {
+        profile: profile.id.clone(),
+        profiles: line.ids.clone(),
+        current: control.value,
+        suggested,
+        owner: control.owner.clone(),
         ttl,
         ttl_basis: ttl_basis.into(),
+        unresolved,
         replacement,
         waits: BashWaits {
             calls,
@@ -308,7 +266,7 @@ mod tests {
     use crate::prices::unit_rates;
     use crate::reader::scan;
     use crate::replay::{AnalyzeOptions, analyze};
-    use crate::report::{ReportOptions, rendered as format_report};
+    use crate::report::{ReportOptions, advice, rendered as format_report};
     use crate::test_support::{Workspace, prices};
     use serde_json::{Value, json};
 
@@ -412,31 +370,28 @@ mod tests {
         })
         .unwrap();
         // Compare with the current TTL alone; the TTL check's own verdict is tested separately.
-        let checks = bash_checks(&BashInput {
+        report.bash = bash_caps(&BashInput {
             scan: &report.scan,
             catalog: &prices(),
             ttls: &[],
             since: None,
-            now: START + 60 * MIN,
         });
-        report
-            .checks
-            .retain(|c| !matches!(c, CheckResult::BashCap(_)));
-        report
-            .checks
-            .extend(checks.into_iter().map(CheckResult::BashCap));
         report
     }
 
-    fn bash(report: &crate::model::Report) -> &BashCapCheck {
-        report
-            .checks
-            .iter()
-            .find_map(|c| match c {
-                CheckResult::BashCap(c) => Some(c),
-                _ => None,
-            })
-            .unwrap()
+    fn bash(report: &crate::model::Report) -> &BashCap {
+        &report.bash[0]
+    }
+
+    /// The cap's card as `vibes` shows it.
+    fn card(report: &crate::model::Report) -> crate::vibes::Item {
+        let items = advice(report, ReportOptions::default());
+        let mut caps = items
+            .into_iter()
+            .filter(|i| i.name.starts_with("Bash timeout cap"));
+        let card = caps.next().expect("a cap card");
+        assert!(caps.next().is_none());
+        card
     }
 
     #[test]
@@ -483,22 +438,20 @@ mod tests {
             })
             .unwrap();
         assert_ne!(verdict.base.action, Action::Advisory);
-        let check = bash(&report);
+        let check = &report.bash[0];
         assert_eq!(check.ttl, verdict.base.recommended);
         assert!(check.ttl_basis.contains("recommends"));
     }
 
     #[test]
-    fn a_default_cap_past_the_cache_ttl_changes_and_prices_the_long_wait() {
+    fn a_default_cap_past_the_cache_ttl_is_advice_that_prices_the_long_wait() {
         let report = report(r#"{"promptCacheTtl":"5m"}"#);
         let check = bash(&report);
-        assert_eq!(check.base.action, Action::Change);
-        assert_eq!(check.base.current, Some(600_000));
-        assert_eq!(check.base.recommended, Some(240_000));
+        assert_eq!(check.current, 600_000);
+        assert_eq!(check.suggested, Some(240_000));
         assert_eq!(check.ttl, Some(Ttl::FiveMinutes));
         assert!(
             check
-                .base
                 .owner
                 .ends_with("settings.json:env.BASH_MAX_TIMEOUT_MS")
         );
@@ -513,6 +466,7 @@ mod tests {
         let rates = unit_rates(&prices(), next, &next.parts[0]).unwrap();
         let expected = 100_000.0 * (rates.write5m - rates.read);
         assert!((w.miss_cost.total_usd.unwrap().to_f64() - expected).abs() < 1e-9);
+        // The cap is advice with an edit, and no line or verdict of the measured report.
         let text = format_report(
             &report,
             ReportOptions {
@@ -520,23 +474,44 @@ mod tests {
                 ..Default::default()
             },
         );
-        let line = crate::test_support::report_line(&text, "Bash timeout cap 10m -> 4m");
-        assert_eq!(line.mark, "change");
+        assert!(!text.contains("Bash timeout cap"), "{text}");
+        assert!(!text.contains("BASH_MAX_TIMEOUT_MS"), "{text}");
         assert!(
-            line.evidence
-                .starts_with("A wait that long outlasts the 5m cache."),
-            "{text}"
+            crate::doctor::fixes(&report, false)
+                .iter()
+                .all(|f| !f.name.contains("Bash"))
+        );
+        let card = card(&report);
+        assert_eq!(card.value, "10m -> 4m");
+        assert!(!card.quiet);
+        let Some(crate::doctor::How::Edit(patch)) = &card.how else {
+            panic!("{:?}", card.how)
+        };
+        assert_eq!(patch.edits.len(), 1);
+        assert_eq!(
+            patch.edits[0].text(Harness::Claude),
+            r#""env": {"BASH_MAX_TIMEOUT_MS": "240000"}"#
         );
         // The miss cost is the window's total, like the wait count, not a 30-day rate.
         assert!(
-            text.contains(&format!(
+            card.text.contains(&format!(
                 "1 foreground Bash wait outlasted the cache (1 hit the timeout, 1 polled in a loop); the cache misses cost {} over the window.",
                 crate::report::about(expected)
             )),
-            "{text}"
+            "{}",
+            card.text
         );
+        // It says the saving is a guess, and that a lowered cap kills nothing.
+        for said in [
+            "What a lower cap saves is not measured, and the 4m margin is a guess.",
+            "A command past the cap is not killed: it keeps running in the background",
+            "keep the cap if yours do",
+        ] {
+            assert!(card.text.contains(said), "{}", card.text);
+        }
+        assert!(card.sources[0].contains("The maintainer's pick"));
         assert!(!format!("{report:?}").contains("SYNTHETIC_PRIVATE"));
-        assert!(!text.contains("SYNTHETIC_PRIVATE"));
+        assert!(!format!("{card:?}").contains("SYNTHETIC_PRIVATE"));
     }
 
     #[test]
@@ -557,12 +532,11 @@ mod tests {
         let lines: String = records.iter().map(|r| format!("{r}\n")).collect();
         std::fs::write(w.claude.join("projects/project/main.jsonl"), lines).unwrap();
         let data = scan(&w.scan_options()).unwrap();
-        let checks = bash_checks(&BashInput {
+        let checks = bash_caps(&BashInput {
             scan: &data,
             catalog: &prices(),
             ttls: &[],
             since: None,
-            now: START + 60 * MIN,
         });
         let waits = &checks[0].waits;
         assert_eq!((waits.long, waits.timed_out), (2, 2));
@@ -573,23 +547,55 @@ mod tests {
     }
 
     #[test]
-    fn a_cap_under_the_ttl_keeps_and_a_larger_default_timeout_counts() {
-        let keep = report(r#"{"promptCacheTtl":"5m","env":{"BASH_MAX_TIMEOUT_MS":"200000"}}"#);
-        let check = bash(&keep);
-        assert_eq!(check.base.action, Action::Keep);
-        assert_eq!(check.base.current, Some(200_000));
-        // The default timeout raises the effective cap past the TTL, so both must come down.
-        let change = report(
+    fn any_cap_but_the_margin_is_moved_to_it_and_a_larger_default_timeout_comes_down_too() {
+        // Exactly the margin: a card with nothing to change, which `doctor` offers nothing for.
+        let kept = report(r#"{"promptCacheTtl":"5m","env":{"BASH_MAX_TIMEOUT_MS":"240000"}}"#);
+        assert_eq!(bash(&kept).suggested, Some(240_000));
+        let item = card(&kept);
+        assert_eq!((item.value.as_str(), item.quiet), ("", true));
+        assert_eq!(item.how, None);
+        assert!(
+            item.text
+                .starts_with("Capped at 4m, the margin suggested under the 5m cache."),
+            "{}",
+            item.text
+        );
+        assert!(
+            item.text
+                .ends_with("settings.json:env.BASH_MAX_TIMEOUT_MS.")
+        );
+        // Under the TTL but past the margin, which a threshold at the TTL would keep.
+        let near = report(r#"{"promptCacheTtl":"5m","env":{"BASH_MAX_TIMEOUT_MS":"270000"}}"#);
+        assert_eq!(card(&near).value, "270s -> 4m");
+        // A low cap is raised, and says what that trades.
+        let low = report(r#"{"promptCacheTtl":"5m","env":{"BASH_MAX_TIMEOUT_MS":"120000"}}"#);
+        let item = card(&low);
+        assert_eq!(item.value, "2m -> 4m");
+        assert!(
+            item.text.contains(
+                "Raising it to 4m trades longer foreground waits for fewer background check-ins."
+            ),
+            "{}",
+            item.text
+        );
+        // The default timeout raises the effective cap, so both come down in the one edit.
+        let both = report(
             r#"{"promptCacheTtl":"5m","env":{"BASH_MAX_TIMEOUT_MS":"200000","BASH_DEFAULT_TIMEOUT_MS":"300000"}}"#,
         );
-        let check = bash(&change);
-        assert_eq!(check.base.action, Action::Change);
-        assert_eq!(check.base.current, Some(300_000));
+        let check = bash(&both);
+        assert_eq!(check.current, 300_000);
         assert!(
             check
                 .replacement
                 .contains("BASH_DEFAULT_TIMEOUT_MS: \"240000\"")
         );
+        let Some(crate::doctor::How::Edit(patch)) = card(&both).how else {
+            panic!("an edit")
+        };
+        assert_eq!(patch.edits.len(), 2);
+        // Under a 1h cache the margin is 55m.
+        let hour = report(r#"{"promptCacheTtl":"1h"}"#);
+        assert_eq!(card(&hour).value, "10m -> 55m");
     }
 
     #[test]
@@ -597,34 +603,27 @@ mod tests {
         let report = report("{}");
         let check = bash(&report);
         assert_eq!(check.ttl, Some(Ttl::FiveMinutes));
-        assert_ne!(check.base.action, Action::Advisory);
+        assert_eq!(check.suggested, Some(240_000));
     }
 
     #[test]
-    fn an_unresolved_ttl_gives_the_cap_a_whole_reason() {
+    fn an_unresolved_ttl_suggests_no_cap_and_says_why() {
         let mut report = report("{}");
-        for check in &mut report.checks {
-            if let CheckResult::BashCap(c) = check {
-                c.ttl = None;
-                c.ttl_basis = "the main-agent cache TTL is unresolved".into();
-                c.base.action = Action::Advisory;
-                c.base.recommended = None;
-            }
+        for cap in &mut report.bash {
+            cap.ttl = None;
+            cap.ttl_basis = "the main-agent cache TTL is unresolved".into();
+            cap.unresolved = Some(cap.ttl_basis.clone());
+            cap.suggested = None;
         }
-        let text = format_report(
-            &report,
-            ReportOptions {
-                details: true,
-                ..Default::default()
-            },
-        );
-        let line = crate::test_support::report_line(&text, "Bash timeout cap");
-        assert_eq!(line.mark, "unknown", "{text}");
+        let item = card(&report);
+        assert_eq!((item.value.as_str(), item.quiet), ("", true));
+        assert_eq!(item.how, None);
         assert!(
-            line.evidence.starts_with(
-                "Not enough evidence: the main-agent cache TTL is unresolved, so the cap has nothing to compare with."
+            item.text.starts_with(
+                "Capped at 10m. No cap is suggested: the main-agent cache TTL is unresolved."
             ),
-            "{text}"
+            "{}",
+            item.text
         );
     }
 }

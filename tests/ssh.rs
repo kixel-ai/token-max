@@ -273,6 +273,10 @@ fn section<'a>(text: &'a str, host: &str) -> &'a str {
 /// dollar amounts, since a per-30-day rate divides by the window that ends at that clock.
 fn timeless(text: &str) -> String {
     let text = text.strip_prefix("token-max  ").unwrap_or(text);
+    // The closing hint counts every host's advice, so it is no part of one host's report.
+    let text = text
+        .find("\n  token-max vibes has ")
+        .map_or(text, |at| &text[..at]);
     // A section names its own host as the base of its percents; run there, it is "this host".
     let named;
     // The name is the word before the first "'s", as in "of devbox's spend" or, when part
@@ -377,7 +381,7 @@ fn a_remote_report_matches_running_there() {
     }
 
     // With a change to offer on devbox, which exits 1.
-    std::fs::write(hosts.settings("devbox"), HOME_SETTINGS).unwrap();
+    std::fs::write(hosts.settings("devbox"), r#"{"promptCacheTtl":"5m"}"#).unwrap();
     let (status, text, _) = hosts.run(&["--ssh", "devbox", "--include-local"]);
     assert_eq!(status, 1);
     // One total heads the report, beside each host's own section.
@@ -512,50 +516,74 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     let lines: String = records.iter().map(|r| format!("{r}\n")).collect();
     std::fs::write(&transcript, lines).unwrap();
 
-    let cap = |home: &Path| {
-        analysis(home, None, 1.0)
-            .checks
-            .into_iter()
-            .find_map(|c| match c {
-                CheckResult::BashCap(b) => Some(b),
-                _ => None,
-            })
-            .unwrap()
-    };
+    let cap = |home: &Path| analysis(home, None, 1.0).bash.remove(0);
     let local = cap(&hosts.root.join("homes/local"));
     let remote = cap(&home);
-    assert_eq!(local.base.current, Some(600_000));
-    assert_eq!(local.base.action, Action::Keep);
+    assert_eq!(local.current, 600_000);
     assert_eq!(local.waits.calls, 0);
-    assert_eq!(remote.base.current, Some(7_200_000));
-    assert_eq!(remote.base.recommended, Some(3_300_000));
-    assert_eq!(remote.base.action, Action::Change);
+    assert_eq!(remote.current, 7_200_000);
+    assert_eq!(remote.suggested, Some(3_300_000));
     let w = &remote.waits;
     assert_eq!((w.calls, w.long, w.timed_out, w.polling), (1, 1, 1, 1));
     assert!(w.miss_cost.total_usd.unwrap().to_f64() > 0.0);
 
-    let (status, stdout, stderr) = hosts.run(&["--ssh", "devbox", "--include-local", "--details"]);
-    assert_eq!(status, 1, "{stderr}");
+    // `doctor` leaves the cap to `vibes`, which it names once for every host.
+    let (_, stdout, stderr) = hosts.run(&["--ssh", "devbox", "--include-local", "--details"]);
     assert_eq!(stderr, "");
+    assert!(!stdout.contains("BASH_MAX_TIMEOUT_MS"), "{stdout}");
+    assert!(
+        stdout.ends_with(
+            "\n  token-max vibes has 2 pieces of advice the transcripts can't price. Run token-max vibes to see it.\n"
+        ),
+        "{stdout}"
+    );
+    let advice = |args: &[&str]| run(&mut hosts.invoke("vibes", args));
+    let (status, stdout, stderr) = advice(&["--ssh", "devbox", "--include-local"]);
+    assert_eq!((status, stderr.as_str()), (0, ""), "{stdout}");
     assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
+    let cards: Vec<&str> = stdout.split("\n\n").collect();
     assert!(
-        section(&stdout, "devbox").contains("BASH_MAX_TIMEOUT_MS"),
+        cards[0].starts_with("token-max vibes: 2 pieces of advice the transcripts can't price.\n"),
         "{stdout}"
     );
-    // The destination's change names the edit to make there, in its own home.
+    // Each host's card names its host, its own waits and the edit to make there, in its home.
+    let here = flat(cards[1]);
+    assert!(here.starts_with("[1/2] Bash timeout cap not measured 10m -> 55m Host this host"));
     assert!(
-        section(&stdout, "devbox").lines().any(|l| {
-            l.starts_with("  change   Bash timeout cap ")
-                && l.contains(" 2h -> 55m ")
-                && l.ends_with(
-                    "  \"env\": {\"BASH_MAX_TIMEOUT_MS\": \"3300000\"} in ~/.claude/settings.json",
-                )
-        }),
-        "{stdout}"
+        here.contains("No foreground Bash wait outlasted the cache."),
+        "{here}"
     );
-    let (status, there, stderr) = run(hosts.command(&["--details"]).env("HOME", &home));
-    assert_eq!(status, 1, "{stderr}");
-    assert_eq!(timeless(section(&stdout, "devbox")), timeless(&there));
+    assert!(
+        here.ends_with(
+            r#"Change "env": {"BASH_MAX_TIMEOUT_MS": "3300000"} in ~/.claude/settings.json"#
+        ),
+        "{here}"
+    );
+    let there = flat(cards[2]);
+    assert!(there.starts_with("[2/2] Bash timeout cap not measured 2h -> 55m Host devbox"));
+    assert!(
+        there.contains(
+            "1 foreground Bash wait outlasted the cache (1 hit the timeout, 1 polled in a loop)"
+        ),
+        "{there}"
+    );
+    assert!(
+        there.ends_with(
+            r#"Change "env": {"BASH_MAX_TIMEOUT_MS": "3300000"} in devbox:~/.claude/settings.json"#
+        ),
+        "{there}"
+    );
+    // The destination's card is the one it prints for itself, but for its host's name.
+    let (_, alone, stderr) = run(hosts.invoke("vibes", &[]).env("HOME", &home));
+    assert_eq!(stderr, "");
+    let alone = flat(alone.split("\n\n").nth(1).unwrap());
+    assert_eq!(
+        there
+            .replace("[2/2]", "[1/1]")
+            .replace(" Host devbox", "")
+            .replace("devbox:~", "~"),
+        alone
+    );
 }
 
 #[test]
@@ -1474,28 +1502,29 @@ fn flat(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Each walked home's settings: a 1h TTL, and a Bash cap that outlasts it, which every host
-/// offers to lower with a saving not measured.
+/// Each walked home's settings: a 1h TTL, and a Bash cap that outlasts it, which `vibes`
+/// offers to lower on every host with a saving not measured.
 const HOME_SETTINGS: &str = r#"{"promptCacheTtl":"1h","env":{"BASH_MAX_TIMEOUT_MS":"7200000"}}"#;
 
 /// [`HOME_SETTINGS`] with the cap lowered under the TTL, as accepting its change writes them.
 const CAP_LOWERED: &str = "{\n  \"promptCacheTtl\": \"1h\",\n  \"env\": {\n    \"BASH_MAX_TIMEOUT_MS\": \"3300000\"\n  }\n}";
 
 impl Hosts {
-    /// `doctor` on this host, devbox and laptop, walked on a terminal after the billing question.
+    /// `vibes` on this host, devbox and laptop, walked on a terminal after the billing question.
     fn walk(&self) -> Terminal {
         self.host("devbox");
         self.host("laptop");
-        self.walk_ready()
+        self.walk_ready("vibes")
     }
 
-    /// The walk of [`Hosts::walk`] with its destinations already set up, each home given
+    /// `command`'s walk over the hosts of [`Hosts::walk`], already set up, each home given
     /// [`HOME_SETTINGS`].
-    fn walk_ready(&self) -> Terminal {
+    fn walk_ready(&self, command: &str) -> Terminal {
         for host in ["local", "devbox", "laptop"] {
             std::fs::write(self.settings(host), HOME_SETTINGS).unwrap();
         }
-        let mut command = self.command(&["--ssh", "devbox", "--ssh", "laptop", "--include-local"]);
+        let hosts = ["--ssh", "devbox", "--ssh", "laptop", "--include-local"];
+        let mut command = self.invoke(command, &hosts);
         command.env("NO_COLOR", "1");
         let mut terminal = Terminal::spawn(command);
         terminal.answer("[s]kip:", "a");
@@ -1524,18 +1553,20 @@ impl Hosts {
 fn the_walk_offers_every_hosts_changes_and_writes_each_on_its_host() {
     let hosts = Hosts::new();
     let mut terminal = hosts.walk();
-    // Unmeasured, so asked in the order the hosts were given.
-    terminal.wait("Host  this host");
+    // Asked in the order the hosts were given.
+    terminal.wait("token-max vibes: 3 pieces of advice the transcripts can't price.");
+    terminal.wait("Host    this host");
     terminal.answer("Accept? [y]es, [n]o, [q]uit:", "y");
-    terminal.wait("Host  devbox");
+    terminal.wait("Host    devbox");
     terminal.answer("Accept? [y]es, [n]o, [q]uit:", "n");
-    terminal.wait("Host  laptop");
+    terminal.wait("Host    laptop");
     terminal.answer("Accept? [y]es, [n]o, [q]uit:", "y");
-    terminal.wait("token-max: devbox  ");
     terminal.wait("laptop:~/.claude/settings.json\n  @@");
     terminal.answer("[n]o:", "y");
     let (code, output, stderr) = terminal.finish();
     assert_eq!(code, 0, "{output}{stderr}");
+    // Advice has no report to print again after its questions.
+    assert!(!output.contains("token-max: devbox  "), "{output}");
     assert!(flat(&output).contains("Write the 2 accepted changes to ~/.claude/settings.json and laptop:~/.claude/settings.json?"), "{output}");
     assert!(flat(&output).contains("Wrote 1 edit to laptop:~/.claude/settings.json. Backed up the old file to laptop:~/.claude/settings.json.token-max.bak."), "{output}");
     for host in ["local", "laptop"] {
@@ -1551,6 +1582,53 @@ fn the_walk_offers_every_hosts_changes_and_writes_each_on_its_host() {
         HOME_SETTINGS
     );
     assert_eq!(hosts.backup("devbox"), None);
+}
+
+#[test]
+fn doctor_hands_every_host_to_vibes_from_the_same_scan() {
+    let hosts = Hosts::new();
+    hosts.host("devbox");
+    hosts.host("laptop");
+    // Put this build on each destination first, so the walk reaches each of them once.
+    let (_, _, stderr) = hosts.run(&["--ssh", "devbox", "--ssh", "laptop"]);
+    assert_eq!(stderr, "");
+    std::fs::remove_file(hosts.root.join("ssh.args")).unwrap();
+    let mut terminal = hosts.walk_ready("doctor");
+    // Nothing measured to change, so doctor's walk ends with each host's report.
+    terminal.wait("token-max: devbox  ");
+    terminal.wait("token-max: laptop  ");
+    terminal.wait("Nothing to change on these hosts.");
+    terminal.wait("token-max vibes has 3 pieces of advice the transcripts can't price. Show them?");
+    terminal.answer("[y]es, [n]o:", "y");
+    terminal.wait("token-max vibes: 3 pieces of advice the transcripts can't price.");
+    terminal.wait("Host    this host");
+    terminal.answer("Accept? [y]es, [n]o, [q]uit:", "n");
+    terminal.wait("Host    devbox");
+    terminal.answer("Accept? [y]es, [n]o, [q]uit:", "y");
+    terminal.wait("Host    laptop");
+    terminal.answer("Accept? [y]es, [n]o, [q]uit:", "y");
+    terminal.answer("[n]o:", "y");
+    let (code, output, stderr) = terminal.finish();
+    assert_eq!((code, stderr.as_str()), (0, ""), "{output}");
+    assert!(flat(&output).contains("Write the 2 accepted changes to devbox:~/.claude/settings.json and laptop:~/.claude/settings.json?"), "{output}");
+    for host in ["devbox", "laptop"] {
+        assert!(
+            flat(&output).contains(&format!("Wrote 1 edit to {host}:~/.claude/settings.json.")),
+            "{output}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(hosts.settings(host)).unwrap(),
+            CAP_LOWERED
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(hosts.settings("local")).unwrap(),
+        HOME_SETTINGS
+    );
+    // One scan for both commands: each destination was reached once, and its billing asked once.
+    let args = std::fs::read_to_string(hosts.root.join("ssh.args")).unwrap();
+    assert_eq!(args.matches("--ssh-scan").count(), 2, "{args}");
+    assert_eq!(output.matches("paid for?").count(), 1, "{output}");
 }
 
 #[test]
@@ -1573,7 +1651,7 @@ fn a_host_that_fails_to_write_stops_the_run_before_later_hosts() {
     assert!(!output.contains("Wrote 1 edit to devbox"), "{output}");
     assert!(stderr.contains("devbox: "), "{stderr}");
     assert!(
-        flat(&stderr).contains("changed while token-max doctor was running; nothing was written"),
+        flat(&stderr).contains("changed while token-max was running; nothing was written"),
         "{stderr}"
     );
     assert!(
@@ -1678,7 +1756,7 @@ while IFS= read -r line; do
 done"#
         ),
     );
-    let mut terminal = hosts.walk_ready();
+    let mut terminal = hosts.walk_ready("vibes");
     for _ in 0..3 {
         terminal.answer("Accept? [y]es, [n]o, [q]uit:", "y");
     }

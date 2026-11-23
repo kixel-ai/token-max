@@ -10,18 +10,19 @@ use crate::context::{
 };
 use crate::controls::CAPPED_SHARED;
 use crate::discovery::{TTL_API_DEFAULT, TTL_BILLING_UNKNOWN, TTL_PLAN_DEFAULT};
+use crate::doctor::How;
 use crate::keepalive::duration as keepalive_duration;
 use crate::model::{
-    Action, BackgroundCheck, BackgroundFeature, BashCapCheck, Billing, CacheReplayEvidence,
-    CheckBase, CheckResult, ContextCost, ContextKind, ControlValue, Cost, Coverage, EffortCheck,
-    EffortRun, Estimate, EstimateEvidence, Evidence, FableUse, FableWeek, Harness, KeepaliveCheck,
-    Margin, MemoryCheck, Millis, ModelSource, PeriodStatus, Profile, Report, RequestEvidence,
-    ReturnTiming, Scalar, Share, SubagentCost, T3IdleCheck, T3TextGeneration, Ttl, UsageEstimate,
-    Verdict,
+    Action, BackgroundCheck, BackgroundFeature, BashCap, Billing, CacheReplayEvidence, CheckBase,
+    CheckResult, ContextCost, ContextKind, ControlValue, Cost, Coverage, EffortCheck, EffortRun,
+    Estimate, EstimateEvidence, Evidence, FableUse, FableWeek, Harness, KeepaliveCheck, Margin,
+    MemoryCheck, Millis, ModelSource, PeriodStatus, Profile, Report, RequestEvidence, ReturnTiming,
+    Scalar, Share, SubagentCost, T3IdleCheck, T3TextGeneration, Ttl, UsageEstimate, Verdict,
 };
 use crate::prices::{TIER_SENSITIVITY, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
 use crate::terminal::{BOLD, DIM, GREEN, RED, WrapOptions, YELLOW, cells, wrap_spans};
+use crate::vibes::Item;
 
 /// How to lay out the text report; presentation never changes the analysis.
 #[derive(Clone, Copy, Debug, Default)]
@@ -238,7 +239,6 @@ enum Setting<'a> {
     T3Idle(crate::model::T3IdleMode),
     Speed(&'a str),
     Toggle(bool),
-    Cap(Millis),
     Keepalive(&'a str),
     Effort(&'a str),
 }
@@ -339,9 +339,6 @@ fn common(result: &CheckResult) -> Common<'_> {
             &c.usage_estimates,
             |s: &String| Setting::Speed(s),
         ),
-        CheckResult::BashCap(c) => base("bash-timeout-cap", c.bucket, &c.base, &[], |n| {
-            Setting::Cap(*n)
-        }),
         CheckResult::Background(c) => base(
             "background-generation",
             feature_label(c.feature),
@@ -689,7 +686,6 @@ fn setting(value: Option<Setting<'_>>) -> String {
         Some(Setting::T3Idle(mode)) => mode.as_str().into(),
         Some(Setting::Speed(s)) => s.into(),
         Some(Setting::Toggle(b)) => if b { "on" } else { "off" }.into(),
-        Some(Setting::Cap(ms)) => format!("{ms} ms"),
         Some(Setting::Keepalive(s) | Setting::Effort(s)) => s.into(),
     }
 }
@@ -704,7 +700,6 @@ fn setting_value(value: Option<Setting<'_>>) -> String {
         Some(Setting::Speed(s)) => s.into(),
         Some(Setting::Window(n)) => format!("{} tokens", count(n)),
         Some(Setting::Ttl(t)) => t.as_str().into(),
-        Some(Setting::Cap(ms)) => duration(ms),
         Some(Setting::Keepalive(s) | Setting::Effort(s)) => s.into(),
     }
 }
@@ -1213,7 +1208,7 @@ pub fn format_report<'a>(
     options: ReportOptions<'a>,
 ) -> Listing {
     let mut out = Out::new(report, options);
-    let (title, head, rows) = summary(report, fixes, &mut out);
+    let (title, head, rows, vibes) = summary(report, fixes, &mut out);
     if options.details {
         details(report, &mut out);
     }
@@ -1221,6 +1216,7 @@ pub fn format_report<'a>(
         title,
         head,
         rows,
+        vibes,
         tail: out.text,
         options: ReportOptions {
             host: None,
@@ -1242,6 +1238,17 @@ pub(crate) fn rendered(report: &Report, options: ReportOptions<'_>) -> String {
     .text()
 }
 
+/// The advice `token-max vibes` shows for a report.
+#[cfg(test)]
+pub(crate) fn advice(report: &Report, options: ReportOptions<'_>) -> Vec<Item> {
+    format_report(
+        report,
+        &crate::doctor::fixes(report, options.unicode),
+        options,
+    )
+    .vibes
+}
+
 /// A rendered report whose list of lines can be printed again once `doctor`'s walk has
 /// sorted its changes into those accepted, declined and left by hand.
 pub struct Listing {
@@ -1250,6 +1257,8 @@ pub struct Listing {
     /// Everything between the header and the list.
     head: String,
     rows: Vec<Row>,
+    /// The advice the transcripts cannot price, which `vibes` shows and this report leaves out.
+    pub vibes: Vec<Item>,
     /// Everything after the list.
     tail: String,
     options: ReportOptions<'static>,
@@ -2230,21 +2239,6 @@ fn card(result: &CheckResult, action: Option<Action>, out: &mut Out<'_>) {
                 &estimate(s.reread_break_even_usd_per_resumed_summary),
             );
         }
-        CheckResult::BashCap(b) => {
-            out.field(
-                "Compared TTL",
-                &format!("{}; {}", b.ttl.map_or("unknown", Ttl::as_str), b.ttl_basis),
-            );
-            out.field("Replacement", &b.replacement);
-            let w = &b.waits;
-            out.field(
-                "Foreground Bash waits",
-                &format!(
-                    "{} calls; {} reached the cache TTL ({} timed out, {} polling loops)",
-                    w.calls, w.long, w.timed_out, w.polling
-                ),
-            );
-        }
         CheckResult::Keepalive(k) => {
             out.field(
                 "Cache lifetime",
@@ -2552,11 +2546,6 @@ fn card(result: &CheckResult, action: Option<Action>, out: &mut Out<'_>) {
                 out.notes("Idle unknown", &scenario.unknown);
             }
         }
-        CheckResult::BashCap(b) => out.estimate(
-            "Cache misses after long waits",
-            &b.waits.miss_cost,
-            b.waits.miss_estimate,
-        ),
         CheckResult::Keepalive(k) => {
             // Counts are what the priced sessions recorded; dollars cover every period.
             if let Some(c) = k
@@ -2697,7 +2686,6 @@ fn card(result: &CheckResult, action: Option<Action>, out: &mut Out<'_>) {
         | CheckResult::Idle(_)
         | CheckResult::Speed(_)
         | CheckResult::Background(_)
-        | CheckResult::BashCap(_)
         | CheckResult::Keepalive(_)
         | CheckResult::Memory(_)
         | CheckResult::Effort(_) => {}
@@ -2720,18 +2708,6 @@ fn reason(result: &CheckResult, r: &Common<'_>) -> String {
                 Action::Advisory => format!("{} {}", background_unknown(b), b.reason),
                 _ if r.current == Some(Setting::Toggle(false)) => "Off; it costs nothing.".into(),
                 _ => "Its whole cost is within --max-cost-per-use, so it costs no more than that per use.".into(),
-            };
-        }
-        CheckResult::BashCap(b) => {
-            return match (b.ttl, r.action) {
-                (None, _) => "No main-agent cache TTL to compare the cap with.".into(),
-                (Some(ttl), Action::Change) => format!(
-                    "A foreground wait as long as the cap outlasts the {} cache; lower it below the TTL.",
-                    ttl.as_str()
-                ),
-                // An unsettled owner leaves the cap advisory whatever its value.
-                (Some(_), Action::Advisory) => unresolved(result, r),
-                (Some(ttl), _) => format!("The cap is under the {} cache TTL.", ttl.as_str()),
             };
         }
         CheckResult::Keepalive(_) => {
@@ -2803,7 +2779,6 @@ fn setting_name(result: &CheckResult) -> String {
         CheckResult::Idle(_) => "Idle compaction".into(),
         CheckResult::Speed(_) => "Fast mode".into(),
         CheckResult::Keepalive(_) => "Keepalive pings".into(),
-        CheckResult::BashCap(_) => "Bash timeout cap".into(),
         CheckResult::Memory(m) => match m.harness {
             Harness::Codex => CODEX_MEMORY.into(),
             Harness::Claude => CLAUDE_MEMORY.into(),
@@ -3013,23 +2988,6 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
     if r.uncertainty.iter().any(|u| u == crate::t3::UNOWNED) {
         return "The T3 instance is disabled or the file that owns this setting for it is unresolved, so its past costs do not establish a setting to change.".into();
     }
-    if let CheckResult::BashCap(b) = result {
-        // Advisory with no recommendation either for want of a TTL or for an unsettled owner.
-        return match b.ttl {
-            None => format!(
-                "{}, so the cap has nothing to compare with.",
-                capitalize(&b.ttl_basis)
-            ),
-            Some(_) => r
-                .uncertainty
-                .iter()
-                .find(|u| u.contains("unresolved T3 control ownership"))
-                .map_or_else(
-                    || "The cap could not be compared with the cache TTL.".into(),
-                    |_| "Requests T3 could not settle may have run under another owner's cap, so the cap's line is unresolved.".into(),
-                ),
-        };
-    }
     if let CheckResult::Keepalive(k) = result {
         return keepalive_unresolved(k, r);
     }
@@ -3111,7 +3069,6 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
         // Handled above; a doctor run never panics on a combination nothing names.
         CheckResult::Speed(_)
         | CheckResult::Background(_)
-        | CheckResult::BashCap(_)
         | CheckResult::Keepalive(_)
         | CheckResult::Memory(_)
         | CheckResult::Effort(_) => "No verdict could be reached.".into(),
@@ -4181,7 +4138,12 @@ fn instruction_saving(c: &ContextCost, out: &Out<'_>) -> Option<String> {
 
 /// The provider's size guidance an instruction file is over, with what each 100 lines of it
 /// costs: Claude Code's 200 lines per CLAUDE.md, or the byte budget Codex cuts AGENTS.md at.
-fn instruction_warning(c: &ContextCost, profiles: &[Profile], out: &Out<'_>) -> Option<Warning> {
+fn instruction_warning(
+    c: &ContextCost,
+    profiles: &[Profile],
+    profile: &str,
+    out: &Out<'_>,
+) -> Option<Item> {
     let size = c.instruction_size?;
     let claude_file = c
         .name
@@ -4226,44 +4188,101 @@ fn instruction_warning(c: &ContextCost, profiles: &[Profile], out: &Out<'_>) -> 
         }
         _ => return None,
     };
-    Some(Warning {
-        name: out.home(&c.name),
-        profile: String::new(),
-        text: text.trim_end().into(),
-        sources: vec![source],
-    })
+    Some(guidance(
+        out.home(&c.name),
+        profile,
+        text.trim_end().into(),
+        &[source],
+    ))
 }
 
-/// Provider guidance that bears on a line but that the transcripts cannot price: listed
-/// apart from the measured lines, cited, with no verdict and no effect on the exit code.
-struct Warning {
-    /// The line it concerns, such as "Main-session effort".
-    name: String,
-    /// The profile tag, when the report covers several.
-    profile: String,
-    /// What the provider says, and what was measured beside it.
-    text: String,
-    /// The provider's pages it cites.
-    sources: Vec<&'static str>,
-}
-
-/// The warnings, after the lines, each naming its line, then the guidance and its sources.
-fn warnings_section(warnings: &[Warning], out: &mut Out<'_>) {
-    if warnings.is_empty() {
-        return;
+/// Provider guidance that bears on the line `name` but that the transcripts cannot price,
+/// which `vibes` shows as a cited card: what the provider says and what was measured beside
+/// it, and the pages it cites.
+fn guidance(name: String, profile: &str, text: String, sources: &[&str]) -> Item {
+    Item {
+        name: tagged(name, profile),
+        value: String::new(),
+        what: String::new(),
+        text,
+        sources: sources.iter().map(|s| s.to_string()).collect(),
+        how: None,
+        quiet: false,
     }
-    out.section("WARNINGS  provider guidance the transcripts cannot price");
-    for w in warnings {
-        let name = match w.profile.as_str() {
-            "" => format!("{}: ", w.name),
-            tag => format!("{} {tag}: ", w.name),
-        };
-        let sources = format!(" {}", w.sources.join(" "));
-        out.spans(
-            &[(&name, BOLD), (&w.text, PLAIN), (&sources, DIM)],
-            0,
-            Some(2),
-        );
+}
+
+/// A line's name with its profile tag, when the report covers several profiles.
+fn tagged(name: String, profile: &str) -> String {
+    match profile {
+        "" => name,
+        tag => format!("{name} {tag}"),
+    }
+}
+
+/// Whose advice the Bash cap's margin is, before the pages on how the cap and cache work.
+const BASH_PICK: &str =
+    "The maintainer's pick of a margin under the cache TTL. Claude Code's docs:";
+
+/// A Bash timeout cap as `vibes` shows it: the long waits measured under it, the cap a
+/// guessed margin under the cache TTL suggests, and what moving it trades.
+fn bash_item(cap: &BashCap, profile: &str, how: Option<How>, out: &Out<'_>) -> Item {
+    let w = &cap.waits;
+    // What long foreground Bash waits cost: a total over the window, like their count.
+    let waits = if w.long == 0 {
+        "No foreground Bash wait outlasted the cache.".to_string()
+    } else {
+        format!(
+            "{} outlasted the cache ({} hit the timeout, {} polled in a loop); the cache misses cost {} over the window.",
+            plural(w.long, "foreground Bash wait"),
+            count(w.timed_out),
+            count(w.polling),
+            figure(w.miss_estimate)
+        )
+    };
+    let current = duration(cap.current);
+    let ttl = cap.ttl.map_or("unknown", Ttl::as_str);
+    let set_in = format!("Set in {}.", out.home(&cap.owner));
+    const BACKGROUND: &str = "A command past the cap is not killed: it keeps running in the background, where Claude checks on it in later turns.";
+    let (value, text) = match cap.suggested {
+        None => (
+            String::new(),
+            format!(
+                "Capped at {current}. No cap is suggested: {}. {waits} {set_in}",
+                out.home_in(cap.unresolved.as_deref().unwrap_or("the cap is unresolved"))
+            ),
+        ),
+        Some(suggested) if suggested == cap.current => (
+            String::new(),
+            format!(
+                "Capped at {current}, the margin suggested under the {ttl} cache. {waits} {set_in}"
+            ),
+        ),
+        Some(suggested) => {
+            let to = duration(suggested);
+            let trade = if suggested < cap.current {
+                format!(
+                    "A foreground wait at or past the {ttl} cache TTL lets the cache expire before Claude replies, and a {to} cap leaves room under it. {waits} What a lower cap saves is not measured, and the {to} margin is a guess. {BACKGROUND} Some commands need longer in the foreground; keep the cap if yours do."
+                )
+            } else {
+                format!(
+                    "A {current} cap moves commands to the background sooner than the {ttl} cache needs. Raising it to {to} trades longer foreground waits for fewer background check-ins. {waits} What a higher cap saves is not measured, and the {to} margin is a guess. {BACKGROUND}"
+                )
+            };
+            (format!("{current} {} {to}", out.arrow), trade)
+        }
+    };
+    let value_is_empty = value.is_empty();
+    Item {
+        name: tagged("Bash timeout cap".into(), profile),
+        value,
+        what: "The longest Claude waits on a foreground Bash command before Claude Code moves it to the background.".into(),
+        text,
+        sources: std::iter::once(BASH_PICK)
+            .chain(crate::bash::SOURCES)
+            .map(String::from)
+            .collect(),
+        how,
+        quiet: value_is_empty,
     }
 }
 
@@ -4342,6 +4361,8 @@ pub enum Origin {
     Check(usize),
     /// A piece of context, by its index among `setting_rows` of the report's context.
     Context(usize),
+    /// One of `vibes`' items, by its index among them; never a line of this report.
+    Vibe(usize),
 }
 
 /// Every change the report recommends or suggests, in its order: biggest monthly saving
@@ -4571,7 +4592,7 @@ fn summary(
     report: &Report,
     fixes: &[crate::doctor::Fix],
     out: &mut Out<'_>,
-) -> (String, String, Vec<Row>) {
+) -> (String, String, Vec<Row>, Vec<Item>) {
     let arrow = out.arrow;
     let coverage = &report.scan.coverage;
     let spend = out.spend;
@@ -4775,20 +4796,6 @@ fn summary(
             .map(|n| format!(" {n}"))
             .collect::<String>()
     };
-    // What long foreground Bash waits cost: a total over the window, like their count.
-    let waits = |b: &BashCapCheck| {
-        let w = &b.waits;
-        if w.long == 0 {
-            return "No foreground Bash wait outlasted the cache.".to_string();
-        }
-        let cost = figure(w.miss_estimate);
-        format!(
-            "{} outlasted the cache ({} hit the timeout, {} polled in a loop); the cache misses cost {cost} over the window.",
-            plural(w.long, "foreground Bash wait"),
-            count(w.timed_out),
-            count(w.polling)
-        )
-    };
     let check_row = |c: &(usize, &CheckResult, Common<'_>), out: &Out<'_>| {
         let (index, result, r) = c;
         let mark = check_mark(result, r);
@@ -4956,22 +4963,6 @@ fn summary(
                 }
                 _ => unknown(),
             },
-            CheckResult::BashCap(b) => {
-                let ttl = b.ttl.map_or("unknown", Ttl::as_str);
-                match mark {
-                    Mark::Change => format!(
-                        "A wait that long outlasts the {ttl} cache. {} Commands past the cap keep running in the background; what checking on them costs is not measured.{} {set_in}",
-                        waits(b),
-                        if b.replacement.contains("BASH_DEFAULT_TIMEOUT_MS") {
-                            " Lower BASH_DEFAULT_TIMEOUT_MS to match."
-                        } else {
-                            ""
-                        }
-                    ),
-                    Mark::Keep => format!("Under the {ttl} cache TTL. {} {set_in}", waits(b)),
-                    _ => unknown(),
-                }
-            }
             CheckResult::Keepalive(k) => match mark {
                 Mark::Keep => keepalive_keep(k, r),
                 // A priced result is no verdict only because no setting caps pings.
@@ -5249,17 +5240,28 @@ fn summary(
         row
     };
     let mut rows: Vec<Row> = checks.iter().map(|c| check_row(c, out)).collect();
-    let mut warnings: Vec<Warning> = vec![];
+    // Advice the transcripts cannot price, which `vibes` shows instead of this report.
+    let mut vibes: Vec<Item> = vec![];
+    for cap in &report.bash {
+        let how = report
+            .scan
+            .profiles
+            .iter()
+            .find(|p| p.id == cap.profile)
+            .and_then(|profile| crate::doctor::bash_how(cap, profile));
+        let profile = tag(&cap.profiles, &|_| cap.owner.clone(), out);
+        vibes.push(bash_item(cap, &profile, how, out));
+    }
     for (_, result, r) in &checks {
         if let CheckResult::Effort(e) = result
             && let Some((text, sources)) = effort_warning(e)
         {
-            warnings.push(Warning {
-                name: setting_name(result),
-                profile: tag(r.profiles, &|_| r.owner.to_string(), out),
+            vibes.push(guidance(
+                setting_name(result),
+                &tag(r.profiles, &|_| r.owner.to_string(), out),
                 text,
-                sources,
-            });
+                &sources,
+            ));
         }
     }
     // Lines of one setting that split only because the controls they replay differ name the
@@ -5580,10 +5582,12 @@ fn summary(
         row.profile = tag(&c.profiles, &switch, out);
         row.costs(c.estimate(), false, &spend);
         rows.push(row);
-        if let Some(mut warning) = instruction_warning(c, &report.scan.profiles, out) {
-            warning.profile = tag(&c.profiles, &switch, out);
-            warnings.push(warning);
-        }
+        vibes.extend(instruction_warning(
+            c,
+            &report.scan.profiles,
+            &tag(&c.profiles, &switch, out),
+            out,
+        ));
     }
     let loading = mcp_guidance(report.context.iter().filter(|c| c.current));
     if !loading.is_empty() {
@@ -5686,12 +5690,12 @@ fn summary(
         row.costs(c.estimate, false, &spend);
         row.evidence = subagent_line(c, out);
         if let Some(text) = explore_warning(c) {
-            warnings.push(Warning {
-                name: subagent_name(c),
-                profile: row.profile.clone(),
+            vibes.push(guidance(
+                subagent_name(c),
+                &row.profile,
                 text,
-                sources: vec![CLAUDE_MODEL_GUIDE],
-            });
+                &[CLAUDE_MODEL_GUIDE],
+            ));
         }
         // The setting, without why it is the one.
         row.setting = out
@@ -5710,17 +5714,17 @@ fn summary(
         }
         row.setting = FABLE_MODEL.into();
         if u.requests > 0 {
-            warnings.push(Warning {
-                name: row.name.clone(),
-                profile: row.profile.clone(),
-                text: format!(
+            vibes.push(guidance(
+                row.name.clone(),
+                &row.profile,
+                format!(
                     "Cost {} over {}. {}",
                     figure(u.estimate),
                     plural(u.requests, "Fable request"),
                     capitalize(FABLE_RULE)
                 ),
-                sources: vec![FABLE_PLANS],
-            });
+                &[FABLE_PLANS],
+            ));
         }
         rows.push(row);
     }
@@ -5866,7 +5870,6 @@ fn summary(
             DIM,
         );
     }
-    warnings_section(&warnings, out);
     out.blank();
     let fetched = report
         .prices
@@ -5899,7 +5902,7 @@ fn summary(
             DIM,
         );
     }
-    (title, head, rows)
+    (title, head, rows, vibes)
 }
 
 /// What every piece of context cost, including pieces no longer sent.
@@ -6650,6 +6653,7 @@ mod tests {
         Report {
             subagents: vec![],
             fable: vec![],
+            bash: vec![],
             generated_at: "2026-12-01T00:00:00.000Z".into(),
             scan: Scan {
                 subagents: vec![],
@@ -7027,32 +7031,6 @@ mod tests {
         );
         let standard = check_base(Action::Keep, Some("standard".to_string()), None);
         assert_eq!(saving(&speed_check(standard, "standard")), None);
-        // A Bash cap other than 10m changes background waits, which are not priced.
-        let bash = |ms: i64| {
-            CheckResult::BashCap(BashCapCheck {
-                base: check_base(Action::Keep, Some(ms), Some(ms)),
-                bucket: "all",
-                ttl: Some(Ttl::OneHour),
-                ttl_basis: "synthetic".into(),
-                replacement: "BASH_MAX_TIMEOUT_MS".into(),
-                waits: BashWaits {
-                    calls: 0,
-                    long: 0,
-                    timed_out: 0,
-                    polling: 0,
-                    miss_cost: cost(Some(0.0), 0.0),
-                    miss_estimate: Some(Estimate {
-                        usd: 0.0,
-                        margin: None,
-                    }),
-                },
-            })
-        };
-        assert_eq!(saving(&bash(600_000)), None);
-        assert_eq!(
-            saving(&bash(3_300_000)),
-            Some(("10m".into(), Saving::NotMeasured))
-        );
         // Codex memories are off by default, so on costs what the check measured.
         let memory = |harness, current: bool, unmeasured_generation| {
             CheckResult::Memory(MemoryCheck {
@@ -8001,10 +7979,12 @@ mod tests {
                 text.contains("INFO  main-effort") || text.contains("ADVISORY  main-effort"),
                 "{text}"
             );
-            let warning = text
-                .lines()
-                .find(|l| l.starts_with("  Main-session effort: "))
-                .map(String::from);
+            // The provider's guidance is `vibes`' card, and no part of the measured report.
+            assert!(!text.contains("model guide") && !text.contains("reasoning guide"));
+            let warning = advice(&report, ReportOptions::default())
+                .into_iter()
+                .find(|i| i.name == "Main-session effort")
+                .map(|i| format!("{} {}", i.text, i.sources.join(" ")));
             let line = report_line(&text, "Main-session effort");
             (line, warning, fixes(&report, false).is_empty())
         };
@@ -8460,7 +8440,7 @@ mod tests {
             row.evidence
         );
         // Claude's guidance is per CLAUDE.md, from 200 lines; other files it loads have none.
-        let warning = instruction_warning(&claude(200), &[], &out).unwrap();
+        let warning = instruction_warning(&claude(200), &[], "", &out).unwrap();
         assert!(
             warning
                 .text
@@ -8469,15 +8449,15 @@ mod tests {
             warning.text
         );
         assert!(warning.text.contains("Each 100 lines costs about $2/mo"));
-        assert!(instruction_warning(&claude(199), &[], &out).is_none());
+        assert!(instruction_warning(&claude(199), &[], "", &out).is_none());
         let other = file(Harness::Claude, "/repo/AGENTS.md", 100, 900);
         assert_eq!(instruction_row(&other, &out).mark, Mark::Info);
-        assert!(instruction_warning(&other, &[], &out).is_none());
+        assert!(instruction_warning(&other, &[], "", &out).is_none());
         // Rendered bytes count headers and wrappers, so only reaching the budget can mean truncation.
         let mut profile = crate::test_support::make_profile("profile", "/codex");
         let agents = |bytes| file(Harness::Codex, "AGENTS.md", bytes, 1);
         let warn = |c: &ContextCost, profiles: &[Profile], out: &Out<'_>| {
-            instruction_warning(c, profiles, out).map(|w| w.text)
+            instruction_warning(c, profiles, "", out).map(|w| w.text)
         };
         let profiles = std::slice::from_ref(&profile);
         assert_eq!(warn(&agents(32_767), profiles, &out), None);
@@ -8978,14 +8958,16 @@ mod tests {
             assert!(line.contains(part), "{part} in {line}");
         }
         assert!(summary.contains(SUBAGENT_EVIDENCE));
-        // The model guide's tip is a cited warning apart from the measured line.
-        assert!(!line.contains("Anthropic"), "{line}");
-        assert!(
-            summary.contains(&format!(
-                "\n  Explore subagent: Ran on claude-opus-5-5 (90%), claude-haiku-4-5 (10%) and cost ~$2.20 ± $0.30. On claude-haiku-5-5 the same recorded tokens would cost $0.50, assuming the same turns. Anthropic's model guide notes that the built-in Explore runs on the session's model, and suggests a user agent named Explore with model: haiku to keep exploration cheap. {CLAUDE_MODEL_GUIDE}\n"
-            )),
-            "{summary}"
+        // The model guide's tip is `vibes`' cited card, apart from the measured report.
+        assert!(!summary.contains("Anthropic's model guide"), "{summary}");
+        let cards = advice(&report, ReportOptions::default());
+        let card = cards.iter().find(|i| i.name == "Explore subagent").unwrap();
+        assert_eq!(
+            card.text,
+            "Ran on claude-opus-5-5 (90%), claude-haiku-4-5 (10%) and cost ~$2.20 ± $0.30. On claude-haiku-5-5 the same recorded tokens would cost $0.50, assuming the same turns. Anthropic's model guide notes that the built-in Explore runs on the session's model, and suggests a user agent named Explore with model: haiku to keep exploration cheap."
         );
+        assert_eq!(card.sources, [CLAUDE_MODEL_GUIDE]);
+        assert_eq!((card.how.as_ref(), card.quiet), (None, false));
         let details = text(&report, None, true);
         assert!(
             details.contains("Same tokens on claude-haiku-5-5: $0.50"),
@@ -9070,11 +9052,16 @@ mod tests {
         );
         assert!(!row.evidence.contains("half the weekly usage limit"));
         assert!(
-            summary.contains(&format!(
-                "\n  Fable weekly use: Cost ~$516 ± $40 over 5 Fable requests. On a Claude Max or Ultra plan or a Team or seat-based Enterprise premium seat, Fable models can use up to half the weekly usage limit, and use it faster than other models; on Pro or a Team or seat-based Enterprise standard seat, they run on usage credits; on usage-based Enterprise, they bill at API rates. {FABLE_PLANS}\n"
-            )),
+            !summary.contains("half the weekly usage limit"),
             "{summary}"
         );
+        let cards = advice(&report, ReportOptions::default());
+        let card = cards.iter().find(|i| i.name == "Fable weekly use").unwrap();
+        assert_eq!(
+            card.text,
+            "Cost ~$516 ± $40 over 5 Fable requests. On a Claude Max or Ultra plan or a Team or seat-based Enterprise premium seat, Fable models can use up to half the weekly usage limit, and use it faster than other models; on Pro or a Team or seat-based Enterprise standard seat, they run on usage credits; on usage-based Enterprise, they bill at API rates."
+        );
+        assert_eq!(card.sources, [FABLE_PLANS]);
         // --details keeps each span's cost with its unknowns, the caveats and the sources.
         let details = text(&report, None, true);
         for part in [
@@ -9098,8 +9085,8 @@ mod tests {
             row.evidence,
             "No Fable requests recorded in the window. Model setting: /model, or model in settings.json."
         );
-        // With no Fable use, there is nothing for the plan rule to warn about.
-        assert!(!summary.contains("WARNINGS"), "{summary}");
+        // With no Fable use, there is nothing for the plan rule to advise about.
+        assert_eq!(advice(&report, ReportOptions::default()), []);
     }
 
     #[test]

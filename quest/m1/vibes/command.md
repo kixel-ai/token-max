@@ -3,7 +3,8 @@
 ## Goal
 
 `token-max vibes` walks the advice token-max can't measure, using `doctor`'s
-cards and y/n/q confirm. It offers an edit only where one setting applies, and
+cards and y/n/q confirm. It offers an edit where the item names settings to
+change, one confirmed edit per settings file even when it writes two keys, and
 shows every other item as a cited card with no question. It exits 0, or 2 on
 a failed scan. Off a terminal it prints the cards.
 
@@ -22,8 +23,8 @@ transcripts. Off a terminal, `doctor` prints a one-line hint naming
 
 Decision prompts, chosen options marked ✅ (maintainer, 2026-11-23):
 
-- `vibes` itself: ✅ `doctor`'s walk, offering an edit where one setting
-  applies, exit 0 (rejected: exit 1 when it has an offer, which puts a verdict
+- `vibes` itself: ✅ `doctor`'s walk, offering an edit where the item names
+  the settings to change, exit 0 (rejected: exit 1 when it has an offer, which puts a verdict
   back on a guess; print only, which drops the Bash cap edit that motivated
   the command).
 - Hand-off: ✅ ask only when `vibes` has items, from the same scan, and print

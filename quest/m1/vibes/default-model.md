@@ -5,8 +5,9 @@
 `token-max vibes` suggests a main-session default of Claude Opus 5.5 at
 `medium` effort for Claude Code, and Sol 6.2 at `high` for Codex, whenever a
 settings file's default is neither the pick nor an accepted alternative:
-Opus 5.5 at `high`, or Sol 6.2 at `xhigh`. It offers the edit to the file
-that sets the default. The card names the maintainer's pick as its
+Opus 5.5 at `high`, or Sol 6.2 at `xhigh`. It offers one confirmed edit to
+the file that sets the default, writing the model and the effort together
+when both differ, or one edit per file when two files set them. The card names the maintainer's pick as its
 source, cites the provider guides the effort warning cites today, and shows
 the effort line's measured cost by model and effort.
 
@@ -30,8 +31,10 @@ Recommendations:
 
 - This card replaces the effort warning that
   [the command quest](/quest/m1/vibes/command.md) moves into `vibes`, so Sol
-  6.2 at `xhigh` no longer gets OpenAI's xhigh caution. Every other default
-  above `high` gets this card. `doctor`'s effort line stays evidence only.
+  6.2 at `xhigh` no longer gets OpenAI's xhigh caution. That is deliberate:
+  the maintainer accepted it as a fine default, and a caution against it
+  would contradict that. Every other default above `high` gets this card,
+  which still cites the guidance. `doctor`'s effort line stays evidence only.
 - Keep the picks and accepted alternatives in one table, so changing them is
   a one-line edit.
 - Confirm Sol 6.2's model ID before writing it. This host's Codex sessions

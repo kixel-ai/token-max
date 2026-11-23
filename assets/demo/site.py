@@ -1,7 +1,7 @@
 """Write max.kixel.me's terminal: the maintainer's `token-max doctor --defaults`, as HTML.
 
 Usage, from the repository root after `cargo build --release`, on the maintainer's host:
-    python3 assets/demo/site.py site/public ~/.claude=p ~/.claude-api-credits=a --ssh desktop ...
+    python3 assets/demo/site.py site/public ~/.claude=p ~/.claude-api-credits=a --since 2026-10-25 --ssh desktop ...
 
 Runs the release binary in a pseudo-terminal against this host's own transcripts and those of
 any --ssh destination, passing every argument that is not a PROFILE=ANSWER on to doctor and
@@ -21,7 +21,7 @@ import os
 import pty
 import re
 import sys
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 COMMAND = ["token-max", "doctor", "--defaults"]
@@ -259,8 +259,6 @@ TOTAL_LINE = re.compile(
 )
 # A whole spend, as doctor prints it without unpriced requests: an amount, perhaps with a margin.
 SPENT = re.compile(r"(~?)\$([\d,.]+)(?: ± \$[\d,.]+|, margin unknown)?")
-# This host's window, from its report's title line.
-WINDOW = re.compile(r"token-max: this host\s+[\d,]+ requests in [\d,]+ sessions? from \S+ to \S+ \((\d+ days?)\)")
 # One part of the "Changes offered" sentence: its amount and its percent of the hosts' spend.
 AMOUNT = re.compile(r"^(?:up to )?(?:about )?(~?)(<?)\$([\d,.]+)/mo.*?, (<?)(\d+)% of these hosts' spend")
 
@@ -304,7 +302,7 @@ def billions(tokens: int) -> str:
 LISTED = 5
 
 
-def results(plan: str, api: str, paid: set[str]) -> tuple[str, str]:
+def results(plan: str, api: str, paid: set[str], since: date, today: date) -> tuple[str, str]:
     """The results section and its bars' CSS: the plan run as the maintainer pays, and the
     run with every profile answered as API. Doctor asks only about this host's profiles, so a
     destination's main-TTL change stays "up to"; billing picks only that change's default, and
@@ -315,9 +313,8 @@ def results(plan: str, api: str, paid: set[str]) -> tuple[str, str]:
     spent = SPENT.fullmatch(spent_text)
     if not spent:
         sys.exit(f"the usage boxes need a whole spend, not {spent_text!r}")
-    window = WINDOW.search(" ".join(line.strip() for line in plain_lines(plan)))
-    if not window:
-        sys.exit("the usage boxes need this host's window, which its report's title gives")
+    # Every host's spend covers --since to the run, so the window is the same for the total.
+    days = (today - since).days
     plan_usd, plan_about, plan_pct = plan_offer["measured"]
     _, api_offer = offered(api)
     api_about = api_offer["measured"][1] or api_offer["up to"][1]
@@ -352,9 +349,16 @@ def results(plan: str, api: str, paid: set[str]) -> tuple[str, str]:
     items, css = [], []
     for n, (whole, on_plan, about, name) in enumerate(listed, 1):
         tag = ' <span class="tag">API only</span>' if on_plan < 0.005 else ""
+        # The bars are decorative, so a screen reader hears the split they draw as text.
+        if on_plan < 0.005:
+            split = ""
+        elif whole - on_plan < 0.005:
+            split = '<span class="sr">, all of it on my subscription too</span>'
+        else:
+            split = f'<span class="sr">, {usd(on_plan, about)}/mo of it on my subscription too</span>'
         items.append(
             f'    <li><span class="name">{html.escape(name)}{tag}</span>'
-            f'<span class="amt">{usd(whole, about)}<small>/mo</small></span>'
+            f'<span class="amt">{usd(whole, about)}<small>/mo</small></span>{split}'
             f'<span class="track" aria-hidden="true"><i class="plan"></i><i class="api"></i></span></li>'
         )
         # A saving too small to see keeps a sliver; one of nothing keeps none.
@@ -375,7 +379,7 @@ def results(plan: str, api: str, paid: set[str]) -> tuple[str, str]:
   <div class="stats">
     <div class="stat"><h3>Tokens</h3><p>{billions(int(tokens.replace(",", "")))}</p></div>
     <div class="stat"><h3>Requests</h3><p>{requests}</p></div>
-    <div class="stat"><h3>API price, {window[1]}</h3><p>{spent[1]}${spent[2]}</p></div>
+    <div class="stat"><h3>API price, {days} day{"" if days == 1 else "s"}</h3><p>{spent[1]}${spent[2]}</p></div>
   </div>
   <h3 class="where">What token-max saves</h3>
   <div class="cols">
@@ -390,8 +394,9 @@ def results(plan: str, api: str, paid: set[str]) -> tuple[str, str]:
       <p>{usd(api_usd, api_about)}/mo</p>
     </div>
   </div>
-{breakdown}  <p class="fine">Replayed at public API prices on {hosts} of my machines on {date.today().isoformat()}, each change
-  priced alone, so together they may save less. ~ marks figures extrapolated over unpriced requests.</p>
+{breakdown}  <p class="fine">Replayed at public API prices on {hosts} of my machines on {today.isoformat()}, each change
+  priced alone, so together they may save less. ~ marks figures extrapolated over unpriced requests,
+  assuming they resemble the priced ones.</p>
 """
     return fragment, "".join(css)
 
@@ -419,12 +424,20 @@ def main() -> None:
             sys.exit(f"{arg!r} is not PROFILE=p, PROFILE=a or PROFILE=s")
         home = os.environ["HOME"]
         answers["~" + profile[len(home) :] if profile.startswith(home) else profile] = answer
+    # The usage boxes name the window, so the run must set its start.
+    starts = [command[i + 1] for i, arg in enumerate(command[:-1]) if arg == "--since"]
+    starts += [arg.removeprefix("--since=") for arg in command if arg.startswith("--since=")]
+    if len(starts) != 1:
+        sys.exit("pass one --since YYYY-MM-DD, so the usage boxes can name their window")
+    since = date.fromisoformat(starts[0])
     typed = " ".join(command)
     transcript = run(command, answers)
     # The same run with every profile answered as API, for the results' API-rate column.
     api = run(command, {profile: "a" for profile in answers})
     run_steps, questions = steps(transcript)
-    figures, bars = results(transcript, api, {p for p, a in answers.items() if a == "a"})
+    # Doctor dates its window in UTC.
+    today = datetime.now(timezone.utc).date()
+    figures, bars = results(transcript, api, {p for p, a in answers.items() if a == "a"}, since, today)
     body = "".join(f'<span class="step">{chr(10).join(s)}\n</span>' for s in run_steps)
     fragment = f'<pre class="screen"><code><span class="cmdline">$ <span class="typed">{typed}</span>\n</span>{body}</code></pre>'
     replace(site / "index.html", "<!-- doctor -->", "<!-- /doctor -->", fragment)

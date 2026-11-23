@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::doctor::{Fix, Total};
-use crate::model::{Margin, Report};
+use crate::model::{Margin, Report, Request};
 use crate::report::Spend;
 
 /// One host's figures, or the sum of several.
@@ -16,6 +16,8 @@ use crate::report::Spend;
 #[serde(rename_all = "camelCase")]
 pub struct Totals {
     pub requests: u64,
+    /// The input and output tokens the requests recorded, cache reads and writes included.
+    pub tokens: u64,
     /// Sessions, each subagent counted with the session that spawned it.
     pub sessions: u64,
     /// What the requests cost at API prices, extrapolated over unpriced ones, plus `floor`.
@@ -40,6 +42,7 @@ impl Totals {
         savings.set_share(spend.monthly());
         Totals {
             requests: report.scan.coverage.requests,
+            tokens: tokens(&report.scan.requests),
             sessions: crate::report::sessions(&report.scan),
             spend: spend.usd,
             margin: spend.margin,
@@ -54,6 +57,7 @@ impl Totals {
     /// combine in quadrature.
     pub fn merge(&mut self, other: &Totals) {
         self.requests += other.requests;
+        self.tokens += other.tokens;
         self.sessions += other.sessions;
         self.spend += other.spend;
         self.margin = Margin::independent(self.margin, other.margin);
@@ -65,6 +69,19 @@ impl Totals {
     }
 }
 
+/// The input and output tokens `requests` recorded; a count a record left out adds none.
+fn tokens(requests: &[Request]) -> u64 {
+    requests
+        .iter()
+        .flat_map(|r| &r.parts)
+        .map(|p| {
+            let u = &p.usage;
+            // Input counts cache reads and writes; output counts reasoning.
+            u.input.unwrap_or(0).max(0) as u64 + u.output.unwrap_or(0).max(0) as u64
+        })
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,6 +90,7 @@ mod tests {
     fn host(requests: u64, spend: f64, margin: Option<Margin>, monthly: f64) -> Totals {
         Totals {
             requests,
+            tokens: requests * 10,
             sessions: requests / 10,
             spend,
             margin,
@@ -88,6 +106,7 @@ mod tests {
         // A host priced in full adds no margin of its own.
         total.merge(&host(1, 10.0, None, 5.0));
         assert_eq!(total.requests, 151);
+        assert_eq!(total.tokens, 1510);
         assert_eq!(total.sessions, 15);
         assert_eq!(total.spend, 1510.0);
         assert_eq!(total.monthly, 805.0);

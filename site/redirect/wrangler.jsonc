@@ -1,0 +1,10 @@
+// max.kixel.ai: the page's old host, answering every path with a 301 to the same path on max.kixel.me,
+// so shared install and run links keep working. Deploy by hand from this directory; see docs/releasing.md.
+{
+	"name": "max-kixel-ai",
+	"account_id": "dd618f5dbd5da77b8296f1613c301f5c",
+	"main": "redirect.js",
+	"compatibility_date": "2026-10-01",
+	"workers_dev": false,
+	"routes": [{ "pattern": "max.kixel.ai", "custom_domain": true }]
+}

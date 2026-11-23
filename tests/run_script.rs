@@ -1,4 +1,4 @@
-//! max.kixel.ai's run script (`run.sh`, or `run.ps1` on Windows) against fixture releases on a
+//! max.kixel.me's run script (`run.sh`, or `run.ps1` on Windows) against fixture releases on a
 //! local server.
 
 // Only the platforms the scripts have a release for.

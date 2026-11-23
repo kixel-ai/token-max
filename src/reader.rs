@@ -38,7 +38,22 @@ pub struct ScanOptions {
     pub discovery: DiscoveryOptions,
     /// Records whose timestamp proves they precede this instant stay outside selected billing.
     pub since: Option<Millis>,
+    /// Which transcripts to read.
+    pub reach: Reach,
 }
+
+/// Which transcripts a scan reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reach {
+    /// Every transcript, since checks read the history before the window too.
+    History,
+    /// Only transcripts written since the window opened, which hold every record in it.
+    Window,
+}
+
+/// The coarsest modification time a filesystem records, FAT's two seconds, so a transcript
+/// whose recorded time rounds down still counts as written in the window.
+const MODIFIED_RESOLUTION: Millis = 2_000;
 
 /// Bytes read per system call; lines longer than this are assembled across chunks.
 const CHUNK: usize = 1 << 20;
@@ -1891,6 +1906,11 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         mut t3,
     } = discover(&options.discovery)?;
     let snapshot_finished_at = iso(now());
+    // A record is written no earlier than its own timestamp, so a transcript last written
+    // before the window holds none of it.
+    if let (Reach::Window, Some(since)) = (options.reach, since) {
+        snapshots.retain(|s| s.modified.is_none_or(|m| m + MODIFIED_RESOLUTION >= since));
+    }
     let mut native_ids = crate::t3::NativeIds::default();
     let has_t3 = profiles.iter().any(|p| p.t3.is_some());
     let mut reader = Reader {

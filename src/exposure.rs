@@ -3528,6 +3528,7 @@ mod tests {
                     bytes: 0,
                     device: 0,
                     inode: 0,
+                    modified: None,
                     deferred_bytes: 0,
                     skipped_lines: 0,
                     unreadable: Default::default(),

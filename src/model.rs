@@ -1263,6 +1263,8 @@ pub struct Snapshot {
     pub bytes: u64,
     pub device: u64,
     pub inode: u64,
+    /// When the file was last written, as its filesystem recorded it; None when it records none.
+    pub modified: Option<Millis>,
     pub deferred_bytes: u64,
     /// Complete lines that were not valid JSON objects, such as truncated or interleaved writes.
     pub skipped_lines: u64,

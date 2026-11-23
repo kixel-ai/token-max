@@ -1168,8 +1168,9 @@ content is stored or tested.
 `--ssh HOST` runs `ssh -T -x -a` in batch mode, without forwarding, local
 commands, a configured remote command or a persisted control master, with
 stdin kept open (OpenSSH 8.7 or newer for those overrides), and asks
-the destination's `sh` to run `token-max doctor --ssh-scan` with this build
-on Linux or macOS, x86_64 or arm64. The script first prints one short line:
+the destination's `sh` to run `token-max doctor --ssh-scan`, or
+`token-max sessions --ssh-scan` for session lines, with this build on Linux or
+macOS, x86_64 or arm64. The script first prints one short line:
 `run` before it execs the binary it found, or `copy` or `download <target>`
 when it found none. Then a second `ssh` streams this binary to the cache
 there, or downloads this version's release archive there and checks it

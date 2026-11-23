@@ -17,7 +17,7 @@ use token_max::{
 };
 use token_max::{AnalyzeOptions, analyze};
 use token_max::{PriceOptions, load_prices};
-use token_max::{ScanOptions, scan};
+use token_max::{Reach, ScanOptions, scan};
 
 const BIN: &str = env!("CARGO_BIN_EXE_token-max");
 
@@ -240,7 +240,12 @@ fn analysis(home: &Path, since: Option<i64>, max_cost_per_use_usd: f64) -> Repor
         billing: Default::default(),
     };
     analyze(AnalyzeOptions {
-        scan: scan(&ScanOptions { discovery, since }).unwrap(),
+        scan: scan(&ScanOptions {
+            discovery,
+            since,
+            reach: Reach::History,
+        })
+        .unwrap(),
         catalog: &catalog,
         since,
         now: NOW,

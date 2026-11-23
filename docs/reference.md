@@ -765,6 +765,15 @@ session. A cost is a lower bound, marked `"complete": false`, when a request
 could not be priced or a transcript had unreadable or unfinished lines.
 Compaction summaries the transcripts never recorded are not estimated here.
 
+With `--since`, only transcripts written since the window opened are read, so
+a recent window costs what its own transcripts hold rather than the whole
+history. A record is never written before its own timestamp, so a transcript
+last modified before the window, allowing two seconds for filesystems that
+record coarse modification times, holds none of it. Each transcript read is
+read whole, since its earlier records still price the window's requests.
+`files` and `skippedLines` count only transcripts read. `doctor` reads every
+transcript, since its checks use the history before the window too.
+
 Each line names its `host`: the `--ssh` destination as given, or null for this
 host. Lines from every host are ordered together by first request; a session
 whose history was copied between hosts is printed once per host, each with its
@@ -988,7 +997,8 @@ priced session lines.
 token-max doctor --ssh devbox --ssh user@laptop --include-local
 ```
 
-The destination runs `token-max doctor --ssh-scan`, which discovers that host's own
+The destination runs `token-max doctor --ssh-scan`, or
+`token-max sessions --ssh-scan` for session lines, which discovers that host's own
 profiles from its home and environment, reads its transcripts and settings,
 and runs every check there, priced from the one catalog this host loads and
 sends it. Only its finished report comes back, so its transcripts and scan

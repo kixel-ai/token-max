@@ -186,6 +186,7 @@ impl Workspace {
                 billing: Default::default(),
             },
             since: None,
+            reach: crate::reader::Reach::History,
         }
     }
 }
@@ -217,6 +218,7 @@ pub fn make_snapshot(profile: &str, lines: &[&str], unmatched: u64) -> Snapshot 
         bytes: 0,
         device: 0,
         inode: 0,
+        modified: None,
         deferred_bytes: 0,
         skipped_lines: lines.len() as u64,
         unreadable,

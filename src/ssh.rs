@@ -1,7 +1,7 @@
 //! Audits of selected SSH destinations, each run by this build of `token-max` there.
 //!
-//! The coordinator runs `token-max doctor --ssh-scan` on each destination through the local OpenSSH
-//! client, with its configuration, authentication and host keys. The destination reads its own
+//! The coordinator runs `token-max doctor --ssh-scan`, or `token-max sessions --ssh-scan` for
+//! session lines, on each destination through the local OpenSSH client, with its configuration, authentication and host keys. The destination reads its own
 //! histories and settings, prices them with the coordinator's catalog, and sends back only its
 //! printed report or its session lines (see [`crate::wire`]); its scan never leaves it.
 //!
@@ -24,7 +24,7 @@ use crate::cli::{Printed, Render, Rendered, render};
 use crate::discovery::DiscoveryOptions;
 use crate::doctor::{Event, Offers, Owner, Style, Written, preview, write};
 use crate::model::Millis;
-use crate::reader::{ScanOptions, scan};
+use crate::reader::{Reach, ScanOptions, scan};
 use crate::safe::{ScanError, iso, terminal_text};
 use crate::sessions::{self, export};
 use crate::wire::{self, Answer, Header, Job, Outcome, Request, Stream};
@@ -138,20 +138,43 @@ fn remote(script: &str, args: &[&str]) -> String {
     command
 }
 
-fn run_command(binary: &Binary, since: Option<Millis>, defaults: bool) -> String {
+/// What a destination scans for, which it must know before its job arrives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    /// A report, with every settings file pretended away for `--defaults`.
+    Report { defaults: bool },
+    /// Session lines.
+    Sessions,
+}
+
+impl Scope {
+    /// The transcripts the scan reads.
+    pub fn reach(self) -> Reach {
+        match self {
+            Scope::Report { .. } => Reach::History,
+            Scope::Sessions => Reach::Window,
+        }
+    }
+}
+
+fn run_command(binary: &Binary, since: Option<Millis>, scope: Scope) -> String {
     let since = since.map(iso);
+    let command = match scope {
+        Scope::Report { .. } => "doctor",
+        Scope::Sessions => "sessions",
+    };
     let mut args = vec![
         std::env::consts::OS,
         std::env::consts::ARCH,
         &binary.name,
         VERSION,
-        "doctor",
+        command,
         "--ssh-scan",
     ];
     if let Some(since) = &since {
         args.extend(["--since", since]);
     }
-    if defaults {
+    if scope == (Scope::Report { defaults: true }) {
         args.push("--defaults");
     }
     remote(RUN, &args)
@@ -428,10 +451,10 @@ fn provision(destination: &str, found: &Found) -> Result<(), ScanError> {
 pub fn audit(
     destination: &str,
     since: Option<Millis>,
-    defaults: bool,
+    scope: Scope,
     request: mpsc::Receiver<Request>,
 ) -> Result<Reply, ScanError> {
-    let command = run_command(binary()?, since, defaults);
+    let command = run_command(binary()?, since, scope);
     let mut provisioned = false;
     let (mut session, stdout, ran) = loop {
         let (mut session, mut stdout) = spawn(destination, command.clone(), Stdio::piped())?;
@@ -706,7 +729,7 @@ struct Walked {
 /// coordinator's request arrives on stdin while this host scans, and the audit stops when stdin
 /// closes, which happens when the coordinator or its connection ends, unless it already asked
 /// this host to write.
-pub fn serve(since: Option<Millis>, defaults: bool) -> u8 {
+pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
     let (sender, incoming) = mpsc::channel();
     std::thread::spawn(move || {
         let mut stdin = BufReader::new(io::stdin());
@@ -744,14 +767,24 @@ pub fn serve(since: Option<Millis>, defaults: bool) -> u8 {
     }
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
         let mut discovery = DiscoveryOptions::host()?;
-        if defaults {
+        if scope == (Scope::Report { defaults: true }) {
             discovery.pretend_defaults();
         }
-        let scan = scan(&ScanOptions { discovery, since })?;
+        let reach = scope.reach();
+        let scan = scan(&ScanOptions {
+            discovery,
+            since,
+            reach,
+        })?;
         // The stdin thread keeps the sender until it exits this process.
         let Ok(Incoming::Request(request)) = incoming.recv() else {
             unreachable!("the request comes first")
         };
+        if matches!(request.job, Job::Sessions) != (scope == Scope::Sessions) {
+            return Err(ScanError::new(
+                "the coordinator asked for another job than this host scanned for",
+            ));
+        }
         let (max_cost_per_use_usd, format, walk) = match &request.job {
             Job::Report {
                 max_cost_per_use_usd,

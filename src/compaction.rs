@@ -2679,6 +2679,7 @@ mod tests {
                     bytes: 0,
                     device: 0,
                     inode: 0,
+                    modified: None,
                     deferred_bytes: 0,
                     skipped_lines: 10000,
                     unreadable: Default::default(),
@@ -4807,6 +4808,7 @@ mod tests {
                     billing: Default::default(),
                 },
                 since: None,
+                reach: crate::reader::Reach::History,
             }
         }
 
@@ -5498,6 +5500,7 @@ mod tests {
                 bytes: 0,
                 device: 0,
                 inode: 0,
+                modified: None,
                 deferred_bytes: 0,
                 skipped_lines,
                 unreadable: Default::default(),

@@ -553,6 +553,41 @@ mod tests {
     }
 
     #[test]
+    fn a_window_reads_only_transcripts_written_since_it_opened() {
+        let w = Workspace::new();
+        let since: Millis = 1_793_491_200_000;
+        let project = w.claude.join("projects/project");
+        // Each file's modification time is set before its own record, which no harness writes,
+        // so only a file the window reads can export its session.
+        for (name, written) in [("late", since - 2_001), ("rounded", since - 2_000)] {
+            let path = project.join(format!("{name}.jsonl"));
+            let record = reply(name, name, "2026-11-01T00:01:00Z", "main", "high");
+            write(&path, &[record], "");
+            let at = std::time::UNIX_EPOCH + std::time::Duration::from_millis(written as u64);
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+        }
+        let exported = |reach| {
+            let options = crate::reader::ScanOptions {
+                since: Some(since),
+                reach,
+                ..w.scan_options()
+            };
+            let sessions = export(&scan(&options).unwrap(), &prices()).unwrap();
+            let ids: Vec<_> = sessions.into_iter().filter_map(|s| s.session).collect();
+            ids
+        };
+        use crate::reader::Reach;
+        assert_eq!(exported(Reach::History), ["late", "rounded"]);
+        // A two-second modification time may round a write in the window down to before it.
+        assert_eq!(exported(Reach::Window), ["rounded"]);
+    }
+
+    #[test]
     fn codex_review_threads_name_their_parent_and_effort() {
         let w = Workspace::new();
         let thread = |id: &str, source: Value, root: Option<&str>| {

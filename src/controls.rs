@@ -6,8 +6,8 @@ use serde_json::{Map, Value};
 
 use crate::model::{
     BackgroundControl, BackgroundFeature, BashCapControl, Change, CompactionControls, EventKind,
-    Harness, IdleAttribution, IdleControl, Location, MemoryControl, Millis, PercentOverride, Scan,
-    Setting, Source, SpeedControl, TunedWindow, WindowControl,
+    Harness, IdleAttribution, IdleControl, Inbound, InboundControl, Location, MemoryControl,
+    Millis, PercentOverride, Scan, Setting, Source, SpeedControl, TunedWindow, WindowControl,
 };
 use crate::safe::{MAX_SAFE_INTEGER, ScanError, object};
 
@@ -368,6 +368,49 @@ pub fn claude_memory(scopes: &[SettingsScope], env: &Env) -> Result<MemoryContro
         unresolved: None,
         overrides: vec![],
         stored: false,
+    })
+}
+
+/// `crossSessionInbound` as Claude Code resolves it: managed, then user settings, the first
+/// value found; then a project or local value from `repository`, only where it is stricter.
+/// Neither file setting it leaves Claude Code to decide per message.
+/// <https://code.claude.com/docs/en/settings-reference#crosssessioninbound>
+pub fn claude_inbound(
+    managed: SettingsScope,
+    user: SettingsScope,
+    repository: &[SettingsScope],
+) -> Result<InboundControl, ScanError> {
+    let key = "crossSessionInbound";
+    let read = |scope: &SettingsScope| match scope.config.get(key) {
+        None => Ok(None),
+        Some(Value::String(s)) if s == "accept" => Ok(Some(Inbound::Accept)),
+        Some(Value::String(s)) if s == "hold" => Ok(Some(Inbound::Hold)),
+        Some(Value::String(s)) if s == "refuse" => Ok(Some(Inbound::Refuse)),
+        Some(_) => Err(invalid(format!("invalid {key}"), scope.file)),
+    };
+    let mut resolved = None;
+    for scope in [managed, user] {
+        if let Some(value) = read(&scope)? {
+            resolved = Some((value, scope.file));
+            break;
+        }
+    }
+    let policy = resolved.is_some_and(|(_, file)| file == managed.file);
+    for scope in repository {
+        let current = resolved.map(|(value, _)| value);
+        let Some(value) = read(scope)? else { continue };
+        // A repository value as strict as the user's also holds it there, so Claude Code
+        // names the repository; managed settings keep their name.
+        let tied = current == Some(value) && value != Inbound::Accept && !policy;
+        if value > current.unwrap_or(Inbound::Accept) || tied {
+            resolved = Some((value, scope.file));
+        }
+    }
+    Ok(InboundControl {
+        value: resolved.map(|(value, _)| value),
+        file: resolved.map_or(user.file, |(_, file)| file).to_string(),
+        directory: None,
+        unresolved: None,
     })
 }
 
@@ -2840,5 +2883,87 @@ mod tests {
         ] {
             assert_eq!(native_million(model), million, "{model}");
         }
+    }
+
+    #[test]
+    fn inbound_takes_the_first_trusted_value_and_only_stricter_repository_values() {
+        let config = |value: Option<&str>| match value {
+            Some(v) => map(json!({ "crossSessionInbound": v })),
+            None => Map::new(),
+        };
+        // Managed, user, then each repository file; the value and the file that decides it.
+        let resolve = |managed: Option<&str>, user: Option<&str>, repository: &[Option<&str>]| {
+            let configs: Vec<Map<String, Value>> =
+                repository.iter().map(|value| config(*value)).collect();
+            let names: Vec<String> = (0..configs.len()).map(|i| format!("repo{i}")).collect();
+            let scopes: Vec<SettingsScope> = configs
+                .iter()
+                .zip(&names)
+                .map(|(config, file)| SettingsScope { config, file })
+                .collect();
+            let (managed, user) = (config(managed), config(user));
+            let c = claude_inbound(
+                SettingsScope {
+                    config: &managed,
+                    file: "managed",
+                },
+                SettingsScope {
+                    config: &user,
+                    file: "user",
+                },
+                &scopes,
+            )
+            .unwrap();
+            (c.value.map(Inbound::as_str), c.file)
+        };
+        let at = |value: Option<&'static str>, file: &str| (value, file.to_string());
+        // Unset everywhere leaves the per-message default, set in the user's file.
+        assert_eq!(resolve(None, None, &[]), at(None, "user"));
+        // Managed outranks the user, whatever either says.
+        assert_eq!(
+            resolve(Some("accept"), Some("refuse"), &[]),
+            at(Some("accept"), "managed")
+        );
+        assert_eq!(resolve(None, Some("hold"), &[]), at(Some("hold"), "user"));
+        // A repository value applies only where stricter, even over managed settings.
+        assert_eq!(
+            resolve(None, Some("hold"), &[Some("accept")]),
+            at(Some("hold"), "user")
+        );
+        assert_eq!(
+            resolve(Some("accept"), None, &[Some("hold"), Some("refuse")]),
+            at(Some("refuse"), "repo1")
+        );
+        // With nothing trusted set, a repository accept stays the per-message default.
+        assert_eq!(resolve(None, None, &[Some("accept")]), at(None, "user"));
+        assert_eq!(
+            resolve(None, None, &[Some("hold")]),
+            at(Some("hold"), "repo0")
+        );
+        // A tie holds it in the repository too, unless managed settings decide it.
+        assert_eq!(
+            resolve(None, Some("hold"), &[Some("hold")]),
+            at(Some("hold"), "repo0")
+        );
+        assert_eq!(
+            resolve(Some("hold"), None, &[Some("hold")]),
+            at(Some("hold"), "managed")
+        );
+        // A value Claude Code does not recognize fails where it is set.
+        let bad = map(json!({ "crossSessionInbound": "deny" }));
+        let none = Map::new();
+        let error = claude_inbound(
+            SettingsScope {
+                config: &none,
+                file: "managed",
+            },
+            SettingsScope {
+                config: &bad,
+                file: "/synthetic/settings.json",
+            },
+            &[],
+        )
+        .unwrap_err();
+        assert!(error.message.contains("invalid crossSessionInbound"));
     }
 }

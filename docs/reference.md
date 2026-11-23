@@ -1263,3 +1263,36 @@ with `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` or
 `CLAUDE_CODE_USE_FOUNDRY` is billed by its cloud provider and gets no line.
 Change the model with `/model` or the `model` setting.
 See [Fable weekly use](semantics.md#fable-weekly-use).
+
+## Messages from other sessions
+
+Each Claude settings file gets one `Messages from other sessions` line: what
+the turns that messages from your other Claude Code sessions started in an
+idle session cost over the window, how many such messages arrived, how many
+more arrived between tool calls of a running turn, the current
+`crossSessionInbound` value and the file that sets it. Claude Code starts a
+new turn for a message to an idle session, which resends the whole
+conversation, and a break past the cache TTL makes that turn a cache miss
+([costs doc](https://code.claude.com/docs/en/costs#why-usage-climbs-in-a-long-session)).
+An idle notice another session sends back when asked with `notify_when_idle`
+counts as a message. A subagent's report to its own session is not one: no
+setting gates it.
+
+`crossSessionInbound` set to `refuse` drops each message, and `hold` shows it
+as a notice and keeps it undelivered until an `accept` applies
+([settings reference](https://code.claude.com/docs/en/settings-reference#crosssessioninbound),
+[cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging#control-inbound-messages)),
+so the cost is every request of those turns, the subagents they started
+included: the work done in them is what the setting trades. With no value
+set, Claude Code decides per message from the two sessions' permission modes,
+holding one only when one session bypasses permission prompts and the other
+does not, so the line shows `unset, by permission mode` rather than `accept`.
+Messages read between tool calls are counted but not priced, since what one
+added to its turn cannot be told apart.
+
+The line is evidence, never a recommendation: its dot is dim, with no
+verdict, and it never changes the exit code or offers a change. Sessions that
+coordinate, such as an orchestrator and its workers, depend on these messages,
+so a high cost per message is no reason to stop them. Codex has no such
+setting and gets no line. See
+[Messages from other sessions](semantics.md#messages-from-other-sessions).

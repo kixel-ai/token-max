@@ -2344,6 +2344,7 @@ mod tests {
             background_directories: IndexMap::default(),
             background_requests: IndexMap::default(),
             memory: None,
+            inbound: None,
             t3: None,
         };
         let mut first = at("sample-resume", "sample", 1000);

@@ -9,14 +9,14 @@ use serde_json::{Map, Value};
 
 use crate::controls::{
     CLAUDE_BACKGROUND_ENV, CompactionSources, Env, SettingsScope, bash_cap_control,
-    claude_background, claude_memory, codex_background, codex_memory, compaction_controls,
-    idle_controls, js_string, members, scoped_environment, speed_controls,
+    claude_background, claude_inbound, claude_memory, codex_background, codex_memory,
+    compaction_controls, idle_controls, js_string, members, scoped_environment, speed_controls,
 };
 use crate::effort::{claude_effort, codex_catalog, codex_effort, latest_model};
 use crate::model::{
-    Agent, BackgroundControl, Billing, Control, ControlValue, Harness, IdleControl, Location,
-    MemoryControl, PerBucket, Profile, Request, RootOrigin, RootState, RootStatus, Scalar,
-    Snapshot, SpeedControl, Ttl, TtlControl,
+    Agent, BackgroundControl, Billing, Control, ControlValue, Harness, IdleControl, InboundControl,
+    Location, MemoryControl, PerBucket, Profile, Request, RootOrigin, RootState, RootStatus,
+    Scalar, Snapshot, SpeedControl, Ttl, TtlControl,
 };
 use crate::safe::{ScanError, identity, label};
 
@@ -1199,6 +1199,16 @@ pub fn discover_claude_controls(
                     local_env,
                     recorded,
                 )?);
+                // A session in the home directory reads the user's own file as its project's.
+                let repository: Vec<SettingsScope> = [&scopes[3], &scopes[2], &scopes[1]]
+                    .into_iter()
+                    .filter(|s| !same_file(s.file, &profile.settings_file))
+                    .copied()
+                    .collect();
+                profile.inbound = Some(InboundControl {
+                    directory: Some(cwd.into()),
+                    ..claude_inbound(scopes[4], scopes[0], &repository)?
+                });
             }
             let settings_env = scoped_environment(&scopes, &empty);
             let launch_conflict = CLAUDE_BACKGROUND_ENV.iter().any(|key| {
@@ -2402,6 +2412,11 @@ pub(crate) fn profile(
     } else {
         codex_background(&speed_scopes)?
     };
+    let inbound = if claude {
+        Some(claude_inbound(speed_scopes[1], speed_scopes[0], &[])?)
+    } else {
+        None
+    };
     let memory = if claude {
         claude_memory(&speed_scopes, local_env)?
     } else {
@@ -2437,6 +2452,7 @@ pub(crate) fn profile(
         background_directories: IndexMap::default(),
         background_requests: IndexMap::default(),
         memory: Some(memory),
+        inbound,
         t3: None,
         agents: crate::model::AgentControls::default(),
         instruction_budget_file,

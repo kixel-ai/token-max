@@ -348,6 +348,25 @@ fn numeric_tools(raw: Option<&Value>) -> Result<Option<IndexMap<String, i64>>, S
     Ok(Some(result))
 }
 
+/// The text Claude Code opens a cross-session idle notice with, which records no origin.
+const PEER_IDLE_NOTICE: &str = "[Cross-session idle notice]";
+
+/// Whether a user record or queued command delivers what `crossSessionInbound` gates: a
+/// message from another session, or an idle notice one sent. A subagent's message to its own
+/// session is a peer too, but carries `senderTaskId` and passes no gate.
+fn delivered(record: &Map<String, Value>, content: Option<&Value>) -> bool {
+    match record.get("origin") {
+        Some(origin) => {
+            let origin = object(origin);
+            is(origin, "kind", "peer") && !origin.contains_key("senderTaskId")
+        }
+        None => {
+            is_true(record, "isMeta")
+                && matches!(content, Some(Value::String(s)) if s.starts_with(PEER_IDLE_NOTICE))
+        }
+    }
+}
+
 /// The exact native idle notice text; any other informational notice is ignored.
 fn idle_notice(text: &str) -> bool {
     const NOTICES: [&str; 2] = [
@@ -381,6 +400,9 @@ fn kind_name(kind: EventKind) -> &'static str {
         EventKind::Settings => "settings",
         EventKind::Client => "client",
         EventKind::IdleNotice => "idle-notice",
+        EventKind::PeerTurn => "peer-turn",
+        EventKind::PeerMessage => "peer-message",
+        EventKind::AutoTurn => "auto-turn",
     }
 }
 
@@ -1429,13 +1451,35 @@ impl Reader {
                     }
                 }
             }
-            if !tool_result && !is_true(raw, "isMeta") {
+            // A compaction summary carries its turn's origin but continues that turn.
+            let turn = if tool_result || is_true(raw, "isCompactSummary") {
+                None
+            } else if delivered(raw, m.get("content")) {
+                selected.then_some(EventKind::PeerTurn)
+            } else if !is_true(raw, "isMeta") {
+                Some(EventKind::TurnStart)
+            } else if selected
+                && (raw.contains_key("turnOrigin") || is(nested(raw, "origin"), "kind", "peer"))
+            {
+                Some(EventKind::AutoTurn)
+            } else {
+                None
+            };
+            if let Some(turn) = turn {
+                let e = event(snapshot, location, context, time, turn, uuid);
+                self.add_event(e);
+            }
+        } else if kind == Some("attachment") {
+            let a = nested(raw, "attachment");
+            if is(a, "type", "queued_command") && delivered(a, a.get("prompt")) {
+                let time =
+                    time.ok_or_else(|| ScanError::new("missing message delivery timestamp"))?;
                 let e = event(
                     snapshot,
                     location,
                     context,
                     time,
-                    EventKind::TurnStart,
+                    EventKind::PeerMessage,
                     uuid,
                 );
                 self.add_event(e);

@@ -631,6 +631,14 @@ pub enum EventKind {
     Settings,
     Client,
     IdleNotice,
+    /// A message from another session, or an idle notice one sent, that started a turn in
+    /// an idle session.
+    PeerTurn,
+    /// A message from another session delivered between tool calls of a running turn.
+    PeerMessage,
+    /// A turn Claude Code started without a prompt, such as for a subagent's report or a
+    /// scheduled task; it only ends the turn before it.
+    AutoTurn,
 }
 
 /// What tied an idle period to its cause, when anything did.
@@ -978,6 +986,8 @@ pub struct Profile {
     pub background_requests: IndexMap<Text, std::sync::Arc<[BackgroundControl]>>,
     /// Auto memory's current setting.
     pub memory: Option<MemoryControl>,
+    /// Claude's `crossSessionInbound`; None for Codex, which has no such setting.
+    pub inbound: Option<InboundControl>,
     pub t3: Option<T3Instance>,
     /// Current controls that choose subagent models and efforts.
     pub agents: AgentControls,
@@ -1184,6 +1194,44 @@ pub enum BackgroundFeature {
     GoalCheckIns,
     /// Codex's recap while the terminal is unfocused.
     AutoRecaps,
+}
+
+/// What Claude Code does with a message from another of your sessions, least strict first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Inbound {
+    /// Delivers it.
+    Accept,
+    /// Shows a notice and keeps it undelivered until an `accept` applies.
+    Hold,
+    /// Drops it.
+    Refuse,
+}
+
+impl Inbound {
+    /// The value as settings spell it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Inbound::Accept => "accept",
+            Inbound::Hold => "hold",
+            Inbound::Refuse => "refuse",
+        }
+    }
+}
+
+/// `crossSessionInbound` as Claude Code resolves it today, and the file that decides it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InboundControl {
+    /// None when no file sets it, so Claude Code decides per message from the two sessions'
+    /// permission modes.
+    pub value: Option<Inbound>,
+    /// The file that sets `value`, or the user's settings file when none does.
+    pub file: String,
+    /// The working directory whose project and local files were read, the latest session's;
+    /// None when only user and managed settings were.
+    pub directory: Option<String>,
+    /// Why a source token-max cannot read may decide it instead, such as a T3 instance's
+    /// launch arguments; None when it resolved.
+    pub unresolved: Option<String>,
 }
 
 /// Whether auto memory is on in current settings, and the setting that turns it off.
@@ -3089,6 +3137,23 @@ pub struct FableWeek {
     pub estimate: Option<Estimate>,
 }
 
+/// What the turns messages from other sessions started cost the Claude profiles that share
+/// one `crossSessionInbound` value and owner.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InboundUse {
+    pub profiles: Vec<String>,
+    pub control: InboundControl,
+    /// Messages and idle notices delivered to an idle session, each starting a turn.
+    pub idle: u64,
+    /// Messages delivered between tool calls of a running turn, whose cost is not measured.
+    pub busy: u64,
+    /// Requests of the turns `idle` started, with the subagents those turns spawned.
+    pub requests: u64,
+    pub cost: Cost,
+    /// `cost` extrapolated from the priced requests to every one; None when none was priced.
+    pub estimate: Option<Estimate>,
+}
+
 /// One host's analysis, which the text report presents.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Report {
@@ -3112,6 +3177,8 @@ pub struct Report {
     pub subagents: Vec<SubagentCost>,
     /// Each subscription-eligible Claude profile's weekly Fable spend, as evidence only.
     pub fable: Vec<FableUse>,
+    /// Each `crossSessionInbound` line's message-started turns, as evidence only.
+    pub inbound: Vec<InboundUse>,
     /// One result per setting checked.
     pub checks: Vec<CheckResult>,
     /// What the report assumes beyond the measurements.

@@ -937,7 +937,8 @@ pub struct EffortControl {
     /// Why the default cannot be resolved, such as an unrecorded `--profile` selection.
     pub unresolved: Option<String>,
     /// The default as these settings resolve it on the model the maintainer picks, whose
-    /// own level setting may differ; None when the model is already that one or unknown.
+    /// own level setting may differ, with its model as the settings would name it, such as
+    /// with a `[1m]`; None when the model is already that one or unknown.
     pub picked: Option<Box<EffortControl>>,
 }
 

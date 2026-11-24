@@ -445,10 +445,11 @@ fn default_pair(model: Option<&str>, level: Option<&str>) -> String {
 /// the settings give, the provider's guidance past `high`, and what each recorded model and
 /// effort pair cost. None when the default is unresolved.
 fn default_item(e: &EffortCheck, profile: &str, how: Option<How>, out: &Out<'_>) -> Option<Item> {
-    if e.base.action != Action::Keep {
+    let c = &e.control;
+    // A Codex level with no model to weigh it on names no default either.
+    if e.base.action != Action::Keep || c.model.is_none() {
         return None;
     }
-    let c = &e.control;
     let ((model, effort), others) = crate::effort::pick(e.harness);
     let pick = default_pair(Some(model), Some(effort));
     let fine: Vec<String> = others
@@ -461,13 +462,12 @@ fn default_item(e: &EffortCheck, profile: &str, how: Option<How>, out: &Out<'_>)
         format!("Defaults to {current}, the maintainer's pick.")
     } else if quiet {
         format!("Defaults to {current}, which the maintainer accepts beside their pick, {pick}.")
-    } else if fine.is_empty() {
-        format!("Defaults to {current}. The maintainer's pick is {pick}.")
     } else {
-        format!(
-            "Defaults to {current}. The maintainer's pick is {pick}, and {} is fine too.",
-            fine.join(" or ")
-        )
+        let mut text = format!("Defaults to {current}. The maintainer's pick is {pick}");
+        if !fine.is_empty() {
+            let _ = write!(text, ", and {} is fine too", fine.join(" or "));
+        }
+        text + "."
     };
     // An accepted default is fine as it is, so no caution is raised against it.
     if let Some(guidance) = c
@@ -567,7 +567,7 @@ fn effort_evidence(e: &EffortCheck, mark: Mark, out: &Out<'_>) -> String {
     if let (Some(model), Some(level)) = (&c.model, &c.level) {
         let mut text = if level == "auto" {
             format!("No level is sent to {model}")
-        } else if c.owner.ends_with("(the model's default)") {
+        } else if c.owner.ends_with(crate::effort::MODEL_DEFAULT) {
             format!("{model} defaults to {level}")
         } else {
             format!("The default is set to {level} on {model}")
@@ -5478,7 +5478,9 @@ fn summary(
         vibes.push(bash_item(cap, &profile, how, out));
     }
     for (_, result, r) in &checks {
-        if let CheckResult::Effort(e) = result {
+        if let CheckResult::Effort(e) = result
+            && e.base.action == Action::Keep
+        {
             let how = report
                 .scan
                 .profiles
@@ -8333,6 +8335,15 @@ mod tests {
         let (_, warning, _) = line(Harness::Codex, control("gpt-6.1-sol", "ultra", toml));
         let card = warning.expect("ultra is off the pick");
         assert_eq!(card.value, "gpt-6.1-sol at ultra -> gpt-6.2-sol at high");
+        // A Codex level with no model named or recorded is no default to weigh.
+        let (_, warning, _) = line(
+            Harness::Codex,
+            EffortControl {
+                model: None,
+                ..control("gpt-6.1-sol", "xhigh", toml)
+            },
+        );
+        assert!(warning.is_none());
         // Sol 6.2 at xhigh is accepted, so OpenAI's xhigh caution is not shown against it.
         let (_, warning, _) = line(Harness::Codex, control("gpt-6.2-sol", "xhigh", toml));
         let card = warning.expect("an accepted default has a card");

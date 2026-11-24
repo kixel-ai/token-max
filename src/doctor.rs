@@ -673,7 +673,11 @@ pub(crate) fn default_how(control: &EffortControl, profile: &Profile) -> Option<
     let file = profile.settings_file.as_str();
     // Each change: the setting that decides it, its edit when it is in `file`, and its step.
     let mut changes: Vec<(&str, Option<Edit>, String)> = vec![];
+    // The pick's model may take its level from another setting than the current model's.
+    let target = control.picked.as_deref().unwrap_or(control);
     if control.model.as_deref() != Some(model) {
+        // As the settings will name it, which keeps a `[1m]` context window.
+        let model = target.model.as_deref().unwrap_or(model);
         let owner = control.model_owner.as_str();
         let (setting, edit) = if owner == crate::effort::RECORDED {
             (format!("{file}:model"), Some(Edit::set("model", model)))
@@ -684,13 +688,23 @@ pub(crate) fn default_how(control: &EffortControl, profile: &Profile) -> Option<
         } else {
             (owner.to_string(), None)
         };
-        changes.push((owner, edit, format!("set {setting} to {model}")));
+        let step = format!("set {setting} to {model}");
+        // A cloud provider names its models its own way, which token-max does not write.
+        if let Some(provider) = &profile.provider {
+            return Some(How::Manual {
+                step: format!("{step}, in {provider}'s spelling of that model"),
+                reason: format!(
+                    "the profile runs on {provider}, whose model IDs token-max does not write"
+                ),
+            });
+        }
+        changes.push((owner, edit, step));
     }
-    // The pick's model may take its level from another setting than the current model's.
-    let target = control.picked.as_deref().unwrap_or(control);
     if target.level.as_deref() != Some(effort) {
         let owner = target.owner.as_str();
-        let setting = owner.split(" (").next().unwrap_or(owner);
+        let setting = owner
+            .strip_suffix(crate::effort::MODEL_DEFAULT)
+            .unwrap_or(owner);
         let edit = setting
             .strip_prefix(file)
             .and_then(|rest| rest.strip_prefix(':'))
@@ -735,10 +749,9 @@ fn effort_edit(harness: Harness, key: &str, level: &str) -> Option<Edit> {
         op: Op::Set,
     };
     match harness {
+        // The user file's top-level `effortLevel` never decides the level of a current
+        // model, which is all the pick names.
         Harness::Claude => {
-            if key == "effortLevel" {
-                return Some(set(vec![key.into()]));
-            }
             if key == "env.CLAUDE_CODE_EFFORT_LEVEL" {
                 return Some(env("CLAUDE_CODE_EFFORT_LEVEL", level));
             }
@@ -5709,6 +5722,37 @@ mod tests {
             step.ends_with(&format!("raise {file}:maxEffortLevel to medium")),
             "{step}"
         );
+        // A `[1m]` context window carries over to the pick.
+        std::fs::write(&file, r#"{"model": "claude-fable-5-2[1M]"}"#).unwrap();
+        let control = default_in(&file, Harness::Claude, &[]);
+        let Some(How::Edit(patch)) = default_how(&control, &claude) else {
+            panic!("the model is in the user file")
+        };
+        assert_eq!(patch.edits, [Edit::set("model", "claude-opus-5-5[1m]")]);
+        // A cloud provider spells its models its own way, so the model is changed by hand.
+        let bedrock = Profile {
+            provider: Some("bedrock".into()),
+            ..claude.clone()
+        };
+        let Some(How::Manual { step, reason }) = default_how(&control, &bedrock) else {
+            panic!("a provider's model is set by hand")
+        };
+        assert!(
+            step.ends_with("in bedrock's spelling of that model"),
+            "{step}"
+        );
+        assert!(reason.contains("bedrock"), "{reason}");
+        // A home whose path holds " (" still takes the edit.
+        let odd = w.home.join("a (b)");
+        std::fs::create_dir_all(&odd).unwrap();
+        let odd = make_profile("odd", &odd.to_string_lossy());
+        std::fs::write(
+            &odd.settings_file,
+            r#"{"model": "claude-opus-5-5", "env": {"CLAUDE_CODE_EFFORT_LEVEL": "xhigh"}}"#,
+        )
+        .unwrap();
+        let control = default_in(&odd.settings_file, Harness::Claude, &[]);
+        assert!(matches!(default_how(&control, &odd), Some(How::Edit(_))));
 
         // Codex: no model set, so the user file takes both, and the pick's level is not its default.
         let mut codex = make_profile("codex", &w.codex.to_string_lossy());

@@ -1334,9 +1334,12 @@ model resolves to, such as `modelSettings.claude-opus-5-5.effortLevel` or
 The level is resolved for the pick's model, since Claude keeps a level per
 model: moving from Fable to Opus 5.5 with no level set for Opus needs only the
 model, since Opus 5.5 defaults to `medium`. When no setting names the model,
-the edit sets it in the profile's file. When another file or a shell variable
-decides either setting, or a `maxEffortLevel` below the pick's level would
-lower it, the whole change is a step by hand naming each setting.
+the edit sets it in the profile's file, and a `[1m]` the current model names
+carries over to the pick. When another file or a shell variable decides
+either setting, or a `maxEffortLevel` below the pick's level would lower it,
+the whole change is a step by hand naming each setting; so is a new model on
+a cloud provider, such as Bedrock, which spells model IDs its own way. A
+Codex level with no model set or recorded has no card.
 
 ## Main-session effort
 

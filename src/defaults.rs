@@ -212,7 +212,7 @@ pub fn check(result: &CheckResult, profile: Option<&Profile>) -> Option<Baseline
             // What the session runs at, after a level and any `maxEffortLevel` cap; `auto`
             // sends none, so the model runs at its own default.
             let effective = c.effective.as_deref()?;
-            let unset = c.owner.ends_with("(the model's default)") && c.caps.is_empty();
+            let unset = c.owner.ends_with(crate::effort::MODEL_DEFAULT) && c.caps.is_empty();
             match c.default.as_deref() {
                 Some(default) if effective == default || effective == "auto" => None,
                 Some(default) => baseline(default, Saving::NotMeasured),

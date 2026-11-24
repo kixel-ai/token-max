@@ -176,6 +176,9 @@ pub(crate) fn latest_model<'a>(requests: &[&'a Request]) -> Option<&'a str> {
         .map(|(model, _)| *model)
 }
 
+/// What a level owner ends with when no setting names a level.
+pub(crate) const MODEL_DEFAULT: &str = " (the model's default)";
+
 /// The model owner when no setting names the model.
 pub(crate) const RECORDED: &str = "the latest recorded main-session model";
 
@@ -255,7 +258,7 @@ pub fn claude_effort(
     )?;
     let (pick, _) = pick(Harness::Claude);
     if control.unresolved.is_none() && control.model.as_deref() != Some(pick.0) {
-        let picked = claude_on(
+        let mut picked = claude_on(
             scopes,
             user_file,
             &environment,
@@ -263,13 +266,17 @@ pub fn claude_effort(
             Some(pick.0),
             model_owner,
         )?;
+        // A `[1m]` context window carries over to the pick, as the edit names it.
+        if named.is_some_and(|m| m.trim().to_ascii_lowercase().ends_with("[1m]")) {
+            picked.model = Some(format!("{}[1m]", pick.0));
+        }
         control.picked = Some(Box::new(picked));
     }
     Ok(control)
 }
 
 /// A Claude profile's default effort on `model`, which `named` names in the settings or
-/// `model_owner` records; None when it cannot be resolved.
+/// `model_owner` records; `unresolved` says why when it cannot be resolved.
 fn claude_on(
     scopes: &[SettingsScope],
     user_file: &str,
@@ -298,9 +305,8 @@ fn claude_on(
         .get(variable)
         .cloned()
         .unwrap_or_default();
-    let default_owner = |model: &str| {
-        format!("{user_file}:modelSettings.{model}.effortLevel (the model's default)")
-    };
+    let default_owner =
+        |model: &str| format!("{user_file}:modelSettings.{model}.effortLevel{MODEL_DEFAULT}");
     let Some(model) = model else {
         let why = match named {
             None => {
@@ -526,10 +532,7 @@ fn codex_on(
     let (level, owner) = match highest(scopes, key) {
         Some((Value::String(level), file)) => (Some(level.clone()), format!("{file}:{key}")),
         Some((_, file)) => return Err(invalid(format!("invalid {key}"), file)),
-        None => (
-            default.clone(),
-            format!("{user_file}:{key} (the model's default)"),
-        ),
+        None => (default.clone(), format!("{user_file}:{key}{MODEL_DEFAULT}")),
     };
     let unresolved = level.is_none().then(|| match (&model, catalog) {
         (None, _) => "no setting names the model and no main-session request recorded one".to_string(),
@@ -565,8 +568,13 @@ pub fn effort_checks(input: &EffortInput<'_>) -> Vec<EffortCheck> {
     let owner = |p: &Profile| {
         let e = p.effort.as_ref().expect("filtered on an effort control");
         // One owner can resolve to different levels on different recorded models.
+        // The pick's own level can come from a file one profile reads and another does not.
+        let picked = e
+            .picked
+            .as_ref()
+            .map(|p| (&p.model, &p.owner, &p.level, &p.effective, &p.caps));
         format!(
-            "{}\n{}\n{:?}\n{:?}\n{:?}\n{:?}",
+            "{}\n{}\n{:?}\n{:?}\n{:?}\n{:?}\n{picked:?}",
             e.owner, e.model_owner, e.model, e.level, e.effective, e.unresolved
         )
     };

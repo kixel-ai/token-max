@@ -22,13 +22,13 @@ use std::sync::{Mutex, OnceLock, PoisonError, mpsc};
 use sha2::{Digest, Sha256};
 
 use crate::cli::{Printed, Render, Rendered, render};
-use crate::discovery::DiscoveryOptions;
+use crate::discovery::{DiscoveryOptions, discover};
 use crate::doctor::{Event, Offers, Owner, Style, Written, preview, write};
 use crate::model::Millis;
 use crate::reader::{Reach, ScanOptions, scan};
 use crate::safe::{ScanError, iso, terminal_text};
 use crate::sessions::{self, export};
-use crate::wire::{self, Answer, Header, Job, Outcome, Request, Stream};
+use crate::wire::{self, Answer, Header, Job, Outcome, Paid, Request, Stream};
 
 /// Reject a destination OpenSSH would read as an option or that cannot be printed whole.
 pub fn destination(value: &str) -> Result<(), ScanError> {
@@ -443,18 +443,31 @@ fn provision(destination: &str, found: &Found) -> Result<(), ScanError> {
     Err(ScanError::new(format!("{destination}: {message}")))
 }
 
-/// Audit one destination with this build of `token-max`, putting it there first if needed,
-/// and failing on any error there.
-///
-/// The destination scans while this host loads prices; once `request` delivers the catalog and
-/// job, it analyzes and sends back what the job asks for. A destination that fails first is
-/// reported at once, without waiting for the request.
-pub fn audit(
+/// A destination running this build's audit, before it scans: for a report, waiting for how
+/// its Claude profiles pay.
+pub struct Connected {
+    session: Session,
+    stream: Stream<BufReader<ChildStdout>>,
+    since: Option<Millis>,
+    profiles: Option<Profiles>,
+}
+
+/// A report destination's Claude profiles whose billing picks their main TTL's default.
+#[derive(Clone, Debug)]
+pub struct Profiles {
+    /// Its home directory, which its roots are shown from as `~`.
+    pub home: Option<String>,
+    /// Each profile's root, as that host names it; [`Connected::audit`] answers by these.
+    pub roots: Vec<String>,
+}
+
+/// Start this build of `token-max` on `destination`, putting it there first if needed, and
+/// read its header and, for a report, the profiles it asks about, failing on any error there.
+pub fn connect(
     destination: &str,
     since: Option<Millis>,
     scope: Scope,
-    request: mpsc::Receiver<Request>,
-) -> Result<Reply, ScanError> {
+) -> Result<Connected, ScanError> {
     let command = run_command(binary()?, since, scope);
     let mut provisioned = false;
     let (mut session, stdout, ran) = loop {
@@ -511,105 +524,154 @@ pub fn audit(
             )
         }));
     }
-    // The destination may fail before this host has prices to send, so its outcome is read
-    // while the request is still pending.
-    let (steps, arrived) = mpsc::channel();
-    let forward = steps.clone();
-    std::thread::spawn(move || {
-        // Dropped without a request when this host fails first, and then stops every destination.
-        let _ = forward.send(request.recv().map_or(Step::Cancelled, Step::Request));
-    });
-    std::thread::spawn(move || {
-        let outcome = stream.value();
-        let _ = steps.send(Step::Outcome(outcome, Box::new(stream)));
-    });
-    // What the job asked for, once it is sent: sessions, or a report and whether it is walked.
-    let mut requested = None;
-    let (outcome, mut stream) = loop {
-        match arrived.recv() {
-            Ok(Step::Request(request)) => {
-                requested = Some(match request.job {
-                    Job::Sessions => None,
-                    Job::Report { walk, .. } => Some(walk),
-                });
-                if let Some(stdin) = session.stdin.as_mut() {
-                    // A destination that already failed has stopped reading; its outcome says why.
-                    let _ = wire::write(&mut BufWriter::new(stdin), &request);
+    let profiles = match scope {
+        Scope::Report { .. } => match stream.value::<Outcome>() {
+            Ok(Outcome::Profiles { home, roots }) => Some(Profiles { home, roots }),
+            Ok(Outcome::Error(error)) => return Err(session.remote_error(error)),
+            Ok(_) => return Err(session.wrong_result(None)),
+            Err(error) => {
+                return Err(session.fail(true, |status| match status {
+                    Some(SSH_FAILED) => "SSH connection lost during the audit".into(),
+                    _ => invalid_stream(&error, status, None),
+                }));
+            }
+        },
+        Scope::Sessions => None,
+    };
+    Ok(Connected {
+        session,
+        stream,
+        since,
+        profiles,
+    })
+}
+
+impl Connected {
+    /// For a report, the profiles the destination asks about; it scans once
+    /// [`Connected::audit`] sends their answers.
+    pub fn profiles(&self) -> Option<&Profiles> {
+        self.profiles.as_ref()
+    }
+
+    /// Send a report's `paid` answers, by the roots [`Connected::profiles`] lists, so the
+    /// destination scans; once `request` delivers the catalog and job, it analyzes and sends
+    /// back what the job asks for. A destination that fails first is reported at once,
+    /// without waiting for the request.
+    pub fn audit(self, paid: Paid, request: mpsc::Receiver<Request>) -> Result<Reply, ScanError> {
+        let Connected {
+            mut session,
+            mut stream,
+            since,
+            profiles,
+        } = self;
+        if profiles.is_some()
+            && let Some(stdin) = session.stdin.as_mut()
+        {
+            // A destination that already failed has stopped reading; its outcome says why.
+            let _ = wire::write(&mut BufWriter::new(stdin), &paid);
+        }
+        // The destination may fail before this host has prices to send, so its outcome is read
+        // while the request is still pending.
+        let (steps, arrived) = mpsc::channel();
+        let forward = steps.clone();
+        std::thread::spawn(move || {
+            // Dropped without a request when this host fails first, and then stops every destination.
+            let _ = forward.send(request.recv().map_or(Step::Cancelled, Step::Request));
+        });
+        std::thread::spawn(move || {
+            let outcome = stream.value();
+            let _ = steps.send(Step::Outcome(outcome, Box::new(stream)));
+        });
+        // What the job asked for, once it is sent: sessions, or a report and whether it is walked.
+        let mut requested = None;
+        let (outcome, mut stream) = loop {
+            match arrived.recv() {
+                Ok(Step::Request(request)) => {
+                    requested = Some(match request.job {
+                        Job::Sessions => None,
+                        Job::Report { walk, .. } => Some(walk),
+                    });
+                    if let Some(stdin) = session.stdin.as_mut() {
+                        // A destination that already failed has stopped reading; its outcome says why.
+                        let _ = wire::write(&mut BufWriter::new(stdin), &request);
+                    }
+                }
+                Ok(Step::Outcome(outcome, stream)) => break (outcome, stream),
+                Ok(Step::Cancelled) | Err(_) => {
+                    return Err(ScanError::new("cancelled; no report produced"));
                 }
             }
-            Ok(Step::Outcome(outcome, stream)) => break (outcome, stream),
-            Ok(Step::Cancelled) | Err(_) => {
-                return Err(ScanError::new("cancelled; no report produced"));
-            }
-        }
-    };
-    let invalid = |session: &mut Session, error: serde_json::Error| {
-        session.fail(true, |status| match status {
-            Some(SSH_FAILED) => "SSH connection lost during the audit".into(),
-            _ => invalid_stream(&error, status, None),
-        })
-    };
-    let (scanned, reply, offers) = match outcome {
-        Ok(Outcome::Report {
-            since,
-            text,
-            change,
-            totals,
-            offers,
-        }) => (
-            since,
-            Reply::Report(Printed {
+        };
+        let invalid = |session: &mut Session, error: serde_json::Error| {
+            session.fail(true, |status| match status {
+                Some(SSH_FAILED) => "SSH connection lost during the audit".into(),
+                _ => invalid_stream(&error, status, None),
+            })
+        };
+        let (scanned, reply, offers) = match outcome {
+            Ok(Outcome::Report {
+                since,
                 text,
                 change,
-                totals: Box::new(totals),
-            }),
-            offers,
-        ),
-        Ok(Outcome::Sessions { since, sessions }) => (since, Reply::Sessions(sessions), None),
-        Ok(Outcome::Reviewed { .. } | Outcome::Wrote { .. }) => {
-            return Err(session.wrong_result(None));
-        }
-        Ok(Outcome::Error(error)) => return Err(session.remote_error(error)),
-        Err(error) => return Err(invalid(&mut session, error)),
-    };
-    if scanned != since {
-        return Err(session.fail(true, |_| {
-            "token-max scanned a different window than requested".into()
-        }));
-    }
-    match (requested, &reply, offers) {
-        (None, _, _) => {
+                totals,
+                offers,
+            }) => (
+                since,
+                Reply::Report(Printed {
+                    text,
+                    change,
+                    totals: Box::new(totals),
+                }),
+                offers,
+            ),
+            Ok(Outcome::Sessions { since, sessions }) => (since, Reply::Sessions(sessions), None),
+            Ok(Outcome::Profiles { .. } | Outcome::Reviewed { .. } | Outcome::Wrote { .. }) => {
+                return Err(session.wrong_result(None));
+            }
+            Ok(Outcome::Error(error)) => return Err(session.remote_error(error)),
+            Err(error) => return Err(invalid(&mut session, error)),
+        };
+        if scanned != since {
             return Err(session.fail(true, |_| {
-                "token-max sent its result before its request".into()
+                "token-max scanned a different window than requested".into()
             }));
         }
-        (Some(Some(true)), Reply::Report(_), Some(offers)) => {
-            if let Err(error) = offers.check() {
-                return Err(session.fail(true, |_| format!("token-max there {error}")));
+        match (requested, &reply, offers) {
+            (None, _, _) => {
+                return Err(session.fail(true, |_| {
+                    "token-max sent its result before its request".into()
+                }));
             }
-            let Reply::Report(printed) = reply else {
-                unreachable!("matched a report")
-            };
-            return Ok(Reply::Walk {
-                printed,
-                offers,
-                remote: Remote { session, stream },
-            });
+            (Some(Some(true)), Reply::Report(_), Some(offers)) => {
+                if let Err(error) = offers.check() {
+                    return Err(session.fail(true, |_| format!("token-max there {error}")));
+                }
+                let Reply::Report(printed) = reply else {
+                    unreachable!("matched a report")
+                };
+                return Ok(Reply::Walk {
+                    printed,
+                    offers,
+                    remote: Remote { session, stream },
+                });
+            }
+            (Some(None), Reply::Sessions(_), None)
+            | (Some(Some(false)), Reply::Report(_), None) => {}
+            _ => return Err(session.wrong_result(None)),
         }
-        (Some(None), Reply::Sessions(_), None) | (Some(Some(false)), Reply::Report(_), None) => {}
-        _ => return Err(session.wrong_result(None)),
+        if let Err(error) = stream.end() {
+            return Err(invalid(&mut session, error));
+        }
+        let status = session.stop(false).and_then(|s| s.code());
+        if status != Some(0) {
+            return Err(ScanError::new(format!(
+                "{}: token-max failed after sending its result ({})",
+                session.destination,
+                exit(status)
+            )));
+        }
+        Ok(reply)
     }
-    if let Err(error) = stream.end() {
-        return Err(invalid(&mut session, error));
-    }
-    let status = session.stop(false).and_then(|s| s.code());
-    if status != Some(0) {
-        return Err(ScanError::new(format!(
-            "{destination}: token-max failed after sending its result ({})",
-            exit(status)
-        )));
-    }
-    Ok(reply)
 }
 
 /// A destination's audit kept open for this host's walk through its changes.
@@ -711,6 +773,8 @@ fn exit(status: Option<i32>) -> String {
 
 /// What reaches a destination on stdin.
 enum Incoming {
+    /// How the profiles a report listed pay, which comes first.
+    Paid(Paid),
     Request(Request),
     Answer(Answer),
 }
@@ -726,15 +790,22 @@ struct Walked {
 /// to stdout and return the exit code. For a walk, then answer the coordinator's review and
 /// write the changes it confirms.
 ///
-/// Diagnostics travel in the stream, since the coordinator discards this host's stderr. The
-/// coordinator's request arrives on stdin while this host scans, and the audit stops when stdin
-/// closes, which happens when the coordinator or its connection ends, unless it already asked
-/// this host to write.
+/// Diagnostics travel in the stream, since the coordinator discards this host's stderr. A
+/// report first lists the Claude profiles whose billing picks their main TTL's default and
+/// scans once the coordinator says how they pay. The coordinator's request arrives on stdin
+/// while this host scans, and the audit stops when stdin closes, which happens when the
+/// coordinator or its connection ends, unless it already asked this host to write.
 pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
     let (sender, incoming) = mpsc::channel();
     std::thread::spawn(move || {
         let mut stdin = BufReader::new(io::stdin());
         let mut stream = Stream::new(&mut stdin);
+        if scope != Scope::Sessions {
+            let Ok(paid) = stream.value::<Paid>() else {
+                std::process::exit(2);
+            };
+            let _ = sender.send(Incoming::Paid(paid));
+        }
         let Ok(request) = stream.request() else {
             // Not this build's coordinator, or it is gone.
             std::process::exit(2);
@@ -771,6 +842,26 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
         if scope == (Scope::Report { defaults: true }) {
             discovery.pretend_defaults();
         }
+        let home = std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned());
+        if scope != Scope::Sessions {
+            let roots = discover(&discovery)?.billing_roots();
+            let profiles = Outcome::Profiles {
+                home: home.clone(),
+                roots: roots.clone(),
+            };
+            wire::write(&mut stdout, &profiles)
+                .map_err(|_| ScanError::new("the coordinator is gone; no report produced"))?;
+            // The stdin thread keeps the sender until it exits this process.
+            let Ok(Incoming::Paid(paid)) = incoming.recv() else {
+                unreachable!("the answers come first")
+            };
+            if paid.profiles.keys().any(|root| !roots.contains(root)) {
+                return Err(ScanError::new(
+                    "the coordinator answered how a profile pays that this host did not list",
+                ));
+            }
+            discovery.billing = paid.profiles;
+        }
         let reach = scope.reach();
         let scan = scan(&ScanOptions {
             discovery,
@@ -780,7 +871,7 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
         })?;
         // The stdin thread keeps the sender until it exits this process.
         let Ok(Incoming::Request(request)) = incoming.recv() else {
-            unreachable!("the request comes first")
+            unreachable!("the request comes next")
         };
         if matches!(request.job, Job::Sessions) != (scope == Scope::Sessions) {
             return Err(ScanError::new(
@@ -798,7 +889,6 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
                 return Ok((Outcome::Sessions { since, sessions }, None));
             }
         };
-        let home = std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned());
         let Rendered {
             printed:
                 Printed {

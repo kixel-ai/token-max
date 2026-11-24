@@ -2020,21 +2020,33 @@ pub fn upgrade_line(text: &str, note: bool, style: &Style) -> String {
     }
 }
 
-/// Ask how each Claude profile at `roots` pays, before the report, so its main conversation's
-/// cache TTL is priced against the one default that applies. A skip leaves a profile naming
-/// both defaults, and end of input skips the rest. Nothing is stored: the next run asks again.
-pub fn ask_billing(
-    roots: &[String],
-    style: &Style,
-    input: &mut impl BufRead,
-    output: &mut impl Write,
-) -> io::Result<IndexMap<String, Billing>> {
-    let mut answers = IndexMap::default();
-    if roots.is_empty() {
-        return Ok(answers);
-    }
-    'roots: for root in roots {
-        let question = format!("How is {} paid for?", home_in(root, style.home.as_deref()));
+/// Asks how each Claude profile pays, one at a time across hosts, before the report, so its
+/// main conversation's cache TTL is priced against the one default that applies. A skip
+/// leaves a profile naming both defaults, and end of input skips the rest, on every host.
+/// Nothing is stored: the next run asks again.
+#[derive(Debug, Default)]
+pub struct BillingQuestions {
+    asked: bool,
+    ended: bool,
+}
+
+impl BillingQuestions {
+    /// Ask how the profile at `root` pays, shown from `style`'s home and after its host's
+    /// name; none for a skip, or once input has ended.
+    pub fn ask(
+        &mut self,
+        root: &str,
+        style: &Style,
+        input: &mut impl BufRead,
+        output: &mut impl Write,
+    ) -> io::Result<Option<Billing>> {
+        if self.ended {
+            return Ok(None);
+        }
+        self.asked = true;
+        // A destination's root is its own text.
+        let profile = crate::safe::terminal_text(&style.file(root));
+        let question = format!("How is {profile} paid for?");
         let prompt = style.ask(&question, "[p]lan, [a]PI key or usage credits, [s]kip");
         loop {
             write!(output, "{prompt}")?;
@@ -2042,23 +2054,25 @@ pub fn ask_billing(
             let mut line = String::new();
             if input.read_line(&mut line)? == 0 {
                 writeln!(output)?;
-                break 'roots;
+                self.ended = true;
+                return Ok(None);
             }
-            let billing = match line.trim().to_ascii_lowercase().as_str() {
-                "p" | "plan" => Some(Billing::Plan),
-                "a" | "api" | "api key" | "usage credits" => Some(Billing::Api),
-                "s" | "skip" => None,
-                _ => continue,
-            };
-            if let Some(billing) = billing {
-                answers.insert(root.clone(), billing);
+            match line.trim().to_ascii_lowercase().as_str() {
+                "p" | "plan" => return Ok(Some(Billing::Plan)),
+                "a" | "api" | "api key" | "usage credits" => return Ok(Some(Billing::Api)),
+                "s" | "skip" => return Ok(None),
+                _ => {}
             }
-            break;
         }
     }
-    // The report follows as its own section.
-    writeln!(output)?;
-    Ok(answers)
+
+    /// End the questions, so the report follows as its own section.
+    pub fn finish(self, output: &mut impl Write) -> io::Result<()> {
+        if self.asked {
+            writeln!(output)?;
+        }
+        Ok(())
+    }
 }
 
 /// One answer in the walk, by its place in a host's [`Offers`], so the host that owns the
@@ -3945,39 +3959,49 @@ mod tests {
     }
 
     #[test]
-    fn billing_is_asked_per_root_until_answered_and_end_of_input_skips_the_rest() {
+    fn billing_is_asked_per_root_until_answered_and_end_of_input_skips_every_host() {
         let w = Workspace::new();
         let home = w.home.to_string_lossy().into_owned();
-        let roots: Vec<String> = ["a", "b", "c", "d"]
-            .iter()
-            .map(|n| format!("{home}/.claude-{n}"))
-            .collect();
         let mut printed = vec![];
-        let answers = ask_billing(
-            &roots,
-            &style(&w),
-            &mut "maybe\nP\nskip\napi\n".as_bytes(),
-            &mut printed,
-        )
-        .unwrap();
-        let printed = String::from_utf8(printed).unwrap();
-        assert_eq!(
-            answers.into_iter().collect::<Vec<_>>(),
-            [
-                (roots[0].clone(), Billing::Plan),
-                (roots[2].clone(), Billing::Api)
-            ]
-        );
-        // The unrecognized answer asks the same profile again, shown from home.
-        assert_eq!(printed.matches("How is ~/.claude-a paid for?").count(), 2);
-        let answers = ask_billing(&roots, &style(&w), &mut "a\n".as_bytes(), &mut vec![]).unwrap();
-        assert_eq!(answers.len(), 1);
-        let mut printed = vec![];
-        assert!(
-            ask_billing(&[], &style(&w), &mut "p\n".as_bytes(), &mut printed)
+        let mut questions = BillingQuestions::default();
+        let mut ask = |root: &str, style: &Style, input: &str| {
+            questions
+                .ask(root, style, &mut input.as_bytes(), &mut printed)
                 .unwrap()
-                .is_empty()
+        };
+        // An unrecognized answer asks the same profile again.
+        let local = format!("{home}/.claude-a");
+        assert_eq!(ask(&local, &style(&w), "maybe\nP\n"), Some(Billing::Plan));
+        assert_eq!(ask(&local, &style(&w), "skip\n"), None);
+        assert_eq!(ask(&local, &style(&w), "api\n"), Some(Billing::Api));
+        // A destination's roots are shown from its home, after its name, and escaped.
+        let remote = Style {
+            home: Some("/home/dev".into()),
+            host: Some("devbox".into()),
+            ..style(&w)
+        };
+        assert_eq!(ask("/home/dev/.claude", &remote, "a\n"), Some(Billing::Api));
+        // Input ends on this one, so no later question is asked.
+        assert_eq!(ask("/srv/\u{1b}[2J", &remote, ""), None);
+        assert_eq!(ask("/home/dev/.claude", &remote, "p\n"), None);
+        questions.finish(&mut printed).unwrap();
+        let printed = String::from_utf8(printed).unwrap();
+        assert_eq!(printed.matches("How is ~/.claude-a paid for?").count(), 4);
+        assert!(
+            printed.contains("How is devbox:~/.claude paid for?"),
+            "{printed}"
         );
+        assert!(
+            printed.contains("How is devbox:/srv/\\u001b[2J paid for?"),
+            "{printed}"
+        );
+        assert_eq!(printed.matches("paid for?").count(), 6, "{printed}");
+        assert!(
+            printed.ends_with("\n\n"),
+            "the report follows as its own section"
+        );
+        let mut printed = vec![];
+        BillingQuestions::default().finish(&mut printed).unwrap();
         assert!(printed.is_empty(), "nothing to ask prints nothing");
     }
 

@@ -30,7 +30,7 @@ Decision prompts, chosen options marked ✅:
 - Its first items: ✅ the Bash cap and the old Warnings, which the `vibes`
   command shipped with; ✅
   [a default main-session model and effort](/quest/m1/vibes/default-model.md);
-  ✅ [Explore on Haiku](/quest/m1/vibes/explore-haiku.md) (rejected for now:
+  ✅ Explore on Haiku (rejected for now:
   cache habits from the 2026-11-17 study, which can return as their own quest
   here).
 - The TTL the Bash cap card compares with (2026-11-23, maintainer,
@@ -57,9 +57,8 @@ codex-cli 0.167.1 settings worth turning on):
   [an advisor model](/quest/m1/vibes/advisor.md) (rejected:
   `includeGitInstructions: false`, spend caps, and Codex code mode, which the
   model catalog already turns on). The one measurable find,
-  Codex turn-end compaction, is
-  [a `doctor` line](/quest/m1/codex-turn-end-compaction.md). Idle compaction
-  is already a measured `doctor` line, native and T3.
+  Codex turn-end compaction, is a measured `doctor` line, as idle compaction
+  is, native and T3.
 - New releases: ✅ [a check every two weeks](/quest/m1/releases.md) for
   settings to measure or suggest.
 

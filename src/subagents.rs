@@ -16,8 +16,8 @@ use crate::discovery::{
     named_profile_files, project_directories, realpath, resolve, settings,
 };
 use crate::model::{
-    Agent, AgentControls, AgentDefinition, Harness, Millis, ModelSource, Owned, Profile, Request,
-    Scan, Share, SourceShare, Subagent, SubagentCost,
+    Agent, AgentControls, AgentDefinition, Harness, Millis, ModelSource, Owned, Profile,
+    Replacement, Request, Scan, Share, SourceShare, Subagent, SubagentCost,
 };
 use crate::prices::{Catalog, Sample, Sum, price_part, price_request, server_cost};
 use crate::reader::UNRECORDED;
@@ -116,24 +116,36 @@ fn files(dir: &str, extension: &str) -> Result<Vec<String>, ScanError> {
     Ok(found)
 }
 
-/// A Claude agent file's frontmatter `name`, `model` and `effort`, never its prompt.
+/// A Claude agent file's frontmatter `name`, `model` and `effort`, never its prompt;
+/// none without the `description` Claude Code requires.
 fn frontmatter(text: &str) -> Option<(String, Option<String>, Option<String>)> {
     let mut lines = text.trim_start_matches('\u{feff}').lines();
     if lines.next()?.trim_end() != "---" {
         return None;
     }
-    let (mut name, mut model, mut effort) = (None, None, None);
+    let (mut name, mut model, mut effort, mut described) = (None, None, None, false);
+    // A description whose value starts on the next line, indented or as a `|` or `>` block.
+    let mut continued = false;
     for line in lines {
         let line = line.trim_end();
         if line == "---" {
-            return name.map(|name| (name, model, effort));
+            // Claude Code skips an agent file without a description.
+            return name.filter(|_| described).map(|name| (name, model, effort));
         }
-        if line.starts_with(char::is_whitespace) {
+        // A blank line can open a block value, so it leaves a pending description open.
+        if line.is_empty() {
             continue;
         }
+        if line.starts_with(char::is_whitespace) {
+            described |= continued;
+            continue;
+        }
+        continued = false;
         let Some((key, value)) = line.split_once(':') else {
             continue;
         };
+        // A block indicator is read before unquoting: `"> text"` is a quoted string.
+        let block = value.trim_start().starts_with(['|', '>']);
         let value = scalar(value);
         let labelled = label(&Value::from(value));
         match key.trim() {
@@ -146,6 +158,10 @@ fn frontmatter(text: &str) -> Option<(String, Option<String>, Option<String>)> {
                 }
             }
             "effort" => effort = labelled,
+            "description" => {
+                continued = value.is_empty() || block;
+                described = !continued;
+            }
             _ => {}
         }
     }
@@ -1128,7 +1144,11 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
         let mut sources: IndexMap<(ModelSource, String), u64> = IndexMap::default();
         let mut model_settings: IndexSet<String> = IndexSet::default();
         let mut effort_settings: IndexSet<String> = IndexSet::default();
+        // Whether an agent file of this name would replace a Claude built-in.
+        let replaces = harness == Harness::Claude && !fork && built_in(kind).is_some();
         let mut built_in = true;
+        let (mut missing, mut present) = (IndexSet::default(), IndexSet::default());
+        let mut forced = false;
         for session in runs.keys() {
             let subagent = spawns.get(session).copied();
             let all = &history[session];
@@ -1171,15 +1191,25 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
                 })
             });
             if let Some(profile) = own {
-                let (model, effort) = settings_text(
-                    profile,
-                    scoped(&profile.agents, run.cwd),
-                    kind,
-                    fork,
-                    native,
-                );
+                let controls = scoped(&profile.agents, run.cwd);
+                let (model, effort) = settings_text(profile, controls, kind, fork, native);
                 model_settings.insert(model);
                 effort_settings.insert(effort);
+            }
+            // Profiles sharing the history each record the run, and each needs its own file.
+            let sharing = owners
+                .iter()
+                .filter(|p| all.iter().any(|r| r.profiles.contains(&p.id)));
+            for profile in sharing.filter(|_| replaces) {
+                let controls = scoped(&profile.agents, run.cwd);
+                forced |= controls.force;
+                if let Some(d) = definition(controls, kind) {
+                    present.insert(d.file.clone());
+                } else if !controls.force {
+                    // Where the subagent model is forced, a new file's model would be dropped.
+                    // Claude Code names an agent by its frontmatter, so any unused `.md` file name works.
+                    missing.insert(join(&[&profile.root, "agents"]));
+                }
             }
         }
         let mut sources: Vec<SourceShare> = sources
@@ -1259,6 +1289,11 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
             reprice: reprice.map(|r| r.0),
             model_setting,
             effort_setting,
+            replacement: Replacement {
+                missing: missing.into_iter().collect(),
+                present: present.into_iter().collect(),
+                forced,
+            },
         });
     }
     lines.sort_by(|a, b| {
@@ -1325,17 +1360,17 @@ mod tests {
         );
         assert_eq!(
             frontmatter(
-                "---\nname: scout # quick\nmodel: haiku # cheaper\neffort: 'low' # x\n---\n"
+                "---\nname: scout # quick\ndescription: x\nmodel: haiku # cheaper\neffort: 'low' # x\n---\n"
             ),
             Some(("scout".into(), Some("haiku".into()), Some("low".into())))
         );
         assert_eq!(
-            frontmatter("---\nname: \"a\" # quoted\nmodel: # none\n---\n"),
+            frontmatter("---\nname: \"a\" # quoted\ndescription: x\nmodel: # none\n---\n"),
             Some(("a".into(), None, None))
         );
         // A long-context model keeps its suffix.
         assert_eq!(
-            frontmatter("---\nname: deep\nmodel: opus[1m]\n---\n"),
+            frontmatter("---\nname: deep\ndescription: x\nmodel: opus[1m]\n---\n"),
             Some(("deep".into(), Some("opus[1m]".into()), None))
         );
         assert_eq!(frontmatter("name: reviewer\n"), None);
@@ -1666,6 +1701,110 @@ mod tests {
         let mut defined_scan = scan(run(), vec![spawn("Explore")]);
         defined_scan.profiles[0].agents.definitions = vec![defined("Explore", Some("opus"), None)];
         assert!(!subagent_costs(&defined_scan, &prices())[0].built_in);
+        // A run recorded as the built-in can predate an agent file of its name: today's
+        // settings for its own directory say which file it needs or has, and whether the
+        // forced subagent model would drop that file's model.
+        let mut recorded = spawn("Explore");
+        recorded.built_in = Some(true);
+        let replacement = |scan: &Scan| subagent_costs(scan, &prices())[0].replacement.clone();
+        let mut plain = scan(run(), vec![recorded.clone()]);
+        assert_eq!(
+            replacement(&plain),
+            Replacement {
+                missing: vec![join(&["/home/.claude", "agents"])],
+                ..Replacement::default()
+            }
+        );
+        // A file of another name, or one Claude Code skips for want of a description,
+        // doesn't replace it.
+        let skipped = "---\nname: Explore\nmodel: haiku\n---\n";
+        assert_eq!(frontmatter(skipped), None);
+        assert_eq!(frontmatter("---\nname: x\ndescription:\n---\n"), None);
+        assert_eq!(
+            frontmatter("---\nname: x\ndescription: |\nmodel: y\n---\n"),
+            None
+        );
+        for described in [
+            "description:\n  Search code",
+            "description: >-\n  Search\n  code",
+            "description: |\n\n  Search code",
+            "description: \"> Search code\"",
+            "description: '| Search code'",
+        ] {
+            let text = format!("---\nname: x\n{described}\nmodel: haiku\n---\n");
+            assert_eq!(
+                frontmatter(&text),
+                Some(("x".into(), Some("haiku".into()), None))
+            );
+        }
+        let mut occupied = defined("reviewer", None, None);
+        occupied.file = "/home/.claude/agents/Explore.md".into();
+        plain.profiles[0].agents.definitions = vec![occupied];
+        assert_eq!(
+            replacement(&plain).missing,
+            [join(&["/home/.claude", "agents"])]
+        );
+        // Where the subagent model is forced, a file's model would be dropped: none is asked for.
+        plain.profiles[0].agents.force = true;
+        assert_eq!(
+            replacement(&plain),
+            Replacement {
+                forced: true,
+                ..Replacement::default()
+            }
+        );
+        // Profiles sharing the history each record the run: each is checked, not the first,
+        // and force in one asks for no file there.
+        let mut shared = run();
+        shared[0].profiles = vec!["profile".into(), "work".into()].into();
+        let mut shared = scan(shared, vec![recorded.clone()]);
+        shared.profiles[0].agents.force = true;
+        shared
+            .profiles
+            .push(make_profile("work", "/home/.claude-work"));
+        assert_eq!(
+            replacement(&shared),
+            Replacement {
+                missing: vec![join(&["/home/.claude-work", "agents"])],
+                forced: true,
+                ..Replacement::default()
+            }
+        );
+        shared.profiles[1].agents.definitions = vec![defined("Explore", Some("haiku"), None)];
+        assert_eq!(
+            replacement(&shared),
+            Replacement {
+                present: vec!["/home/.claude/agents/Explore.md".into()],
+                forced: true,
+                ..Replacement::default()
+            }
+        );
+        let project = "/synthetic/project";
+        let mut in_project = run();
+        in_project[0].cwd = Some(project.into());
+        let mut scoped = scan(in_project, vec![recorded]);
+        let file = defined("Explore", Some("haiku"), Some(project));
+        scoped.profiles[0].agents.directories.insert(
+            project.into(),
+            AgentControls {
+                definitions: vec![file.clone()],
+                ..AgentControls::default()
+            },
+        );
+        let found = subagent_costs(&scoped, &prices()).remove(0);
+        assert!(found.built_in);
+        assert_eq!(
+            found.replacement,
+            Replacement {
+                present: vec![file.file],
+                ..Replacement::default()
+            }
+        );
+        // Only a Claude built-in can be replaced this way.
+        assert_eq!(
+            subagent_costs(&scan(run(), vec![spawn("log-reader")]), &prices())[0].replacement,
+            Replacement::default()
+        );
     }
 
     #[test]
@@ -1677,7 +1816,7 @@ mod tests {
         };
         write(
             w.claude.join("agents/nested/reviewer.md"),
-            "---\nname: reviewer\nmodel: haiku\neffort: low\n---\nSYNTHETIC_PRIVATE prompt\n",
+            "---\nname: reviewer\ndescription: x\nmodel: haiku\neffort: low\n---\nSYNTHETIC_PRIVATE prompt\n",
         );
         write(w.claude.join("agents/notes.md"), "no frontmatter\n");
         write(
@@ -1788,11 +1927,11 @@ mod tests {
         );
         put(
             project.join(".claude/agents/reviewer.md"),
-            "---\nname: reviewer\nmodel: sonnet\n---\n",
+            "---\nname: reviewer\ndescription: x\nmodel: sonnet\n---\n",
         );
         put(
             w.claude.join("agents/reviewer.md"),
-            "---\nname: reviewer\nmodel: opus\n---\n",
+            "---\nname: reviewer\ndescription: x\nmodel: opus\n---\n",
         );
         put(w.claude.join("projects/project/main.jsonl"), "");
         let profile = discover_in(&w, Harness::Claude, &[&project, &other]);

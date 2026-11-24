@@ -616,15 +616,7 @@ fn pieces(
             None,
         ),
         Category::PluginInstructions => {
-            // Each UTF-16 unit outside the allowed set becomes one underscore.
-            let mut server = String::with_capacity(name.len());
-            for c in name.chars() {
-                if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                    server.push(c);
-                } else {
-                    server.extend(std::iter::repeat_n('_', c.len_utf16()));
-                }
-            }
+            let server = crate::mcp::tool_name(name);
             one(
                 format!("mcp:{server}"),
                 ContextKind::McpServer,

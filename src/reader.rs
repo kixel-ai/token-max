@@ -666,6 +666,8 @@ struct Context {
     source: Option<Text>,
     cwd: Option<Text>,
     effort: Option<Text>,
+    /// The context window Codex last recorded as usable.
+    usable_window: Option<i64>,
     pricing: Option<Arc<Pricing>>,
     profiles: Profiles,
 }
@@ -744,6 +746,7 @@ impl FileState {
                 source: None,
                 cwd: None,
                 effort: None,
+                usable_window: None,
                 pricing: None,
                 profiles: strings.profiles(&snapshot.profiles),
             },
@@ -802,6 +805,7 @@ fn event(
             pre_tokens: None,
             post_tokens: None,
             duration_ms: None,
+            usable_window: context.usable_window,
             tool: None,
             t3: None,
             pricing: context.pricing.clone(),
@@ -1603,7 +1607,12 @@ impl Reader {
             if let Some(cwd) = absolute_cwd {
                 set(&mut context.cwd, Some(cwd));
             }
+            let model = context.model.clone();
             set(&mut context.model, label(member(p, "model")).as_deref());
+            // A window was recorded for the model that ran then, not for the one that runs now.
+            if context.model != model {
+                context.usable_window = None;
+            }
             let mode = nested(nested(p, "collaboration_mode"), "settings");
             set(
                 &mut context.effort,
@@ -1666,6 +1675,11 @@ impl Reader {
             let info = nested(p, "info");
             if info.is_empty() {
                 return Ok(());
+            }
+            // Codex records the window less the share it reserves, which is what a turn-end
+            // threshold is a percentage of.
+            if let Some(window) = info.get("model_context_window").and_then(Value::as_i64) {
+                context.usable_window = Some(window).filter(|w| *w > 0);
             }
             let total = match usage(member(info, "total_token_usage"), Harness::Codex) {
                 Ok(total) => total,
@@ -1789,7 +1803,11 @@ impl Reader {
                     context.tier = Some(tier.into());
                 }
                 if let Some(model) = label(member(applied, "model")) {
+                    let before = context.model.clone();
                     set(&mut context.model, Some(&model));
+                    if context.model != before {
+                        context.usable_window = None;
+                    }
                 }
                 if let Some(effort) = label(member(applied, "reasoning_effort")) {
                     set(&mut context.effort, Some(&effort));
@@ -3146,6 +3164,87 @@ mod tests {
         let result = scan(&options(&w)).unwrap();
         assert_eq!(result.requests.len(), 1);
         assert_eq!(result.requests[0].locations.len(), 2);
+    }
+
+    #[test]
+    fn a_codex_turn_end_carries_the_usable_window_recorded_before_it() {
+        let w = Workspace::new();
+        let end = |minute: u8, turn: &str| {
+            json!({
+                "type": "event_msg",
+                "timestamp": format!("2026-11-01T00:{minute:02}:00Z"),
+                "payload": { "type": "task_complete", "turn_id": turn },
+            })
+        };
+        let raw = jsonl(&[
+            json!({
+                "type": "session_meta",
+                "timestamp": "2026-11-01T00:00:00Z",
+                "payload": { "id": "thread", "source": "cli", "model_provider": "openai" },
+            }),
+            json!({
+                "type": "turn_context",
+                "timestamp": "2026-11-01T00:00:00Z",
+                "payload": { "turn_id": "first", "model": "gpt-6.1-sol" },
+            }),
+            end(1, "first"),
+            json!({
+                "type": "event_msg",
+                "timestamp": "2026-11-01T00:02:00Z",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": { "input_tokens": 100, "output_tokens": 10 },
+                        "last_token_usage": { "input_tokens": 100, "output_tokens": 10 },
+                        "model_context_window": 258400,
+                    },
+                },
+            }),
+            end(3, "second"),
+            json!({
+                "type": "turn_context",
+                "timestamp": "2026-11-01T00:04:00Z",
+                "payload": { "turn_id": "third", "model": "gpt-6.1-luna" },
+            }),
+            end(5, "third"),
+            json!({
+                "type": "event_msg",
+                "timestamp": "2026-11-01T00:06:00Z",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": { "input_tokens": 100, "output_tokens": 10 },
+                        "model_context_window": 380000,
+                    },
+                },
+            }),
+            end(7, "fourth"),
+            json!({
+                "type": "event_msg",
+                "timestamp": "2026-11-01T00:08:00Z",
+                "payload": {
+                    "type": "thread_settings_applied",
+                    "thread_settings": { "model": "gpt-6.1-sol" },
+                },
+            }),
+            json!({
+                "type": "turn_context",
+                "timestamp": "2026-11-01T00:09:00Z",
+                "payload": { "turn_id": "fifth", "model": "gpt-6.1-sol" },
+            }),
+            end(10, "fifth"),
+        ]);
+        write(w.codex.join("sessions/thread.jsonl"), &raw);
+        let result = scan(&options(&w)).unwrap();
+        let windows: Vec<Option<i64>> = result
+            .events
+            .iter()
+            .filter(|e| e.kind == EventKind::TurnEnd)
+            .map(|e| e.usable_window)
+            .collect();
+        // The window belongs to the model that recorded it, so a switch forgets it, whether
+        // a turn's context or the thread's settings record the switch.
+        assert_eq!(windows, [None, Some(258_400), None, Some(380_000), None]);
     }
 
     #[test]

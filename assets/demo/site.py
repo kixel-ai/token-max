@@ -38,6 +38,8 @@ CLASSES = {"1": "b", "2": "d", "31": "r", "32": "g", "33": "y", "35": "p"}
 # A report section opens with its bold uppercase heading.
 HEADING = re.compile(r"^  [A-Z][A-Z ]+[A-Z]  ")
 CUT = "EVERYTHING ELSE"
+# The lines closing a report, which follow its last section and stay on the page.
+FOOTER = re.compile(r"^  Prices: ")
 # A report, and each host's report under --ssh, opens with its title.
 TITLE = re.compile(r"^token-max[: ]")
 # The finished run scrolls back to the hosts' total under --ssh, else to the count of changes.
@@ -146,14 +148,17 @@ def steps(transcript: str) -> tuple[list[list[str]], int]:
                 out.append(lines + [""])
             lines = [line]
             if plain.strip().startswith(CUT):
-                # Skip to the next section, keeping only a count of what was cut.
+                # Skip to the next section or the report's footer, keeping only a count of
+                # what was cut.
                 j = i + 1
-                while j < len(raws) and not starts(plains[j]):
+                while j < len(raws) and not (starts(plains[j]) or FOOTER.match(plains[j])):
                     j += 1
                 cut = sum(1 for r in raws[i + 1 : j] if r.strip())
                 lines.append(
                     f'<span class="elided">  … {cut} lines on every other setting and feature, cut from this page</span>'
                 )
+                if j < len(raws) and FOOTER.match(plains[j]):
+                    lines.append("")
                 i = j
                 continue
         else:

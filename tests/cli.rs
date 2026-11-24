@@ -415,7 +415,7 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     assert_eq!(
         stdout,
         format!(
-            "token-max vibes: 2 pieces of advice the transcripts can't price.\n  None of it is measured, so none of it is a verdict. Each card names whose advice it is.\n\n  [1/3] Bash timeout cap  not measured\n        2h -> 4m\n        What    The longest Claude waits on a foreground Bash command before Claude Code moves it to the background.\n        Advice  A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess. A command past the cap is not killed: it keeps running in the background, where Claude checks on it in later turns. Some commands need longer in the foreground; keep the cap if yours do. Project and local settings, which override it, are not read.\n        Source  The maintainer's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching\n        Change  \"env\": {{\"BASH_MAX_TIMEOUT_MS\": \"240000\"}} in ~{0}.claude{0}settings.json\n\n  [2/3] Auto-compact window (claude-opus-5-5)  not measured\n        967k -> 400k\n        What    How large a conversation grows before it is automatically summarized and continued from the summary.\n        Advice  No setting names it, so Claude Code compacts this model near 967k, its window for the model. The maintainer would cap it at 400k for better output, not a smaller bill: a smaller window compacts sooner, so the model works from a shorter context. Anthropic's docs say accuracy and recall degrade as a context grows. doctor's auto-compact window line keeps it on cost. Its replay did not price a 400k window, so what the cap costs is not measured. The cap is advice beside that line, not its verdict.\n        Source  The maintainer's pick, for output quality rather than cost. Anthropic's docs on context rot: https://platform.claude.com/docs/en/build-with-claude/context-windows\n        Change  \"modelSettings\": {{\"claude-opus-5-5\": {{\"autoCompactWindow\": 400000}}}} in ~{0}.claude{0}settings.json\n\n  [3/3] Main-session default  not measured\n        What    The model and reasoning effort a main session starts with.\n        Advice  Defaults to claude-opus-5-5 at medium, the maintainer's pick. Ran claude-opus-5-5 at an unrecorded effort 2 times, $0.01.\n        Source  The maintainer's pick of a default. Anthropic's guidance: https://claude.dev/blog/which-claude-model-should-you-build-with/ https://code.claude.com/docs/en/model-config#choose-an-effort-level\n",
+            "token-max vibes: 2 pieces of advice the transcripts can't price.\n  None of it is measured, so none of it is a verdict. Each card names whose advice it is.\n\n  [1/4] Bash timeout cap  not measured\n        2h -> 4m\n        What    The longest Claude waits on a foreground Bash command before Claude Code moves it to the background.\n        Advice  A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess. A command past the cap is not killed: it keeps running in the background, where Claude checks on it in later turns. Some commands need longer in the foreground; keep the cap if yours do. Project and local settings, which override it, are not read.\n        Source  The maintainer's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching\n        Change  \"env\": {{\"BASH_MAX_TIMEOUT_MS\": \"240000\"}} in ~{0}.claude{0}settings.json\n\n  [2/4] Auto memory  not measured\n        What    Auto memory lets Claude write notes for itself and loads them into every session.\n        Advice  0 of 1 main session (0%) in the window ran in a repository with a CLAUDE.md or AGENTS.md, counting as without 1 session whose transcript recorded loading none and whose directory is gone or unrecorded. Outside a repository, memory may be the only place a fact is kept, so turning it off is not advised. doctor's line could not price it over the window (never read back or written).\n        Source  The maintainer's pick: a lasting fact about a project belongs in its repository. How memory works: https://code.claude.com/docs/en/memory#auto-memory (2026-11-11)\n\n  [3/4] Auto-compact window (claude-opus-5-5)  not measured\n        967k -> 400k\n        What    How large a conversation grows before it is automatically summarized and continued from the summary.\n        Advice  No setting names it, so Claude Code compacts this model near 967k, its window for the model. The maintainer would cap it at 400k for better output, not a smaller bill: a smaller window compacts sooner, so the model works from a shorter context. Anthropic's docs say accuracy and recall degrade as a context grows. doctor's auto-compact window line keeps it on cost. Its replay did not price a 400k window, so what the cap costs is not measured. The cap is advice beside that line, not its verdict.\n        Source  The maintainer's pick, for output quality rather than cost. Anthropic's docs on context rot: https://platform.claude.com/docs/en/build-with-claude/context-windows\n        Change  \"modelSettings\": {{\"claude-opus-5-5\": {{\"autoCompactWindow\": 400000}}}} in ~{0}.claude{0}settings.json\n\n  [4/4] Main-session default  not measured\n        What    The model and reasoning effort a main session starts with.\n        Advice  Defaults to claude-opus-5-5 at medium, the maintainer's pick. Ran claude-opus-5-5 at an unrecorded effort 2 times, $0.01.\n        Source  The maintainer's pick of a default. Anthropic's guidance: https://claude.dev/blog/which-claude-model-should-you-build-with/ https://code.claude.com/docs/en/model-config#choose-an-effort-level\n",
             std::path::MAIN_SEPARATOR
         )
     );
@@ -438,12 +438,12 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     assert_eq!(status, 0);
     // The heading counts advice as doctor does, so the card that advises nothing is not in it.
     assert!(
-        stdout.starts_with("token-max vibes: no advice for these settings.\n\n  [1/3] "),
+        stdout.starts_with("token-max vibes: no advice for these settings.\n\n  [1/4] "),
         "{stdout}"
     );
     assert!(
-        stdout.contains("\n  [1/3] Bash timeout cap  not measured\n        What    ")
-            && stdout.contains("\n  [2/3] Auto-compact window (claude-opus-5-5)  not measured\n        What    ")
+        stdout.contains("\n  [1/4] Bash timeout cap  not measured\n        What    ")
+            && stdout.contains("\n  [3/4] Auto-compact window (claude-opus-5-5)  not measured\n        What    ")
             && stdout.contains("Set to 400k. That is at or under the 400k window the maintainer caps it at, so there is nothing to change.")
             && stdout.contains("Capped at 55m, the margin suggested under the 1h cache, the current main-agent cache TTL setting.")
             && !stdout.contains("Change"),
@@ -480,6 +480,112 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
 }
 
 #[test]
+fn vibes_advises_memory_off_when_most_sessions_ran_in_a_repository() {
+    let w = Workspace::new();
+    // A checkout whose root holds an AGENTS.md, and the fixture's session in a directory
+    // under it. Its own .git ends the walk up before this repository's.
+    let repo = w.home.join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(repo.join("AGENTS.md"), "synthetic\n").unwrap();
+    // The fixture's session in `cwd`, after an attachment recording the files it loaded.
+    let session = |cwd: &Path, loaded: &[&Path]| {
+        let files: Vec<Value> = loaded
+            .iter()
+            .map(|p| {
+                // Claude Code types the user's own file apart from the project's.
+                let kind = if p.starts_with(&w.claude) {
+                    "User"
+                } else {
+                    "Project"
+                };
+                json!({"path": p.to_string_lossy(), "content": "synthetic", "type": kind})
+            })
+            .collect();
+        let attachment = json!({
+            "type": "attachment", "sessionId": "session-a", "uuid": "attachment-a",
+            "timestamp": "2026-11-01T00:00:00Z", "cwd": cwd.to_string_lossy(),
+            "attachment": {"type": "instructions", "files": files},
+        });
+        let mut text = format!("{attachment}\n");
+        for line in std::fs::read_to_string(fixture("claude.jsonl"))
+            .unwrap()
+            .lines()
+        {
+            let mut record: Value = serde_json::from_str(line).unwrap();
+            record["cwd"] = json!(cwd.to_string_lossy());
+            text += &format!("{record}\n");
+        }
+        std::fs::write(w.transcript(), text).unwrap();
+    };
+    session(&repo.join("src"), &[]);
+    // Memory is on by default; a 55m cap under a 1h cache, a window at the maintainer's cap
+    // and a year of transcripts leave the other cards quiet.
+    w.settings(
+        r#"{"promptCacheTtl":"1h","autoCompactWindow":400000,"cleanupPeriodDays":365,"env":{"BASH_MAX_TIMEOUT_MS":"3300000"}}"#,
+    );
+    let base = prices_args(&w);
+    let invoke = |name: &str| {
+        let mut all = vec![name];
+        all.extend(base.iter().map(String::as_str));
+        run(&mut command(&w, &all))
+    };
+    // doctor's measured line gives no verdict here, so vibes has the one piece of advice.
+    let (_, report, _) = invoke("doctor");
+    assert!(
+        report.contains("token-max vibes has 1 piece of advice"),
+        "{report}"
+    );
+    let (status, stdout, stderr) = invoke("vibes");
+    assert_eq!((status, stderr.as_str()), (0, ""), "{stdout}");
+    let card = &stdout[stdout.find("Auto memory").expect(&stdout)..];
+    assert!(
+        card.starts_with("Auto memory  not measured\n        on -> off\n"),
+        "{stdout}"
+    );
+    assert!(
+        card.contains("Advice  1 of 1 main session (100%) in the window ran in a repository with a CLAUDE.md or AGENTS.md. A lasting fact about a project belongs in that file"),
+        "{stdout}"
+    );
+    let sep = std::path::MAIN_SEPARATOR;
+    assert!(
+        card.contains(&format!(
+            "        Change  \"autoMemoryEnabled\": false in ~{sep}.claude{sep}settings.json\n"
+        )),
+        "{stdout}"
+    );
+    // Without the file, the session ran where memory may be the only place for a fact.
+    std::fs::remove_file(repo.join("AGENTS.md")).unwrap();
+    let (status, stdout, _) = invoke("vibes");
+    assert_eq!(status, 0);
+    assert!(
+        stdout.starts_with("token-max vibes: no advice for these settings."),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("0 of 1 main session (0%)") && !stdout.contains("on -> off"),
+        "{stdout}"
+    );
+    // A session whose directory is gone counts where its transcript recorded loading a
+    // project file from it, and not where it recorded only the user's own, though that sits
+    // above every directory in the home.
+    let gone = w.home.join("gone");
+    let user = w.claude.join("CLAUDE.md");
+    session(&gone.join("src"), &[&user, &gone.join("AGENTS.md")]);
+    let (_, stdout, _) = invoke("vibes");
+    assert!(
+        stdout.contains("1 of 1 main session (100%)") && stdout.contains("on -> off"),
+        "{stdout}"
+    );
+    session(&gone.join("src"), &[&user]);
+    let (_, stdout, _) = invoke("vibes");
+    assert!(
+        stdout.contains("0 of 1 main session (0%) in the window ran in a repository with a CLAUDE.md or AGENTS.md, counting as without 1 session whose transcript recorded loading none"),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn vibes_suggests_a_year_of_transcripts_unless_claude_already_keeps_one() {
     let w = Workspace::new();
     w.fixture();
@@ -498,7 +604,7 @@ fn vibes_suggests_a_year_of_transcripts_unless_claude_already_keeps_one() {
     // Unset is Claude Code's 30 days; the card counts the disk the transcripts read take.
     let unset = cards("{}");
     assert!(
-        unset.contains("  [2/4] Transcript retention  not measured\n        30 days -> 365 days\n        What    How long Claude Code keeps session transcripts before its startup sweep deletes them.\n        Advice  Claude Code deletes eligible transcripts after 30 days, so token-max has less history to replay. The transcripts token-max read take "),
+        unset.contains("  [2/5] Transcript retention  not measured\n        30 days -> 365 days\n        What    How long Claude Code keeps session transcripts before its startup sweep deletes them.\n        Advice  Claude Code deletes eligible transcripts after 30 days, so token-max has less history to replay. The transcripts token-max read take "),
         "{unset}"
     );
     assert!(
@@ -1667,8 +1773,8 @@ mod unix {
             "\n  token-max vibes has 2 pieces of advice the transcripts can't price. Show them?\n  [y]es, [n]o: ",
         );
         let advice = at("\ntoken-max vibes: 2 pieces of advice the transcripts can't price.\n");
-        let card = at("\n  [1/3] Bash timeout cap ");
-        let window = at("\n  [2/3] Auto-compact window (claude-opus-5-5) ");
+        let card = at("\n  [1/4] Bash timeout cap ");
+        let window = at("\n  [3/4] Auto-compact window (claude-opus-5-5) ");
         assert_eq!(
             words(&stdout[advice..card]),
             "token-max vibes: 2 pieces of advice the transcripts can't price. None of it is measured, so none of it is a verdict. Each card names whose advice it is. Nothing is written until you confirm the list at the end."
@@ -1683,9 +1789,12 @@ mod unix {
             .find("\n  ~/.claude/settings.json\n  @@")
             .map(|at| card + at)
             .unwrap_or_else(|| panic!("{stdout}"));
-        let entry = words(&stdout[card..window]);
+        // The memory card that follows advises nothing here, so it asks nothing.
+        let memory = at("\n  [2/4] Auto memory ");
+        assert!(card < memory && memory < window, "{stdout}");
+        let entry = words(&stdout[card..memory]);
         assert!(
-            entry.starts_with("[1/3] Bash timeout cap not measured 2h -> 4m What The longest Claude waits on a foreground Bash command before Claude Code moves it to the background. Advice A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess."),
+            entry.starts_with("[1/4] Bash timeout cap not measured 2h -> 4m What The longest Claude waits on a foreground Bash command before Claude Code moves it to the background. Advice A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess."),
             "{entry}"
         );
         assert!(
@@ -1695,12 +1804,12 @@ mod unix {
         assert!(!entry.contains("Recommended") && !entry.contains("Worth considering"));
         // The window card names doctor's verdict beside its own cap, which is declined.
         // The card on the default advises nothing, so it asks nothing before the diff.
-        let next = at("\n  [3/3] Main-session default ");
+        let next = at("\n  [4/4] Main-session default ");
         assert!(window < next && next < again, "{stdout}");
         let entry = words(&stdout[window..next]);
         assert!(
             entry.starts_with(
-                "[2/3] Auto-compact window (claude-opus-5-5) not measured 967k -> 400k What "
+                "[3/4] Auto-compact window (claude-opus-5-5) not measured 967k -> 400k What "
             ),
             "{entry}"
         );

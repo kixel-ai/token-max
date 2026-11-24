@@ -214,12 +214,46 @@ server that a project's or named profile's configuration also declares is a
 step by hand, since that layer may rely on the rest of the user's table, and
 so is one the system `/etc/codex/config.toml` declares, which would start
 again once the user's table turning it off is gone. So is a table the user's
-`config.toml` no longer declares when the walk runs. Where token-max cannot remove a
-server, it names the step to take by hand instead of asking: a
-project's `.mcp.json`, which everyone using the project shares, a plugin's
-server (`plugin_*`), a claude.ai connector (`claude_ai_*`), or a server it
-found in none of those files, such as one from `--mcp-config` or
-`managed-mcp.json`.
+`config.toml` no longer declares when the walk runs.
+
+Some Claude Code servers are not in a file token-max edits: one in a project's
+`.mcp.json`, which everyone using the project shares, a plugin's server
+(`plugin_*`), a claude.ai connector (`claude_ai_*`), or one found in none of
+those files, such as from `--mcp-config` or `managed-mcp.json`. The same
+question offers to block each of these instead, adding
+`{"serverName": "<name>"}` to
+[`deniedMcpServers`](https://code.claude.com/docs/en/settings-reference#deniedmcpservers)
+in the `settings.json` the turn-off edits, once. Claude Code then connects no
+server by that name, wherever it is configured, and the plugin's skills and the
+connector on claude.ai stay. The name is the one Claude Code matches:
+
+- a project's server, by its key in `.mcp.json`;
+- a plugin's server, as `plugin:<plugin>:<server>`, read from its tools'
+  `plugin_<plugin>_<server>` prefix only when that has no other `_`, since
+  Claude Code writes any character but a letter, digit or `-` as `_`;
+- a connector, by the display name, such as `claude.ai Slack`, that the state
+  file's `claudeAiMcpEverConnected` records and that gives its tools their
+  prefix, once collapsed as Claude Code does (`claude.ai Slack (2)` gives
+  `claude_ai_Slack_2`);
+- a server found in no file, by its tools' prefix, only when that has no `_`.
+
+The newest Claude Code each profile on the line recorded must match the entry
+by name: 2.1.182 for a plugin's server, 2.1.330 for a connector, whose name
+entry before then also hid other connectors at its URL, 2.1.83 for one found in
+no file, and 2.1.0 for a project's. These were measured by loading each kind
+of server under an entry, except the connector's, which is from Claude Code's
+changelog. Where a name can't be spelled, two recorded names give one prefix,
+a declared key and a plugin or connector give one prefix, a recorded tool's
+name holds another `__` after the server's, the Claude Code is older, or
+`deniedMcpServers` is not a list, the walk names
+the step to take by hand instead: remove it from `.mcp.json`, uninstall the
+plugin, disconnect the connector at claude.ai, or remove it where it is
+configured. `disableClaudeAiConnectors` is never offered, since it turns off
+every connector, including ones added later.
+
+A server whose name holds `__` or ends in `_`, known from its MCP
+instructions, has its tools counted under the shorter name before that `__`,
+so its own line shows no use; its removal and its block are steps by hand.
 
 The last question offers to remove servers that are off already, as cleanup
 that saves nothing: a Claude Code server whose tools the user's

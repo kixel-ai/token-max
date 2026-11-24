@@ -60,6 +60,9 @@ pub fn check(result: &CheckResult) -> &'static str {
         CheckResult::Compaction(_) => {
             "How large a conversation grows before it is automatically summarized and continued from the summary."
         }
+        CheckResult::TurnEnd(_) => {
+            "Whether Codex summarizes a conversation when a turn ends, once it fills a set share of the context window: the summary is paid for while the cache is warm, and every later request carries the summary instead of the conversation."
+        }
         CheckResult::Idle(_) => {
             "Whether Claude Code summarizes a large idle session just before its cache expires, so coming back rewrites a short summary instead of the whole conversation."
         }

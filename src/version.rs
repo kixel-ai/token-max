@@ -1,4 +1,4 @@
-//! Plain `major.minor.patch` versions, as Claude Code's gates and token-max's releases compare them.
+//! Plain `major.minor.patch` versions, as Claude Code's and Codex's gates and token-max's releases compare them.
 
 /// A version's numbers, when it is plain `major.minor.patch` digits.
 pub(crate) fn plain(version: &str) -> Option<(u64, u64, u64)> {
@@ -21,6 +21,14 @@ pub(crate) fn claude_at_least(version: Option<&str>, minor: u64, patch: u64) -> 
     version
         .and_then(plain)
         .is_some_and(|v| v >= (2, minor, patch))
+}
+
+/// Whether `version` is a plain Codex version at least v0.`minor`.`patch`; a missing or
+/// malformed one is not.
+pub(crate) fn codex_at_least(version: Option<&str>, minor: u64, patch: u64) -> bool {
+    version
+        .and_then(plain)
+        .is_some_and(|v| v >= (0, minor, patch))
 }
 
 #[cfg(test)]

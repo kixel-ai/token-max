@@ -2377,6 +2377,9 @@ fn unmeasured(group: &crate::rows::Group<'_>, since: Option<Millis>) -> Option<C
         usage_estimates: vec![],
         cache_evidence: vec![],
         reowned: None,
+        // Only Claude's percentage override needs a plan, and this line is Codex.
+        capped: None,
+        unsettable: (!control.applicable).then(|| control.reason.clone()),
     })
 }
 

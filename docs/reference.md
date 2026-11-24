@@ -1349,8 +1349,9 @@ files do not explain the recorded model, for example after a file changed.
 When Claude's built-in Explore ran off Haiku, a [`vibes`](#vibes) card gives what it cost,
 the same tokens on the cheapest model, and the tip from Anthropic's
 [model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/):
-a user agent named `Explore` with `model: haiku`. Its `Change` names that
-file in the profile's `agents` directory as a step by hand, with no question:
+a user agent named `Explore` with `model: haiku`. Its `Change` asks for a new
+file in the profile's `agents` directory as a step by hand, with no question
+(Claude Code names an agent by its frontmatter, so any unused file name works):
 the file replaces the built-in's system prompt, which Anthropic doesn't
 publish, so token-max can't write one that explores the same way. The step
 restates what Claude Code's
@@ -1359,11 +1360,13 @@ do give: `disallowedTools: Write, Edit` and `omitClaudeMd: true`, since the
 built-in starts without CLAUDE.md. It doesn't suggest
 `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`, which moves every subagent to the model,
 not just Explore. Runs recorded as the built-in can predate an `Explore.md`
-there now, the profile's or a project's: the step names only the user files
-the other runs still need, and once every run's directory has one the card
-says so and advises nothing. While `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` applies,
-which drops an agent file's model, the card says the tip doesn't apply and
-names no step. A run of an agent file
+there now, the profile's or a project's: the step names only the `agents`
+directories the other runs still need a file in, and once every run's directory
+has one the card says so and advises nothing. A file counts only with the
+`name` and `description` Claude Code requires. Where
+`CLAUDE_CODE_SUBAGENT_MODEL_FORCE` applies, per profile and project, it drops
+an agent file's model, so the card says the tip doesn't apply to those runs and
+asks for no file there. A run of an agent file
 named `Explore`, which replaces the built-in, gets none. Other types get no card:
 the guide splits subagents by whether they search or edit, which the
 transcripts don't record.

@@ -3031,7 +3031,8 @@ pub struct SubagentCost {
 /// runs: runs recorded as the built-in can predate the file.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Replacement {
-    /// The user agent files that would replace it for the runs no agent file replaces today.
+    /// The user agent directories where a file would replace it, for the runs no agent file
+    /// replaces today and no forced subagent model would override.
     pub missing: Vec<String>,
     /// The agent files of its name, a project's included, that replace it for some run today.
     pub present: Vec<String>,

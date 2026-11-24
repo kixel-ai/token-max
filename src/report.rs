@@ -1864,14 +1864,22 @@ fn explore_item(c: &SubagentCost, profile: &str, out: &Out<'_>) -> Option<Item> 
         );
     }
     if r.forced {
-        text += " CLAUDE_CODE_SUBAGENT_MODEL_FORCE is set, which drops an agent file's model, so the tip does not apply while it is.";
+        // The step still covers the runs where no forced model applies.
+        let (scope, whom) = if r.missing.is_empty() {
+            ("", "")
+        } else {
+            (" for some runs", " to them")
+        };
+        text += &format!(
+            " CLAUDE_CODE_SUBAGENT_MODEL_FORCE is set{scope}, which drops an agent file's model, so the tip does not apply{whom} while it is."
+        );
     }
     // Nothing left to do once every run has its replacement; nothing a file can do under force.
     let quiet = r.missing.is_empty() && !r.forced;
-    let how = (!r.missing.is_empty() && !r.forced).then(|| How::Manual {
+    let how = (!r.missing.is_empty()).then(|| How::Manual {
         // The built-in's documented restriction and its start without CLAUDE.md.
         step: format!(
-            "create {} with the frontmatter name: Explore; description: when to use it; model: haiku; disallowedTools: Write, Edit; omitClaudeMd: true; and a system prompt of your own below it",
+            "add a new agent file to {} with the frontmatter name: Explore; description: when to use it; model: haiku; disallowedTools: Write, Edit; omitClaudeMd: true; and a system prompt of your own below it",
             list(&r.missing)
         ),
         reason: "the file replaces the built-in Explore's system prompt, which Anthropic doesn't publish".into(),
@@ -6360,8 +6368,8 @@ mod tests {
     const NOV1: Millis = 1_793_491_200_000;
     const DAY_MS: Millis = 86_400_000;
     const ROOT: &str = "/synthetic/home/.claude";
-    /// The user agent file that would replace the built-in Explore in [`ROOT`].
-    const ROOT_EXPLORE: &str = "/synthetic/home/.claude/agents/Explore.md";
+    /// The user agent directory where a file would replace the built-in Explore in [`ROOT`].
+    const ROOT_AGENTS: &str = "/synthetic/home/.claude/agents";
 
     fn cost(total: Option<f64>, known: f64) -> Cost {
         Cost {
@@ -9158,7 +9166,7 @@ mod tests {
             model_setting: "model: in /synthetic/.claude/agents/Explore.md".into(),
             effort_setting: "effort: in /synthetic/.claude/agents/Explore.md".into(),
             replacement: Replacement {
-                missing: vec![ROOT_EXPLORE.into()],
+                missing: vec![ROOT_AGENTS.into()],
                 ..Replacement::default()
             },
         });
@@ -9202,7 +9210,7 @@ mod tests {
         };
         assert_eq!(
             step,
-            "create /synthetic/home/.claude/agents/Explore.md with the frontmatter name: Explore; description: when to use it; model: haiku; disallowedTools: Write, Edit; omitClaudeMd: true; and a system prompt of your own below it"
+            "add a new agent file to /synthetic/home/.claude/agents with the frontmatter name: Explore; description: when to use it; model: haiku; disallowedTools: Write, Edit; omitClaudeMd: true; and a system prompt of your own below it"
         );
         assert!(reason.contains("doesn't publish"), "{reason}");
         let details = text(&report, None, true);
@@ -9352,7 +9360,7 @@ mod tests {
             model_setting: String::new(),
             effort_setting: String::new(),
             replacement: Replacement {
-                missing: vec![ROOT_EXPLORE.into()],
+                missing: vec![ROOT_AGENTS.into()],
                 ..Replacement::default()
             },
         };
@@ -9387,14 +9395,14 @@ mod tests {
                 .text
                 .contains("user agent named Explore with model: haiku")
         );
-        // Each file still missing is named; the files there now are said, not asked for.
+        // Each directory still missing a file is named; the files there now are said, not asked for.
         let (missing, project) = (
-            "/synthetic/home/.claude-work/agents/Explore.md",
+            "/synthetic/home/.claude-work/agents",
             "/synthetic/project/.claude/agents/Explore.md",
         );
         let mut partial = line(Harness::Claude, "Explore", "claude-opus-5-5");
         partial.replacement = Replacement {
-            missing: vec![ROOT_EXPLORE.into(), missing.into()],
+            missing: vec![ROOT_AGENTS.into(), missing.into()],
             present: vec![project.into()],
             forced: false,
         };
@@ -9404,7 +9412,7 @@ mod tests {
         };
         assert!(
             step.starts_with(&format!(
-                "create {ROOT_EXPLORE} and {missing} with the frontmatter name: Explore;"
+                "add a new agent file to {ROOT_AGENTS} and {missing} with the frontmatter name: Explore;"
             )),
             "{step}"
         );
@@ -9423,17 +9431,32 @@ mod tests {
             (card.quiet, card.how.as_ref(), card.value.as_str()),
             (true, None, "")
         );
-        // A forced subagent model drops the file's model, so no file is asked for.
+        // A forced subagent model drops the file's model, so no file is asked for there.
         let mut forced = line(Harness::Claude, "Explore", "claude-opus-5-5");
-        forced.replacement.forced = true;
-        let card = &cards(vec![forced])[0];
+        forced.replacement = Replacement {
+            forced: true,
+            ..Replacement::default()
+        };
+        let card = &cards(vec![forced.clone()])[0];
         assert_eq!(
             (card.quiet, card.how.as_ref(), card.value.as_str()),
             (false, None, "")
         );
         assert!(
+            card.text.ends_with(
+                " CLAUDE_CODE_SUBAGENT_MODEL_FORCE is set, which drops an agent file's model, so the tip does not apply while it is."
+            ),
+            "{}",
             card.text
-                .ends_with("so the tip does not apply while it is."),
+        );
+        // Force in one scope leaves the step for the runs where a file would work.
+        forced.replacement.missing = vec![ROOT_AGENTS.into()];
+        let card = &cards(vec![forced])[0];
+        assert!(matches!(card.how, Some(How::Manual { .. })), "{card:?}");
+        assert_eq!(card.value, "inherit -> haiku");
+        assert!(
+            card.text
+                .contains("is set for some runs, which drops an agent file's model, so the tip does not apply to them while it is."),
             "{}",
             card.text
         );

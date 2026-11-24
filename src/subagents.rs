@@ -116,17 +116,19 @@ fn files(dir: &str, extension: &str) -> Result<Vec<String>, ScanError> {
     Ok(found)
 }
 
-/// A Claude agent file's frontmatter `name`, `model` and `effort`, never its prompt.
+/// A Claude agent file's frontmatter `name`, `model` and `effort`, never its prompt;
+/// none without the `description` Claude Code requires.
 fn frontmatter(text: &str) -> Option<(String, Option<String>, Option<String>)> {
     let mut lines = text.trim_start_matches('\u{feff}').lines();
     if lines.next()?.trim_end() != "---" {
         return None;
     }
-    let (mut name, mut model, mut effort) = (None, None, None);
+    let (mut name, mut model, mut effort, mut described) = (None, None, None, false);
     for line in lines {
         let line = line.trim_end();
         if line == "---" {
-            return name.map(|name| (name, model, effort));
+            // Claude Code skips an agent file without a description.
+            return name.filter(|_| described).map(|name| (name, model, effort));
         }
         if line.starts_with(char::is_whitespace) {
             continue;
@@ -146,6 +148,7 @@ fn frontmatter(text: &str) -> Option<(String, Option<String>, Option<String>)> {
                 }
             }
             "effort" => effort = labelled,
+            "description" => described = !value.is_empty(),
             _ => {}
         }
     }
@@ -1187,10 +1190,13 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
             for profile in sharing.filter(|_| replaces) {
                 let controls = scoped(&profile.agents, run.cwd);
                 forced |= controls.force;
-                match definition(controls, kind) {
-                    Some(d) => present.insert(d.file.clone()),
-                    None => missing.insert(join(&[&profile.root, "agents", &format!("{kind}.md")])),
-                };
+                if let Some(d) = definition(controls, kind) {
+                    present.insert(d.file.clone());
+                } else if !controls.force {
+                    // Where the subagent model is forced, a new file's model would be dropped.
+                    // Claude Code names an agent by its frontmatter, so any unused file name works.
+                    missing.insert(join(&[&profile.root, "agents"]));
+                }
             }
         }
         let mut sources: Vec<SourceShare> = sources
@@ -1341,17 +1347,17 @@ mod tests {
         );
         assert_eq!(
             frontmatter(
-                "---\nname: scout # quick\nmodel: haiku # cheaper\neffort: 'low' # x\n---\n"
+                "---\nname: scout # quick\ndescription: x\nmodel: haiku # cheaper\neffort: 'low' # x\n---\n"
             ),
             Some(("scout".into(), Some("haiku".into()), Some("low".into())))
         );
         assert_eq!(
-            frontmatter("---\nname: \"a\" # quoted\nmodel: # none\n---\n"),
+            frontmatter("---\nname: \"a\" # quoted\ndescription: x\nmodel: # none\n---\n"),
             Some(("a".into(), None, None))
         );
         // A long-context model keeps its suffix.
         assert_eq!(
-            frontmatter("---\nname: deep\nmodel: opus[1m]\n---\n"),
+            frontmatter("---\nname: deep\ndescription: x\nmodel: opus[1m]\n---\n"),
             Some(("deep".into(), Some("opus[1m]".into()), None))
         );
         assert_eq!(frontmatter("name: reviewer\n"), None);
@@ -1692,26 +1698,54 @@ mod tests {
         assert_eq!(
             replacement(&plain),
             Replacement {
-                missing: vec!["/home/.claude/agents/Explore.md".into()],
+                missing: vec![join(&["/home/.claude", "agents"])],
                 ..Replacement::default()
             }
         );
+        // A file of another name, or one Claude Code skips for want of a description,
+        // doesn't replace it.
+        let skipped = "---\nname: Explore\nmodel: haiku\n---\n";
+        assert_eq!(frontmatter(skipped), None);
+        let mut occupied = defined("reviewer", None, None);
+        occupied.file = "/home/.claude/agents/Explore.md".into();
+        plain.profiles[0].agents.definitions = vec![occupied];
+        assert_eq!(
+            replacement(&plain).missing,
+            [join(&["/home/.claude", "agents"])]
+        );
+        // Where the subagent model is forced, a file's model would be dropped: none is asked for.
         plain.profiles[0].agents.force = true;
-        assert!(replacement(&plain).forced);
-        // Profiles sharing the history each record the run: each is checked, not the first.
+        assert_eq!(
+            replacement(&plain),
+            Replacement {
+                forced: true,
+                ..Replacement::default()
+            }
+        );
+        // Profiles sharing the history each record the run: each is checked, not the first,
+        // and force in one asks for no file there.
         let mut shared = run();
         shared[0].profiles = vec!["profile".into(), "work".into()].into();
         let mut shared = scan(shared, vec![recorded.clone()]);
-        shared.profiles[0].agents.definitions = vec![defined("Explore", Some("haiku"), None)];
-        let mut work = make_profile("work", "/home/.claude-work");
-        work.agents.force = true;
-        shared.profiles.push(work);
+        shared.profiles[0].agents.force = true;
+        shared
+            .profiles
+            .push(make_profile("work", "/home/.claude-work"));
         assert_eq!(
             replacement(&shared),
             Replacement {
-                missing: vec!["/home/.claude-work/agents/Explore.md".into()],
+                missing: vec![join(&["/home/.claude-work", "agents"])],
+                forced: true,
+                ..Replacement::default()
+            }
+        );
+        shared.profiles[1].agents.definitions = vec![defined("Explore", Some("haiku"), None)];
+        assert_eq!(
+            replacement(&shared),
+            Replacement {
                 present: vec!["/home/.claude/agents/Explore.md".into()],
                 forced: true,
+                ..Replacement::default()
             }
         );
         let project = "/synthetic/project";
@@ -1751,7 +1785,7 @@ mod tests {
         };
         write(
             w.claude.join("agents/nested/reviewer.md"),
-            "---\nname: reviewer\nmodel: haiku\neffort: low\n---\nSYNTHETIC_PRIVATE prompt\n",
+            "---\nname: reviewer\ndescription: x\nmodel: haiku\neffort: low\n---\nSYNTHETIC_PRIVATE prompt\n",
         );
         write(w.claude.join("agents/notes.md"), "no frontmatter\n");
         write(
@@ -1862,11 +1896,11 @@ mod tests {
         );
         put(
             project.join(".claude/agents/reviewer.md"),
-            "---\nname: reviewer\nmodel: sonnet\n---\n",
+            "---\nname: reviewer\ndescription: x\nmodel: sonnet\n---\n",
         );
         put(
             w.claude.join("agents/reviewer.md"),
-            "---\nname: reviewer\nmodel: opus\n---\n",
+            "---\nname: reviewer\ndescription: x\nmodel: opus\n---\n",
         );
         put(w.claude.join("projects/project/main.jsonl"), "");
         let profile = discover_in(&w, Harness::Claude, &[&project, &other]);

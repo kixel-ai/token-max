@@ -10,6 +10,8 @@ Opus 5.5 default is offered a Fable advisor rather than a second Opus.
 
 ## Plan
 
+Decided 2026-11-24 (maintainer, /quest-run): ✅ keep this quest (rejected: drop it).
+
 The advisor card (`advisor_item` in `src/report.rs`) ranks against
 `Profile.effort.model`, resolved before the walk, and every card's change is
 built before the walk starts (`vibes::fixes`). Recommendations:

@@ -46,7 +46,7 @@ codex-cli 0.167.1 settings worth turning on):
 
 - The maintainer's opinions: ✅ [auto memory off](/quest/m1/vibes/memory.md),
   ✅ a smaller compaction window, ✅
-  [a year of transcripts](/quest/m1/vibes/retention.md) (rejected: telemetry
+  a year of transcripts (rejected: telemetry
   opt-outs, which are about privacy rather than cost or capability, and turn
   off Claude Code's updater). Max effort is already outside
   the `Main-session default` card's picks, and fast

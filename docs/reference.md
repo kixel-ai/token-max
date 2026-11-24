@@ -355,7 +355,7 @@ a [`vibes`](#vibes) card, shown when the window holds a Fable request:
 | Codex fast mode | A ChatGPT plan [counts Fast at 2.5x and Ultrafast at 8x](https://learn.chatgpt.com/docs/pricing) standard against included usage, and 2x and 6x on credits. The API premium priced is the [documented API rate](semantics.md#speed-controls-and-premiums), which can be lower, so included usage can draw faster than it shows. |
 | Prompt suggestions | Claude Code [skips them](https://code.claude.com/docs/en/costs#background-token-usage) while a plan is near its usage limit, which the estimate, run on every eligible turn, cannot see. |
 | Fable weekly use | Anthropic [caps Fable models](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan) at up to half the weekly usage limit on Max, Ultra and Team and seat-based Enterprise premium seats, drawing it faster than other models, runs them on usage credits on Pro and Team and seat-based Enterprise standard seats, and bills them at API rates on usage-based Enterprise. The line shows weekly API-price spend and no share of the cap, as [Fable weekly use](#fable-weekly-use) explains. |
-| Codex compaction window and keepalive pings | ChatGPT credits [charge cache writes as ordinary input](https://learn.chatgpt.com/docs/pricing), while API prices from GPT-5.6 on charge 1.25x for a 30-minute write, so a replay that trades writes for reads can come out differently on credits. |
+| Codex compaction window, turn-end compaction and keepalive pings | ChatGPT credits [charge cache writes as ordinary input](https://learn.chatgpt.com/docs/pricing), while API prices from GPT-5.6 on charge 1.25x for a 30-minute write, so a replay that trades writes for reads can come out differently on credits. |
 
 Every other line's dollars are API prices with no documented plan rule beside
 them.
@@ -567,6 +567,7 @@ one that cannot be measured is counted, never priced at zero.
 | Subagent prompt cache TTL | 5m | The TTL replay's gap, when the line has a verdict; otherwise not measured. |
 | Main-agent prompt cache TTL | 1h on a Claude plan within its included usage, 5m on usage credits or an API key; 5m under Bedrock, Vertex or Foundry | The replay's gap as "up to", saved only while the default would be the other value; against the answered default alone when `doctor` asked [how the profile pays](#how-a-profile-pays); under a cloud provider, the replay's gap against 5m. "Up to" savings and costs are bounded apart, never netted. |
 | Compaction window | The model's tuned window (see [Compaction window](#compaction-window)), or Codex's per-model limit | Not measured: a window smaller than the default can't be replayed at the default, since the detail its summaries dropped is gone. |
+| Turn-end compaction | Off | Not measured: a threshold in force can't be replayed off, since the detail its summaries dropped is gone. |
 | Idle compaction | On | The on and off replay under the current settings. |
 | T3 idle compaction | `onReturn` | The difference between the two modes' replays. |
 | Fast mode | Off | The measured premium, as a cost. |
@@ -946,6 +947,67 @@ Summary generation and cold resumed prefixes are included in net savings. Larger
 observed summaries/prefixes, cold-summary costs, and the extra re-read spend that
 would erase a saving accompany the aggregate winner. Lost detail and changed work
 remain unmeasured risks, not zero-cost observations.
+
+## Turn-end compaction
+
+Codex's `model_post_turn_compact_threshold_percent` compacts a conversation
+after a turn's final response once its context reaches that percentage of the
+usable context window or the auto-compact limit; unset or zero is off, and the
+limit still applies before each request ([config reference](https://developers.openai.com/codex/config-reference),
+[Codex's source](https://github.com/openai/codex/blob/rust-v0.171.0/codex-rs/core/src/session/context_window.rs),
+checked 2026-11-23). The line replays candidate thresholds against the current
+one, under the limit the [compaction window](#compaction-window) line
+recommends, and recommends the cheapest. Its baseline names the threshold and
+the limit it replayed. `doctor` offers the two edits apart, so when the limit
+is one the window line recommends, the threshold's card says its saving assumes
+that limit is set too. Both replay in one pass, so a turn's end that compacts
+first spares the limit's compaction before the next request.
+
+A turn ends where the transcript records its completion, so an interrupted turn
+compacts nothing. Its context is its final request's input and output, and the
+usable window is the one Codex last recorded for the model, which is the model's
+context window less the share Codex reserves. A model with no recorded window
+leaves its turns unpriced.
+
+Candidates are the current threshold and, as percentages of each model's usable
+window, its price-tier boundaries and the auto-compact limit. This is not a
+search over every percentage. Any threshold but off compacts a turn that ends
+at the limit, so thresholds above the limit's percentage replay alike and the
+highest wins their tie. With no limit set, Codex's built-in one is not
+recorded. The compactions it caused stay charged as recorded, and a turn the
+session carried on from without one ended under it. A session's final turn
+under its threshold is decided only when it ended with no more context than
+some request the model carried into a next request on the same model; otherwise the threshold is unpriced
+there. A threshold already in force replays only lower
+ones: a higher one, or off, would need the detail its recorded summaries
+dropped.
+
+A summary at a turn's end reads the conversation while its cache is warm: what
+the turn's final request read from the cache is read again, and the rest is
+ordinary input. Its output and the prefix the next request resumes from use the
+same calibration as the window replay. It replaces only the context the turn
+finished with, so what the next turn adds stays, and a next request on another
+model leaves the threshold unpriced. That next request starts cold, later ones
+reuse the prefix, and a session's final turn pays for its summary and gets
+nothing back. Every recorded compaction stays charged once, and a turn that one
+follows adds none. Larger summaries, a summary that reads nothing from the
+cache, and the re-read spend that would erase a saving accompany the winner.
+
+A threshold no recorded turn reached decides nothing, unless some turn's end
+could not be decided, such as one on a model with no recorded usable window,
+which might compact under one threshold and not another. A tie with the current
+threshold, or a candidate that could not be priced beside none that wins, is not
+enough evidence. Neither is any threshold beside an auto-compact limit the
+replay cannot model, such as one scoped to the body after the prefix. A named profile, a `profiles` table or a project's
+`.codex/config.toml` that sets the threshold keeps the line advisory, since
+which applied is not recorded, as does a latest recorded Codex before v0.156.0,
+which added the setting. Lost detail and changed work remain unmeasured risks.
+
+Native Codex transcripts record no billed service tier, so their requests are
+priced at an assumed one and, as for the compaction window, a winner that
+rests on it is withheld (see [Fast mode](#fast-mode)):
+`--details` shows each threshold's priced saving, and the line gives no
+verdict.
 
 ## Idle compaction
 

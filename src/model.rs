@@ -704,6 +704,8 @@ pub struct EventMeta {
     pub post_tokens: Option<i64>,
     pub duration_ms: Option<i64>,
     pub tool: Option<Text>,
+    /// The context window Codex last recorded as usable in this file, in tokens.
+    pub usable_window: Option<i64>,
     /// Preceding metadata from this file, retained even before the selected window.
     pub pricing: Option<std::sync::Arc<Pricing>>,
     pub t3: Option<std::sync::Arc<T3Request>>,
@@ -938,6 +940,20 @@ pub struct EffortControl {
     pub unresolved: Option<String>,
 }
 
+/// Codex's `model_post_turn_compact_threshold_percent`: the share of the usable context
+/// window at which a turn's end compacts the conversation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TurnEndControl {
+    /// The percentage, zero when off, which unset is.
+    pub percent: i64,
+    /// The setting that decides it, as `{file}:{key}`.
+    pub owner: String,
+    /// Whether no file sets it.
+    pub unset: bool,
+    /// Why another file may set it for some runs, such as an unrecorded `--profile` selection.
+    pub unresolved: Option<String>,
+}
+
 /// Claude's effective foreground Bash timeout ceiling and the variables that set it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BashCapControl {
@@ -973,6 +989,8 @@ pub struct Profile {
     pub idle: Option<IdleControl>,
     pub speed: Option<SpeedControl>,
     pub bash: Option<BashCapControl>,
+    /// Codex's turn-end compaction threshold; None for Claude.
+    pub turn_end: Option<TurnEndControl>,
     /// The main session's default reasoning effort.
     pub effort: Option<EffortControl>,
     pub speed_directories: Option<IndexMap<String, SpeedControl>>,
@@ -1765,6 +1783,33 @@ pub struct CompactionCheck {
     pub reowned: Option<Reowned>,
 }
 
+/// A model's usable context window, as Codex last recorded it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UsableWindow {
+    pub model: Option<Text>,
+    pub tokens: i64,
+}
+
+/// A Codex turn-end compaction check, which runs after the window line's recommendation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TurnEndCheck {
+    /// Percentages of the usable window; zero is off.
+    pub base: CheckBase<i64>,
+    /// Whether no file sets the threshold, so `current` is Codex's default, off.
+    pub unset: bool,
+    /// Each model's usable window, which a percentage is taken of.
+    pub usable: Vec<UsableWindow>,
+    /// The auto-compact limit the replay applies first, after the window line's recommendation.
+    pub window: Option<i64>,
+    /// Whether `window` is a change the window line offers, not the limit set now, so
+    /// every saving here assumes that change is made.
+    pub window_offered: bool,
+    pub baseline_cost: Cost,
+    /// Each candidate percentage; `window` holds the percentage.
+    pub scenarios: Vec<WindowScenario>,
+    pub usage_estimates: Vec<UsageEstimate>,
+}
+
 /// What changing a window under `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` also changes: the variable
 /// comes out of every scope, and every other model the line runs keeps its trigger.
 #[derive(Clone, Debug, PartialEq)]
@@ -2257,6 +2302,8 @@ pub enum CheckResult {
     Ttl(TtlCheck),
     /// The context window size that triggers compaction.
     Compaction(CompactionCheck),
+    /// Codex compacting at the end of a turn, once its context is large enough.
+    TurnEnd(TurnEndCheck),
     /// Compacting a session that sits idle, before its cache expires.
     Idle(IdleCheck),
     /// How T3 Code treats an idle session.
@@ -2279,6 +2326,7 @@ impl CheckResult {
         match self {
             CheckResult::Ttl(c) => c.base.action,
             CheckResult::Compaction(c) => c.base.action,
+            CheckResult::TurnEnd(c) => c.base.action,
             CheckResult::Idle(c) => c.base.action,
             CheckResult::T3Idle(c) => c.base.action,
             CheckResult::Speed(c) => c.base.action,

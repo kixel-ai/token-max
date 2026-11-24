@@ -113,6 +113,7 @@ token-max doctor --help
 | --- | --- |
 | Prompt cache TTL (5m or 1h) | Which lifetime would have cost less on your sessions |
 | Auto-compact window | Whether a different window would have cost less, summaries included |
+| Turn-end compaction | Whether Codex compacting at the end of a large turn would have cost less |
 | Idle compaction | Whether compacting sessions you walked away from paid for itself |
 | Tools, skills and MCP servers | What each cost to send with every request, and how often it was used |
 | Instruction files | What each CLAUDE.md or AGENTS.md cost, and what shortening it would save |

@@ -574,6 +574,7 @@ fn check_profiles(result: &CheckResult) -> (&str, &[String]) {
     match result {
         CheckResult::Ttl(c) => (&c.base.profile, &c.base.profiles),
         CheckResult::Compaction(c) => (&c.base.profile, &c.base.profiles),
+        CheckResult::TurnEnd(c) => (&c.base.profile, &c.base.profiles),
         CheckResult::Idle(c) => (&c.base.profile, &c.base.profiles),
         CheckResult::T3Idle(c) => (&c.base.profile, &c.base.profiles),
         CheckResult::Speed(c) => (&c.base.profile, &c.base.profiles),
@@ -698,6 +699,18 @@ fn check_how(result: &CheckResult, profile: &Profile) -> How {
                 Some(reowned) if c.base.current != Some(window) => reown(reowned, profile),
                 _ => window_how(c, window, profile),
             }
+        }
+        CheckResult::TurnEnd(c) => {
+            let Some(percent) = c.base.recommended else {
+                return unknown(&c.base.owner);
+            };
+            let key = crate::controls::TURN_END_KEY;
+            owned(
+                &c.base.owner,
+                profile,
+                vec![(key.into(), vec![Edit::set(key, percent)])],
+                format!("set {} to {percent}", c.base.owner),
+            )
         }
         CheckResult::Idle(c) => {
             let Some(on) = c.base.recommended else {

@@ -4644,8 +4644,17 @@ struct MemoryLine<'a> {
     common: &'a Common<'a>,
     /// The line's name, with its profile tag.
     name: String,
-    /// Whether `doctor`'s walk offers turning it off, and if so whether only as a suggestion.
-    offered: Option<bool>,
+    /// Whether `doctor`'s line recommends or suggests turning it off.
+    offered: Option<Offered>,
+}
+
+/// `doctor`'s change to turn auto memory off, as its walk takes it.
+#[derive(Clone, Copy)]
+struct Offered {
+    /// Worth considering, rather than recommended.
+    suggested: bool,
+    /// Whether the walk takes it up, which it doesn't for an edit saving too little to ask.
+    asked: bool,
 }
 
 /// Auto memory as `vibes` shows it: off is advised when most main sessions ran in a
@@ -4715,7 +4724,13 @@ fn memory_item(line: MemoryLine<'_>, out: &Out<'_>) -> Item {
                 "{share} Outside a repository, memory may be the only place a fact is kept, so turning it off is not advised. {measured}."
             ),
         ),
-        (_, Some(suggested)) => (
+        (
+            _,
+            Some(Offered {
+                suggested,
+                asked: true,
+            }),
+        ) => (
             String::new(),
             true,
             format!(
@@ -4723,17 +4738,24 @@ fn memory_item(line: MemoryLine<'_>, out: &Out<'_>) -> Item {
                 if suggested { "suggests" } else { "recommends" }
             ),
         ),
-        (current, None) => (
+        (current, offered) => (
             format!(
                 "{} {} off",
                 if current.is_some() { "on" } else { "may be on" },
                 out.arrow
             ),
             false,
-            format!(
-                "{share} {REASON} {measured}; judging only cost, it offers no change. {}",
-                memory_reason(m, r)
-            ),
+            match offered {
+                Some(Offered { suggested, .. }) => format!(
+                    "{share} {REASON} {measured}, and already {} turning it off for its cost per use, but its walk does not ask about a change saving under {}/mo.",
+                    if suggested { "suggests" } else { "recommends" },
+                    about(crate::doctor::ASKED_USD)
+                ),
+                None => format!(
+                    "{share} {REASON} {measured}; judging only cost, it offers no change. {}",
+                    memory_reason(m, r)
+                ),
+            },
         ),
     };
     Item {
@@ -5762,7 +5784,10 @@ fn summary(
         let offered = fixes
             .iter()
             .find(|f| f.origins.contains(&Origin::Check(*index)))
-            .map(|f| f.suggested);
+            .map(|f| Offered {
+                suggested: f.suggested,
+                asked: crate::doctor::takes_up(f),
+            });
         let mut item = memory_item(
             MemoryLine {
                 result,
@@ -9714,6 +9739,18 @@ mod tests {
             "{}",
             item.text
         );
+        // A change saving too little for doctor's walk to ask is the card's to offer.
+        let m = memory(&mut report);
+        let measured = m.base.monthly_savings_usd.replace(0.5);
+        let item = card(&report);
+        assert_eq!((item.value.as_str(), item.quiet), ("on -> off", false));
+        assert!(matches!(item.how, Some(How::Edit(_))), "{:?}", item.how);
+        assert!(
+            item.text.ends_with(", and already suggests turning it off for its cost per use, but its walk does not ask about a change saving under $1/mo."),
+            "{}",
+            item.text
+        );
+        memory(&mut report).base.monthly_savings_usd = measured;
         // Half is not most, and a session nothing settles counts as without.
         let m = memory(&mut report);
         (m.base.action, m.base.recommended) = (Action::Keep, Some(true));

@@ -31,10 +31,6 @@ pub(crate) const NAMESPACE_DESCRIPTION: &str = "deferred-namespace-description";
 /// one, so its text belongs to no single tool or server.
 pub(crate) const UNMAPPED_DELTA: &str = "unmapped-rendered-delta";
 
-/// The provenance of an instruction file Claude Code recorded loading as the project's,
-/// rather than the user's, a local or a managed one.
-pub(crate) const PROJECT_INSTRUCTIONS: &str = "project-instruction-attachment";
-
 /// Prefer recorded counts; a missing calibration leaves token and dollar estimates unknown.
 pub fn measure_size(text: Option<&str>) -> Size {
     Size {
@@ -122,6 +118,8 @@ pub struct ExposureCollector {
     // Directories of the MEMORY.md files loaded in the current file, which
     // `autoMemoryDirectory` can move outside the profile root.
     memory_dirs: IndexSet<String>,
+    // Each session's instruction files Claude Code recorded loading as the project's.
+    project_files: IndexMap<Text, IndexSet<String>>,
     // One shared copy of each name, and of each profile set calls and results are seen under.
     interner: Interner,
     // One shared copy of each list of sessions a call, result or invocation was copied into.
@@ -454,6 +452,7 @@ impl ExposureCollector {
             memory: IndexMap::default(),
             roots: HashMap::default(),
             memory_dirs: IndexSet::default(),
+            project_files: IndexMap::default(),
             interner: Interner::default(),
             copies: HashSet::default(),
             call_tools: HashMap::default(),
@@ -715,6 +714,7 @@ impl ExposureCollector {
             calls,
             results,
             memory,
+            project_files,
             components,
             invocations,
             observations,
@@ -926,6 +926,7 @@ impl ExposureCollector {
             tool_calls: tool_calls(calls),
             tool_results: tool_results(results),
             memory,
+            project_files,
         }
     }
 
@@ -1223,13 +1224,6 @@ impl ExposureCollector {
         let revision = match self.components.get_full_mut(revision) {
             Some((_, id, existing)) => {
                 existing.first_seen = existing.first_seen.min(at);
-                // The same file and text may arrive untyped before Claude Code types it as the
-                // project's; either order keeps the type.
-                if new.provenance == PROJECT_INSTRUCTIONS
-                    && &*existing.provenance != PROJECT_INSTRUCTIONS
-                {
-                    existing.provenance = PROJECT_INSTRUCTIONS.into();
-                }
                 id.clone()
             }
             None => {
@@ -1707,13 +1701,16 @@ impl ExposureCollector {
                 } else {
                     Category::Instructions
                 };
-                let provenance = if is(f, "type", "Project") {
-                    PROJECT_INSTRUCTIONS
-                } else {
-                    "instruction-attachment"
-                };
+                // A component is shared by every session that loaded the same text, so the
+                // project's type is kept with the session that recorded it.
+                if is(f, "type", "Project") {
+                    self.project_files
+                        .entry(self.session.clone())
+                        .or_default()
+                        .insert(path.to_string());
+                }
                 self.component(
-                    New::active(category, path, provenance),
+                    New::active(category, path, "instruction-attachment"),
                     Content::Text(content),
                     at,
                 );
@@ -3768,31 +3765,39 @@ mod tests {
     }
 
     #[test]
-    fn a_project_instruction_file_keeps_its_type_whichever_record_came_first() {
-        let instructions = |second: u32, kind: Option<&str>| {
+    fn a_project_instruction_file_is_typed_for_the_session_that_recorded_it() {
+        let instructions = |second: u32, session: &str, kind: Option<&str>| {
             let mut file = json!({ "path": "/repo/CLAUDE.md", "content": "same" });
             if let Some(kind) = kind {
                 file["type"] = json!(kind);
             }
-            attachment(second, json!({ "type": "instructions", "files": [file] }))
+            let mut raw = attachment(second, json!({ "type": "instructions", "files": [file] }));
+            raw["sessionId"] = json!(session);
+            raw
         };
+        // Session a loads the file untyped, then typed, and the user's copy in session b
+        // shares its component but not its type, in either order.
         for kinds in [[None, Some("Project")], [Some("Project"), None]] {
             let mut c = ExposureCollector::new(None);
             let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);
             feed.all(
                 &mut c,
                 vec![
-                    instructions(0, kinds[0]),
-                    assistant(1, json!([])),
-                    instructions(2, kinds[1]),
-                    assistant(3, json!([])),
+                    instructions(0, "a", kinds[0]),
+                    instructions(1, "b", Some("User")),
+                    instructions(2, "a", kinds[1]),
                 ],
             );
-            let requests = [feed.request("r1", 2, None), feed.request("r2", 4, None)];
-            let scan = c.finish(&requests, &[], None);
-            assert_eq!(scan.components.len(), 1, "{kinds:?}");
+            let scan = c.finish(&[], &[], None);
             assert_eq!(
-                &*scan.components[0].provenance, PROJECT_INSTRUCTIONS,
+                scan.project_files
+                    .iter()
+                    .map(|(session, files)| (
+                        &**session,
+                        files.iter().map(String::as_str).collect::<Vec<_>>()
+                    ))
+                    .collect::<Vec<_>>(),
+                [(&*identity("a"), vec!["/repo/CLAUDE.md"])],
                 "{kinds:?}"
             );
         }

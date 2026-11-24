@@ -93,8 +93,6 @@ fn check(
     let mut sessions: HashMap<&str, (Millis, bool)> = HashMap::default();
     let mut unmeasured = 0;
     let mut recorded_requests = crate::collections::HashSet::default();
-    // The project instruction files each main session's transcript recorded loading.
-    let mut loaded: HashMap<&str, crate::collections::IndexSet<&str>> = HashMap::default();
     // Recorded main-agent requests, and those of them that carried memory.
     let (mut main_recorded, mut main_carried) = (0u64, 0u64);
     for e in &scan.exposure.requests {
@@ -109,20 +107,6 @@ fn check(
             (Harness::Codex, Linkage::Chronological) => (&e.view.candidates, true),
             _ => (&e.view.components, false),
         };
-        // A file the session loaded shows where it ran, whether the request recorded it on
-        // the wire or it was active in the transcript before the request.
-        if r.agent == Agent::Main {
-            let files = e
-                .view
-                .components
-                .iter()
-                .chain(e.view.candidates.iter())
-                .map(|id| components[&**id])
-                .filter(|c| &*c.provenance == crate::exposure::PROJECT_INSTRUCTIONS);
-            for c in files {
-                loaded.entry(&r.session).or_default().insert(&c.name);
-            }
-        }
         if !recorded {
             continue;
         }
@@ -150,7 +134,7 @@ fn check(
             }
         }
     }
-    let places = places(line, &mine, &loaded);
+    let places = places(line, &mine, &scan.exposure.project_files);
     let on = control.value;
     // Unknown when a setting the scan cannot resolve, such as a Codex --profile
     // selection, could change it.
@@ -456,7 +440,7 @@ fn check(
 fn places(
     line: &crate::rows::Group<'_>,
     mine: &[&Request],
-    loaded: &HashMap<&str, crate::collections::IndexSet<&str>>,
+    loaded: &crate::collections::IndexMap<crate::model::Text, crate::collections::IndexSet<String>>,
 ) -> SessionPlaces {
     let mut latest: HashMap<&str, &Request> = HashMap::default();
     for r in mine.iter().filter(|r| r.agent == Agent::Main) {
@@ -498,7 +482,8 @@ fn places(
 }
 
 /// Whether `file`, an instruction file a session at `cwd` loaded as its project's, is one
-/// its repository checks in: a CLAUDE.md or AGENTS.md at `cwd` or above it.
+/// its repository checks in: a CLAUDE.md or AGENTS.md at `cwd` or above it, as recorded or,
+/// when both directories still exist, once symlinks resolve.
 fn project_file(file: &str, cwd: &str) -> bool {
     let path = std::path::Path::new(file);
     crate::discovery::PROJECT_INSTRUCTIONS.iter().any(|parts| {
@@ -510,7 +495,13 @@ fn project_file(file: &str, cwd: &str) -> bool {
             }
         }
         base.is_some_and(|dir| {
-            !dir.as_os_str().is_empty() && std::path::Path::new(cwd).starts_with(dir)
+            let resolved = || {
+                let dir = crate::discovery::realpath(dir.to_str()?).ok()?;
+                let cwd = crate::discovery::realpath(cwd).ok()?;
+                Some(std::path::Path::new(&cwd).starts_with(dir))
+            };
+            !dir.as_os_str().is_empty()
+                && (std::path::Path::new(cwd).starts_with(dir) || resolved() == Some(true))
         })
     })
 }
@@ -622,6 +613,21 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_project_file_counts_under_a_symlinked_session_directory() {
+        let workspace = crate::test_support::Workspace::new();
+        let temp = &workspace.home;
+        let repo = temp.join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::os::unix::fs::symlink(&repo, temp.join("alias")).unwrap();
+        let path = |p: &str| temp.join(p).to_str().unwrap().to_string();
+        // The file is gone; its directory, reached through the alias, is not.
+        assert!(project_file(&path("repo/CLAUDE.md"), &path("alias/src")));
+        assert!(project_file(&path("alias/AGENTS.md"), &path("repo")));
+        assert!(!project_file(&path("repo/src/CLAUDE.md"), &path("alias")));
+    }
+
     #[test]
     fn sessions_count_where_their_latest_request_ran_and_records_win_over_directories() {
         let mut profile = crate::test_support::make_profile("profile", "/home/.claude");
@@ -666,11 +672,12 @@ mod tests {
         ];
         let mine: Vec<&Request> = requests.iter().collect();
         let loaded = [
-            ("recorded", ["/gone/AGENTS.md"].into_iter().collect()),
+            ("recorded", "/gone/AGENTS.md"),
             // Loaded where it ran before, then resumed in a plain directory.
-            ("plain", ["/repo/CLAUDE.md"].into_iter().collect()),
+            ("plain", "/repo/CLAUDE.md"),
         ]
         .into_iter()
+        .map(|(session, file)| (session.into(), [file.to_string()].into_iter().collect()))
         .collect();
         let line = crate::rows::Group::one(&profile);
         let p = places(&line, &mine, &loaded);

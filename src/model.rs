@@ -2793,6 +2793,9 @@ pub struct ExposureScan {
     pub tool_results: Vec<ToolResults>,
     /// Selected-window reads and writes of auto memory, deduplicated by call id.
     pub memory: Vec<MemoryUse>,
+    /// Each session's instruction files Claude Code recorded loading as the project's,
+    /// rather than the user's, a local or a managed one.
+    pub project_files: IndexMap<Text, crate::collections::IndexSet<String>>,
 }
 
 /// Whether the agent read or wrote auto memory.

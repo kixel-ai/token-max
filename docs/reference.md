@@ -1410,7 +1410,8 @@ advises turning it off, and says what share of sessions qualified.
 
 A session counts at the directory of its latest main-agent request. It ran in
 such a repository when its transcript recorded Claude Code loading one of those
-files as the project's, from that directory or one above it; or when one sits
+files as the project's, from that directory or one above it, compared once
+symlinks resolve while both directories exist; or when one sits
 now between that directory and the root of the Git checkout that holds it,
 outside the profile's own directory, where the user's file lives. Whether Git tracks
 the file is not read. Codex records its AGENTS.md text without a path, so its
@@ -1423,8 +1424,9 @@ or too few sessions in a repository, where memory may be the only place a fact
 is kept. It never repeats [`doctor`'s measured line](#reading-the-report),
 which judges memory by its cost per use and stays as it is; the card quotes
 that line's total cost and uses as evidence. When that line already
-recommends or suggests memory off, `doctor`'s walk asks, and the card advises
-nothing. Otherwise the card offers the same edit `doctor` would make,
+recommends or suggests memory off and `doctor`'s walk asks, the card advises
+nothing; the walk doesn't ask about an edit saving under $1/mo, so then the
+card offers it. Otherwise the card offers the same edit `doctor` would make,
 including its steps by hand for a named Codex profile or an untrusted project
 that may set memories too.
 

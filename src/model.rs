@@ -978,6 +978,17 @@ pub struct BashCapControl {
     pub unresolved: Option<String>,
 }
 
+/// Claude's `cleanupPeriodDays`: how long it keeps transcripts before its startup sweep
+/// deletes them, and the file that decides it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RetentionControl {
+    /// The days in effect (30 when unset); None when the setting is not a whole number of
+    /// days of at least 1, which Claude Code rejects.
+    pub days: Option<u64>,
+    /// Where `cleanupPeriodDays` is set, or the user's settings file that would set it.
+    pub owner: String,
+}
+
 /// A selected profile's current settings and their owning controls.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Profile {
@@ -998,6 +1009,8 @@ pub struct Profile {
     pub idle: Option<IdleControl>,
     pub speed: Option<SpeedControl>,
     pub bash: Option<BashCapControl>,
+    /// How long Claude keeps transcripts; None for Codex, which keeps them until deleted.
+    pub retention: Option<RetentionControl>,
     /// Codex's turn-end compaction threshold; None for Claude.
     pub turn_end: Option<TurnEndControl>,
     /// The main session's default reasoning effort.
@@ -1679,6 +1692,43 @@ pub struct CheckBase<V> {
     pub assumptions: Vec<String>,
     pub uncertainty: Vec<String>,
     pub sources: Vec<String>,
+}
+
+impl<V> CheckBase<V> {
+    /// A line for a set value that no selected request measures: the value and its owner, no
+    /// verdict, no saving, and no edit to offer.
+    pub fn unmeasured(
+        group: &crate::rows::Group<'_>,
+        current: V,
+        owner: String,
+        since: Option<Millis>,
+    ) -> Self {
+        Self {
+            profile: group.lead.id.clone(),
+            profiles: group.ids.clone(),
+            history_profiles: vec![],
+            evidence: Evidence::Unknown,
+            action: Action::Advisory,
+            current: Some(current),
+            recommended: None,
+            owner,
+            since,
+            until: None,
+            window_basis: "no selected request".into(),
+            baseline: "no request in the scan to replay this value against".into(),
+            requests: 0,
+            coverage: None,
+            savings_usd: None,
+            margin: None,
+            monthly_savings_usd: None,
+            break_even: None,
+            assumptions: vec![],
+            uncertainty: vec![
+                "no request in the window uses this setting, so nothing measures it; select a window that holds requests to compare it".into(),
+            ],
+            sources: vec![],
+        }
+    }
 }
 
 /// What chose the TTL comparison's window: `--since`, the last TTL change, or all available history.

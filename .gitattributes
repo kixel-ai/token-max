@@ -1,1 +1,3 @@
 quest/** merge=quest
+# Fixtures are byte-exact test data: a Windows checkout must not add CRLF.
+test/fixtures/** -text

@@ -3582,6 +3582,7 @@ mod tests {
             ),
             speed: None,
             bash: None,
+            retention: None,
             turn_end: None,
             effort: None,
             speed_directories: None,

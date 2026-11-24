@@ -1852,6 +1852,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             .filter(|r| selected_ids.contains(&*r.id))
             .collect();
         let Some(first_selected) = selected.iter().map(|r| r.time).min() else {
+            checks.extend(unmeasured(&group, options.since));
             continue;
         };
         let ttl_results: Vec<&TtlCheck> = options
@@ -2349,6 +2350,39 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
     checks
 }
 
+/// A Codex limit that is set, with no selected request to replay it against.
+fn unmeasured(group: &crate::rows::Group<'_>, since: Option<Millis>) -> Option<CompactionCheck> {
+    let profile = group.lead;
+    if profile.harness != Harness::Codex {
+        return None;
+    }
+    let control = window_control(&profile.compaction, None);
+    let current = control.value.filter(|_| !control.unset)?;
+    let mut base = CheckBase::unmeasured(group, current, control.owner, since);
+    base.sources = SOURCES.iter().map(|s| s.to_string()).collect();
+    Some(CompactionCheck {
+        base,
+        bucket: "all",
+        model: None,
+        models: vec![],
+        unset: false,
+        setting: control.setting,
+        baseline_cost: Cost::default(),
+        observed_summary_cost: Cost::default(),
+        ttls: PerBucket {
+            main: None,
+            subagent: None,
+        },
+        scenarios: vec![],
+        usage_estimates: vec![],
+        cache_evidence: vec![],
+        reowned: None,
+        // Only Claude's percentage override needs a plan, and this line is Codex.
+        capped: None,
+        unsettable: (!control.applicable).then(|| control.reason.clone()),
+    })
+}
+
 /// What a window change under `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` must also change so one
 /// setting owns each trigger: every setting of the variable comes out, in the home and in each
 /// recorded project of every profile on the line. When other models run, the target goes in its
@@ -2756,6 +2790,7 @@ mod tests {
             idle: None,
             speed: None,
             bash: None,
+            retention: None,
             turn_end: None,
             effort: None,
             speed_directories: None,

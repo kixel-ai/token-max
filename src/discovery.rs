@@ -10,7 +10,8 @@ use serde_json::{Map, Value};
 use crate::controls::{
     CLAUDE_BACKGROUND_ENV, CompactionSources, Env, SettingsScope, TURN_END_KEY, bash_cap_control,
     claude_background, claude_inbound, claude_memory, codex_background, codex_memory,
-    compaction_controls, idle_controls, js_string, members, scoped_environment, speed_controls,
+    compaction_controls, idle_controls, js_string, members, retention_control, scoped_environment,
+    speed_controls,
 };
 use crate::effort::{claude_effort, codex_catalog, codex_effort, latest_model};
 use crate::model::{
@@ -2409,6 +2410,18 @@ pub(crate) fn profile(
     };
     let mut speed = speed_controls(harness, &speed_scopes, local_env)?;
     let bash = claude.then(|| bash_cap_control(&speed_scopes, local_env));
+    let retention = claude.then(|| {
+        retention_control(
+            SettingsScope {
+                config: &user,
+                file: &settings_file,
+            },
+            SettingsScope {
+                config: &managed,
+                file: managed_file,
+            },
+        )
+    });
     let turn_end = if claude {
         None
     } else {
@@ -2558,6 +2571,7 @@ pub(crate) fn profile(
         idle,
         speed: Some(speed),
         bash,
+        retention,
         turn_end,
         effort: None,
         speed_directories: None,

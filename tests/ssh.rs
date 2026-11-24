@@ -120,7 +120,7 @@ HOME="$TEST_ROOT/homes/$host" PATH="$TEST_ROOT/remote/$host:$TEST_PATH" exec sh 
         std::fs::copy(fixture("claude.jsonl"), project.join("main.jsonl")).unwrap();
         std::fs::write(
             home.join(".claude/settings.json"),
-            r#"{"promptCacheTtl":"1h"}"#,
+            r#"{"promptCacheTtl":"1h","cleanupPeriodDays":365}"#,
         )
         .unwrap();
         home
@@ -482,7 +482,7 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     let home = hosts.host("devbox");
     std::fs::write(
         home.join(".claude/settings.json"),
-        r#"{"promptCacheTtl":"1h","env":{"BASH_MAX_TIMEOUT_MS":"7200000"}}"#,
+        r#"{"promptCacheTtl":"1h","cleanupPeriodDays":365,"env":{"BASH_MAX_TIMEOUT_MS":"7200000"}}"#,
     )
     .unwrap();
     let transcript = home.join(".claude/projects/my project/main.jsonl");
@@ -1504,11 +1504,10 @@ fn flat(text: &str) -> String {
 /// Each walked home's settings: a 1h TTL, and a Bash cap that outlasts it, which `vibes`
 /// offers to lower on every host with a saving not measured. The compaction window is at the
 /// maintainer's cap, so its card asks nothing.
-const HOME_SETTINGS: &str =
-    r#"{"promptCacheTtl":"1h","autoCompactWindow":400000,"env":{"BASH_MAX_TIMEOUT_MS":"7200000"}}"#;
+const HOME_SETTINGS: &str = r#"{"promptCacheTtl":"1h","autoCompactWindow":400000,"cleanupPeriodDays":365,"env":{"BASH_MAX_TIMEOUT_MS":"7200000"}}"#;
 
 /// [`HOME_SETTINGS`] with the cap lowered under the TTL, as accepting its change writes them.
-const CAP_LOWERED: &str = "{\n  \"promptCacheTtl\": \"1h\",\n  \"autoCompactWindow\": 400000,\n  \"env\": {\n    \"BASH_MAX_TIMEOUT_MS\": \"3300000\"\n  }\n}";
+const CAP_LOWERED: &str = "{\n  \"promptCacheTtl\": \"1h\",\n  \"autoCompactWindow\": 400000,\n  \"cleanupPeriodDays\": 365,\n  \"env\": {\n    \"BASH_MAX_TIMEOUT_MS\": \"3300000\"\n  }\n}";
 
 impl Hosts {
     /// `vibes` on this host, devbox and laptop, walked on a terminal after the billing questions.

@@ -937,7 +937,10 @@ model's latest observed automatic-compaction trigger, else Claude Code's
 documented default. A window larger than the model's context window replays
 at that context window, as Claude Code caps it. Unresolved defaults, disabled
 compaction, unsupported versions/scopes, and ambiguous named Codex profiles stay
-advisory.
+advisory. A Codex limit that is set still gets its line when no selected request
+exists, such as under a `--since` that excludes every one: the value and its
+setting, with no verdict and no edit, since nothing replays it. An unset limit
+gets none.
 
 `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` resolves into the replayed trigger from every
 environment the window reads, a T3 instance's included. An explicit window
@@ -1041,7 +1044,9 @@ enough evidence. Neither is any threshold beside an auto-compact limit the
 replay cannot model, such as one scoped to the body after the prefix. A named profile, a `profiles` table or a project's
 `.codex/config.toml` that sets the threshold keeps the line advisory, since
 which applied is not recorded, as does a latest recorded Codex before v0.156.0,
-which added the setting. Lost detail and changed work remain unmeasured risks.
+which added the setting. A threshold that is set, zero included, still gets its
+line with no verdict when no selected request exists. Lost detail and changed
+work remain unmeasured risks.
 
 Native Codex transcripts record no billed service tier, so their requests are
 priced at an assumed one and, as for the compaction window, the line gives a
@@ -1364,6 +1369,7 @@ an exit code.
 | Card | When |
 | --- | --- |
 | [Bash timeout cap](#bash-timeout-cap) | Every Claude settings file: the cap beside the long waits measured under it. |
+| [Transcript retention](#transcript-retention) | A Claude profile whose `cleanupPeriodDays` is under 365, the default of 30 included: the disk its transcripts take, and the change to 365. |
 | [Auto-compact window](#auto-compact-window-cap) | Every compaction window line: the maintainer's cap of 400K for Claude and 240K for Codex, beside `doctor`'s replay of it. |
 | [Main-session default](#main-session-default) | Every resolved main-session default: the maintainer's pick of a model and effort beside what each recorded pair cost, and past `high` the provider's guidance. |
 | An instruction file | A CLAUDE.md of 200 lines or more, past Claude Code's [guidance](https://code.claude.com/docs/en/memory#write-effective-instructions), or an AGENTS.md at or above the byte budget Codex [loads](https://learn.chatgpt.com/docs/agent-configuration/agents-md), with what each 100 lines of it costs. |
@@ -1434,6 +1440,26 @@ says so.
 Background commands and the user's own processes are unaffected by the cap.
 Codex's `background_terminal_max_timeout` bounds one poll of a background
 terminal, and each poll reads the cache, so it has no card.
+
+### Transcript retention
+
+Claude Code deletes a transcript, with its subagent transcripts and spilled tool
+results, once it is older than `cleanupPeriodDays`, 30 days unless set. token-max
+replays those transcripts, so a shorter period leaves it less history to measure
+and to compare, and a deleted transcript is gone: the setting stops only future
+deletion. Claude Desktop and Cowork transcripts are exempt from the sweep by
+default, so the period is not a limit on every transcript. When a profile's value is under 365, the card advises 365 and says how
+much disk the transcripts the scan read take today, from their sizes. A year is
+the maintainer's pick: a longer period grows disk without bound for a heavy
+user, and 90 days loses longer comparisons. The card names whose file sets the
+value; the edit goes in the user's settings file, and a managed file's value,
+which outranks it, is a step by hand. Project and local settings are not read, and a
+T3 instance whose launch arguments may replace the settings file has no card.
+A period of a year or more, or a value Claude Code rejects (not a whole number of
+days of at least 1), has no card.
+
+Codex has no card: its [configuration reference](https://developers.openai.com/codex/config-reference)
+lists no setting that deletes old `sessions/`.
 
 ### Auto-compact window cap
 

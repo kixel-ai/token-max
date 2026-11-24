@@ -16,8 +16,8 @@ use crate::collections::{IndexMap, IndexSet};
 use crate::context::{json_value, setting_text, typed_only};
 use crate::mcp::{Definition, Entry, Lock};
 use crate::model::{
-    BackgroundFeature, Billing, Bucket, CheckResult, CompactionCheck, ContextKind, Control,
-    Harness, Margin, Profile, Reowned, Report, Setting, Verdict,
+    BackgroundFeature, BashCap, Billing, Bucket, CheckResult, CompactionCheck, ContextKind,
+    Control, Harness, Margin, Profile, Reowned, Report, Setting, Verdict,
 };
 use crate::report::{
     AT_LEAST, Choice, Listing, Origin, Recommendation, Source, UP_TO, about, approx, capitalize,
@@ -203,7 +203,7 @@ pub fn fixes(report: &Report, unicode: bool) -> Vec<Fix> {
 }
 
 /// Drop repeated edits, and leave the second of two values for one setting by hand.
-fn fixes_from(all: Vec<Fix>) -> Vec<Fix> {
+pub(crate) fn fixes_from(all: Vec<Fix>) -> Vec<Fix> {
     let mut fixes: Vec<Fix> = vec![];
     for mut fix in all {
         if let Some(same) = fixes
@@ -578,7 +578,6 @@ fn check_profiles(result: &CheckResult) -> (&str, &[String]) {
         CheckResult::T3Idle(c) => (&c.base.profile, &c.base.profiles),
         CheckResult::Speed(c) => (&c.base.profile, &c.base.profiles),
         CheckResult::Background(c) => (&c.base.profile, &c.base.profiles),
-        CheckResult::BashCap(c) => (&c.base.profile, &c.base.profiles),
         CheckResult::Keepalive(c) => (&c.base.profile, &c.base.profiles),
         CheckResult::Memory(c) => (&c.base.profile, &c.base.profiles),
         CheckResult::Effort(c) => (&c.base.profile, &c.base.profiles),
@@ -636,6 +635,32 @@ fn manual(owner: &str, profile: &Profile, step: String) -> How {
         format!("{owner} sets it; token-max edits only {file}")
     };
     How::Manual { step, reason }
+}
+
+/// How to move a Bash timeout cap to the one suggested, in `profile`'s settings; None when
+/// it suggests no other cap.
+pub(crate) fn bash_how(cap: &BashCap, profile: &Profile) -> Option<How> {
+    let to = cap.suggested.filter(|to| *to != cap.current)?.to_string();
+    let file = profile.settings_file.as_str();
+    let step = format!("set {}", cap.replacement);
+    let max = "BASH_MAX_TIMEOUT_MS";
+    let mut how = owned(
+        &cap.owner,
+        profile,
+        vec![(format!("env.{max}"), vec![env(max, &to)])],
+        step.clone(),
+    );
+    // A default above the cap raises the cap again, so it comes down too, in the one edit.
+    let default = "BASH_DEFAULT_TIMEOUT_MS";
+    if let (How::Edit(patch), Some(control)) = (&mut how, &profile.bash)
+        && cap.replacement.contains(default)
+    {
+        if !names(&control.default_owner, file, &format!("env.{default}")) {
+            return Some(manual(&control.default_owner, profile, step));
+        }
+        patch.edits.push(env(default, &to));
+    }
+    Some(how)
 }
 
 fn check_how(result: &CheckResult, profile: &Profile) -> How {
@@ -704,31 +729,6 @@ fn check_how(result: &CheckResult, profile: &Profile) -> How {
                 )],
             };
             owned(&s.base.owner, profile, candidates, s.replacement.clone())
-        }
-        CheckResult::BashCap(b) => {
-            let Some(cap) = b.base.recommended else {
-                return unknown(&b.base.owner);
-            };
-            let cap = cap.to_string();
-            let step = format!("set {}", b.replacement);
-            let max = "BASH_MAX_TIMEOUT_MS";
-            let mut how = owned(
-                &b.base.owner,
-                profile,
-                vec![(format!("env.{max}"), vec![env(max, &cap)])],
-                step.clone(),
-            );
-            // A default above the cap raises the cap again, so it comes down too.
-            let default = "BASH_DEFAULT_TIMEOUT_MS";
-            if let (How::Edit(patch), Some(control)) = (&mut how, &profile.bash)
-                && b.replacement.contains(default)
-            {
-                if !names(&control.default_owner, file, &format!("env.{default}")) {
-                    return manual(&control.default_owner, profile, step);
-                }
-                patch.edits.push(env(default, &cap));
-            }
-            how
         }
         CheckResult::Background(b) => {
             let (key, variable, off) = match b.feature {
@@ -1032,23 +1032,44 @@ const CARD_CELLS: usize = 88;
 
 /// A question of the walk as a card: a heading with its figure at the right, the change,
 /// then labeled paragraphs.
-struct Card<'a> {
+pub(crate) struct Card<'a> {
     /// Such as "[1/4]".
-    counter: String,
-    name: &'a str,
+    pub(crate) counter: String,
+    pub(crate) name: &'a str,
     /// What it saves, such as "saves $206/mo", and its share of this host's spend.
-    saving: Option<(String, String)>,
+    pub(crate) saving: Option<(String, String)>,
     /// Shown instead of a saving, such as "saving not measured".
-    no_saving: &'a str,
-    /// The current value and the offered one, such as "on → off".
-    value: String,
-    suggested: bool,
+    pub(crate) no_saving: &'a str,
+    /// The current value and the offered one, such as "on → off"; empty with none to offer.
+    pub(crate) value: String,
+    pub(crate) standing: Standing,
     /// Labeled paragraphs, such as ("What", ...) and ("Why", ...).
-    rows: Vec<(&'a str, String)>,
+    pub(crate) rows: Vec<(&'a str, String)>,
+}
+
+/// How strongly a card's change is put.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Standing {
+    /// Measured to save.
+    Recommended,
+    /// Measured, with a cost only the person can weigh.
+    Considered,
+    /// `vibes`' advice, which nothing measured backs: no verdict.
+    Advice,
+}
+
+impl Standing {
+    fn of(suggested: bool) -> Self {
+        if suggested {
+            Standing::Considered
+        } else {
+            Standing::Recommended
+        }
+    }
 }
 
 /// A prompt: its question, and whether it offers to split a group into its changes.
-struct Prompt {
+pub(crate) struct Prompt {
     text: String,
     split: bool,
 }
@@ -1056,7 +1077,7 @@ struct Prompt {
 impl Style {
     /// Spans wrapped `indent` cells in, rows after the first at `continuation` when given,
     /// each styled on a color terminal, ending with a line break.
-    fn spans(
+    pub(crate) fn spans(
         &self,
         spans: &[(&str, &str)],
         width: Option<usize>,
@@ -1077,12 +1098,12 @@ impl Style {
     }
 
     /// A line of the walk, inside its margin.
-    fn line(&self, text: &str) -> String {
+    pub(crate) fn line(&self, text: &str) -> String {
         self.spans(&[(text, "")], self.width, MARGIN, None)
     }
 
     /// Secondary text, such as what the walk left out.
-    fn dim(&self, text: &str) -> String {
+    pub(crate) fn dim(&self, text: &str) -> String {
         self.spans(&[(text, DIM)], self.width, MARGIN, None)
     }
 
@@ -1099,7 +1120,7 @@ impl Style {
 
     /// The walk's heading: how many questions about how many changes, then that nothing is
     /// written before the confirm, with a blank line around it.
-    fn headline(&self, text: &str) -> String {
+    pub(crate) fn headline(&self, text: &str) -> String {
         format!(
             "\n{}{}",
             self.spans(&[(text, BOLD)], self.width, MARGIN, None),
@@ -1108,7 +1129,7 @@ impl Style {
     }
 
     /// A question, bold, then its answers, dim.
-    fn prompt(&self, question: &str, split: bool) -> Prompt {
+    pub(crate) fn prompt(&self, question: &str, split: bool) -> Prompt {
         let options = if split {
             "[y]es, [n]o, [s]plit, [q]uit"
         } else {
@@ -1142,7 +1163,7 @@ impl Style {
 
     /// A card: the counter and name with the saving at the right, then the change with its
     /// colored verdict, then each labeled paragraph hanging under its label.
-    fn card(&self, card: &Card<'_>) -> String {
+    pub(crate) fn card(&self, card: &Card<'_>) -> String {
         let width = self.card_width();
         let body = MARGIN + crate::terminal::cells(&card.counter) + 1;
         let (figure, share) = match &card.saving {
@@ -1174,13 +1195,18 @@ impl Style {
             MARGIN,
             Some(body),
         );
-        let (verdict, color) = if card.suggested {
-            ("Worth considering", YELLOW)
-        } else {
-            ("Recommended", RED)
+        let (verdict, color) = match card.standing {
+            Standing::Recommended => ("Recommended", RED),
+            Standing::Considered => ("Worth considering", YELLOW),
+            Standing::Advice => ("", ""),
         };
-        let value = format!("{}  ", card.value);
-        text += &self.spans(&[(&value, ""), (verdict, color)], width, body, None);
+        let value = match (card.value.as_str(), verdict) {
+            (value, "") => value.to_string(),
+            (value, _) => format!("{value}  "),
+        };
+        if !value.is_empty() {
+            text += &self.spans(&[(&value, ""), (verdict, color)], width, body, None);
+        }
         let label = card
             .rows
             .iter()
@@ -1215,7 +1241,7 @@ impl Style {
             saving: saving(fix.verb, fix.saving, fix.margin, fix.share),
             no_saving: "saving not measured",
             value: fix.value.clone(),
-            suggested: fix.suggested,
+            standing: Standing::of(fix.suggested),
             rows,
         })
     }
@@ -1227,7 +1253,7 @@ impl Style {
 
     /// A file to write, from `~` and after its host's name as `scp` names it, such as
     /// `devbox:~/.claude/settings.json`.
-    fn file(&self, path: &str) -> String {
+    pub(crate) fn file(&self, path: &str) -> String {
         match &self.host {
             Some(host) => format!("{host}:{}", self.path(path)),
             None => self.path(path),
@@ -1265,7 +1291,7 @@ fn why(evidence: &str) -> &str {
 }
 
 /// `text` with every path under `home` shown from `~`.
-fn home_in(text: &str, home: Option<&str>) -> String {
+pub(crate) fn home_in(text: &str, home: Option<&str>) -> String {
     match home {
         Some(dir) => text
             .replace(&format!("{dir}/"), "~/")
@@ -1426,13 +1452,11 @@ impl Target {
             // Check again just before replacing it, so a write by another tool since the
             // walk's check is kept rather than overwritten.
             if !self.unchanged()? {
-                return Err(io::Error::other(
-                    "it changed while token-max doctor was writing",
-                ));
+                return Err(io::Error::other("it changed while token-max was writing"));
             }
             if lock.is_some_and(|l| !l.held()) {
                 return Err(io::Error::other(
-                    "another program took over its lock while token-max doctor was writing",
+                    "another program took over its lock while token-max was writing",
                 ));
             }
             fs::rename(&temp, &self.resolved)
@@ -1785,7 +1809,7 @@ pub fn total(fixes: &[Fix], defaults: bool) -> String {
 
 /// One person's answer at a prompt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Answer {
+pub(crate) enum Answer {
     Yes,
     No,
     Quit,
@@ -1794,7 +1818,7 @@ enum Answer {
 }
 
 /// Ask `prompt` until it gets an answer it takes; end of input is a quit.
-fn answer(
+pub(crate) fn answer(
     prompt: &Prompt,
     input: &mut impl BufRead,
     output: &mut impl Write,
@@ -2117,7 +2141,7 @@ impl Selection {
     }
 
     /// Record `event`, one of `offers`' changes, or why it names none.
-    fn apply(&mut self, offers: &Offers, event: Event) -> Result<(), String> {
+    pub(crate) fn apply(&mut self, offers: &Offers, event: Event) -> Result<(), String> {
         let missing = || format!("the walk answered a change it was not offered ({event:?})");
         match event {
             Event::Choose { offer: index, yes } => {
@@ -2301,9 +2325,32 @@ pub struct Offers {
     monthly: f64,
 }
 
+/// What a host's walk does about one line: offers its edit, or names the step by hand.
+pub(crate) enum Change<'a> {
+    /// The offer's index among the host's, and the change.
+    Offer(usize, &'a Fix),
+    /// As the list reads it, such as "by hand, since ...: ...".
+    ByHand(&'a str),
+}
+
 impl Offers {
+    /// What the walk does about the line at `origin`, if it names a change.
+    pub(crate) fn change(&self, origin: Origin) -> Option<Change<'_>> {
+        let offer = self
+            .offers
+            .iter()
+            .position(|o| o.fix.origins.contains(&origin));
+        if let Some(index) = offer {
+            return Some(Change::Offer(index, &self.offers[index].fix));
+        }
+        self.steps.iter().find_map(|(o, choice)| match choice {
+            Choice::Manual(step) if *o == origin => Some(Change::ByHand(step)),
+            _ => None,
+        })
+    }
+
     /// How many changes the walk offers.
-    fn offered(&self) -> usize {
+    pub(crate) fn offered(&self) -> usize {
         self.offers.len() + self.cleanup.len()
     }
 
@@ -2584,7 +2631,7 @@ impl Question<'_> {
             saving: self.saving(),
             no_saving: "savings not measured",
             value: first.value.clone(),
-            suggested: first.suggested,
+            standing: Standing::of(first.suggested),
             rows,
         })
     }
@@ -2732,7 +2779,7 @@ impl Walk<'_, '_> {
                 saving: None,
                 no_saving: "saves nothing",
                 value: format!("off {} removed", style.arrow()),
-                suggested: true,
+                standing: Standing::Considered,
                 rows,
             })
         };
@@ -3063,7 +3110,17 @@ pub fn confirm(
         ));
     }
     let question = format!("Write the {} to {files}?", what.join(" and "));
-    let prompt = style.ask(&question, "[y]es, [n]o");
+    yes_or_no(&question, style, input, output)
+}
+
+/// Ask `question` after a blank line until the answer is a yes or a no; end of input is a no.
+pub fn yes_or_no(
+    question: &str,
+    style: &Style,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> io::Result<bool> {
+    let prompt = style.ask(question, "[y]es, [n]o");
     loop {
         write!(output, "\n{prompt}")?;
         output.flush()?;
@@ -3337,7 +3394,7 @@ pub fn write(plan: &Plan) -> Result<Vec<Written>, ScanError> {
             Ok(true) => {}
             Ok(false) => {
                 return Err(ScanError::new(format!(
-                    "{shown} changed while token-max doctor was running; nothing was written, so run it again"
+                    "{shown} changed while token-max was running; nothing was written, so run it again"
                 )));
             }
             Err(e) => {
@@ -3363,7 +3420,7 @@ pub fn write(plan: &Plan) -> Result<Vec<Written>, ScanError> {
             })?;
             if !removals_unchanged(&pending.target, &target, &pending.removals) {
                 return Err(ScanError::new(format!(
-                    "{shown} changed while token-max doctor was running; nothing was written, so run it again"
+                    "{shown} changed while token-max was running; nothing was written, so run it again"
                 )));
             }
             text = apply(&target, &pending.edits, &pending.removals)
@@ -4692,7 +4749,7 @@ mod tests {
             saving: Some(("saves $206/mo".into(), "39%".into())),
             no_saving: "saving not measured",
             value: "on → off".into(),
-            suggested: false,
+            standing: Standing::Recommended,
             rows: vec![
                 (
                     "What",
@@ -4772,7 +4829,7 @@ mod tests {
         std::fs::write(&settings, r#"{"theirs": 1}"#).unwrap();
         let error = write(&plan).unwrap_err().message;
         assert!(
-            error.contains("changed while token-max doctor was running"),
+            error.contains("changed while token-max was running"),
             "{error}"
         );
         assert_eq!(
@@ -5041,7 +5098,7 @@ mod tests {
         .unwrap();
         let err = write(&plan).unwrap_err().to_string();
         assert!(
-            err.contains("changed while token-max doctor was running; nothing was written"),
+            err.contains("changed while token-max was running; nothing was written"),
             "{err}"
         );
         let bak = |file: &Path| PathBuf::from(format!("{}.token-max.bak", file.display()));

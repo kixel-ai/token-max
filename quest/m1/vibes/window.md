@@ -34,7 +34,3 @@ Recommendations:
   consistent. Where that line would leave the change by hand, so does this
   card.
 - A model whose context is at or under the cap never fires.
-
-## Required
-
-- [Vibes command](/quest/m1/vibes/command.md) - the `vibes` walk this card joins

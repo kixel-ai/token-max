@@ -948,7 +948,7 @@ pub struct BashCapControl {
     /// The effective `BASH_DEFAULT_TIMEOUT_MS` (default 120000).
     pub default_timeout: Millis,
     pub default_owner: String,
-    /// Why the cap stays advisory: a request T3 could not settle may have run under another
+    /// Why no cap is suggested: a request T3 could not settle may have run under another
     /// owner's cap.
     pub unresolved: Option<String>,
 }
@@ -1966,6 +1966,8 @@ pub struct BashWaits {
     pub calls: u64,
     /// Those whose wait reached the cache TTL their request wrote.
     pub long: u64,
+    /// Those with no cache lifetime to compare: none set and none their request wrote.
+    pub unknown: u64,
     /// Long waits that reached their timeout.
     pub timed_out: u64,
     /// Long waits that slept in a polling loop.
@@ -1976,15 +1978,27 @@ pub struct BashWaits {
     pub miss_estimate: Option<Estimate>,
 }
 
-/// Whether the foreground Bash timeout cap outlasts the cache TTL.
+/// A line of Claude profiles' foreground Bash timeout cap beside the long waits recorded
+/// under it. What another cap would save is not measured, so it is advice with no verdict.
 #[derive(Clone, Debug, PartialEq)]
-pub struct BashCapCheck {
-    pub base: CheckBase<Millis>,
-    /// Always "all".
-    pub bucket: &'static str,
-    /// The main-agent TTL the cap is compared with; None when unresolved.
+pub struct BashCap {
+    /// The profile whose controls the line reports, the first of `profiles`.
+    pub profile: String,
+    /// Every profile the line covers, which share the cap's owners.
+    pub profiles: Vec<String>,
+    /// The effective cap.
+    pub current: Millis,
+    /// The cap a guessed margin under `ttl` suggests; None when `unresolved` says why not.
+    pub suggested: Option<Millis>,
+    /// Where `BASH_MAX_TIMEOUT_MS` is set, or the settings file that would set it.
+    pub owner: String,
+    /// The main-agent TTL in effect now, which the cap is compared with; None when unresolved.
     pub ttl: Option<Ttl>,
+    /// Where `ttl` came from.
     pub ttl_basis: String,
+    /// Why no cap is suggested: no TTL to compare with, or an owner that is not settled.
+    pub unresolved: Option<String>,
+    /// The settings that make the suggested cap, such as `env.BASH_MAX_TIMEOUT_MS: "240000"`.
     pub replacement: String,
     pub waits: BashWaits,
 }
@@ -2251,8 +2265,6 @@ pub enum CheckResult {
     Speed(SpeedCheck),
     /// A model request the client makes on its own.
     Background(BackgroundCheck),
-    /// The foreground Bash timeout cap.
-    BashCap(BashCapCheck),
     /// Pings that keep the cache warm.
     Keepalive(KeepaliveCheck),
     /// Auto memory.
@@ -2271,7 +2283,6 @@ impl CheckResult {
             CheckResult::T3Idle(c) => c.base.action,
             CheckResult::Speed(c) => c.base.action,
             CheckResult::Background(c) => c.base.action,
-            CheckResult::BashCap(c) => c.base.action,
             CheckResult::Keepalive(c) => c.base.action,
             CheckResult::Memory(c) => c.base.action,
             CheckResult::Effort(c) => c.base.action,
@@ -3182,6 +3193,8 @@ pub struct Report {
     pub inbound: Vec<InboundUse>,
     /// One result per setting checked.
     pub checks: Vec<CheckResult>,
+    /// Each foreground Bash timeout cap and its long waits, which `vibes` shows as advice.
+    pub bash: Vec<BashCap>,
     /// What the report assumes beyond the measurements.
     pub assumptions: Vec<String>,
 }

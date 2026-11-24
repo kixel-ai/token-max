@@ -1,4 +1,5 @@
-# The README's recording of `token-max doctor` on synthetic transcripts.
+# The README's recording of `token-max doctor`, and the `vibes` it hands off to, on synthetic
+# transcripts.
 # Regenerate from the repository root after `cargo build --release`:
 #   nix shell nixpkgs#vhs nixpkgs#python3 -c vhs assets/demo/walk.tape
 
@@ -33,18 +34,30 @@ Type "a"
 Sleep 300ms
 Enter
 Sleep 4s
+# The two measured changes: fast mode off, then the 1h cache.
 Type "y"
 Sleep 300ms
 Enter
 Sleep 3s
 Type "y"
-Sleep 300ms
-Enter
-Sleep 3s
-Type "n"
 Sleep 300ms
 Enter
 Sleep 5s
+# Write them.
+Type "y"
+Sleep 300ms
+Enter
+Sleep 4s
+# The walk is over: show the advice the transcripts can't price.
+Type "y"
+Sleep 300ms
+Enter
+Sleep 5s
+# Its Bash cap, lowered under the 5m cache the scan saw, then the write.
+Type "y"
+Sleep 300ms
+Enter
+Sleep 4s
 Type "y"
 Sleep 300ms
 Enter

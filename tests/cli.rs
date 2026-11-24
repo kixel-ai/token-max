@@ -393,6 +393,98 @@ fn exit_codes_and_no_partial_findings_or_transcript_content() {
 }
 
 #[test]
+fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options() {
+    let w = Workspace::new();
+    w.fixture();
+    // A TTL doctor recommends raising, and a cap past the margin under the one set now.
+    const SETTINGS: &str = r#"{"promptCacheTtl":"5m","env":{"BASH_MAX_TIMEOUT_MS":"7200000"}}"#;
+    w.settings(SETTINGS);
+    let base = prices_args(&w);
+    let invoke = |name: &str, extra: &[&str]| {
+        let mut all = vec![name];
+        all.extend(base.iter().map(String::as_str));
+        all.extend(extra);
+        run(&mut command(&w, &all))
+    };
+    // Doctor's measured change sets its exit code; the cap is no line of its report, which
+    // only names the command that has it.
+    let (status, report, stderr) = invoke("doctor", &["--details"]);
+    assert_eq!((status, stderr.as_str()), (1, ""), "{report}");
+    assert!(!report.contains("Bash timeout cap") && !report.contains("BASH_MAX_TIMEOUT_MS"));
+    assert!(!report.contains("WARNINGS"), "{report}");
+    assert!(
+        report.ends_with(
+            "\n\n  token-max vibes has 1 piece of advice the transcripts can't price. Run token-max vibes with the same profile, host, --since and price options to see it.\n"
+        ),
+        "{report}"
+    );
+    // The same scan's advice: one cited card, its change named and not made, exit 0.
+    let (status, stdout, stderr) = invoke("vibes", &[]);
+    assert_eq!((status, stderr.as_str()), (0, ""), "{stdout}");
+    assert_eq!(
+        stdout,
+        format!(
+            "token-max vibes: 1 piece of advice the transcripts can't price.\n  None of it is measured, so none of it is a verdict. Each card names whose advice it is.\n\n  [1/1] Bash timeout cap  not measured\n        2h -> 4m\n        What    The longest Claude waits on a foreground Bash command before Claude Code moves it to the background.\n        Advice  A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess. A command past the cap is not killed: it keeps running in the background, where Claude checks on it in later turns. Some commands need longer in the foreground; keep the cap if yours do. Project and local settings, which override it, are not read.\n        Source  The maintainer's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching\n        Change  \"env\": {{\"BASH_MAX_TIMEOUT_MS\": \"240000\"}} in ~{}.claude{}settings.json\n",
+            std::path::MAIN_SEPARATOR,
+            std::path::MAIN_SEPARATOR
+        )
+    );
+    assert_eq!(
+        std::fs::read_to_string(w.claude.join("settings.json")).unwrap(),
+        SETTINGS
+    );
+    // Settings pretended away are not the ones vibes reads, so --defaults names no count.
+    let (_, report, _) = invoke("doctor", &["--defaults"]);
+    assert!(!report.contains("token-max vibes"), "{report}");
+    // A cap already at the margin keeps its card, and doctor has nothing to name.
+    w.settings(r#"{"promptCacheTtl":"1h","env":{"BASH_MAX_TIMEOUT_MS":"3300000"}}"#);
+    let (status, report, _) = invoke("doctor", &[]);
+    assert_eq!(status, 0, "{report}");
+    assert!(!report.contains("token-max vibes"), "{report}");
+    let (status, stdout, _) = invoke("vibes", &[]);
+    assert_eq!(status, 0);
+    // The heading counts advice as doctor does, so the card that advises nothing is not in it.
+    assert!(
+        stdout.starts_with("token-max vibes: no advice for these settings.\n\n  [1/1] "),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("\n  [1/1] Bash timeout cap  not measured\n        What    ")
+            && stdout.contains("Capped at 55m, the margin suggested under the 1h cache, the current main-agent cache TTL setting.")
+            && !stdout.contains("Change"),
+        "{stdout}"
+    );
+    // Advice has no verdict to tune, evidence to expand or defaults to pretend.
+    for extra in [
+        &["--details"][..],
+        &["--defaults"],
+        &["--max-cost-per-use", "2"],
+        &["--ssh-scan"],
+        &["-v"],
+        &["--bogus"],
+    ] {
+        let (status, stdout, stderr) = invoke("vibes", extra);
+        assert_eq!((status, stdout.as_str()), (2, ""), "{extra:?}");
+        assert_eq!(
+            stderr, "token-max: invalid arguments; use token-max vibes --help\n",
+            "{extra:?}"
+        );
+    }
+    let (status, help, _) = invoke("vibes", &["--help"]);
+    assert_eq!(status, 0);
+    assert!(help.starts_with("token-max vibes: advice the transcripts can't price"));
+    let (_, top, _) = run(&mut command(&w, &["--help"]));
+    assert!(
+        top.contains("\n  vibes     Advice the transcripts can't price"),
+        "{top}"
+    );
+    // A failed scan is the one way it exits nonzero.
+    std::fs::write(w.transcript(), "{\"type\":\"assistant\",\"timestamp\":\"2020-01-01T00:00:00Z\",\"message\":{\"usage\":{\"input_tokens\":\"bad\"}}}\n").unwrap();
+    let (status, stdout, stderr) = invoke("vibes", &[]);
+    assert_eq!((status, stdout.as_str()), (2, ""), "{stderr}");
+}
+
+#[test]
 fn a_tool_only_recommendation_sets_exit_one() {
     let w = Workspace::new();
     w.settings(r#"{"promptCacheTtl":"1h","subagentPromptCacheTtl":"1h"}"#);
@@ -1081,6 +1173,13 @@ fn without_a_terminal_a_newer_release_or_a_failed_check_is_one_line_on_stderr() 
         )
     );
     assert_eq!(releases.checks(), 1);
+    // Only `doctor` checks: `vibes` asks nothing of the release server.
+    let mut vibes = doctor.clone();
+    vibes[0] = "vibes";
+    let mut c = command(&w, &vibes);
+    c.env("TOKEN_MAX_RELEASES", &releases.url);
+    let (status, _, stderr) = run(&mut c);
+    assert_eq!((status, stderr.as_str(), releases.checks()), (0, "", 1));
     // A binary Cargo installed is Cargo's to upgrade.
     let cargo = w.home.join(".cargo/bin");
     std::fs::create_dir_all(&cargo).unwrap();
@@ -1390,7 +1489,7 @@ mod unix {
 
     #[test]
     fn doctor_on_a_terminal_writes_only_the_changes_answered_yes() {
-        // A 5m TTL to raise, and a Bash cap that outlasts even 1h to decline.
+        // A 5m TTL to raise, and a Bash cap that outlasts even 1h, which is `vibes`' to lower.
         const SETTINGS: &str = "{\n  \"promptCacheTtl\": \"5m\",\n  \"env\": {\n    \"BASH_MAX_TIMEOUT_MS\": \"7200000\"\n  }\n}\n";
         let w = Workspace::new();
         // A fixed window keeps the walk's dollar figures the same on any day.
@@ -1443,8 +1542,9 @@ mod unix {
         // Answers wait in the terminal until each prompt reads one; the terminal stays
         // open until the child exits, as a person's would.
         let mut keyboard = std::fs::File::from(master);
-        // A plan pays, then yes to the TTL, no to the Bash cap, then yes to writing it.
-        keyboard.write_all(b"p\ny\nn\ny\n").unwrap();
+        // A plan pays, then yes to the TTL and to writing it; then yes to seeing `vibes`'
+        // advice, yes to its Bash cap and to writing that.
+        keyboard.write_all(b"p\ny\ny\ny\ny\ny\n").unwrap();
         let status = child.wait().unwrap().code().unwrap();
         let (stdout, stderr) = (out.join().unwrap(), err.join().unwrap());
         assert_eq!(status, 0, "{stderr}");
@@ -1471,32 +1571,31 @@ mod unix {
             "\n  How is ~/.claude paid for? [p]lan, [a]PI key or usage credits, [s]kip: \ntoken-max  2 requests in 1 session from ",
         );
         let headline = at(
-            "\n\n  2 questions, biggest saving first.\n  Nothing is written until you confirm the list at the end.\n",
+            "\n\n  1 question, biggest saving first.\n  Nothing is written until you confirm the list at the end.\n",
         );
-        let ttl = at("\n  [1/2] Main-agent prompt cache TTL ");
-        let bash = at("\n  [2/2] Bash timeout cap ");
-        let report = at("\n  2 changes recommended.\n");
-        assert!(headline < ttl && ttl < bash && bash < report, "{stdout}");
+        let ttl = at("\n  [1/1] Main-agent prompt cache TTL ");
+        let report = at("\n  1 change recommended.\n");
+        assert!(headline < ttl && ttl < report, "{stdout}");
         // Each card shows the saving, the change and its verdict, then what the setting does
         // and why; the window ends now, so its day count and the wrapping follow the clock.
         let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let entry = words(&stdout[ttl..bash]);
+        let entry = words(&stdout[ttl..at("\n  Profiles: ")]);
         assert!(
-            entry.starts_with("[1/2] Main-agent prompt cache TTL saves $N/mo 13% 5m -> 1h Recommended What How long the main conversation's prompt stays cached between requests: a 1h cache costs more to write than 5m but survives longer pauses. Why Measured on 2 requests over "),
+            entry.starts_with("[1/1] Main-agent prompt cache TTL saves $N/mo 13% 5m -> 1h Recommended What How long the main conversation's prompt stays cached between requests: a 1h cache costs more to write than 5m but survives longer pauses. Why Measured on 2 requests over "),
             "{entry}"
         );
         assert!(
             entry.ends_with(" days. Replayed at 5m and 1h, assuming the same sessions; 1h costs less. While it is unset, Claude Code gives the main conversation 1h on a Claude plan, which you answered pays for this profile; requests past the plan's included usage are paid with usage credits and get 5m. Accept? [y]es, [n]o, [q]uit: Accepted so far: about $N/mo, 13% of this host's spend."),
             "{entry}"
         );
-        assert!(
-            words(&stdout[bash..report]).starts_with("[2/2] Bash timeout cap saving not measured 2h -> 55m Recommended What The longest Claude waits on a foreground Bash command"),
-            "{stdout}"
-        );
         // Then the report, its accepted change first, and one question to write it.
         let accepted =
             at("\n  ACCEPTED  biggest saving first\n  change   Main-agent prompt cache TTL");
-        let declined = at("\n  NOT ACCEPTED\n  change   Bash timeout cap");
+        // The measured report has no line for the cap, whose saving is a guess.
+        assert!(
+            !stdout[..at("token-max vibes")].contains("Bash timeout cap"),
+            "{stdout}"
+        );
         // The confirm shows the file's diff before its one question.
         let diff = at(
             "\n  ~/.claude/settings.json\n  @@ -1,3 +1,3 @@\n    {\n  -   \"promptCacheTtl\": \"5m\",\n  +   \"promptCacheTtl\": \"1h\",\n      \"env\": {\n",
@@ -1509,20 +1608,70 @@ mod unix {
         let wrote = at(
             "\n  Wrote 1 edit to ~/.claude/settings.json. Backed up the old file to\n  ~/.claude/settings.json.token-max.bak.\n",
         );
-        assert!(report < accepted && accepted < declined, "{stdout}");
         assert!(
-            declined < diff && diff < backup && backup < confirm && confirm < wrote,
+            report < accepted && accepted < diff && diff < backup && backup < confirm,
             "{stdout}"
         );
-        // The backup is the file as it was, so copying it back undoes the change.
+        // Once the walk ends, doctor offers the advice it can't measure, from the same scan:
+        // nothing is asked or scanned again.
+        let offer = at(
+            "\n  token-max vibes has 1 piece of advice the transcripts can't price. Show it?\n  [y]es, [n]o: ",
+        );
+        let advice = at("\ntoken-max vibes: 1 piece of advice the transcripts can't price.\n");
+        let card = at("\n  [1/1] Bash timeout cap ");
+        assert_eq!(
+            words(&stdout[advice..card]),
+            "token-max vibes: 1 piece of advice the transcripts can't price. None of it is measured, so none of it is a verdict. Each card names whose advice it is. Nothing is written until you confirm the list at the end."
+        );
+        assert!(confirm < wrote && wrote < offer && offer < advice && advice < card);
+        assert_eq!(stdout.matches("How is ~/.claude paid for?").count(), 1);
+        // The card has no verdict: the change, what was measured, whose advice it is and
+        // the one edit a yes makes.
+        let again = stdout[card..]
+            .find("\n  ~/.claude/settings.json\n  @@")
+            .map(|at| card + at)
+            .unwrap_or_else(|| panic!("{stdout}"));
+        let entry = words(&stdout[card..again]);
+        assert!(
+            entry.starts_with("[1/1] Bash timeout cap not measured 2h -> 4m What The longest Claude waits on a foreground Bash command before Claude Code moves it to the background. Advice A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess."),
+            "{entry}"
+        );
+        assert!(
+            entry.ends_with(r#"Source The maintainer's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching Change "env": {"BASH_MAX_TIMEOUT_MS": "240000"} in ~/.claude/settings.json Accept? [y]es, [n]o, [q]uit:"#),
+            "{entry}"
+        );
+        assert!(!entry.contains("Recommended") && !entry.contains("Worth considering"));
+        // The card is from the scan before doctor wrote 1h, so its cap is for the 5m cache
+        // set then; the next run moves it to 55m.
+        // Its edit is checked against the file as doctor just wrote it, and confirmed alone.
+        let tail = &stdout[again..];
+        assert!(
+            tail.contains("  @@ -3,3 +3,3 @@\n      \"env\": {\n  -     \"BASH_MAX_TIMEOUT_MS\": \"7200000\"\n  +     \"BASH_MAX_TIMEOUT_MS\": \"240000\"\n"),
+            "{tail}"
+        );
+        assert!(
+            tail.contains(
+                "\n  Write the 1 accepted change to ~/.claude/settings.json? [y]es, [n]o: "
+            ),
+            "{tail}"
+        );
+        assert!(
+            tail.contains("\n  Wrote 1 edit to ~/.claude/settings.json."),
+            "{tail}"
+        );
+        let raised = SETTINGS.replace("\"5m\"", "\"1h\"");
+        assert!(
+            stdout.ends_with("~/.claude/settings.json.token-max.bak.\n"),
+            "{stdout}"
+        );
+        // Each write backs up the file as it was just before it.
         assert_eq!(
             std::fs::read_to_string(w.claude.join("settings.json.token-max.bak")).unwrap(),
-            SETTINGS
+            raised
         );
-        // The declined cap is left as it was.
         assert_eq!(
             std::fs::read_to_string(w.claude.join("settings.json")).unwrap(),
-            SETTINGS.replace("\"5m\"", "\"1h\"")
+            raised.replace("7200000", "240000")
         );
         drop(keyboard);
     }
@@ -1638,7 +1787,7 @@ mod unix {
         let offer = format!(
             "\n  token-max v99.0.0 is out; this is v{ours}, and its advice may be out of date.\n  Upgrade to v99.0.0 and rerun? [y]es, [n]o: "
         );
-        let (code, _, stderr) = typed(&mut command_at(&bin, &w, &doctor), b"s\nq\n");
+        let (code, _, stderr) = typed(&mut command_at(&bin, &w, &doctor), b"s\nq\nn\n");
         assert_ne!(code, 2, "{stderr}");
         let opening = format!("\n  token-max {ours}\n");
         let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1647,12 +1796,12 @@ mod unix {
             support::TARGET
         );
         for (keys, said) in [
-            // An unknown answer asks again; then no, then skip how the profile pays.
+            // An unknown answer asks again; then no, skip how the profile pays, quit the walk and decline the advice.
             (
-                &b"maybe\nn\ns\nq\n"[..],
+                &b"maybe\nn\ns\nq\nn\n"[..],
                 "Upgrade to v99.0.0 and rerun? [y]es, [n]o:".to_string(),
             ),
-            (&b"y\ns\nq\n"[..], failed),
+            (&b"y\ns\nq\nn\n"[..], failed),
         ] {
             let before = releases.downloads();
             let mut c = command_at(&bin, &w, &doctor);
@@ -1690,7 +1839,7 @@ mod unix {
         let mut c = command_at(&bin, &w, &doctor);
         let nowhere = "http://127.0.0.1:1/releases";
         c.env("TOKEN_MAX_RELEASES", nowhere);
-        let (status, stdout, stderr) = typed(&mut c, b"s\nq\n");
+        let (status, stdout, stderr) = typed(&mut c, b"s\nq\nn\n");
         assert_eq!(status, code, "{stderr}");
         assert!(stdout.starts_with(&opening), "{stdout}");
         let failed =
@@ -1708,7 +1857,7 @@ mod unix {
             std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
             let mut c = command_at(&bin, &w, &doctor);
             c.env("TOKEN_MAX_RELEASES", &releases.url);
-            let (status, stdout, stderr) = typed(&mut c, b"s\nq\n");
+            let (status, stdout, stderr) = typed(&mut c, b"s\nq\nn\n");
             std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
             assert_eq!(status, code, "{stderr}");
             let (before_opening, _) = stdout.split_once(&opening).expect(&stdout);

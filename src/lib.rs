@@ -42,6 +42,7 @@ mod totals;
 mod unreadable;
 mod upgrade;
 mod version;
+mod vibes;
 mod window;
 mod wire;
 

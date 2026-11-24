@@ -81,9 +81,6 @@ pub fn check(result: &CheckResult) -> &'static str {
                 "While its terminal is unfocused, Codex sends an extra request to recap the session."
             }
         },
-        CheckResult::BashCap(_) => {
-            "The longest Claude waits on a foreground Bash command before Claude Code moves it to the background."
-        }
         CheckResult::Keepalive(_) => {
             "Pinging an idle session just before its cache expires keeps the cache warm for your return, at the price of the pings; no setting does it, only a /loop task."
         }

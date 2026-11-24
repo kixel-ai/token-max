@@ -3842,6 +3842,23 @@ mod tests {
             ]
         );
         assert!(capped.unkept.is_empty(), "{:?}", capped.unkept);
+        // By hand, the step still takes the whole plan, or the override would halve the cap.
+        let how = crate::doctor::window_by_hand(
+            &check,
+            Some(capped),
+            400_000,
+            &scan.profiles[0],
+            "no edit is known to hold it",
+        );
+        assert_eq!(
+            how,
+            crate::doctor::How::Manual {
+                step: format!(
+                    r#"in settings.json, set "modelSettings": {{"claude-opus-5-5": {{"autoCompactWindow": 400000}}}} and "modelSettings": {{"claude-haiku-5-5": {{"autoCompactWindow": 150000}}}}, and remove env.{key}"#
+                ),
+                reason: "no edit is known to hold it".into(),
+            }
+        );
         // A trigger already at or under the cap needs no plan for it.
         scan.profiles[0].compaction = controls(
             Harness::Claude,

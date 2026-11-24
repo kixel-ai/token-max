@@ -4858,10 +4858,7 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
     item.quiet = false;
     item.how = Some(match &c.unsettable {
         // As the line would, the change goes by hand where no edit is known to hold.
-        Some(reason) => How::Manual {
-            step: format!("set {} to {cap}", c.base.owner),
-            reason: reason.clone(),
-        },
+        Some(reason) => crate::doctor::window_by_hand(c, c.capped.as_ref(), cap, profile, reason),
         None => crate::doctor::window_change(c, c.capped.as_ref(), cap, profile),
     });
     item

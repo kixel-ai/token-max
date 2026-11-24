@@ -1072,6 +1072,33 @@ pub(crate) fn window_change(
     }
 }
 
+/// The window change as steps by hand, for a window no edit is known to hold, keeping the
+/// plan that removes the percentage override so the trigger lands on `window`.
+pub(crate) fn window_by_hand(
+    c: &CompactionCheck,
+    reowned: Option<&Reowned>,
+    window: i64,
+    profile: &Profile,
+    reason: &str,
+) -> How {
+    if reowned.is_none() || c.base.current == Some(window) {
+        return How::Manual {
+            step: format!("set {} to {window}", c.base.owner),
+            reason: reason.into(),
+        };
+    }
+    match window_change(c, reowned, window, profile) {
+        How::Edit(patch) => How::Manual {
+            step: steps(&patch),
+            reason: reason.into(),
+        },
+        How::Manual { step, reason: why } => How::Manual {
+            step,
+            reason: format!("{reason}; {why}"),
+        },
+    }
+}
+
 /// The edit that sets a compaction window where its owner holds it.
 fn window_how(c: &CompactionCheck, window: i64, profile: &Profile) -> How {
     let file = profile.settings_file.as_str();

@@ -520,10 +520,27 @@ fn scan(tokens: &[Token], test: bool) -> Vec<Hit> {
                             line,
                         },
                     ] if matches!(m.ident(), Some("join" | "push")) && open.is('(') => {
-                        // `root.join("a/b").to_string_lossy()` is already a string.
-                        let text = init[i + 3..].windows(2).any(|w| {
-                            w[0].is('.') && w[1].ident().is_some_and(|m| STRINGIFY.contains(&m))
-                        });
+                        // `root.join("a/b").to_string_lossy()` is already a string; only a
+                        // method chained onto the join's own result converts it.
+                        let mut text = false;
+                        let mut at = close(&init, i + 2);
+                        while let Some(j) = at {
+                            match (init.get(j + 1), init.get(j + 2)) {
+                                (Some(q), _) if q.is('?') => at = Some(j + 1),
+                                (Some(dot), Some(m)) if dot.is('.') => {
+                                    let Some(m) = m.ident() else { break };
+                                    if STRINGIFY.contains(&m) {
+                                        text = true;
+                                        break;
+                                    }
+                                    at = match init.get(j + 3) {
+                                        Some(open) if open.is('(') => close(&init, j + 4),
+                                        _ => Some(j + 2),
+                                    };
+                                }
+                                _ => break,
+                            }
+                        }
                         Some((!text, *line, s))
                     }
                     _ => None,
@@ -575,6 +592,22 @@ fn scan(tokens: &[Token], test: bool) -> Vec<Hit> {
         }
     }
     hits
+}
+
+/// The index of the `)` closing a group whose contents start at `from`.
+fn close(tokens: &[&Token], from: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (k, t) in tokens.iter().enumerate().skip(from) {
+        if t.is('(') {
+            depth += 1;
+        } else if t.is(')') {
+            if depth == 0 {
+                return Some(k);
+            }
+            depth -= 1;
+        }
+    }
+    None
 }
 
 /// For each token, what each open delimiter around it was opened by, innermost last: a macro as
@@ -713,9 +746,13 @@ fn v() {
 fn w() {
     let expected = root.join("e/f.json").to_string_lossy().into_owned();
     assert_eq!(actual, expected);
+    let pair = (root.join("g/h.json"), "label".to_string());
+    assert_eq!(actual, pair);
+    let chained = root.join("i/j.json").with_extension("toml").display().to_string();
+    assert_eq!(actual, chained);
 }
 "#;
-        assert_eq!(lines(source), [3, 10, 21]);
+        assert_eq!(lines(source), [3, 10, 21, 25]);
     }
 
     #[test]

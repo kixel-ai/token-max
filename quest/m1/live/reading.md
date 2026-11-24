@@ -4,9 +4,9 @@
 
 While a terminal run reads transcripts, the progress line counts up the
 sessions, requests, tokens and API-price spend read so far beside the
-reading bar, and keeps the final counts on the line through the phases that
-follow reading. When reading ends, the counts are exactly the ones the
-report's header gives.
+reading bar, and keeps the counts on the line through the phases that follow
+reading. The counts the line shows when it clears are exactly the report
+header's.
 
 ## Plan
 
@@ -16,18 +16,28 @@ arrives.
 
 Recommendations:
 
+- Some figures only settle after the read loop: a Codex response near
+  `--since` can link to a request outside the window and drop out, T3 can
+  move a shared request to another profile, which changes the group spend
+  is extrapolated in, and SSH hosts reply late. So count while reading as
+  the header would, then replace the counts with the settled ones once
+  reconciliation and pricing finish, and with each host's `Totals`
+  (`src/totals.rs`, which already carries requests, tokens, sessions and
+  spend) as it arrives. The line before it clears must match the header.
 - Count as the header counts: requests de-duplicated across profiles that
   share a history (native Claude Code and T3's `claudeAgent` both read
   `~/.claude`) and across streamed chunks of one response, only those in the
   window, and sessions with each subagent counted in the session that spawned
-  it. If a count can only be settled after reading, settle the live one the
-  same way rather than show a number that later drops.
+  it.
 - Spend follows the header's rule: priced requests at public API prices,
   extrapolated per profile over the unpriced ones and marked `~`. Prices load
   alongside the read; until they arrive the line shows the counts without
   spend, then prices everything read so far.
-- Tokens are every token billed (input, cache writes, cache reads and
-  output), with a short suffix such as `1.9B`.
+- Tokens are as `Totals::tokens` counts them, cache reads and writes
+  included, with a short suffix such as `1.9B`.
+- `vibes` shares the line but its SSH replies (`Outcome::Vibes` in
+  `src/wire.rs`) carry no usage, so under `--ssh` it shows this host's
+  counts, labelled as this host's, rather than add usage to its wire.
 - `Reading` in `src/reader.rs` already carries the byte counters to the
   `Meter` thread in `src/cli.rs`; the counts can travel the same way. The
   line must still fit one row: drop the least useful fields first on a narrow

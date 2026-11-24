@@ -21,4 +21,10 @@ of it is unavoidable, give it its own phase name on the progress line so
 the wait says what it is doing.
 
 The PR's `## Validation` gives the before and after timings and shows the
-report is byte-identical on the same transcripts.
+report is unchanged. The analysis clock is read after the scan, so a
+straight byte comparison would differ on dates and monthly figures: run both
+builds back to back on a frozen copy of the transcripts (`--claude-dir` and
+`--codex-dir`), with the same `--prices-file` and a fixed `--since`, and
+compare `--details` reports with the run-time fields (generation and
+snapshot times, and the monthly figures they scale) normalized, or pin the
+clock the way the unit tests do.

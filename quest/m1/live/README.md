@@ -39,11 +39,13 @@ Decision prompts, chosen options marked ✅:
   stream progress from destinations, which changes the SSH wire for a
   progress line).
 - Release: ✅ only the [credit quest](/quest/m1/live/credit.md) gates 0.1.0,
-  so the promoted demo shows the credit up front, and the live counters ship
-  after it (rejected: gate on all three; gate on none).
+  so 0.1.0 and the README's demo show the credit up front, and the live
+  counters ship after it (rejected: gate on all three; gate on none). The
+  site's demo runs `doctor --defaults`, which has no credit to show.
 - The 69s after reading: ✅ its own [quest](/quest/m1/scan-speed.md)
   (rejected: drop it).
 
 The line is shared by `doctor` and `vibes` and stays on interactive terminals
-only, as now. A change to doctor's terminal output reruns
+only, as now. `vibes` gets the reading counts, for this host only under
+`--ssh` since its replies carry no usage, and no savings tally. A change to doctor's terminal output reruns
 `assets/demo/walk.tape` and `assets/demo/site.py`.

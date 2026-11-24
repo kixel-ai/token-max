@@ -30,3 +30,4 @@ checks.
 - [Language servers card](/quest/m1/vibes/language-servers.md) - a vibes card shipped in 0.1.0
 - [Memory card](/quest/m1/vibes/memory.md) - a vibes card shipped in 0.1.0
 - [Retention card](/quest/m1/vibes/retention.md) - a vibes card shipped in 0.1.0
+- [Credit](/quest/m1/live/credit.md) - opens doctor's walk with what the settings already save, shown in the README's demo

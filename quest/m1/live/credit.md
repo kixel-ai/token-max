@@ -36,8 +36,5 @@ against its default, keeping the walk's existing questions. The site's demo runs
 `doctor --defaults` on purpose, to show what a default user would save, so
 it shows no credit.
 
-The 0.1.0 release quest (`quest/m1/release-0.1.md`) requires this one
-(decided 2026-11-24, see the [epic](/quest/m1/live/README.md)); whichever of
-this quest's planning PR and
-[kixel-ai/token-max#226](https://github.com/kixel-ai/token-max/pull/226),
-which adds that quest, lands second adds this quest to its `Required`.
+The [0.1.0 release quest](/quest/m1/release-0.1.md) requires this one
+(decided 2026-11-24, see the [epic](/quest/m1/live/README.md)).

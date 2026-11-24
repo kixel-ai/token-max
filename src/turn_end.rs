@@ -144,10 +144,10 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
         .windows
         .iter()
         .find(|c| c.base.profiles.contains(&profile.id));
-    let window = match window_check {
-        Some(c) if c.base.action == Action::Change => c.base.recommended,
-        _ => profile.compaction.default.value,
-    };
+    let offered = window_check
+        .filter(|c| c.base.action == Action::Change)
+        .and_then(|c| c.base.recommended);
+    let window = offered.or(profile.compaction.default.value);
     let index = WindowEvents::new(events.iter().copied());
     let turns = TurnEnds::new(
         events.iter().copied(),
@@ -347,12 +347,12 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
         .or(best)
         .or_else(|| scenarios.iter().find(|s| s.window == current))
         .map(|s| s.coverage);
-    let after_window = match (window_check, window) {
-        (Some(c), Some(window)) if c.base.action == Action::Change => {
+    let after_window = match (offered, window) {
+        (Some(window), _) => {
             format!("the auto-compact window line's recommended {window}-token limit")
         }
-        (_, Some(window)) => format!("the current {window}-token auto-compact limit"),
-        (_, None) => "no auto-compact limit, which no setting names".into(),
+        (None, Some(window)) => format!("the current {window}-token auto-compact limit"),
+        (None, None) => "no auto-compact limit, which no setting names".into(),
     };
     let state = if current == 0 {
         "turn-end compaction off".to_string()
@@ -370,7 +370,7 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
                 "a threshold no recorded turn reached decides nothing, and a tie with the current threshold gives no verdict".into(),
             ];
     if window.is_none() {
-        assumptions.push("with no auto-compact limit set, Codex's built-in limit is not recorded: the compactions it caused are in the transcripts and stay charged, a turn the session carried on from without one ended under it, and a session's final turn under its threshold is decided only when it ended with no more context than some request the model carried on from".into());
+        assumptions.push("with no auto-compact limit set, Codex's built-in limit is not recorded: the compactions it caused are in the transcripts and stay charged, a turn the session carried on from without one ended under it, and a session's final turn under its threshold is decided only when it ended with no more context than some request the model carried into a next request on the same model".into());
     }
     Some(TurnEndCheck {
         base: CheckBase {
@@ -420,6 +420,7 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
         unset: control.unset,
         usable,
         window,
+        window_offered: offered.is_some(),
         baseline_cost: current_cost.expect("the current threshold always replays"),
         scenarios,
         usage_estimates: requests
@@ -784,7 +785,7 @@ mod tests {
                 _ => None,
             })
             .expect("a Codex profile has a turn-end line");
-        assert_eq!(c.window, Some(20_000));
+        assert_eq!((c.window, c.window_offered), (Some(20_000), true));
         let percents: Vec<i64> = c.scenarios.iter().map(|s| s.window).collect();
         assert_eq!(percents, [0, 10, 100]);
         assert!(
@@ -932,6 +933,25 @@ mod tests {
             "{:?}",
             whole.comparison_cost.unknown
         );
+        assert_eq!(c.base.recommended, None);
+
+        // A session that carried 190k tokens into a request on another model shows nothing:
+        // Codex checked that request against the other model's limit.
+        let mut switched = s.clone();
+        switched
+            .requests
+            .push(at("big", "other", 2 * HOUR, usage(189_000, 0, 1000)));
+        let mut next = at(
+            "bigger",
+            "other",
+            2 * HOUR + MINUTE,
+            usage(190_000, 189_000, 10),
+        );
+        next.model = Some("gpt-6.1-luna".into());
+        next.parts[0].model = next.model.clone();
+        switched.requests.push(next);
+        let c = check(&switched);
+        assert_eq!(at_percent(&c, 100).savings_usd, None);
         assert_eq!(c.base.recommended, None);
 
         // Another session carried 190k tokens into its next request with no compaction
@@ -1203,7 +1223,31 @@ mod tests {
             fix.evidence
         );
         assert!(
-            fix.evidence.contains("under the 180k auto-compact limit"),
+            fix.evidence.contains("under the 180k auto-compact limit,"),
+            "{}",
+            fix.evidence
+        );
+        assert!(!fix.evidence.contains("assumes"), "{}", fix.evidence);
+
+        // The window line's edit is its own question, so a saving replayed under the limit
+        // it offers says it rests on that edit.
+        let mut offered = check(&scan);
+        offered.window_offered = true;
+        let report = report_of(&scan, offered);
+        let mut fixes = crate::doctor::fixes(&report, false);
+        let listing =
+            crate::report::format_report(&report, &fixes, crate::report::ReportOptions::default());
+        crate::doctor::explain(&mut fixes, &listing);
+        let fix = fixes
+            .iter()
+            .find(|f| f.name == "Turn-end compaction")
+            .unwrap();
+        assert!(
+            fix.evidence.contains(
+                "under the 180k auto-compact limit the Auto-compact window line recommends, "
+            ) && fix
+                .evidence
+                .contains("The saving assumes that limit is set too."),
             "{}",
             fix.evidence
         );

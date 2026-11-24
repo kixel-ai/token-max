@@ -2471,8 +2471,13 @@ fn card(result: &CheckResult, action: Option<Action>, out: &mut Out<'_>) {
             }
             out.field(
                 "Auto-compact limit replayed with it",
-                &c.window
-                    .map_or_else(|| "none set".into(), |w| format!("{w} tokens")),
+                &match c.window {
+                    Some(w) if c.window_offered => {
+                        format!("{w} tokens, which the auto-compact window line recommends")
+                    }
+                    Some(w) => format!("{w} tokens"),
+                    None => "none set".into(),
+                },
             );
             out.field("Current-threshold baseline cost", &money(&c.baseline_cost));
             let suggested = c
@@ -5188,8 +5193,18 @@ fn summary(
             }
             CheckResult::TurnEnd(c) => {
                 let after = match c.window {
+                    Some(window) if c.window_offered => format!(
+                        " under the {} auto-compact limit the Auto-compact window line recommends",
+                        tokens(window)
+                    ),
                     Some(window) => format!(" under the {} auto-compact limit", tokens(window)),
                     None => String::new(),
+                };
+                // The two edits are offered apart, so say what this one's figure rests on.
+                let assumes = if c.window_offered {
+                    " The saving assumes that limit is set too."
+                } else {
+                    ""
                 };
                 match mark {
                     Mark::Change => {
@@ -5199,7 +5214,7 @@ fn summary(
                             .find(|s| r.recommended == Some(Setting::Percent(s.window)))
                             .map_or(0, |s| s.added.len());
                         format!(
-                            "Replayed{after}, assuming the same sessions{}, net of {} added summar{}. Detail lost to summaries is not measured. {set_in}",
+                            "Replayed{after}, assuming the same sessions{}, net of {} added summar{}.{assumes} Detail lost to summaries is not measured. {set_in}",
                             coverage_note(r, MEASURED),
                             count(added as u64),
                             if added == 1 { "y" } else { "ies" }

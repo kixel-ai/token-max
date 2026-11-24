@@ -1801,6 +1801,9 @@ pub struct TurnEndCheck {
     pub usable: Vec<UsableWindow>,
     /// The auto-compact limit the replay applies first, after the window line's recommendation.
     pub window: Option<i64>,
+    /// Whether `window` is a change the window line offers, not the limit set now, so
+    /// every saving here assumes that change is made.
+    pub window_offered: bool,
     pub baseline_cost: Cost,
     /// Each candidate percentage; `window` holds the percentage.
     pub scenarios: Vec<WindowScenario>,

@@ -955,7 +955,9 @@ limit still applies before each request ([config reference](https://developers.o
 checked 2026-11-23). The line replays candidate thresholds against the current
 one, under the limit the [compaction window](#compaction-window) line
 recommends, and recommends the cheapest. Its baseline names the threshold and
-the limit it replayed. Both replay in one pass, so a turn's end that compacts
+the limit it replayed. `doctor` offers the two edits apart, so when the limit
+is one the window line recommends, the threshold's card says its saving assumes
+that limit is set too. Both replay in one pass, so a turn's end that compacts
 first spares the limit's compaction before the next request.
 
 A turn ends where the transcript records its completion, so an interrupted turn
@@ -972,7 +974,7 @@ highest wins their tie. With no limit set, Codex's built-in one is not
 recorded. The compactions it caused stay charged as recorded, and a turn the
 session carried on from without one ended under it. A session's final turn
 under its threshold is decided only when it ended with no more context than
-some request the model carried on from; otherwise the threshold is unpriced
+some request the model carried into a next request on the same model; otherwise the threshold is unpriced
 there. A threshold already in force replays only lower
 ones: a higher one, or off, would need the detail its recorded summaries
 dropped.

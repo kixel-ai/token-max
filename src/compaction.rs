@@ -341,7 +341,8 @@ pub struct WindowEvents<'a> {
 
 impl<'a> WindowEvents<'a> {
     /// The most context each model carried from one of `requests`, in time order, into its
-    /// session's next with no compaction between.
+    /// session's next on the same model with no compaction between. A next request on
+    /// another model was checked against that model's limit, so it shows nothing.
     pub(crate) fn carried(&self, requests: &[&Request]) -> HashMap<Option<Text>, i64> {
         let mut carried: HashMap<Option<Text>, i64> = HashMap::default();
         let mut before: HashMap<&str, (Millis, &Option<Text>, Option<i64>)> = HashMap::default();
@@ -354,6 +355,7 @@ impl<'a> WindowEvents<'a> {
             let active = p.usage.input.zip(p.usage.output).map(|(i, o)| i + o);
             if let Some((time, model, Some(active))) =
                 before.insert(&r.session, (r.time, &p.model, active))
+                && *model == p.model
                 && !self.boundaries.crossed(&r.session, time, r.time)
             {
                 let most = carried.entry(model.clone()).or_default();

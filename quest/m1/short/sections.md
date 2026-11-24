@@ -20,6 +20,17 @@ Recommendations:
 - Keep the reasons apart (never used, no use recorded, over
   `--max-cost-per-use`, redundant catalog copy), so a yes to never-used
   features never removes one in use.
+- A section's members share one offered effect: a skill set to typed only
+  and one whose sync is turned off, which removes typed use too, are
+  separate sections, so a yes never approves an effect the row didn't name.
+- Keep an "up to" saving, such as an unset main-agent TTL under unknown
+  billing, apart from the measured one within the TTL section's row, as the
+  walk's running total already does.
+- The unsplit card names a count and the few largest members, not all of
+  them; `s` lists each.
+- `vibes` cards that say doctor skipped a change under $1/mo, such as auto
+  memory, apply the section's total, not each member's, so they never
+  re-offer what the walk asked.
 - `s` splits a section into its members, as it splits a group now; a member
   row names its profile when several were read. `--details` lists members
   under the section row.

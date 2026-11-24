@@ -44,3 +44,8 @@ Decision prompts, chosen options marked ✅:
 
 Each child changing doctor's output or questions reruns
 `assets/demo/walk.tape`; the release quest reruns `assets/demo/site.py`.
+`site.py`'s results section parses each change row of two wide runs, by
+host, profile and setting, to split the savings; each child that changes
+those rows keeps that parse working, such as by reading `--details`, which
+keeps member rows, so the release rerun neither fails its totals check nor
+publishes a wrong breakdown.

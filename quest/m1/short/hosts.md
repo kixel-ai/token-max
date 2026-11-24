@@ -20,6 +20,9 @@ files; this host only sends back which members were accepted, as it does
 now. That replaces "a group only gathers one host's changes" in
 `docs/reference.md`.
 
+The report after the walk (`Outcome::Reviewed`'s text, printed before the
+confirm) merges the same way; validation and writing stay on each host.
+
 Percents are of every host's spend together, as the total line already
 computes (`Totals::monthly`). The left-out line from the
 [preamble quest](/quest/m1/short/preamble.md) sums across hosts.

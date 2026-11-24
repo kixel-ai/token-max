@@ -17,8 +17,9 @@ not measure (rejected: title and headline only; trim the wording).
 
 Recommendations:
 
-- A legend is needed only without color, where words replace the dots; with
-  color, drop it.
+- Keep the one-line legend, so a first reader can tell the dots apart.
+- Whenever a figure carries `~`, one short line says it assumes the
+  unpriced requests resemble the priced ones, as AGENTS.md requires.
 - Keep the left-out line to one row: counts, not explanations.
 - The `--defaults` run says so in the title, such as "as a default user",
   rather than a paragraph.

@@ -139,7 +139,8 @@ Usage: token-max vibes [options]
 
 Prints one card for each piece of advice token-max doctor leaves out because no transcript
 can price it: a provider's guidance, such as an effort above high or an instruction file
-past its budget, and settings whose saving is a guess, such as the Bash timeout cap. Each
+past its budget, settings whose saving is a guess, such as the Bash timeout cap, and the
+maintainer's picks, such as auto memory off where most sessions ran in a repository. Each
 card says what was measured beside the advice and names whose advice it is: the provider's
 page, or the maintainer's pick. None of it is a verdict.
 

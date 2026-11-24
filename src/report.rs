@@ -4884,6 +4884,144 @@ fn window_rescan(c: &CompactionCheck, profile: &Profile, out: &Out<'_>) -> Item 
     }
 }
 
+/// Whose advice turning memory off is, before the providers' pages on it.
+const MEMORY_PICK: &str = "The maintainer's pick: a lasting fact about a project belongs in its repository. How memory works:";
+
+/// Auto memory's line as `vibes`' card reads it.
+struct MemoryLine<'a> {
+    result: &'a CheckResult,
+    common: &'a Common<'a>,
+    /// The line's name, with its profile tag.
+    name: String,
+    /// Whether `doctor`'s line recommends or suggests turning it off.
+    offered: Option<Offered>,
+}
+
+/// `doctor`'s change to turn auto memory off, as its walk takes it.
+#[derive(Clone, Copy)]
+struct Offered {
+    /// Worth considering, rather than recommended.
+    suggested: bool,
+    /// Whether the walk takes it up, which it doesn't for an edit saving too little to ask.
+    asked: bool,
+}
+
+/// Auto memory as `vibes` shows it: off is advised when most main sessions ran in a
+/// repository with an instruction file to keep facts in, beside `doctor`'s measured cost and
+/// uses. A card that leaves the question to `doctor`, or advises nothing, is quiet and has no
+/// change; the caller gives the others theirs.
+fn memory_item(line: MemoryLine<'_>, out: &Out<'_>) -> Item {
+    let CheckResult::Memory(m) = line.result else {
+        unreachable!("a memory line")
+    };
+    let r = line.common;
+    let p = m.places;
+    let mut share = match p.sessions {
+        0 => "No main session ran in the window, so where the work happens is unknown.".to_string(),
+        n => format!(
+            "{} of {} ({}%) in the window ran in a repository with a CLAUDE.md or AGENTS.md",
+            count(p.instructed),
+            plural(n, "main session"),
+            percent(p.instructed, n)
+        ),
+    };
+    if p.unknown > 0 {
+        let _ = write!(
+            share,
+            ", counting as without {} whose transcript recorded loading none and whose directory is gone or unrecorded",
+            plural(p.unknown, "session")
+        );
+    }
+    if p.sessions > 0 {
+        share.push('.');
+    }
+    const REASON: &str = "A lasting fact about a project belongs in that file, where it is reviewed and every host and teammate sees it, not saved silently on one machine.";
+    // A total that leaves a part out says so wherever it is quoted, as doctor's line does.
+    let mut left = vec![];
+    if m.unmeasured_generation {
+        left.push("Codex's extraction and consolidation of memories".to_string());
+    }
+    if m.unpriced_reads > 0 {
+        left.push(format!(
+            "memory read back by {} that recorded no context",
+            plural(m.unpriced_reads, "request")
+        ));
+    }
+    let measured = match r.savings_usd {
+        Some(usd) if !left.is_empty() => format!(
+            "doctor's line measured at least {} at API prices over the window, {}; that leaves out {}, which could not be priced",
+            figure(check_estimate(Some(usd), r)),
+            memory_uses(m),
+            left.join(" and ")
+        ),
+        Some(usd) => format!(
+            "doctor's line measured {} at API prices over the window, {}",
+            figure(check_estimate(Some(usd), r)),
+            memory_uses(m)
+        ),
+        None => format!(
+            "doctor's line could not price it over the window ({})",
+            memory_uses(m)
+        ),
+    };
+    let (value, quiet, text) = match (m.base.current, line.offered) {
+        (Some(false), _) => (String::new(), true, format!("Off. {share}")),
+        _ if !p.most() => (
+            String::new(),
+            true,
+            format!(
+                "{share} Outside a repository, memory may be the only place a fact is kept, so turning it off is not advised. {measured}."
+            ),
+        ),
+        (
+            _,
+            Some(Offered {
+                suggested,
+                asked: true,
+            }),
+        ) => (
+            String::new(),
+            true,
+            format!(
+                "{share} {REASON} {measured}, and already {} turning it off for its cost per use, so doctor asks and this card does not.",
+                if suggested { "suggests" } else { "recommends" }
+            ),
+        ),
+        (current, offered) => (
+            format!(
+                "{} {} off",
+                if current.is_some() { "on" } else { "may be on" },
+                out.arrow
+            ),
+            false,
+            match offered {
+                Some(Offered { suggested, .. }) => format!(
+                    "{share} {REASON} {measured}, and already {} turning it off for its cost per use, but its walk does not ask about a change saving under {}/mo.",
+                    if suggested { "suggests" } else { "recommends" },
+                    about(crate::doctor::ASKED_USD)
+                ),
+                None => format!(
+                    "{share} {REASON} {measured}; judging only cost, it offers no change. {}",
+                    memory_reason(m, r)
+                ),
+            },
+        ),
+    };
+    Item {
+        name: line.name,
+        value,
+        what: crate::descriptions::check(line.result).into(),
+        text,
+        sources: vec![
+            MEMORY_PICK.into(),
+            crate::memory::SOURCES[usize::from(m.harness == Harness::Codex)].into(),
+        ],
+        how: None,
+        quiet,
+        after: vec![],
+    }
+}
+
 /// What the maintainer picked for how long Claude Code keeps transcripts, before the pages
 /// on the setting and on what the sweep deletes.
 const RETENTION_PICK: &str = "The maintainer's pick of 365 days, which keeps a year of history without growing disk without bound. Claude Code's docs:";
@@ -5979,6 +6117,39 @@ fn summary(
         let how = crate::doctor::retention_how(control, RETENTION_DAYS, line.lead);
         let profile = tag(&line.ids, &owned, out);
         vibes.push(retention_item(control, days, &profile, disk, how, out));
+    }
+    for (index, result, r) in &checks {
+        if !matches!(result, CheckResult::Memory(_)) {
+            continue;
+        }
+        let offered = fixes
+            .iter()
+            .find(|f| f.origins.contains(&Origin::Check(*index)))
+            .map(|f| Offered {
+                suggested: f.suggested,
+                asked: crate::doctor::takes_up(f),
+            });
+        let mut item = memory_item(
+            MemoryLine {
+                result,
+                common: r,
+                name: tagged(
+                    setting_name(result),
+                    &tag(r.profiles, &|_| r.owner.to_string(), out),
+                ),
+                offered,
+            },
+            out,
+        );
+        if !item.quiet {
+            item.how = report
+                .scan
+                .profiles
+                .iter()
+                .find(|p| p.id == r.profile)
+                .map(|profile| crate::doctor::check_how(result, profile));
+        }
+        vibes.push(item);
     }
     for (index, result, r) in &checks {
         if let CheckResult::Compaction(c) = result
@@ -7497,6 +7668,7 @@ mod tests {
                     unpriced_reads: 0,
                     use_unproven: false,
                     tier_unknown: false,
+                    places: Default::default(),
                 })
             },
         ];
@@ -7900,6 +8072,7 @@ mod tests {
                 unpriced_reads: 0,
                 use_unproven: false,
                 tier_unknown: false,
+                places: Default::default(),
             })
         };
         assert_eq!(
@@ -10096,6 +10269,127 @@ mod tests {
             both[1].ends_with("(plugins in /synthetic/cache)"),
             "{both:?}"
         );
+    }
+
+    #[test]
+    fn the_memory_card_advises_off_only_where_most_sessions_ran_in_a_repository() {
+        use crate::doctor::{Edit, Op, Patch};
+        let mut report = synthetic();
+        fn memory(report: &mut Report) -> &mut MemoryCheck {
+            report
+                .checks
+                .iter_mut()
+                .find_map(|c| match c {
+                    CheckResult::Memory(m) => Some(m),
+                    _ => None,
+                })
+                .unwrap()
+        }
+        let card = |report: &Report| {
+            advice(report, ReportOptions::default())
+                .into_iter()
+                .find(|i| i.name == "Auto memory")
+                .unwrap()
+        };
+        let most = SessionPlaces {
+            sessions: 4,
+            instructed: 3,
+            unknown: 0,
+        };
+        // doctor keeps it on for its cost, so the card asks with doctor's own edit.
+        let m = memory(&mut report);
+        (m.base.action, m.base.recommended, m.places) = (Action::Keep, Some(true), most);
+        let item = card(&report);
+        assert_eq!((item.value.as_str(), item.quiet), ("on -> off", false));
+        assert_eq!(
+            item.how,
+            Some(How::Edit(Patch {
+                file: format!("{ROOT}/settings.json"),
+                harness: Harness::Claude,
+                edits: vec![Edit {
+                    path: vec!["autoMemoryEnabled".into()],
+                    value: serde_json::json!(false),
+                    op: Op::Set,
+                }],
+            }))
+        );
+        assert_eq!(
+            item.text,
+            "3 of 4 main sessions (75%) in the window ran in a repository with a CLAUDE.md or AGENTS.md. A lasting fact about a project belongs in that file, where it is reviewed and every host and teammate sees it, not saved silently on one machine. doctor's line measured $150 at API prices over the window, used 3 times (1 read, 2 writes); judging only cost, it offers no change. Its cost per read or write is within --max-cost-per-use."
+        );
+        assert!(item.sources[0].starts_with("The maintainer's pick"));
+        // doctor already suggests it off: its walk asks, and the card advises nothing more.
+        let m = memory(&mut report);
+        (m.base.action, m.base.recommended) = (Action::Advisory, Some(false));
+        let item = card(&report);
+        assert!(item.quiet && item.how.is_none() && item.value.is_empty());
+        assert!(
+            item.text.contains(", and already suggests turning it off for its cost per use, so doctor asks and this card does not."),
+            "{}",
+            item.text
+        );
+        // A change saving too little for doctor's walk to ask is the card's to offer.
+        let m = memory(&mut report);
+        let measured = m.base.monthly_savings_usd.replace(0.5);
+        let item = card(&report);
+        assert_eq!((item.value.as_str(), item.quiet), ("on -> off", false));
+        assert!(matches!(item.how, Some(How::Edit(_))), "{:?}", item.how);
+        assert!(
+            item.text.ends_with(", and already suggests turning it off for its cost per use, but its walk does not ask about a change saving under $1/mo."),
+            "{}",
+            item.text
+        );
+        memory(&mut report).base.monthly_savings_usd = measured;
+        // Half is not most, and a session nothing settles counts as without.
+        let m = memory(&mut report);
+        (m.base.action, m.base.recommended) = (Action::Keep, Some(true));
+        m.places = SessionPlaces {
+            sessions: 4,
+            instructed: 2,
+            unknown: 1,
+        };
+        let item = card(&report);
+        assert!(item.quiet && item.how.is_none());
+        assert!(
+            item.text.starts_with("2 of 4 main sessions (50%) in the window ran in a repository with a CLAUDE.md or AGENTS.md, counting as without 1 session whose transcript recorded loading none and whose directory is gone or unrecorded. Outside a repository, memory may be the only place a fact is kept, so turning it off is not advised."),
+            "{}",
+            item.text
+        );
+        // Unknown whether it is on: the advice stands, as the step doctor gives by hand.
+        let m = memory(&mut report);
+        (m.base.action, m.base.current, m.base.recommended) = (Action::Advisory, None, None);
+        m.unresolved = Some("a named config profile sets memories".into());
+        m.places = most;
+        let item = card(&report);
+        assert_eq!(
+            (item.value.as_str(), item.quiet),
+            ("may be on -> off", false)
+        );
+        assert!(
+            matches!(item.how, Some(How::Manual { .. })),
+            "{:?}",
+            item.how
+        );
+        // A total that leaves a part out is quoted as a floor, naming what it leaves out.
+        let m = memory(&mut report);
+        m.unresolved = None;
+        (m.base.action, m.base.current, m.base.recommended) =
+            (Action::Keep, Some(true), Some(true));
+        m.unpriced_reads = 2;
+        let item = card(&report);
+        assert!(
+            item.text.contains("doctor's line measured at least $150 at API prices over the window, used 3 times (1 read, 2 writes); that leaves out memory read back by 2 requests that recorded no context, which could not be priced; judging only cost"),
+            "{}",
+            item.text
+        );
+        memory(&mut report).unpriced_reads = 0;
+        // Off already: nothing to advise.
+        let m = memory(&mut report);
+        (m.base.action, m.base.current, m.base.recommended) =
+            (Action::Keep, Some(false), Some(false));
+        m.unresolved = None;
+        let item = card(&report);
+        assert!(item.quiet && item.how.is_none() && item.text.starts_with("Off. 3 of 4 "));
     }
 
     #[test]

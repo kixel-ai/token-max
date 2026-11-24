@@ -538,7 +538,7 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     );
     // Each host's card names its host, its own waits and the edit to make there, in its home.
     let here = flat(cards[1]);
-    assert!(here.starts_with("[1/6] Bash timeout cap not measured 10m -> 55m Host this host"));
+    assert!(here.starts_with("[1/8] Bash timeout cap not measured 10m -> 55m Host this host"));
     assert!(
         here.contains("No foreground Bash wait outlasted the cache."),
         "{here}"
@@ -549,26 +549,29 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
         ),
         "{here}"
     );
-    // Each host's window card follows its cap, its edit in that host's home.
-    let window = flat(cards[2]);
+    // Each host's memory card follows its cap, then its window card, its edit in that
+    // host's home.
+    assert!(flat(cards[2]).starts_with("[2/8] Auto memory not measured Host this host"));
+    assert!(flat(cards[6]).starts_with("[6/8] Auto memory not measured Host devbox"));
+    let window = flat(cards[3]);
     assert!(
         window.starts_with(
-            "[2/6] Auto-compact window (claude-opus-5-5) not measured 967k -> 400k Host this host"
+            "[3/8] Auto-compact window (claude-opus-5-5) not measured 967k -> 400k Host this host"
         ) && window.ends_with(r#"in ~/.claude/settings.json"#),
         "{window}"
     );
-    let window = flat(cards[5]);
+    let window = flat(cards[7]);
     assert!(
         window.starts_with(
-            "[5/6] Auto-compact window (claude-opus-5-5) not measured 967k -> 400k Host devbox"
+            "[7/8] Auto-compact window (claude-opus-5-5) not measured 967k -> 400k Host devbox"
         ) && window.ends_with(r#"in devbox:~/.claude/settings.json"#),
         "{window}"
     );
     // Each host's default has its own card, which advises nothing on the pick.
-    assert!(flat(cards[3]).starts_with("[3/6] Main-session default not measured Host this host"));
-    assert!(flat(cards[6]).starts_with("[6/6] Main-session default not measured Host devbox"));
-    let there = flat(cards[4]);
-    assert!(there.starts_with("[4/6] Bash timeout cap not measured 2h -> 55m Host devbox"));
+    assert!(flat(cards[4]).starts_with("[4/8] Main-session default not measured Host this host"));
+    assert!(flat(cards[8]).starts_with("[8/8] Main-session default not measured Host devbox"));
+    let there = flat(cards[5]);
+    assert!(there.starts_with("[5/8] Bash timeout cap not measured 2h -> 55m Host devbox"));
     assert!(
         there.contains(
             "1 foreground Bash wait outlasted the cache (1 hit the timeout, 1 polled in a loop)"
@@ -587,7 +590,7 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     let alone = flat(alone.split("\n\n").nth(1).unwrap());
     assert_eq!(
         there
-            .replace("[4/6]", "[1/3]")
+            .replace("[5/8]", "[1/4]")
             .replace(" Host devbox", "")
             .replace("devbox:~", "~"),
         alone

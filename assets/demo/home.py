@@ -13,6 +13,9 @@ root = Path(sys.argv[1])
 claude = root / ".claude"
 app = (root / "app").resolve()
 app.mkdir(parents=True, exist_ok=True)
+# The sessions run in a checkout with its own AGENTS.md, which vibes' memory card reads.
+(app / ".git").mkdir(exist_ok=True)
+(app / "AGENTS.md").write_text("# Synthetic instructions\n")
 # Claude Code names a project's directory after its path, with every non-alphanumeric as "-".
 project = claude / "projects" / "".join(c if c.isalnum() else "-" for c in str(app))
 project.mkdir(parents=True, exist_ok=True)

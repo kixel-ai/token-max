@@ -676,6 +676,22 @@ pub(crate) fn default_how(control: &EffortControl, profile: &Profile) -> Option<
     let mut changes: Vec<(&str, Option<Edit>, String)> = vec![];
     // The pick's model may take its level from another setting than the current model's.
     let target = control.picked.as_deref().unwrap_or(control);
+    // A Claude pick is unresolved only when a setting only it reads is invalid, and that
+    // setting would decide its level, so it is fixed first. A Codex pick's unknown default
+    // does not matter, as the edit names the level.
+    if let Some(why) = target
+        .unresolved
+        .as_ref()
+        .filter(|_| profile.harness == Harness::Claude)
+    {
+        return Some(How::Manual {
+            step: format!(
+                "fix {}, then set the default to {model} at {effort}",
+                target.owner
+            ),
+            reason: why.clone(),
+        });
+    }
     if control.model.as_deref() != Some(model) {
         // As the settings will name it, which keeps a `[1m]` context window.
         let model = target.model.as_deref().unwrap_or(model);
@@ -5792,6 +5808,21 @@ mod tests {
             panic!("a null model above the user file is changed by hand")
         };
         assert!(step.contains("/repo/.claude/settings.json:model"), "{step}");
+        // An invalid level in the pick's own row is fixed by hand before the switch.
+        std::fs::write(
+            &file,
+            r#"{"model": "claude-fable-5-2", "modelSettings": {"claude-opus-5-5": {"effortLevel": "max"}}}"#,
+        )
+        .unwrap();
+        let control = default_in(&file, Harness::Claude, &[]);
+        let Some(How::Manual { step, reason }) = default_how(&control, &claude) else {
+            panic!("an invalid level the pick reads is fixed by hand")
+        };
+        assert!(step.starts_with(&format!("fix {file}, then")), "{step}");
+        assert!(
+            reason.starts_with("invalid modelSettings effortLevel"),
+            "{reason}"
+        );
         // A home whose path holds " (" still takes the edit.
         let odd = w.home.join("a (b)");
         std::fs::create_dir_all(&odd).unwrap();

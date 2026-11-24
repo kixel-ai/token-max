@@ -260,14 +260,39 @@ pub fn claude_effort(
     )?;
     let (pick, _) = pick(Harness::Claude);
     if control.unresolved.is_none() && control.model.as_deref() != Some(pick.0) {
-        let mut picked = claude_on(
+        // A setting only the pick reads, such as an invalid level in its own `modelSettings`
+        // row, leaves the pick unresolved: the current default reads none of it.
+        let mut picked = match claude_on(
             scopes,
             user_file,
             &environment,
             Some(pick.0.into()),
             Some(pick.0),
-            model_owner,
-        )?;
+            model_owner.clone(),
+        ) {
+            Ok(picked) => picked,
+            Err(error) => {
+                let file = error
+                    .location
+                    .map_or_else(|| user_file.to_string(), |l| l.file.to_string());
+                EffortControl {
+                    model: Some(pick.0.into()),
+                    model_owner,
+                    level: None,
+                    unresolved: Some(format!(
+                        "{} in {file}, which only {} reads",
+                        error.message, pick.0
+                    )),
+                    owner: file,
+                    effective: None,
+                    lowered: None,
+                    caps: vec![],
+                    default: None,
+                    picked: None,
+                    provider: None,
+                }
+            }
+        };
         // A `[1m]` context window carries over to the pick, as the edit names it.
         if named.is_some_and(|m| m.trim().to_ascii_lowercase().ends_with("[1m]")) {
             picked.model = Some(format!("{}[1m]", pick.0));
@@ -1131,6 +1156,30 @@ mod tests {
         // An unresolved default has no pick to resolve.
         let c = resolve(json!({}), json!({}), json!({}), &[], None).unwrap();
         assert!(c.unresolved.is_some() && c.picked.is_none());
+        // An invalid level only the pick's own row holds leaves the pick unresolved, not the scan;
+        // the same level on the current model still fails it.
+        let dormant = json!({
+            "model": "claude-fable-5-2",
+            "modelSettings": {"claude-opus-5-5": {"effortLevel": "max"}},
+        });
+        let c = resolve(dormant, json!({}), json!({}), &[], None).unwrap();
+        assert_eq!(c.unresolved, None);
+        let picked = c.picked.expect("the pick is kept, unresolved");
+        assert_eq!(
+            (picked.level, picked.unresolved.as_deref()),
+            (
+                None,
+                Some(
+                    format!("invalid modelSettings effortLevel in {USER}, which only claude-opus-5-5 reads")
+                        .as_str()
+                )
+            )
+        );
+        let live = json!({
+            "model": "claude-opus-5-5",
+            "modelSettings": {"claude-opus-5-5": {"effortLevel": "max"}},
+        });
+        assert!(resolve(live, json!({}), json!({}), &[], None).is_err());
 
         // Codex's level is the model's only when no layer sets one.
         let user_file = "/home/u/.codex/config.toml";

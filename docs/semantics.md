@@ -955,8 +955,9 @@ after it; `MEMORY.md` is placed like any other attachment. Both form the
 as subagents do, leaves any memory instructions elsewhere in its prompt
 unmeasured, and the check says how many did. Today's setting decides whether
 memory is on, as every other check reads today's settings. It is resolved at the
-working directory of the latest main-agent request, where the user worked most
-recently, including the project's `.claude/settings.json` and
+working directory of the profile's latest main-agent request, where the user
+worked most recently, once T3 has attributed requests, so a T3 thread sharing
+the history never decides it, including the project's `.claude/settings.json` and
 `.claude/settings.local.json`, so `off_file` names the file that owns it. Claude
 Code reads the setting when a session starts, so a session begun before a change
 keeps the old value until it restarts. When main-agent sessions in that
@@ -1473,8 +1474,8 @@ and the sources.
 ## Advisor model
 
 `Profile.advisor` is resolved where `Profile.effort` is: the user and managed
-settings, plus the project and local files of the latest main-session
-request's directory, with the active profile's shell environment, settings
+settings, plus the project and local files of the profile's latest
+main-session request's directory once T3 has attributed requests, with the active profile's shell environment, settings
 `env` overriding it. `advisorModel` comes from the highest scope that sets it
 to anything but null; a non-string is an error, and an empty name sets no
 advisor. What stops an advisor loading is checked in Claude Code's order: the

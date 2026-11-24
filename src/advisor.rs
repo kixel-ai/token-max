@@ -151,10 +151,10 @@ pub fn advisor_use(scan: &Scan, catalog: &Catalog, since: Option<Millis>) -> Vec
     crate::rows::groups(advised, |p| owner(p).expect("filtered on an advisor"))
         .iter()
         .map(|line| {
-            let lead = file(line.lead);
+            let files: Vec<String> = line.members.iter().map(|m| file(m)).collect();
             let mut ids = line.ids.clone();
             t3.retain(|p| {
-                let mine = file(p) == lead;
+                let mine = files.contains(&file(p));
                 if mine {
                     ids.push(p.id.clone());
                 }
@@ -483,6 +483,12 @@ mod tests {
         let lines = advisor_use(&scan, &catalog, None);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].profiles, ["a", "b"]);
+        assert_eq!((lines[0].requests, lines[0].calls), (3, 4));
+        // Matched against every member's settings file, not only the lead's.
+        scan.profiles[1].settings_file = "/synthetic/other/settings.json".into();
+        scan.profiles[2].settings_file = "/synthetic/other/settings.json".into();
+        let lines = advisor_use(&scan, &catalog, None);
+        assert_eq!(lines.len(), 1);
         assert_eq!((lines[0].requests, lines[0].calls), (3, 4));
     }
 

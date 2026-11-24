@@ -1126,6 +1126,81 @@ pub fn discover_inbound(
     Ok(())
 }
 
+/// Resolve each native Claude profile's auto memory, main-session effort and advisor at its
+/// latest main-session request's directory; without an existing one, the user and managed
+/// files decide. It runs once T3 has attributed requests, so a T3 thread that shares the
+/// profile's history never decides them.
+pub fn discover_latest_claude_controls(
+    options: &DiscoveryOptions,
+    profiles: &mut [Profile],
+    requests: &[Request],
+) -> Result<(), ScanError> {
+    let env = &options.env;
+    let empty = Env::default();
+    let default_root = join(&[&options.home, ".claude"]);
+    let configured = env.get("CLAUDE_CONFIG_DIR").unwrap_or(&default_root);
+    let active = realpath(&resolve(configured)).unwrap_or_default();
+    let managed_file = options.managed_settings_file.as_str();
+    for profile in profiles
+        .iter_mut()
+        .filter(|p| p.harness == Harness::Claude && p.t3.is_none())
+    {
+        let user = options.settings(&profile.settings_file, Harness::Claude)?;
+        let managed = settings(managed_file, Harness::Claude)?;
+        let local_env = if active == profile.root { env } else { &empty };
+        let mine: Vec<&Request> = requests
+            .iter()
+            .filter(|r| r.agent == Agent::Main && r.profiles.contains(&profile.id))
+            .collect();
+        let recorded = latest_model(&mine);
+        let latest = crate::memory::deciding_request(&mine).and_then(|r| r.cwd.as_deref());
+        let directory = match latest {
+            Some(cwd) if !cwd.is_empty() && existing_directory(cwd)? => Some(cwd),
+            _ => None,
+        };
+        let mut project = vec![];
+        if let Some(cwd) = directory {
+            for file in claude_project_files(cwd, options)? {
+                let config = options.settings(&file, Harness::Claude)?;
+                project.push((file, config));
+            }
+        }
+        let scopes: Vec<SettingsScope> = std::iter::once(SettingsScope {
+            config: &user,
+            file: &profile.settings_file,
+        })
+        .chain(
+            project
+                .iter()
+                .map(|(file, config)| SettingsScope { config, file }),
+        )
+        .chain(std::iter::once(SettingsScope {
+            config: &managed,
+            file: managed_file,
+        }))
+        .collect();
+        if let Some(cwd) = directory {
+            profile.memory = Some(MemoryControl {
+                directory: Some(cwd.into()),
+                ..claude_memory(&scopes, local_env)?
+            });
+        }
+        profile.effort = Some(claude_effort(
+            &scopes,
+            &profile.settings_file,
+            local_env,
+            recorded,
+        )?);
+        // Read where effort is: the advisor card ranks against that main-session default.
+        profile.advisor = Some(crate::advisor::control(
+            &scopes,
+            local_env,
+            &profile.settings_file,
+        )?);
+    }
+    Ok(())
+}
+
 /// Resolve current project/local controls at recorded directories, preserving every owner.
 pub fn discover_claude_controls(
     options: &DiscoveryOptions,
@@ -1158,32 +1233,6 @@ pub fn discover_claude_controls(
             .iter()
             .filter(|r| r.agent == Agent::Main && r.profiles.contains(&profile.id))
             .collect();
-        // Auto memory's and effort's settings are read at the latest main-agent request's
-        // directory; without one, the user and managed files decide.
-        let latest = crate::memory::deciding_request(&relevant).and_then(|r| r.cwd.clone());
-        let recorded = latest_model(&relevant);
-        let base = [
-            SettingsScope {
-                config: &user,
-                file: &profile.settings_file,
-            },
-            SettingsScope {
-                config: &managed,
-                file: managed_file,
-            },
-        ];
-        profile.effort = Some(claude_effort(
-            &base,
-            &profile.settings_file,
-            local_env,
-            recorded,
-        )?);
-        // Read where effort is: the advisor card ranks against that main-session default.
-        profile.advisor = Some(crate::advisor::control(
-            &base,
-            local_env,
-            &profile.settings_file,
-        )?);
         if relevant
             .iter()
             .any(|r| r.cwd.as_deref().is_none_or(str::is_empty))
@@ -1275,23 +1324,6 @@ pub fn discover_claude_controls(
             let speed = speed_controls(Harness::Claude, &scopes, local_env)?;
             let mut idle = idle_controls(&scopes, local_env)?;
             let background = claude_background(&scopes, local_env)?;
-            if latest.as_deref() == Some(cwd) {
-                profile.memory = Some(MemoryControl {
-                    directory: Some(cwd.into()),
-                    ..claude_memory(&scopes, local_env)?
-                });
-                profile.effort = Some(claude_effort(
-                    &scopes,
-                    &profile.settings_file,
-                    local_env,
-                    recorded,
-                )?);
-                profile.advisor = Some(crate::advisor::control(
-                    &scopes,
-                    local_env,
-                    &profile.settings_file,
-                )?);
-            }
             let settings_env = scoped_environment(&scopes, &empty);
             let launch_conflict = CLAUDE_BACKGROUND_ENV.iter().any(|key| {
                 settings_env
@@ -4474,5 +4506,49 @@ mod tests {
         let profile = claude(&data);
         assert!(!profile.idle.as_ref().unwrap().resolved);
         assert!(profile.idle_directories.as_ref().unwrap().is_empty());
+    }
+
+    #[test]
+    fn only_the_profiles_own_latest_request_decides_its_memory_effort_and_advisor() {
+        let w = Workspace::new();
+        let (mine, theirs) = (w.home.join("mine"), w.home.join("theirs"));
+        for (dir, settings) in [
+            (
+                &mine,
+                r#"{"advisorModel":"opus","autoMemoryEnabled":false}"#,
+            ),
+            (
+                &theirs,
+                r#"{"advisorModel":"fable","model":"claude-sonnet-5-5"}"#,
+            ),
+        ] {
+            fs::create_dir_all(dir.join(".git")).unwrap();
+            write(dir.join(".claude/settings.json"), settings);
+        }
+        let mut data = discover(&options(&w)).unwrap();
+        let profile = claude(&data).clone();
+        let mut earlier = request(&profile, Some(&mine));
+        earlier.time = 1;
+        // Newer, but T3 attributed it to an instance of its own.
+        let mut later = request(&profile, Some(&theirs));
+        later.time = 2;
+        later.profiles = vec!["t3".into()].into();
+        discover_latest_claude_controls(&options(&w), &mut data.profiles, &[earlier, later])
+            .unwrap();
+        let profile = claude(&data);
+        let advisor = profile.advisor.as_ref().unwrap();
+        assert_eq!(advisor.model.as_deref(), Some("opus"));
+        assert_eq!(
+            advisor.owner,
+            format!(
+                "{}:advisorModel",
+                join(&[&text(&mine), ".claude", "settings.json"])
+            )
+        );
+        let memory = profile.memory.as_ref().unwrap();
+        assert_eq!(memory.directory.as_deref(), Some(text(&mine).as_str()));
+        // The recorded model, not the other project's setting.
+        let effort = profile.effort.as_ref().unwrap();
+        assert_eq!(effort.model.as_deref(), Some("claude-opus-5-5"));
     }
 }

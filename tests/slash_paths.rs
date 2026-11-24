@@ -330,14 +330,17 @@ fn item_end(tokens: &[Token], start: usize) -> usize {
     tokens.len()
 }
 
-/// Whether the `cfg(...)` at `k` holds on Windows, and the index of its closing `)`.
+/// Whether the `cfg(...)` at `k` can hold on Windows, and the index of its closing `)`.
 fn cfg(tokens: &[Token], k: usize) -> (bool, usize) {
-    fn predicate(t: &[Token], k: usize) -> (bool, usize) {
+    // A predicate Windows doesn't settle, such as `target_arch`, takes whichever value keeps the
+    // item live: `unknown` is true outside a `not` and false inside one.
+    fn predicate(t: &[Token], k: usize, unknown: bool) -> (bool, usize) {
         let name = t[k].ident().unwrap_or_default();
         if t[k + 1].is('(') {
+            let inner = if name == "not" { !unknown } else { unknown };
             let (mut values, mut j) = (Vec::new(), k + 2);
             while !t[j].is(')') {
-                let (value, next) = predicate(t, j);
+                let (value, next) = predicate(t, j, inner);
                 values.push(value);
                 j = next + usize::from(t[next].is(','));
             }
@@ -345,23 +348,25 @@ fn cfg(tokens: &[Token], k: usize) -> (bool, usize) {
                 "not" => !values[0],
                 "all" => values.iter().all(|&v| v),
                 "any" => values.iter().any(|&v| v),
-                _ => true,
+                _ => unknown,
             };
             return (value, j + 1);
         }
         if t[k + 1].is('=') {
-            let Kind::Str(value) = &t[k + 2].kind else {
-                return (true, k + 3);
-            };
-            let windows = match name {
-                "target_os" | "target_family" => value == "windows",
-                _ => true,
+            let windows = match (name, &t[k + 2].kind) {
+                ("target_os" | "target_family", Kind::Str(value)) => value == "windows",
+                _ => unknown,
             };
             return (windows, k + 3);
         }
-        (name != "unix", k + 1)
+        let windows = match name {
+            "unix" => false,
+            "windows" | "test" => true,
+            _ => unknown,
+        };
+        (windows, k + 1)
     }
-    predicate(tokens, k + 2)
+    predicate(tokens, k + 2, true)
 }
 
 #[derive(Debug, PartialEq)]
@@ -423,6 +428,8 @@ fn scan(tokens: &[Token], test: bool) -> Vec<Hit> {
         .collect();
     let opted = |line: usize| opted.contains(&line) || opted.contains(&(line - 1));
     let calls = calls(tokens);
+    // Bindings are per function, not per block: a shadowing `let` in an inner block hides an outer
+    // binding for the rest of the function, a rare miss not worth tracking scopes for.
     let mut bound: HashMap<String, Bound> = HashMap::new();
     let mut hits = Vec::new();
     let mut flag = |line: usize, path: String| {
@@ -441,7 +448,8 @@ fn scan(tokens: &[Token], test: bool) -> Vec<Hit> {
         if token.ident() == Some("fn") {
             bound.clear();
         }
-        if token.ident() == Some("let") {
+        // A declaration Windows never compiles must not bind or shadow a name.
+        if token.ident() == Some("let") && live {
             let mut j = n + 1;
             if at(j).and_then(Token::ident) == Some("mut") {
                 j += 1;
@@ -503,7 +511,7 @@ fn scan(tokens: &[Token], test: bool) -> Vec<Hit> {
                 ] if f.ident() == Some("format") && bang.is('!') && open.is('(') => {
                     Some((false, *line, s))
                 }
-                _ => init.windows(3).find_map(|w| match w {
+                _ => init.windows(3).enumerate().find_map(|(i, w)| match w {
                     [
                         m,
                         open,
@@ -512,7 +520,11 @@ fn scan(tokens: &[Token], test: bool) -> Vec<Hit> {
                             line,
                         },
                     ] if matches!(m.ident(), Some("join" | "push")) && open.is('(') => {
-                        Some((true, *line, s))
+                        // `root.join("a/b").to_string_lossy()` is already a string.
+                        let text = init[i + 3..].windows(2).any(|w| {
+                            w[0].is('.') && w[1].ident().is_some_and(|m| STRINGIFY.contains(&m))
+                        });
+                        Some((!text, *line, s))
                     }
                     _ => None,
                 }),
@@ -698,8 +710,12 @@ fn v() {
     let canonical = std::fs::canonicalize(&canonical).unwrap();
     assert_eq!(found, canonical.to_string_lossy());
 }
+fn w() {
+    let expected = root.join("e/f.json").to_string_lossy().into_owned();
+    assert_eq!(actual, expected);
+}
 "#;
-        assert_eq!(lines(source), [3, 10]);
+        assert_eq!(lines(source), [3, 10, 21]);
     }
 
     #[test]
@@ -751,13 +767,25 @@ mod tests {
     fn w() { assert!(text.contains("~/.claude/settings.json")); }
 }
 fn product() { assert!(text.contains("~/.claude/settings.json")); }
+#[cfg(all(test, not(target_arch = "aarch64")))]
+fn x() { assert!(text.contains("~/.claude/settings.json")); }
+#[cfg(all(test, not(any(unix, feature = "f"))))]
+fn y() { assert!(text.contains("~/.claude/settings.json")); }
+#[cfg(test)]
+fn z() {
+    #[cfg(windows)]
+    let expected = native_path("a/b.json");
+    #[cfg(unix)]
+    let expected = "a/b.json";
+    assert_eq!(actual, expected);
+}
 "#;
         assert_eq!(
             scan(&lex(source), false)
                 .iter()
                 .map(|h| h.line)
                 .collect::<Vec<_>>(),
-            [12]
+            [12, 16, 18]
         );
     }
 

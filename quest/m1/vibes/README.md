@@ -30,7 +30,7 @@ Decision prompts, chosen options marked ✅:
 - Its first items: ✅ the Bash cap and the old Warnings, which the `vibes`
   command shipped with; ✅
   [a default main-session model and effort](/quest/m1/vibes/default-model.md);
-  ✅ [Explore on Haiku](/quest/m1/vibes/explore-haiku.md) (rejected for now:
+  ✅ Explore on Haiku (rejected for now:
   cache habits from the 2026-11-17 study, which can return as their own quest
   here).
 - The TTL the Bash cap card compares with (2026-11-23, maintainer,

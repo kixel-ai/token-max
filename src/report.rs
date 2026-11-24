@@ -4369,17 +4369,25 @@ const BASH_PICK: &str =
 fn bash_item(cap: &BashCap, profile: &str, how: Option<How>, out: &Out<'_>) -> Item {
     let w = &cap.waits;
     // What long foreground Bash waits cost: a total over the window, like their count.
-    let waits = if w.long == 0 {
-        "No foreground Bash wait outlasted the cache.".to_string()
-    } else {
-        format!(
-            "{} outlasted the cache ({} hit the timeout, {} polled in a loop); the cache misses cost {} over the window.",
+    let mut waits = match (w.long, w.unknown) {
+        (0, 0) => "No foreground Bash wait outlasted the cache.".to_string(),
+        (0, _) => "No foreground Bash wait is known to have outlasted the cache.".to_string(),
+        _ => format!(
+            "{} outlasted the cache ({} hit the timeout, {} polled in a loop); the cache misses cost {} at API prices over the window.",
             plural(w.long, "foreground Bash wait"),
             count(w.timed_out),
             count(w.polling),
             figure(w.miss_estimate)
-        )
+        ),
     };
+    // A wait with no cache lifetime to compare is not one that fit under the cache.
+    if w.unknown > 0 {
+        waits += &format!(
+            " {} of {} could not be compared, since no cache lifetime is recorded for the request that started it.",
+            count(w.unknown),
+            plural(w.calls, "foreground Bash wait")
+        );
+    }
     let current = duration(cap.current);
     let ttl = cap.ttl.map_or("unknown", Ttl::as_str);
     // An edit to the user file changes nothing where a project sets the cap itself.
@@ -5876,7 +5884,7 @@ fn summary(
                 row.name.clone(),
                 &row.profile,
                 format!(
-                    "Cost {} over {}. {}",
+                    "Cost {} at API prices over {}. {}",
                     figure(u.estimate),
                     plural(u.requests, "Fable request"),
                     capitalize(FABLE_RULE)
@@ -9218,7 +9226,7 @@ mod tests {
         let card = cards.iter().find(|i| i.name == "Fable weekly use").unwrap();
         assert_eq!(
             card.text,
-            "Cost ~$516 ± $40 over 5 Fable requests. On a Claude Max or Ultra plan or a Team or seat-based Enterprise premium seat, Fable models can use up to half the weekly usage limit, and use it faster than other models; on Pro or a Team or seat-based Enterprise standard seat, they run on usage credits; on usage-based Enterprise, they bill at API rates."
+            "Cost ~$516 ± $40 at API prices over 5 Fable requests. On a Claude Max or Ultra plan or a Team or seat-based Enterprise premium seat, Fable models can use up to half the weekly usage limit, and use it faster than other models; on Pro or a Team or seat-based Enterprise standard seat, they run on usage credits; on usage-based Enterprise, they bill at API rates."
         );
         assert_eq!(card.sources, [FABLE_PLANS]);
         // --details keeps each span's cost with its unknowns, the caveats and the sources.

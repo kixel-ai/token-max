@@ -1660,8 +1660,7 @@ fn walk(walk: Walk) -> Result<(), ScanError> {
             drop(walking);
             settle(&mut hosts, &selections, &style, &mut stdin, &mut stdout)?;
             let pending: usize = hosts.iter().map(|h| h.pending).sum();
-            // A Ctrl-C while the changes were written ends the run after them.
-            if pending == 0 || ssh::cancelled() {
+            if pending == 0 {
                 return Ok(());
             }
             let wrote = hosts.iter().any(|h| h.wrote);
@@ -1670,6 +1669,11 @@ fn walk(walk: Walk) -> Result<(), ScanError> {
             } else {
                 Phase::Asking
             });
+            // A Ctrl-C while the changes were written ends the run after them. Read once the
+            // phase has moved on, since one that lands after that exits in the handler.
+            if ssh::cancelled() {
+                return Ok(());
+            }
             let failed = |_| unusable(wrote);
             if !vibes::offer(pending, &style, &mut stdin, &mut stdout).map_err(failed)? {
                 return Ok(());

@@ -162,7 +162,7 @@ fn check(
                 .or_insert(e);
         }
     }
-    let (mut calls, mut long, mut timed_out, mut polling) = (0, 0, 0, 0);
+    let (mut calls, mut long, mut unknown, mut timed_out, mut polling) = (0, 0, 0, 0, 0);
     let mut costs = vec![];
     let mut priced = crate::collections::HashSet::default();
     for start in scan.events.iter().filter(mine) {
@@ -189,7 +189,11 @@ fn check(
             .and_then(|r| r.parts.iter().rev().find_map(observed_ttl))
             .or(ttl);
         let began = issuing.map_or(start.time, |r| r.time);
-        if lifetime.is_none_or(|t| end.time - began < ttl_milliseconds(t)) {
+        let Some(lifetime) = lifetime else {
+            unknown += 1;
+            continue;
+        };
+        if end.time - began < ttl_milliseconds(lifetime) {
             continue;
         }
         long += 1;
@@ -239,6 +243,7 @@ fn check(
         waits: BashWaits {
             calls,
             long,
+            unknown,
             timed_out,
             polling,
             miss_cost,
@@ -312,8 +317,6 @@ mod tests {
     }
 
     fn report(settings: &str) -> crate::model::Report {
-        let w = Workspace::new();
-        std::fs::write(w.claude.join("settings.json"), settings).unwrap();
         let records = [
             // A polling loop that waits 6 minutes, past the 5m cache, then times out.
             assistant(
@@ -346,6 +349,12 @@ mod tests {
             ),
             result(30.0, "background", false),
         ];
+        report_of(settings, &records)
+    }
+
+    fn report_of(settings: &str, records: &[Value]) -> crate::model::Report {
+        let w = Workspace::new();
+        std::fs::write(w.claude.join("settings.json"), settings).unwrap();
         let lines: String = records.iter().map(|r| format!("{r}\n")).collect();
         std::fs::write(w.claude.join("projects/project/main.jsonl"), lines).unwrap();
         analyze(AnalyzeOptions {
@@ -447,7 +456,10 @@ mod tests {
                 .ends_with("settings.json:env.BASH_MAX_TIMEOUT_MS")
         );
         let w = &check.waits;
-        assert_eq!((w.calls, w.long, w.timed_out, w.polling), (2, 1, 1, 1));
+        assert_eq!(
+            (w.calls, w.long, w.unknown, w.timed_out, w.polling),
+            (2, 1, 0, 1, 1)
+        );
         let next = report
             .scan
             .requests
@@ -486,7 +498,7 @@ mod tests {
         // The miss cost is the window's total, like the wait count, not a 30-day rate.
         assert!(
             card.text.contains(&format!(
-                "1 foreground Bash wait outlasted the cache (1 hit the timeout, 1 polled in a loop); the cache misses cost {} over the window.",
+                "1 foreground Bash wait outlasted the cache (1 hit the timeout, 1 polled in a loop); the cache misses cost {} at API prices over the window.",
                 crate::report::about(expected)
             )),
             "{}",
@@ -595,6 +607,26 @@ mod tests {
         let check = bash(&report);
         assert_eq!(check.ttl, Some(Ttl::FiveMinutes));
         assert_eq!(check.suggested, Some(240_000));
+    }
+
+    #[test]
+    fn a_wait_with_no_cache_lifetime_to_compare_is_counted_as_unknown() {
+        // No TTL is set and no request wrote to the cache, so six minutes compares with nothing.
+        let records = [
+            assistant(0.0, "wait", 0, 0, Some(json!({"command": "cargo build"}))),
+            result(6.0, "wait", false),
+            assistant(6.1, "after", 0, 0, None),
+        ];
+        let report = report_of("{}", &records);
+        let check = bash(&report);
+        assert_eq!((check.ttl, check.suggested), (None, None));
+        let w = &check.waits;
+        assert_eq!((w.calls, w.long, w.unknown), (1, 0, 1));
+        let text = card(&report).text;
+        assert!(
+            text.contains(" No foreground Bash wait is known to have outlasted the cache. 1 of 1 foreground Bash wait could not be compared, since no cache lifetime is recorded for the request that started it. Set in "),
+            "{text}"
+        );
     }
 
     #[test]

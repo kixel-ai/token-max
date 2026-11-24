@@ -352,6 +352,7 @@ mod tests {
             card("Fable weekly use"),
         ];
         let (text, events, owner) = walk(&w, &items, "y\n");
+        let shown = format!("~{0}.claude{0}settings.json", std::path::MAIN_SEPARATOR);
         // One question, for the one card with a change; the others end at their source.
         assert_eq!(text.matches("Accept? [y]es, [n]o, [q]uit:").count(), 1);
         assert!(
@@ -359,7 +360,7 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("        Change  \"env\": {\"BASH_MAX_TIMEOUT_MS\": \"240000\"} and \"env\": {\"BASH_DEFAULT_TIMEOUT_MS\": \"240000\"} in ~/.claude/settings.json\n  Accept? [y]es, [n]o, [q]uit: \n  [3/3] Fable weekly use  not measured\n"),
+            text.contains(&format!("        Change  \"env\": {{\"BASH_MAX_TIMEOUT_MS\": \"240000\"}} and \"env\": {{\"BASH_DEFAULT_TIMEOUT_MS\": \"240000\"}} in {shown}\n  Accept? [y]es, [n]o, [q]uit: \n  [3/3] Fable weekly use  not measured\n")),
             "{text}"
         );
         // No card carries a verdict.
@@ -423,12 +424,13 @@ mod tests {
         ];
         let (text, events, _) = walk(&w, &items, "y\n");
         assert_eq!(text.matches("Accept?").count(), 1, "{text}");
+        let shown = format!("~{0}.claude{0}settings.json", std::path::MAIN_SEPARATOR);
         assert!(
-            text.contains("in ~/.claude/settings.json\n  The same edit as a card above.\n"),
+            text.contains(&format!("in {shown}\n  The same edit as a card above.\n")),
             "{text}"
         );
         assert!(
-            text.contains("        Change  by hand, since Cap wants a different value for the same setting: in ~/.claude/settings.json, set \"env\": {\"BASH_MAX_TIMEOUT_MS\": \"3300000\"}\n"),
+            text.contains(&format!("        Change  by hand, since Cap wants a different value for the same setting: in {shown}, set \"env\": {{\"BASH_MAX_TIMEOUT_MS\": \"3300000\"}}\n")),
             "{text}"
         );
         assert_eq!(events.len(), 1);
@@ -447,7 +449,9 @@ mod tests {
         assert_eq!(printed.matches("        Host    devbox\n").count(), 3);
         assert_eq!(
             printed
-                .matches("        Change  \"env\": {\"BASH_MAX_TIMEOUT_MS\": \"240000\"} in ~/.claude/settings.json\n")
+                .matches(&format!(
+                    "        Change  \"env\": {{\"BASH_MAX_TIMEOUT_MS\": \"240000\"}} in {shown}\n"
+                ))
                 .count(),
             2,
             "{printed}"

@@ -1965,6 +1965,8 @@ pub struct BashWaits {
     pub calls: u64,
     /// Those whose wait reached the cache TTL their request wrote.
     pub long: u64,
+    /// Those with no cache lifetime to compare: none set and none their request wrote.
+    pub unknown: u64,
     /// Long waits that reached their timeout.
     pub timed_out: u64,
     /// Long waits that slept in a polling loop.

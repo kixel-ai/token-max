@@ -1231,9 +1231,10 @@ T3 left unsettled, has a card that advises nothing.
 
 The card counts the foreground Bash waits that outlasted the cache the
 starting request wrote, how many hit their timeout or slept in a polling loop,
-and what their cache misses cost over the window: the prefix the next request
+and what their cache misses cost at API prices over the window: the prefix the next request
 wrote instead of read, at the write rate minus the read rate. Those are
-measured. What another cap would save is not: a lower cap doesn't kill a
+measured. A wait whose request recorded no cache lifetime, under a TTL the
+card can't resolve, is counted as not compared rather than as short. What another cap would save is not: a lower cap doesn't kill a
 command, which keeps running in the background, where checking on it takes
 later turns the transcripts can't predict; a higher cap trades those check-ins
 for longer foreground waits. Some commands need longer in the foreground, so

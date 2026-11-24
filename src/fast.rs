@@ -644,21 +644,13 @@ mod tests {
         use crate::reader::{ScanOptions, scan};
         use crate::replay::{AnalyzeOptions, analyze};
         use crate::report::{ReportOptions, rendered as format_report};
-        use crate::test_support::{ClaudeUsage, Workspace, claude_usage, make_request, prices};
+        use crate::test_support::{
+            ClaudeUsage, Workspace, claude_usage, make_request, native_path, prices,
+        };
         use serde_json::{Value, json};
         use std::path::Path;
 
         const DAY_MS: Millis = 86_400_000;
-
-        fn text(path: &Path) -> String {
-            // Windows paths joined from "a/b" keep the slash; the code under test normalizes it.
-            let path: std::path::PathBuf = if cfg!(windows) {
-                path.components().collect()
-            } else {
-                path.to_path_buf()
-            };
-            path.to_string_lossy().into_owned()
-        }
 
         fn write(path: impl AsRef<Path>, contents: &str) {
             std::fs::write(path, contents).unwrap();
@@ -667,14 +659,14 @@ mod tests {
         /// This home, no environment, a checkout-local managed file.
         fn options(w: &Workspace) -> DiscoveryOptions {
             DiscoveryOptions {
-                home: text(&w.home),
+                home: native_path(&w.home),
                 env: Env::default(),
                 claude_dirs: vec![],
                 codex_dirs: vec![],
                 t3_dirs: vec![],
-                managed_settings_file: text(&w.managed_settings_file()),
-                codex_system_config_file: text(&w.home.join("system.toml")),
-                codex_requirements_file: text(&w.home.join("requirements.toml")),
+                managed_settings_file: native_path(w.managed_settings_file()),
+                codex_system_config_file: native_path(w.home.join("system.toml")),
+                codex_requirements_file: native_path(w.home.join("requirements.toml")),
                 defaults: false,
                 billing: Default::default(),
             }
@@ -692,14 +684,14 @@ mod tests {
 
         fn claude_dirs(w: &Workspace) -> DiscoveryOptions {
             DiscoveryOptions {
-                claude_dirs: vec![text(&w.claude)],
+                claude_dirs: vec![native_path(&w.claude)],
                 ..options(w)
             }
         }
 
         fn codex_dirs(w: &Workspace) -> DiscoveryOptions {
             DiscoveryOptions {
-                codex_dirs: vec![text(&w.codex)],
+                codex_dirs: vec![native_path(&w.codex)],
                 ..options(w)
             }
         }
@@ -948,7 +940,7 @@ mod tests {
             w.fixture(&file, "claude.jsonl");
             let env_scan = scanned(DiscoveryOptions {
                 env: [
-                    ("CLAUDE_CONFIG_DIR".to_string(), text(&w.claude)),
+                    ("CLAUDE_CONFIG_DIR".to_string(), native_path(&w.claude)),
                     ("CLAUDE_CODE_DISABLE_FAST_MODE".to_string(), "1".to_string()),
                 ]
                 .into_iter()
@@ -964,12 +956,12 @@ mod tests {
             let managed = scanned(options(&w));
             assert_eq!(
                 claude(&managed).speed.as_ref().unwrap().owner,
-                format!("{}:fastMode", text(&managed_file))
+                format!("{}:fastMode", native_path(&managed_file))
             );
             write(&managed_file, "{}");
             std::fs::create_dir(w.home.join(".git")).unwrap();
             std::fs::create_dir_all(w.home.join(".claude-project/.claude")).unwrap();
-            let cwd = text(&w.home.join(".claude-project"));
+            let cwd = native_path(w.home.join(".claude-project"));
             // A repository rooted at home keeps the local file at the session directory.
             let local = w.home.join(".claude-project/.claude/settings.local.json");
             write(&local, r#"{"fastMode":false}"#);
@@ -989,7 +981,10 @@ mod tests {
             let cards = checks(&project, &prices(), None, day("2026-11-02"));
             let result = cards.iter().find(|c| &c.base.profile == id).unwrap();
             assert_eq!(result.base.action, Action::Keep);
-            assert_eq!(result.base.owner, format!("{}:fastMode", text(&local)));
+            assert_eq!(
+                result.base.owner,
+                format!("{}:fastMode", native_path(&local))
+            );
         }
 
         // Codex legacy/named profiles and project selection stay advisory; local requirements can block premium.
@@ -1004,7 +999,7 @@ mod tests {
             let requirements = w.home.join("requirements.toml");
             let speed = || {
                 scanned(DiscoveryOptions {
-                    codex_requirements_file: text(&requirements),
+                    codex_requirements_file: native_path(&requirements),
                     defaults: false,
                     ..codex_dirs(&w)
                 })
@@ -1122,7 +1117,7 @@ mod tests {
                         "id": "thread",
                         "source": "cli",
                         "model_provider": "openai",
-                        "cwd": text(&nested),
+                        "cwd": native_path(&nested),
                     },
                 }),
                 json!({
@@ -1148,8 +1143,8 @@ mod tests {
             write(w.codex.join("sessions/main.jsonl"), &jsonl);
             let mut s = scanned(codex_dirs(&w));
             assert_eq!(
-                s.profiles[0].speed_directories.as_ref().unwrap()[&text(&nested)].owner,
-                text(&nearest)
+                s.profiles[0].speed_directories.as_ref().unwrap()[&native_path(&nested)].owner,
+                native_path(&nearest)
             );
             let c = prices();
             assert_eq!(
@@ -1209,7 +1204,7 @@ mod tests {
             let requirements = w.home.join("requirements.toml");
             let speed = || {
                 scanned(DiscoveryOptions {
-                    codex_requirements_file: text(&requirements),
+                    codex_requirements_file: native_path(&requirements),
                     defaults: false,
                     ..codex_dirs(&w)
                 })

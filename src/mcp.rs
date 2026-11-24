@@ -159,13 +159,15 @@ pub fn definitions(server: &str, control: &Control, profiles: &[&Profile]) -> Ve
             }],
         };
     }
-    if let Some(rest) = server.strip_prefix("plugin_") {
+    // A plugin's server and a claude.ai connector live in no file token-max reads, but a
+    // declared key may spell the same prefix.
+    let source = if let Some(rest) = server.strip_prefix("plugin_") {
         let step = "uninstall or disable the plugin that provides it, with /plugin in Claude Code";
         let reason = "a plugin adds it";
         // Claude Code names it `plugin:<plugin>:<server>`, whose colons its tools carry as
         // `_`; with no other `_` in the prefix, neither name held one or a character read
         // as one.
-        return vec![match rest.split_once('_') {
+        Some(match rest.split_once('_') {
             Some((plugin, name))
                 if !plugin.is_empty() && !name.is_empty() && !name.contains('_') =>
             {
@@ -180,11 +182,12 @@ pub fn definitions(server: &str, control: &Control, profiles: &[&Profile]) -> Ve
                 step: step.into(),
                 reason: format!("{reason}, and its tools' prefix does not spell its name"),
             },
-        }];
-    }
-    if server.starts_with("claude_ai_") {
-        return vec![connector(server, &state_files(profiles))];
-    }
+        })
+    } else if server.starts_with("claude_ai_") {
+        Some(connector(server, &state_files(profiles)))
+    } else {
+        None
+    };
     let mut found = vec![];
     let mut files = vec![];
     for file in state_files(profiles) {
@@ -225,6 +228,21 @@ pub fn definitions(server: &str, control: &Control, profiles: &[&Profile]) -> Ve
             }
         }
         files.push(file);
+    }
+    if let Some(source) = source {
+        if found.is_empty() {
+            return vec![source];
+        }
+        // Either may have given its tools this prefix, so no name is known to block them.
+        let why = "a declared server and a plugin or connector give their tools the same prefix";
+        found.push(source);
+        return found
+            .into_iter()
+            .map(|d| match d {
+                Definition::Deny(deny) => deny.by_hand(why),
+                d => d,
+            })
+            .collect();
     }
     if found.is_empty() {
         let searched = if files.is_empty() {
@@ -764,6 +782,28 @@ mod tests {
             assert!(
                 by_hand(server).ends_with("does not spell its name"),
                 "{server}"
+            );
+        }
+        // A declared key that spells a plugin's or connector's prefix leaves both by hand.
+        let project = w.home.join("project");
+        let project = project.to_string_lossy();
+        write(
+            format!("{project}/.mcp.json"),
+            r#"{"mcpServers": {"plugin_github_github": {}, "claude_ai_Slack_2": {}}}"#,
+        );
+        let mut state: Value =
+            serde_json::from_str(&fs::read_to_string(w.home.join(".claude.json")).unwrap())
+                .unwrap();
+        state["projects"] = serde_json::json!({ project.as_ref(): {} });
+        write(w.home.join(".claude.json"), &state.to_string());
+        for server in ["plugin_github_github", "claude_ai_Slack_2"] {
+            let found = definitions(server, &deny(server), &[&p]);
+            assert_eq!(found.len(), 2, "{found:?}");
+            assert!(
+                found.iter().all(|d| matches!(
+                    d, Definition::Manual { reason, .. } if reason.ends_with("the same prefix")
+                )),
+                "{found:?}"
             );
         }
         assert_eq!(tool_name("docs\u{1F600}"), "docs__");

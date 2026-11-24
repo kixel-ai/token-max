@@ -323,9 +323,15 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
                 if unused && matches!(how, How::Edit(_)) {
                     let versions = claude_versions(report, &ids);
                     let whole = ends_at(&c.name, c.details.iter().map(|d| d.name.as_str()));
+                    let own = holds_its_tools(&c.name);
                     removal = crate::mcp::definitions(&c.name, control, &members)
                         .into_iter()
                         .map(|d| match d {
+                            Definition::Entry(entry) if !own => Definition::Manual {
+                                step: format!("remove {} from {}", entry.text(), entry.file),
+                                reason: SHORTER.into(),
+                            },
+                            Definition::Deny(deny) if !own => deny.by_hand(SHORTER),
                             Definition::Deny(deny) if !whole => {
                                 deny.by_hand("its tools' names do not show where its name ends")
                             }
@@ -370,6 +376,17 @@ fn ends_at<'a>(server: &str, mut tools: impl Iterator<Item = &'a str>) -> bool {
     })
 }
 
+/// Why a server named with `__`, or ending in `_`, is not shown unused.
+const SHORTER: &str =
+    "its tools are counted under a shorter name, so no use of it shows on this line";
+
+/// Whether a server's own tools would be counted on its line: the line of a tool stops at
+/// its name's first `__`, so `docs__v2`'s tools count toward `docs`, and `docs_`'s
+/// (`mcp__docs___read`) too.
+fn holds_its_tools(server: &str) -> bool {
+    !server.contains("__") && !server.ends_with('_')
+}
+
 /// The Claude Code each profile in `ids` last recorded a request from, for those with any.
 fn claude_versions<'r>(report: &'r Report, ids: &[&str]) -> Vec<Option<&'r str>> {
     ids.iter()
@@ -395,10 +412,12 @@ fn gate(definition: Definition, versions: &[Option<&str>]) -> Definition {
     {
         return Definition::Deny(deny);
     }
+    // The first version that fails the check, which may be unrecorded.
     let ran = versions
         .iter()
+        .find(|v| !crate::version::claude_at_least(**v, minor, patch))
+        .copied()
         .flatten()
-        .min_by_key(|v| crate::version::plain(v))
         .map_or("an unrecorded Claude Code".to_string(), |v| {
             format!("Claude Code {v}")
         });
@@ -5376,6 +5395,14 @@ mod tests {
             ),
             "{reason}"
         );
+        // The reason names the version that failed, even when another was recorded.
+        let Definition::Manual { reason, .. } = gate(blocked("p"), &[Some("2.1.331"), None]) else {
+            panic!("an unrecorded Claude Code is a step by hand")
+        };
+        assert!(
+            reason.contains("ran an unrecorded Claude Code, before"),
+            "{reason}"
+        );
         assert!(matches!(
             gate(blocked("p"), &[None]),
             Definition::Manual { .. }
@@ -5392,6 +5419,9 @@ mod tests {
             ["mcp__docs__read", "mcp__docs__v2__read"].into_iter()
         ));
         assert!(!ends_at("docs", ["mcp__docs___read"].into_iter()));
+        // A line named by its instructions alone may not hold its own tools.
+        assert!(holds_its_tools("docs") && holds_its_tools("_docs"));
+        assert!(!holds_its_tools("docs__v2") && !holds_its_tools("docs_"));
 
         // A name the file denies already is not offered again, one name twice is offered
         // once, and a denylist that is not a list leaves it by hand.

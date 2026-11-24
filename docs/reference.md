@@ -243,11 +243,17 @@ entry before then also hid other connectors at its URL, 2.1.83 for one found in
 no file, and 2.1.0 for a project's. These were measured by loading each kind
 of server under an entry, except the connector's, which is from Claude Code's
 changelog. Where a name can't be spelled, two recorded names give one prefix,
-the Claude Code is older, or `deniedMcpServers` is not a list, the walk names
+a declared key and a plugin or connector give one prefix, a recorded tool's
+name holds another `__` after the server's, the Claude Code is older, or
+`deniedMcpServers` is not a list, the walk names
 the step to take by hand instead: remove it from `.mcp.json`, uninstall the
 plugin, disconnect the connector at claude.ai, or remove it where it is
 configured. `disableClaudeAiConnectors` is never offered, since it turns off
 every connector, including ones added later.
+
+A server whose name holds `__` or ends in `_`, known from its MCP
+instructions, has its tools counted under the shorter name before that `__`,
+so its own line shows no use; its removal and its block are steps by hand.
 
 The last question offers to remove servers that are off already, as cleanup
 that saves nothing: a Claude Code server whose tools the user's

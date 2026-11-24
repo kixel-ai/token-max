@@ -1071,7 +1071,8 @@ pub(crate) fn claude_project_files(
 
 /// Resolve each Claude profile's `crossSessionInbound` at its latest main-session request's
 /// directory, as auto memory's is; without an existing one, user and managed settings decide.
-/// It runs once T3 has attributed requests, so an instance reads its own sessions' directory.
+/// It runs once T3 has attributed requests, so an instance reads its own sessions' directory,
+/// and a request whose owner T3 can't settle decides for no profile.
 pub fn discover_inbound(
     options: &DiscoveryOptions,
     profiles: &mut [Profile],
@@ -1083,11 +1084,12 @@ pub fn discover_inbound(
     }
     let managed_file = options.managed_settings_file.as_str();
     let managed = settings(managed_file, Harness::Claude)?;
+    let t3 = t3_instances(profiles);
     for profile in profiles.iter_mut().filter(|p| p.harness == Harness::Claude) {
         let user = options.settings(&profile.settings_file, Harness::Claude)?;
         let mine: Vec<&Request> = requests
             .iter()
-            .filter(|r| r.profiles.contains(&profile.id))
+            .filter(|r| owned_by(r, profile, &t3))
             .collect();
         let latest = crate::memory::deciding_request(&mine).and_then(|r| r.cwd.as_deref());
         let directory = match latest {
@@ -1126,10 +1128,33 @@ pub fn discover_inbound(
     Ok(())
 }
 
+/// Every T3 instance's profile ID.
+fn t3_instances(profiles: &[Profile]) -> HashSet<String> {
+    profiles
+        .iter()
+        .filter(|p| p.t3.is_some())
+        .map(|p| p.id.to_string())
+        .collect()
+}
+
+/// Whether T3 settled that `profile` owns `r`. A request whose owner T3 can't settle keeps
+/// every candidate, so a native profile counts only requests that name no T3 instance, and
+/// an instance only those that name it alone.
+fn owned_by(r: &Request, profile: &Profile, t3: &HashSet<String>) -> bool {
+    if !r.profiles.iter().any(|p| **p == *profile.id) {
+        return false;
+    }
+    if profile.t3.is_some() {
+        r.profiles.iter().all(|p| **p == *profile.id)
+    } else {
+        !r.profiles.iter().any(|p| t3.contains(p))
+    }
+}
+
 /// Resolve each native Claude profile's auto memory, main-session effort and advisor at its
 /// latest main-session request's directory; without an existing one, the user and managed
 /// files decide. It runs once T3 has attributed requests, so a T3 thread that shares the
-/// profile's history never decides them.
+/// profile's history never decides them, nor does a request whose owner T3 can't settle.
 pub fn discover_latest_claude_controls(
     options: &DiscoveryOptions,
     profiles: &mut [Profile],
@@ -1141,6 +1166,7 @@ pub fn discover_latest_claude_controls(
     let configured = env.get("CLAUDE_CONFIG_DIR").unwrap_or(&default_root);
     let active = realpath(&resolve(configured)).unwrap_or_default();
     let managed_file = options.managed_settings_file.as_str();
+    let t3 = t3_instances(profiles);
     for profile in profiles
         .iter_mut()
         .filter(|p| p.harness == Harness::Claude && p.t3.is_none())
@@ -1150,7 +1176,7 @@ pub fn discover_latest_claude_controls(
         let local_env = if active == profile.root { env } else { &empty };
         let mine: Vec<&Request> = requests
             .iter()
-            .filter(|r| r.agent == Agent::Main && r.profiles.contains(&profile.id))
+            .filter(|r| r.agent == Agent::Main && owned_by(r, profile, &t3))
             .collect();
         let recorded = latest_model(&mine);
         let latest = crate::memory::deciding_request(&mine).and_then(|r| r.cwd.as_deref());
@@ -4617,7 +4643,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_profiles_own_latest_request_decides_its_memory_effort_and_advisor() {
+    fn only_the_profiles_own_settled_latest_request_decides_its_controls() {
         let w = Workspace::new();
         let (mine, theirs) = (w.home.join("mine"), w.home.join("theirs"));
         for (dir, settings) in [
@@ -4635,14 +4661,29 @@ mod tests {
         }
         let mut data = discover(&options(&w)).unwrap();
         let profile = claude(&data).clone();
+        data.profiles.push(crate::test_support::make_t3_profile(
+            "t3",
+            &text(&w.home.join("t3")),
+        ));
         let mut earlier = request(&profile, Some(&mine));
         earlier.time = 1;
         // Newer, but T3 attributed it to an instance of its own.
         let mut later = request(&profile, Some(&theirs));
         later.time = 2;
         later.profiles = vec!["t3".into()].into();
-        discover_latest_claude_controls(&options(&w), &mut data.profiles, &[earlier, later])
-            .unwrap();
+        // Newest, but T3 couldn't settle its owner, so it names both: it decides for neither.
+        let mut unsettled = request(&profile, Some(&theirs));
+        unsettled.time = 3;
+        unsettled.profiles = vec![profile.id.clone(), "t3".into()].into();
+        let requests = [earlier, later, unsettled.clone()];
+        discover_latest_claude_controls(&options(&w), &mut data.profiles, &requests).unwrap();
+        discover_inbound(&options(&w), &mut data.profiles, &requests).unwrap();
+        let directory = |data: &Discovery, id: &str| {
+            let p = data.profiles.iter().find(|p| p.id == id).unwrap();
+            p.inbound.as_ref().unwrap().directory.clone()
+        };
+        assert_eq!(directory(&data, &profile.id), Some(text(&mine)));
+        assert_eq!(directory(&data, "t3"), Some(text(&theirs)));
         let profile = claude(&data);
         let advisor = profile.advisor.as_ref().unwrap();
         assert_eq!(advisor.model.as_deref(), Some("opus"));
@@ -4658,5 +4699,20 @@ mod tests {
         // The recorded model, not the other project's setting.
         let effort = profile.effort.as_ref().unwrap();
         assert_eq!(effort.model.as_deref(), Some("claude-opus-5-5"));
+
+        // With only an unsettled request, the user and managed files decide.
+        let requests = [unsettled];
+        discover_latest_claude_controls(&options(&w), &mut data.profiles, &requests).unwrap();
+        discover_inbound(&options(&w), &mut data.profiles, &requests).unwrap();
+        assert_eq!(directory(&data, &claude(&data).id.clone()), None);
+        assert_eq!(directory(&data, "t3"), None);
+        let profile = claude(&data);
+        let advisor = profile.advisor.as_ref().unwrap();
+        assert_eq!(advisor.model, None);
+        assert_eq!(
+            advisor.owner,
+            format!("{}:advisorModel", profile.settings_file)
+        );
+        assert_eq!(profile.effort.as_ref().unwrap().model, None);
     }
 }

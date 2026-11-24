@@ -957,8 +957,10 @@ unmeasured, and the check says how many did. Today's setting decides whether
 memory is on, as every other check reads today's settings. It is resolved at the
 working directory of the profile's latest main-agent request, where the user
 worked most recently, once T3 has attributed requests, so a T3 thread sharing
-the history never decides it, including the project's `.claude/settings.json` and
-`.claude/settings.local.json`, so `off_file` names the file that owns it. Claude
+the history never decides it, nor does a request whose owner T3 can't settle;
+without one, the user and managed files decide. The project's
+`.claude/settings.json` and `.claude/settings.local.json` count, so `off_file`
+names the file that owns it. Claude
 Code reads the setting when a session starts, so a session begun before a change
 keeps the old value until it restarts. When main-agent sessions in that
 directory disagree with the setting at their latest request with a recorded
@@ -1539,7 +1541,8 @@ Code does; one as strict as managed settings' leaves them named. A value
 Claude Code does not recognize fails the scan in the file that sets it.
 Project and local files are read at the latest main-session request's working
 directory, as auto memory's are, once T3 has attributed requests, so a T3
-instance reads its own sessions' directory; without an existing one, user and
-managed settings decide. A `--settings` flag outranks the user's file and is not recorded, and
+instance reads its own sessions' directory and a request whose owner T3 can't
+settle decides for no profile; without an existing one, user and managed
+settings decide. A `--settings` flag outranks the user's file and is not recorded, and
 a T3 instance whose launch settings are unresolved gets the line unknown.
 

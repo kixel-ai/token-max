@@ -4286,6 +4286,8 @@ mod tests {
             usage_estimates: vec![],
             cache_evidence: vec![],
             reowned: None,
+            capped: None,
+            unsettable: None,
         };
         for policies in [
             Policies {

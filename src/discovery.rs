@@ -264,11 +264,17 @@ impl Discovery {
     /// TTL defaults by how each pays, so doctor asks; T3 Code's instances share a native root,
     /// and so its account and answer.
     pub fn billing_roots(&self) -> Vec<String> {
+        // A `projects` directory with no transcript in it has nothing to price.
+        let read: HashSet<&str> = self
+            .snapshots
+            .iter()
+            .flat_map(|s| s.profiles.iter().map(String::as_str))
+            .collect();
         let roots: IndexSet<&str> = self
             .profiles
             .iter()
             .filter(|p| {
-                p.harness == Harness::Claude && p.provider.is_none() && !p.histories.is_empty()
+                p.harness == Harness::Claude && p.provider.is_none() && read.contains(p.id.as_str())
             })
             .map(|p| p.root.as_str())
             .collect();
@@ -3591,6 +3597,18 @@ mod tests {
         assert_eq!(directory.owner, text(&nearest));
         assert_eq!(directory.value, None);
         assert_eq!(directory.replacement, profile.speed.unwrap().replacement);
+    }
+
+    #[test]
+    fn billing_asks_only_for_a_root_with_a_transcript() {
+        let w = Workspace::new();
+        // Workspace leaves `projects` empty, so there is nothing to ask about.
+        assert!(discover(&options(&w)).unwrap().billing_roots().is_empty());
+        write(w.claude.join("projects/project/session.jsonl"), "");
+        assert_eq!(
+            discover(&options(&w)).unwrap().billing_roots(),
+            vec![canonical(&w.claude)]
+        );
     }
 
     // A custom ANTHROPIC_BASE_URL proxy is priced as the public Anthropic API.

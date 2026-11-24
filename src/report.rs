@@ -8195,7 +8195,7 @@ mod tests {
             row.evidence
         );
         assert!(row.evidence.contains("Enterprise per-role cap"));
-        // Past high, each provider's own guidance is a cited warning.
+        // Past high, each provider's own guidance is a cited `vibes` card.
         let warning = warning.expect("max warns");
         assert!(
             warning.contains("Defaults to max. Anthropic's model guide says"),
@@ -9210,7 +9210,7 @@ mod tests {
         ] {
             assert!(row.evidence.contains(part), "{part} in {}", row.evidence);
         }
-        // The plan rule is a cited warning apart from the line, which ends with its setting.
+        // The plan rule is a cited `vibes` card apart from the line, which ends with its setting.
         assert!(
             row.evidence
                 .ends_with("reached. The weekly reset time is not recorded, and the limit is not published in tokens or dollars, so no share of it is shown. 1 of them is also attributed to another Claude profile that signs in to Anthropic and reads the same transcripts, so whose they were is unknown. 2 requests recorded no model and may have run on Fable. Model setting: /model, or model in settings.json."),

@@ -625,6 +625,7 @@ pub fn audit(
             }
             let remote = Remote {
                 since,
+                wrote: false,
                 session,
                 stream,
             };
@@ -663,6 +664,8 @@ pub fn audit(
 pub struct Remote {
     /// The window the audit was asked for, which every result of its scan names.
     since: Option<Millis>,
+    /// Whether it was asked to write, so a later failure doesn't say nothing changed there.
+    wrote: bool,
     session: Session,
     stream: Box<Stream<BufReader<ChildStdout>>>,
 }
@@ -704,7 +707,11 @@ impl Remote {
         let answer = Answer::Review {
             events: events.to_vec(),
         };
-        match self.exchange(&answer, "during the walk; no settings were changed there")? {
+        let doing = match self.wrote {
+            true => "during the walk; no further settings were changed there",
+            false => "during the walk; no settings were changed there",
+        };
+        match self.exchange(&answer, doing)? {
             Outcome::Reviewed { report, preview } => Ok((report, preview)),
             _ => Err(self.session.wrong_result(None)),
         }
@@ -713,6 +720,7 @@ impl Remote {
     /// Write the reviewed changes there, returning each file it reported written. The audit
     /// stays open for [`Remote::vibes`] or [`Remote::end`].
     pub fn write(&mut self) -> Result<Vec<Written>, ScanError> {
+        self.wrote = true;
         match self.exchange(&Answer::Write, WRITING)? {
             Outcome::Wrote { written } => Ok(written),
             _ => Err(self.session.wrong_result(Some(WRITING))),
@@ -822,6 +830,11 @@ impl Walked {
     fn advise(&mut self) -> Outcome {
         self.owner = crate::vibes::owner(&self.vibes, self.home.clone(), self.monthly);
         self.listing = None;
+        self.advice()
+    }
+
+    /// `vibes`' advice and the changes this walk offers for it.
+    fn advice(&self) -> Outcome {
         Outcome::Vibes {
             since: self.since,
             items: self.vibes.clone(),
@@ -948,17 +961,17 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
             true => crate::vibes::owner(&vibes, home, totals.monthly),
             false => Owner::new(fixes, turned_off, home, totals.monthly),
         };
-        let mut walked = walk.then(|| Walked {
+        let walked = walk.then(|| Walked {
             owner: owner(home.clone()),
-            listing: Some(listing),
+            listing: (!advice).then_some(listing),
             style: format.style(home.clone()),
             vibes: vibes.clone(),
             home: home.clone(),
             monthly: totals.monthly,
             since,
         });
-        let outcome = match (advice, &mut walked) {
-            (true, Some(walked)) => walked.advise(),
+        let outcome = match (advice, &walked) {
+            (true, Some(walked)) => walked.advice(),
             (true, None) => Outcome::Vibes {
                 since,
                 items: crate::vibes::resolved(vibes),

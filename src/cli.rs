@@ -1600,8 +1600,9 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
     // `--defaults` the count is of settings pretended away, which `vibes` reads as they are.
     let hint = if pending > 0 && !values.defaults {
         let hint = format!(
-            "{} Run token-max vibes over the same profiles, hosts and window to see it.",
-            vibes::hint(pending)
+            "{} Run token-max vibes with the same profile, host and --since options to see {}.",
+            vibes::hint(pending),
+            if pending == 1 { "it" } else { "them" }
         );
         format!("\n{}", style.line(&hint))
     } else {

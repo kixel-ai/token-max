@@ -948,6 +948,10 @@ observed summaries/prefixes, cold-summary costs, and the extra re-read spend tha
 would erase a saving accompany the aggregate winner. Lost detail and changed work
 remain unmeasured risks, not zero-cost observations.
 
+The line weighs cost alone. A smaller window for output quality is a
+[`vibes`](#auto-compact-window-cap) card beside it, which never changes the
+line's verdict.
+
 ## Turn-end compaction
 
 Codex's `model_post_turn_compact_threshold_percent` compacts a conversation
@@ -1297,6 +1301,7 @@ an exit code.
 | Card | When |
 | --- | --- |
 | [Bash timeout cap](#bash-timeout-cap) | Every Claude settings file: the cap beside the long waits measured under it. |
+| [Auto-compact window](#auto-compact-window-cap) | Every compaction window line: the maintainer's cap of 400K for Claude and 240K for Codex, beside `doctor`'s replay of it. |
 | Main-session effort | The default level is above `high`: Anthropic's [model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/) and [model configuration docs](https://code.claude.com/docs/en/model-config#choose-an-effort-level) for Claude, OpenAI's [reasoning guide](https://developers.openai.com/api/docs/guides/reasoning) for Codex. |
 | An instruction file | A CLAUDE.md of 200 lines or more, past Claude Code's [guidance](https://code.claude.com/docs/en/memory#write-effective-instructions), or an AGENTS.md at or above the byte budget Codex [loads](https://learn.chatgpt.com/docs/agent-configuration/agents-md), with what each 100 lines of it costs. |
 | Explore subagent | Claude's built-in Explore ran off Haiku: what it cost, the same tokens on the cheapest model, and the model guide's tip. |
@@ -1316,7 +1321,10 @@ variable or T3, is named on its card as a step by hand. Without a terminal,
 
 `doctor` offers `vibes` when its walk ends, counting the cards that advise
 something, as `vibes`' own heading does: a setting already as advised still
-has its card in `vibes`, and is not worth the question. Under `--defaults`,
+has its card in `vibes`, and is not worth the question. A card whose setting a
+change `doctor` just wrote moves, such as the
+[compaction window](#auto-compact-window-cap), reads as it does after that
+change, and the count is taken after the writes. Under `--defaults`,
 `doctor` names no count, since `vibes` reads the settings as they are. With `--ssh`, each host's cards name their host, and
 each destination checks and writes its own files, as in
 [`doctor`'s walk](#on-ssh-hosts).
@@ -1362,6 +1370,38 @@ says so.
 Background commands and the user's own processes are unaffected by the cap.
 Codex's `background_terminal_max_timeout` bounds one poll of a background
 terminal, and each poll reads the cache, so it has no card.
+
+### Auto-compact window cap
+
+Every [compaction window](#compaction-window) line gets a card capping the
+window at 400K tokens for Claude Code and 240K for Codex. The cap is for output
+quality, not cost, and it is the maintainer's pick. For Claude the card also
+cites Anthropic's [context windows](https://platform.claude.com/docs/en/build-with-claude/context-windows)
+page, which says accuracy and recall degrade as a context grows. No OpenAI page
+says how Codex's output changes with the window, so its card rests on the
+maintainer's pick alone and says so.
+
+The card advises the cap when the window is above it. That includes an unset
+window on a native-1M Claude model, which compacts near 967K, and an unset
+Codex limit, whose default token-max does not read. A window at or under the
+cap, such as a 200K model's, gets a card that advises nothing.
+
+The card names the line's verdict, which weighs cost alone, and stays apart
+from it. When the line's replay priced a window at the cap, the card gives
+what it saves or costs every 30 days against the current window; otherwise
+it says what the cap costs is not measured. The replay's candidates come from
+the evidence, not from this cap, so it is usually unpriced.
+
+The cap goes through the same edit the line's own change makes: where the
+owner holds it, as a model's `modelSettings` row, or, under
+`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, by removing the override and pinning every
+other model's trigger. A change the line would leave by hand is left by hand
+here too, and so is one that would move another model's trigger.
+
+When `doctor`'s walk writes the line's change, the card reads as it does after
+it. A recommended window at or under the cap leaves nothing to advise, and one
+above it is the window the card caps. A change declined, or never confirmed,
+leaves the card as the scan read it.
 
 ## Main-session effort
 

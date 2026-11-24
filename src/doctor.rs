@@ -691,15 +691,10 @@ fn check_how(result: &CheckResult, profile: &Profile) -> How {
                 format!("set {} to {}", t.base.owner, ttl.as_str()),
             )
         }
-        CheckResult::Compaction(c) => {
-            let Some(window) = c.base.recommended else {
-                return unknown(&c.base.owner);
-            };
-            match &c.reowned {
-                Some(reowned) if c.base.current != Some(window) => reown(reowned, profile),
-                _ => window_how(c, window, profile),
-            }
-        }
+        CheckResult::Compaction(c) => match c.base.recommended {
+            Some(window) => window_change(c, c.reowned.as_ref(), window, profile),
+            None => unknown(&c.base.owner),
+        },
         CheckResult::TurnEnd(c) => {
             let Some(percent) = c.base.recommended else {
                 return unknown(&c.base.owner);
@@ -824,6 +819,31 @@ fn check_how(result: &CheckResult, profile: &Profile) -> How {
         CheckResult::Keepalive(k) => unknown(&k.base.owner),
         // Effort lines give no verdict, so they are never offered.
         CheckResult::Effort(e) => unknown(&e.base.owner),
+    }
+}
+
+/// How to move a compaction line's window to `window`: where its owner holds it, or through
+/// `reowned`, the plan for that window when `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` lowers it. A plan
+/// that would move another model's trigger is left by hand.
+pub(crate) fn window_change(
+    c: &CompactionCheck,
+    reowned: Option<&Reowned>,
+    window: i64,
+    profile: &Profile,
+) -> How {
+    let Some(reowned) = reowned.filter(|_| c.base.current != Some(window)) else {
+        return window_how(c, window, profile);
+    };
+    match reown(reowned, profile) {
+        How::Edit(patch) if !reowned.unkept.is_empty() => How::Manual {
+            step: steps(&patch),
+            reason: format!(
+                "changing this window removes {}, and {}",
+                crate::controls::PERCENT_KEY,
+                reowned.unkept.join("; ")
+            ),
+        },
+        how => how,
     }
 }
 
@@ -1631,6 +1651,15 @@ impl Plan {
     /// What became of each change, by the report lines it came from.
     pub fn choices(&self) -> &[(Origin, Choice)] {
         &self.choices
+    }
+
+    /// The lines whose changes the plan writes.
+    pub fn accepted(&self) -> Vec<Origin> {
+        self.choices
+            .iter()
+            .filter(|(_, c)| *c == Choice::Accepted)
+            .map(|(o, _)| *o)
+            .collect()
     }
 
     /// The accepted changes' summed saving after `label`, such as "Accepted"; empty when

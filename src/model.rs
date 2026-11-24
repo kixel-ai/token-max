@@ -1781,6 +1781,8 @@ pub struct CompactionCheck {
     /// The edits that make one setting own the trigger when `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`
     /// lowers it, so the recommended window is the trigger.
     pub reowned: Option<Reowned>,
+    /// The same edits for the window `vibes` caps compaction at, which its card offers.
+    pub capped: Option<Reowned>,
 }
 
 /// A model's usable context window, as Codex last recorded it.

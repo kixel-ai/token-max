@@ -14,11 +14,11 @@ use crate::doctor::How;
 use crate::keepalive::duration as keepalive_duration;
 use crate::model::{
     Action, BackgroundCheck, BackgroundFeature, BashCap, Billing, CacheReplayEvidence, CheckBase,
-    CheckResult, ContextCost, ContextKind, ControlValue, Cost, Coverage, EffortCheck, EffortRun,
-    Estimate, EstimateEvidence, Evidence, FableUse, FableWeek, Harness, InboundControl, InboundUse,
-    KeepaliveCheck, Margin, MemoryCheck, Millis, ModelSource, PeriodStatus, Profile, Report,
-    RequestEvidence, ReturnTiming, Scalar, Share, SubagentCost, T3IdleCheck, T3TextGeneration, Ttl,
-    UsageEstimate, Verdict,
+    CheckResult, CompactionCheck, ContextCost, ContextKind, ControlValue, Cost, Coverage,
+    EffortCheck, EffortRun, Estimate, EstimateEvidence, Evidence, FableUse, FableWeek, Harness,
+    InboundControl, InboundUse, KeepaliveCheck, Margin, MemoryCheck, Millis, ModelSource,
+    PeriodStatus, Profile, Report, RequestEvidence, ReturnTiming, Scalar, Share, SubagentCost,
+    T3IdleCheck, T3TextGeneration, Ttl, UsageEstimate, Verdict,
 };
 use crate::prices::{TIER_SENSITIVITY, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
@@ -4482,6 +4482,7 @@ fn guidance(name: String, profile: &str, text: String, sources: &[&str]) -> Item
         sources: sources.iter().map(|s| s.to_string()).collect(),
         how: None,
         quiet: false,
+        after: None,
     }
 }
 
@@ -4575,7 +4576,149 @@ fn bash_item(cap: &BashCap, profile: &str, how: Option<How>, out: &Out<'_>) -> I
             .collect(),
         how,
         quiet: value_is_empty,
+        after: None,
     }
+}
+
+/// Whose advice the compaction window cap is.
+const WINDOW_PICK: &str = "The maintainer's pick, for output quality rather than cost.";
+/// Anthropic's page on context rot: accuracy and recall fall as a context grows.
+const CONTEXT_ROT: &str = "https://platform.claude.com/docs/en/build-with-claude/context-windows";
+
+/// Where a window card's line stands in `doctor`.
+#[derive(Clone, Copy)]
+enum Doctor {
+    /// As the line read before the walk, its change not written.
+    Line,
+    /// The walk wrote the line's change, which moved the window here.
+    Wrote(i64),
+}
+
+/// A compaction line's window as `vibes` shows it beside the maintainer's cap: the window
+/// left after `doctor`'s change, what `doctor`'s replay priced the cap at, and how the card
+/// relates to that line's verdict. Its name and what it does are the caller's.
+fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out<'_>) -> Item {
+    let cap = crate::vibes::window_cap(profile.harness);
+    let codex = profile.harness == Harness::Codex;
+    let line = "doctor's auto-compact window line";
+    let (window, now) = match (doctor, c.base.current) {
+        (Doctor::Wrote(to), _) => (
+            Some(to),
+            format!(
+                "{line} recommended {} on cost, and the walk wrote it.",
+                tokens(to)
+            ),
+        ),
+        (Doctor::Line, Some(w)) if c.unset => (
+            Some(w),
+            format!(
+                "No setting names it, so Claude Code compacts this model near {}, its window for the model.",
+                tokens(w)
+            ),
+        ),
+        (Doctor::Line, Some(w)) => match c.setting {
+            Some(set) => (
+                Some(w),
+                format!(
+                    "Set to {}, which the model's {} context caps.",
+                    tokens(set),
+                    tokens(w)
+                ),
+            ),
+            None => (Some(w), format!("Set to {}.", tokens(w))),
+        },
+        (Doctor::Line, None) => (
+            None,
+            "No setting names it, and token-max does not read the default for the model.".into(),
+        ),
+    };
+    let sources = if codex {
+        vec![WINDOW_PICK.to_string()]
+    } else {
+        vec![
+            format!("{WINDOW_PICK} Anthropic's docs on context rot:"),
+            CONTEXT_ROT.into(),
+        ]
+    };
+    let mut item = Item {
+        name: String::new(),
+        value: String::new(),
+        what: String::new(),
+        text: String::new(),
+        sources,
+        how: None,
+        quiet: false,
+        after: None,
+    };
+    if window.is_some_and(|w| w <= cap) {
+        item.text = format!(
+            "{now} That is at or under the {} window the maintainer caps it at, so there is nothing to change.",
+            tokens(cap)
+        );
+        item.quiet = true;
+        return item;
+    }
+    let why = if codex {
+        "No OpenAI page says how output changes with the window, so this rests on the maintainer's pick alone."
+    } else {
+        "Anthropic's docs say accuracy and recall degrade as a context grows."
+    };
+    // The line's own replay of the cap, against the window it compared every candidate with.
+    let priced = c
+        .scenarios
+        .iter()
+        .find(|s| s.window == cap)
+        .and_then(|s| Some((s.savings_usd?, s.margin)));
+    let against = c.base.current.map_or_else(
+        || "the recorded requests".into(),
+        |w| format!("the {} window", tokens(w)),
+    );
+    let cost = match priced {
+        Some((usd, margin)) => {
+            let scale = monthly(1.0, c.base.since, c.base.until);
+            let margin = margin.map(|m| m.scale(scale));
+            let usd = usd * scale;
+            let amount = if usd < 0.0 {
+                format!("costs {} more", approx(-usd, margin, "/mo"))
+            } else {
+                format!("saves {}", approx(usd, margin, "/mo"))
+            };
+            format!(
+                "Against {against}, its replay of a {} window {amount} at API prices.",
+                tokens(cap)
+            )
+        }
+        None => format!(
+            "Its replay did not price a {} window, so what the cap costs is not measured.",
+            tokens(cap)
+        ),
+    };
+    // How this card stands beside the line's measured verdict, which it does not change.
+    let verdict = match (doctor, c.base.recommended) {
+        (Doctor::Wrote(_), _) => String::new(),
+        (Doctor::Line, Some(r)) if Some(r) == c.base.current => {
+            format!(" {line} keeps it on cost.")
+        }
+        (Doctor::Line, Some(r)) => format!(" {line} recommends {} on cost.", tokens(r)),
+        (Doctor::Line, None) => format!(" {line} gives no verdict on cost."),
+    };
+    item.text = format!(
+        "{now} The maintainer would cap it at {} for better output, not a smaller bill: a smaller window compacts sooner, so the model works from a shorter context. {why}{verdict} {cost} The cap is advice beside that line, not its verdict.",
+        tokens(cap)
+    );
+    item.value = format!(
+        "{} {} {}",
+        window.map_or_else(|| "default".into(), tokens),
+        out.arrow,
+        tokens(cap)
+    );
+    item.how = Some(crate::doctor::window_change(
+        c,
+        c.capped.as_ref(),
+        cap,
+        profile,
+    ));
+    item
 }
 
 /// A check's verdict before its line is drawn.
@@ -5583,7 +5726,33 @@ fn summary(
         let profile = tag(&cap.profiles, &|_| cap.owner.clone(), out);
         vibes.push(bash_item(cap, &profile, how, out));
     }
-    for (_, result, r) in &checks {
+    for (index, result, r) in &checks {
+        if let CheckResult::Compaction(c) = result
+            && let Some(profile) = out.profiles.get(r.profile).copied()
+        {
+            // The window `doctor`'s change moves it to, when the walk can write that change.
+            let written = fixes
+                .iter()
+                .find(|f| f.origins.contains(&Origin::Check(*index)))
+                .filter(|f| matches!(f.how, How::Edit(_)))
+                .and(c.base.recommended)
+                .filter(|r| Some(*r) != c.base.current);
+            let card = |doctor: Doctor| {
+                let mut item = window_item(c, profile, doctor, out);
+                item.name = tagged(
+                    setting_name(result),
+                    &tag(r.profiles, &|_| r.owner.to_string(), out),
+                );
+                item.what = crate::descriptions::check(result).into();
+                item
+            };
+            let mut item = card(Doctor::Line);
+            item.after = written.map(|window| crate::vibes::After {
+                origin: Origin::Check(*index),
+                item: Box::new(card(Doctor::Wrote(window))),
+            });
+            vibes.push(item);
+        }
         if let CheckResult::Effort(e) = result
             && let Some((text, sources)) = effort_warning(e)
         {
@@ -6651,6 +6820,7 @@ mod tests {
             usage_estimates: vec![],
             cache_evidence: vec![],
             reowned: None,
+            capped: None,
         })
     }
 
@@ -9437,7 +9607,11 @@ mod tests {
             "No Fable requests recorded in the window. Model setting: /model, or model in settings.json."
         );
         // With no Fable use, there is nothing for the plan rule to advise about.
-        assert_eq!(advice(&report, ReportOptions::default()), []);
+        let cards = advice(&report, ReportOptions::default());
+        assert!(
+            !cards.iter().any(|i| i.name.starts_with("Fable")),
+            "{cards:?}"
+        );
     }
 
     #[test]

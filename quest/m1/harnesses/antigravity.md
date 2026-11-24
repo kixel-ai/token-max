@@ -53,6 +53,15 @@ Recommendations:
   uniquely proves the model for those sessions; keep any request without proven
   model identity unpriced and extrapolate with `~` and margin where rules
   allow, never guessing.
+- Cache lifetime: Gemini's implicit cache lifetime is undocumented. One
+  public report from T3 logs never saw a cache hit after a gap longer than
+  14m 39s, and saw a switch from `high` to `medium` effort miss 104.6k cached
+  tokens. Any line that needs a lifetime, such as a T3 idle-compaction
+  replay on an `antigravity` instance (first check whether T3 runs idle
+  compaction there), should take it from the user's own logs: the longest
+  gap still followed by a cache hit. Don't assume 15 minutes. Treat a change
+  of the slug's effort suffix as a model change that starts with a cold
+  cache.
 - Exposure and edits: audit configured MCP servers (`mcp_config.json`),
   skills/plugins/rules (`~/.gemini/antigravity/skills/`, `.agents/skills/`,
   `AGENTS.md`, `GEMINI.md`), and tool usage (`tool_calls` names) against

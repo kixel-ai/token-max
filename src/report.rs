@@ -1842,57 +1842,45 @@ fn explore_item(c: &SubagentCost, profile: &str, out: &Out<'_>) -> Option<Item> 
     {
         return None;
     }
-    // Each profile's own agent file, and whether it is there now: runs recorded as the
-    // built-in can predate it.
-    let mut missing: IndexSet<String> = IndexSet::default();
-    let mut present: IndexSet<String> = IndexSet::default();
-    for p in c
-        .profiles
-        .iter()
-        .filter_map(|id| out.profiles.get(id.as_str()))
-    {
-        let own = p
-            .agents
-            .definitions
-            .iter()
-            .find(|d| d.name == "Explore" && d.project.is_none());
-        match own {
-            Some(d) => present.insert(out.home(&d.file)),
-            None => missing.insert(crate::discovery::join(&[&p.root, "agents", "Explore.md"])),
-        };
-    }
-    let list = |files: IndexSet<String>| files.into_iter().collect::<Vec<_>>().join(" and ");
+    let r = &c.replacement;
+    let list = |files: &[String]| {
+        let files: Vec<String> = files.iter().map(|f| out.home(f)).collect();
+        files.join(" and ")
+    };
     let mut text = format!(
         "Ran on {} and cost {}. {} Anthropic's model guide notes that the built-in Explore runs on the session's model, and suggests a user agent named Explore with model: haiku to keep exploration cheap.",
         shares(&c.models, c.requests),
         figure(c.estimate),
         reprice_text(c)
     );
-    let quiet = missing.is_empty();
-    if !present.is_empty() {
-        let (verb, them) = if present.len() == 1 {
-            ("replaces", "it")
-        } else {
-            ("replace", "them")
+    if !r.present.is_empty() {
+        let (verb, them) = match r.present.len() {
+            1 => ("replaces", "it"),
+            _ => ("replace", "them"),
         };
         text += &format!(
-            " {} now {verb} the built-in, so later runs follow {them}.",
-            list(present)
+            " {} now {verb} the built-in, so later runs there follow {them}.",
+            list(&r.present)
         );
     }
-    let how = (!quiet).then(|| How::Manual {
+    if r.forced {
+        text += " CLAUDE_CODE_SUBAGENT_MODEL_FORCE is set, which drops an agent file's model, so the tip does not apply while it is.";
+    }
+    // Nothing left to do once every run has its replacement; nothing a file can do under force.
+    let quiet = r.missing.is_empty() && !r.forced;
+    let how = (!r.missing.is_empty() && !r.forced).then(|| How::Manual {
         // The built-in's documented restriction and its start without CLAUDE.md.
         step: format!(
             "create {} with the frontmatter name: Explore; description: when to use it; model: haiku; disallowedTools: Write, Edit; omitClaudeMd: true; and a system prompt of your own below it",
-            list(missing)
+            list(&r.missing)
         ),
         reason: "the file replaces the built-in Explore's system prompt, which Anthropic doesn't publish".into(),
     });
     Some(Item {
-        value: if quiet {
-            String::new()
-        } else {
+        value: if how.is_some() {
             format!("inherit {} haiku", out.arrow)
+        } else {
+            String::new()
         },
         what: "The model Claude Code's built-in Explore subagent, which searches and reads code for the main session, runs on.".into(),
         how,
@@ -6372,6 +6360,8 @@ mod tests {
     const NOV1: Millis = 1_793_491_200_000;
     const DAY_MS: Millis = 86_400_000;
     const ROOT: &str = "/synthetic/home/.claude";
+    /// The user agent file that would replace the built-in Explore in [`ROOT`].
+    const ROOT_EXPLORE: &str = "/synthetic/home/.claude/agents/Explore.md";
 
     fn cost(total: Option<f64>, known: f64) -> Cost {
         Cost {
@@ -9167,6 +9157,10 @@ mod tests {
             }),
             model_setting: "model: in /synthetic/.claude/agents/Explore.md".into(),
             effort_setting: "effort: in /synthetic/.claude/agents/Explore.md".into(),
+            replacement: Replacement {
+                missing: vec![ROOT_EXPLORE.into()],
+                ..Replacement::default()
+            },
         });
         let summary = text(&report, None, true);
         let first = |text: &str| {
@@ -9357,6 +9351,10 @@ mod tests {
             reprice_estimate: None,
             model_setting: String::new(),
             effort_setting: String::new(),
+            replacement: Replacement {
+                missing: vec![ROOT_EXPLORE.into()],
+                ..Replacement::default()
+            },
         };
         let cards = |lines: Vec<SubagentCost>| {
             let mut report = synthetic();
@@ -9389,60 +9387,55 @@ mod tests {
                 .text
                 .contains("user agent named Explore with model: haiku")
         );
-        // Profiles sharing the history each get their own agent file named.
-        let mut report = synthetic();
-        report
-            .scan
-            .profiles
-            .push(make_profile("work", "/synthetic/home/.claude-work"));
-        let mut shared = line(Harness::Claude, "Explore", "claude-opus-5-5");
-        shared.profiles.push("work".into());
-        report.subagents = vec![shared];
-        let cards = advice(&report, ReportOptions::default());
-        let Some(How::Manual { step, .. }) = &cards[0].how else {
-            panic!("{cards:?}")
-        };
-        assert!(
-            step.starts_with("create /synthetic/home/.claude/agents/Explore.md and /synthetic/home/.claude-work/agents/Explore.md with the frontmatter name: Explore;"),
-            "{step}"
+        // Each file still missing is named; the files there now are said, not asked for.
+        let (missing, project) = (
+            "/synthetic/home/.claude-work/agents/Explore.md",
+            "/synthetic/project/.claude/agents/Explore.md",
         );
-        // Runs recorded as the built-in can predate an Explore file: only the profile still
-        // without one is named, and once each has one there is nothing left to do.
-        let file = "/synthetic/home/.claude/agents/Explore.md";
-        report.scan.profiles[0].agents.definitions = vec![AgentDefinition {
-            name: "Explore".into(),
-            file: file.into(),
-            project: None,
-            model: Some("haiku".into()),
-            effort: None,
-            modified: None,
-        }];
-        let cards = advice(&report, ReportOptions::default());
-        let Some(How::Manual { step, .. }) = &cards[0].how else {
-            panic!("{cards:?}")
+        let mut partial = line(Harness::Claude, "Explore", "claude-opus-5-5");
+        partial.replacement = Replacement {
+            missing: vec![ROOT_EXPLORE.into(), missing.into()],
+            present: vec![project.into()],
+            forced: false,
+        };
+        let card = &cards(vec![partial.clone()])[0];
+        let Some(How::Manual { step, .. }) = &card.how else {
+            panic!("{card:?}")
         };
         assert!(
-            step.starts_with(
-                "create /synthetic/home/.claude-work/agents/Explore.md with the frontmatter"
-            ),
+            step.starts_with(&format!(
+                "create {ROOT_EXPLORE} and {missing} with the frontmatter name: Explore;"
+            )),
             "{step}"
         );
         assert!(
-            cards[0].text.ends_with(&format!(
-                " {file} now replaces the built-in, so later runs follow it."
+            card.text.ends_with(&format!(
+                " {project} now replaces the built-in, so later runs there follow it."
             )),
             "{}",
-            cards[0].text
+            card.text
         );
-        report.subagents[0].profiles.pop();
-        let cards = advice(&report, ReportOptions::default());
+        assert!(!card.quiet);
+        // Once every run has its file there is nothing left to do.
+        partial.replacement.missing.clear();
+        let card = &cards(vec![partial.clone()])[0];
         assert_eq!(
-            (
-                cards[0].quiet,
-                cards[0].how.as_ref(),
-                cards[0].value.as_str()
-            ),
+            (card.quiet, card.how.as_ref(), card.value.as_str()),
             (true, None, "")
+        );
+        // A forced subagent model drops the file's model, so no file is asked for.
+        let mut forced = line(Harness::Claude, "Explore", "claude-opus-5-5");
+        forced.replacement.forced = true;
+        let card = &cards(vec![forced])[0];
+        assert_eq!(
+            (card.quiet, card.how.as_ref(), card.value.as_str()),
+            (false, None, "")
+        );
+        assert!(
+            card.text
+                .ends_with("so the tip does not apply while it is."),
+            "{}",
+            card.text
         );
     }
 

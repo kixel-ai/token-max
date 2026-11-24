@@ -16,8 +16,8 @@ use crate::discovery::{
     named_profile_files, project_directories, realpath, resolve, settings,
 };
 use crate::model::{
-    Agent, AgentControls, AgentDefinition, Harness, Millis, ModelSource, Owned, Profile, Request,
-    Scan, Share, SourceShare, Subagent, SubagentCost,
+    Agent, AgentControls, AgentDefinition, Harness, Millis, ModelSource, Owned, Profile,
+    Replacement, Request, Scan, Share, SourceShare, Subagent, SubagentCost,
 };
 use crate::prices::{Catalog, Sample, Sum, price_part, price_request, server_cost};
 use crate::reader::UNRECORDED;
@@ -1128,7 +1128,11 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
         let mut sources: IndexMap<(ModelSource, String), u64> = IndexMap::default();
         let mut model_settings: IndexSet<String> = IndexSet::default();
         let mut effort_settings: IndexSet<String> = IndexSet::default();
+        // Whether an agent file of this name would replace a Claude built-in.
+        let replaces = harness == Harness::Claude && !fork && built_in(kind).is_some();
         let mut built_in = true;
+        let (mut missing, mut present) = (IndexSet::default(), IndexSet::default());
+        let mut forced = false;
         for session in runs.keys() {
             let subagent = spawns.get(session).copied();
             let all = &history[session];
@@ -1171,15 +1175,19 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
                 })
             });
             if let Some(profile) = own {
-                let (model, effort) = settings_text(
-                    profile,
-                    scoped(&profile.agents, run.cwd),
-                    kind,
-                    fork,
-                    native,
-                );
+                let controls = scoped(&profile.agents, run.cwd);
+                let (model, effort) = settings_text(profile, controls, kind, fork, native);
                 model_settings.insert(model);
                 effort_settings.insert(effort);
+                if replaces {
+                    forced |= controls.force;
+                    match definition(controls, kind) {
+                        Some(d) => present.insert(d.file.clone()),
+                        None => {
+                            missing.insert(join(&[&profile.root, "agents", &format!("{kind}.md")]))
+                        }
+                    };
+                }
             }
         }
         let mut sources: Vec<SourceShare> = sources
@@ -1259,6 +1267,11 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
             reprice: reprice.map(|r| r.0),
             model_setting,
             effort_setting,
+            replacement: Replacement {
+                missing: missing.into_iter().collect(),
+                present: present.into_iter().collect(),
+                forced,
+            },
         });
     }
     lines.sort_by(|a, b| {
@@ -1666,6 +1679,48 @@ mod tests {
         let mut defined_scan = scan(run(), vec![spawn("Explore")]);
         defined_scan.profiles[0].agents.definitions = vec![defined("Explore", Some("opus"), None)];
         assert!(!subagent_costs(&defined_scan, &prices())[0].built_in);
+        // A run recorded as the built-in can predate an agent file of its name: today's
+        // settings for its own directory say which file it needs or has, and whether the
+        // forced subagent model would drop that file's model.
+        let mut recorded = spawn("Explore");
+        recorded.built_in = Some(true);
+        let replacement = |scan: &Scan| subagent_costs(scan, &prices())[0].replacement.clone();
+        let mut plain = scan(run(), vec![recorded.clone()]);
+        assert_eq!(
+            replacement(&plain),
+            Replacement {
+                missing: vec!["/home/.claude/agents/Explore.md".into()],
+                ..Replacement::default()
+            }
+        );
+        plain.profiles[0].agents.force = true;
+        assert!(replacement(&plain).forced);
+        let project = "/synthetic/project";
+        let mut in_project = run();
+        in_project[0].cwd = Some(project.into());
+        let mut scoped = scan(in_project, vec![recorded]);
+        let file = defined("Explore", Some("haiku"), Some(project));
+        scoped.profiles[0].agents.directories.insert(
+            project.into(),
+            AgentControls {
+                definitions: vec![file.clone()],
+                ..AgentControls::default()
+            },
+        );
+        let found = subagent_costs(&scoped, &prices()).remove(0);
+        assert!(found.built_in);
+        assert_eq!(
+            found.replacement,
+            Replacement {
+                present: vec![file.file],
+                ..Replacement::default()
+            }
+        );
+        // Only a Claude built-in can be replaced this way.
+        assert_eq!(
+            subagent_costs(&scan(run(), vec![spawn("log-reader")]), &prices())[0].replacement,
+            Replacement::default()
+        );
     }
 
     #[test]

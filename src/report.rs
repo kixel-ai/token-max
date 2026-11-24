@@ -4488,7 +4488,24 @@ fn memory_item(line: MemoryLine<'_>, out: &Out<'_>) -> Item {
         share.push('.');
     }
     const REASON: &str = "A lasting fact about a project belongs in that file, where it is reviewed and every host and teammate sees it, not saved silently on one machine.";
+    // A total that leaves a part out says so wherever it is quoted, as doctor's line does.
+    let mut left = vec![];
+    if m.unmeasured_generation {
+        left.push("Codex's extraction and consolidation of memories".to_string());
+    }
+    if m.unpriced_reads > 0 {
+        left.push(format!(
+            "memory read back by {} that recorded no context",
+            plural(m.unpriced_reads, "request")
+        ));
+    }
     let measured = match r.savings_usd {
+        Some(usd) if !left.is_empty() => format!(
+            "doctor's line measured at least {} at API prices over the window, {}; that leaves out {}, which could not be priced",
+            figure(check_estimate(Some(usd), r)),
+            memory_uses(m),
+            left.join(" and ")
+        ),
         Some(usd) => format!(
             "doctor's line measured {} at API prices over the window, {}",
             figure(check_estimate(Some(usd), r)),
@@ -9489,6 +9506,19 @@ mod tests {
             "{:?}",
             item.how
         );
+        // A total that leaves a part out is quoted as a floor, naming what it leaves out.
+        let m = memory(&mut report);
+        m.unresolved = None;
+        (m.base.action, m.base.current, m.base.recommended) =
+            (Action::Keep, Some(true), Some(true));
+        m.unpriced_reads = 2;
+        let item = card(&report);
+        assert!(
+            item.text.contains("doctor's line measured at least $150 at API prices over the window, used 3 times (1 read, 2 writes); that leaves out memory read back by 2 requests that recorded no context, which could not be priced; judging only cost"),
+            "{}",
+            item.text
+        );
+        memory(&mut report).unpriced_reads = 0;
         // Off already: nothing to advise.
         let m = memory(&mut report);
         (m.base.action, m.base.current, m.base.recommended) =

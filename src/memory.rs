@@ -93,8 +93,8 @@ fn check(
     let mut sessions: HashMap<&str, (Millis, bool)> = HashMap::default();
     let mut unmeasured = 0;
     let mut recorded_requests = crate::collections::HashSet::default();
-    // Main sessions whose transcript recorded loading a project instruction file.
-    let mut loaded = crate::collections::HashSet::default();
+    // The project instruction files each main session's transcript recorded loading.
+    let mut loaded: HashMap<&str, crate::collections::IndexSet<&str>> = HashMap::default();
     // Recorded main-agent requests, and those of them that carried memory.
     let (mut main_recorded, mut main_carried) = (0u64, 0u64);
     for e in &scan.exposure.requests {
@@ -111,19 +111,17 @@ fn check(
         };
         // A file the session loaded shows where it ran, whether the request recorded it on
         // the wire or it was active in the transcript before the request.
-        if r.agent == Agent::Main
-            && let Some(cwd) = r.cwd.as_deref()
-            && e.view
+        if r.agent == Agent::Main {
+            let files = e
+                .view
                 .components
                 .iter()
                 .chain(e.view.candidates.iter())
                 .map(|id| components[&**id])
-                .any(|c| {
-                    &*c.provenance == crate::exposure::PROJECT_INSTRUCTIONS
-                        && project_file(&c.name, cwd)
-                })
-        {
-            loaded.insert(&*r.session);
+                .filter(|c| &*c.provenance == crate::exposure::PROJECT_INSTRUCTIONS);
+            for c in files {
+                loaded.entry(&r.session).or_default().insert(&c.name);
+            }
         }
         if !recorded {
             continue;
@@ -452,12 +450,13 @@ fn check(
 }
 
 /// Where the line's main sessions ran, each at its latest request's directory: in a
-/// repository with a project instruction file when its transcript recorded loading one, as
-/// `loaded` holds, or its directory holds one now; unknown when neither settles it.
+/// repository with a project instruction file when its transcript recorded loading one at or
+/// above that directory, of the files `loaded` holds for it, or its directory holds one now;
+/// unknown when neither settles it.
 fn places(
     line: &crate::rows::Group<'_>,
     mine: &[&Request],
-    loaded: &crate::collections::HashSet<&str>,
+    loaded: &HashMap<&str, crate::collections::IndexSet<&str>>,
 ) -> SessionPlaces {
     let mut latest: HashMap<&str, &Request> = HashMap::default();
     for r in mine.iter().filter(|r| r.agent == Agent::Main) {
@@ -471,7 +470,13 @@ fn places(
         ..SessionPlaces::default()
     };
     for (session, r) in latest {
-        if loaded.contains(session) {
+        // A file loaded from where the session ran last, not from where it ran before.
+        let recorded = r.cwd.as_deref().is_some_and(|cwd| {
+            loaded
+                .get(session)
+                .is_some_and(|files| files.iter().any(|f| project_file(f, cwd)))
+        });
+        if recorded {
             places.instructed += 1;
             continue;
         }
@@ -660,7 +665,13 @@ mod tests {
             request("subagent", 1, Some("/repo"), Agent::Subagent),
         ];
         let mine: Vec<&Request> = requests.iter().collect();
-        let loaded = ["recorded"].into_iter().collect();
+        let loaded = [
+            ("recorded", ["/gone/AGENTS.md"].into_iter().collect()),
+            // Loaded where it ran before, then resumed in a plain directory.
+            ("plain", ["/repo/CLAUDE.md"].into_iter().collect()),
+        ]
+        .into_iter()
+        .collect();
         let line = crate::rows::Group::one(&profile);
         let p = places(&line, &mine, &loaded);
         assert_eq!(

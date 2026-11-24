@@ -1223,6 +1223,13 @@ impl ExposureCollector {
         let revision = match self.components.get_full_mut(revision) {
             Some((_, id, existing)) => {
                 existing.first_seen = existing.first_seen.min(at);
+                // The same file and text may arrive untyped before Claude Code types it as the
+                // project's; either order keeps the type.
+                if new.provenance == PROJECT_INSTRUCTIONS
+                    && &*existing.provenance != PROJECT_INSTRUCTIONS
+                {
+                    existing.provenance = PROJECT_INSTRUCTIONS.into();
+                }
                 id.clone()
             }
             None => {
@@ -3758,6 +3765,37 @@ mod tests {
         let second = request(2, json!({ "base": "d", "keep": 1, "tail": [] }));
         let error = feed.push(&mut c, second).unwrap_err();
         assert_eq!(error.message, "invalid request digest prefix length");
+    }
+
+    #[test]
+    fn a_project_instruction_file_keeps_its_type_whichever_record_came_first() {
+        let instructions = |second: u32, kind: Option<&str>| {
+            let mut file = json!({ "path": "/repo/CLAUDE.md", "content": "same" });
+            if let Some(kind) = kind {
+                file["type"] = json!(kind);
+            }
+            attachment(second, json!({ "type": "instructions", "files": [file] }))
+        };
+        for kinds in [[None, Some("Project")], [Some("Project"), None]] {
+            let mut c = ExposureCollector::new(None);
+            let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);
+            feed.all(
+                &mut c,
+                vec![
+                    instructions(0, kinds[0]),
+                    assistant(1, json!([])),
+                    instructions(2, kinds[1]),
+                    assistant(3, json!([])),
+                ],
+            );
+            let requests = [feed.request("r1", 2, None), feed.request("r2", 4, None)];
+            let scan = c.finish(&requests, &[], None);
+            assert_eq!(scan.components.len(), 1, "{kinds:?}");
+            assert_eq!(
+                &*scan.components[0].provenance, PROJECT_INSTRUCTIONS,
+                "{kinds:?}"
+            );
+        }
     }
 
     #[test]

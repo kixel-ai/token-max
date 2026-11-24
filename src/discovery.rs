@@ -1162,7 +1162,9 @@ pub fn discover_instructions(
 /// that holds it, outside `root`, the profile's own directory, where the user's own
 /// instructions live. A directory in no checkout has none to check in.
 fn project_instructions(cwd: &str, root: &str) -> Result<bool, ScanError> {
-    let paths = project_directories(cwd, &[".git".into()])?;
+    // A symlinked directory sits in the checkout its target does, not its link's.
+    let cwd = realpath(cwd).map_err(|_| error("cannot resolve working directory", cwd, 0))?;
+    let paths = project_directories(&cwd, &[".git".into()])?;
     let top = paths.last().expect("cwd is included");
     if git_dir(top)?.is_none() {
         return Ok(false);
@@ -2867,6 +2869,12 @@ mod tests {
         fs::create_dir(w.home.join(".git")).unwrap();
         fs::write(w.claude.join("CLAUDE.md"), "synthetic\n").unwrap();
         assert!(!found(&w.home));
+        // A link to a directory in the checkout is read at its target.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&deep, w.home.join("link")).unwrap();
+            assert!(found(&w.home.join("link")));
+        }
 
         // Each main session's directory since the window's start, and none that is gone.
         let mut profile = crate::test_support::make_profile("profile", &path(&w.claude));

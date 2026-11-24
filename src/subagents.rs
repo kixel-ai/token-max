@@ -132,8 +132,12 @@ fn frontmatter(text: &str) -> Option<(String, Option<String>, Option<String>)> {
             // Claude Code skips an agent file without a description.
             return name.filter(|_| described).map(|name| (name, model, effort));
         }
+        // A blank line can open a block value, so it leaves a pending description open.
+        if line.is_empty() {
+            continue;
+        }
         if line.starts_with(char::is_whitespace) {
-            described |= continued && !line.trim().is_empty();
+            described |= continued;
             continue;
         }
         continued = false;
@@ -1721,6 +1725,7 @@ mod tests {
         for described in [
             "description:\n  Search code",
             "description: >-\n  Search\n  code",
+            "description: |\n\n  Search code",
         ] {
             let text = format!("---\nname: x\n{described}\nmodel: haiku\n---\n");
             assert_eq!(

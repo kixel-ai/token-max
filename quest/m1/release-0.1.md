@@ -30,4 +30,3 @@ checks.
 - [Language servers card](/quest/m1/vibes/language-servers.md) - a vibes card shipped in 0.1.0
 - [Memory card](/quest/m1/vibes/memory.md) - a vibes card shipped in 0.1.0
 - [Retention card](/quest/m1/vibes/retention.md) - a vibes card shipped in 0.1.0
-- [Window card](/quest/m1/vibes/window.md) - a vibes card shipped in 0.1.0

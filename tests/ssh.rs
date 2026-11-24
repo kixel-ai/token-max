@@ -523,7 +523,7 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     assert!(!stdout.contains("BASH_MAX_TIMEOUT_MS"), "{stdout}");
     assert!(
         stdout.ends_with(
-            "\n  token-max vibes has 2 pieces of advice the transcripts can't price. Run token-max vibes with the same profile, host, --since and price options to see them.\n"
+            "\n  token-max vibes has 4 pieces of advice the transcripts can't price. Run token-max vibes with the same profile, host, --since and price options to see them.\n"
         ),
         "{stdout}"
     );
@@ -533,12 +533,12 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
     let cards: Vec<&str> = stdout.split("\n\n").collect();
     assert!(
-        cards[0].starts_with("token-max vibes: 2 pieces of advice the transcripts can't price.\n"),
+        cards[0].starts_with("token-max vibes: 4 pieces of advice the transcripts can't price.\n"),
         "{stdout}"
     );
     // Each host's card names its host, its own waits and the edit to make there, in its home.
     let here = flat(cards[1]);
-    assert!(here.starts_with("[1/4] Bash timeout cap not measured 10m -> 55m Host this host"));
+    assert!(here.starts_with("[1/6] Bash timeout cap not measured 10m -> 55m Host this host"));
     assert!(
         here.contains("No foreground Bash wait outlasted the cache."),
         "{here}"
@@ -549,10 +549,26 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
         ),
         "{here}"
     );
+    // Each host's window card follows its cap, its edit in that host's home.
+    let window = flat(cards[2]);
+    assert!(
+        window.starts_with(
+            "[2/6] Auto-compact window (claude-opus-5-5) not measured 967k -> 400k Host this host"
+        ) && window.ends_with(r#"in ~/.claude/settings.json"#),
+        "{window}"
+    );
+    let window = flat(cards[5]);
+    assert!(
+        window.starts_with(
+            "[5/6] Auto-compact window (claude-opus-5-5) not measured 967k -> 400k Host devbox"
+        ) && window.ends_with(r#"in devbox:~/.claude/settings.json"#),
+        "{window}"
+    );
     // Each host's default has its own card, which advises nothing on the pick.
-    assert!(flat(cards[2]).starts_with("[2/4] Main-session default not measured Host this host"));
-    let there = flat(cards[3]);
-    assert!(there.starts_with("[3/4] Bash timeout cap not measured 2h -> 55m Host devbox"));
+    assert!(flat(cards[3]).starts_with("[3/6] Main-session default not measured Host this host"));
+    assert!(flat(cards[6]).starts_with("[6/6] Main-session default not measured Host devbox"));
+    let there = flat(cards[4]);
+    assert!(there.starts_with("[4/6] Bash timeout cap not measured 2h -> 55m Host devbox"));
     assert!(
         there.contains(
             "1 foreground Bash wait outlasted the cache (1 hit the timeout, 1 polled in a loop)"
@@ -571,7 +587,7 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     let alone = flat(alone.split("\n\n").nth(1).unwrap());
     assert_eq!(
         there
-            .replace("[3/4]", "[1/2]")
+            .replace("[4/6]", "[1/3]")
             .replace(" Host devbox", "")
             .replace("devbox:~", "~"),
         alone
@@ -1486,11 +1502,13 @@ fn flat(text: &str) -> String {
 }
 
 /// Each walked home's settings: a 1h TTL, and a Bash cap that outlasts it, which `vibes`
-/// offers to lower on every host with a saving not measured.
-const HOME_SETTINGS: &str = r#"{"promptCacheTtl":"1h","env":{"BASH_MAX_TIMEOUT_MS":"7200000"}}"#;
+/// offers to lower on every host with a saving not measured. The compaction window is at the
+/// maintainer's cap, so its card asks nothing.
+const HOME_SETTINGS: &str =
+    r#"{"promptCacheTtl":"1h","autoCompactWindow":400000,"env":{"BASH_MAX_TIMEOUT_MS":"7200000"}}"#;
 
 /// [`HOME_SETTINGS`] with the cap lowered under the TTL, as accepting its change writes them.
-const CAP_LOWERED: &str = "{\n  \"promptCacheTtl\": \"1h\",\n  \"env\": {\n    \"BASH_MAX_TIMEOUT_MS\": \"3300000\"\n  }\n}";
+const CAP_LOWERED: &str = "{\n  \"promptCacheTtl\": \"1h\",\n  \"autoCompactWindow\": 400000,\n  \"env\": {\n    \"BASH_MAX_TIMEOUT_MS\": \"3300000\"\n  }\n}";
 
 impl Hosts {
     /// `vibes` on this host, devbox and laptop, walked on a terminal after the billing questions.

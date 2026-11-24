@@ -907,15 +907,10 @@ fn check_how(result: &CheckResult, profile: &Profile) -> How {
                 format!("set {} to {}", t.base.owner, ttl.as_str()),
             )
         }
-        CheckResult::Compaction(c) => {
-            let Some(window) = c.base.recommended else {
-                return unknown(&c.base.owner);
-            };
-            match &c.reowned {
-                Some(reowned) if c.base.current != Some(window) => reown(reowned, profile),
-                _ => window_how(c, window, profile),
-            }
-        }
+        CheckResult::Compaction(c) => match c.base.recommended {
+            Some(window) => window_change(c, c.reowned.as_ref(), window, profile),
+            None => unknown(&c.base.owner),
+        },
         CheckResult::TurnEnd(c) => {
             let Some(percent) = c.base.recommended else {
                 return unknown(&c.base.owner);
@@ -1040,6 +1035,67 @@ fn check_how(result: &CheckResult, profile: &Profile) -> How {
         CheckResult::Keepalive(k) => unknown(&k.base.owner),
         // Effort lines give no verdict, so they are never offered.
         CheckResult::Effort(e) => unknown(&e.base.owner),
+    }
+}
+
+/// How to move a compaction line's window to `window`: where its owner holds it, or through
+/// `reowned`, the plan for that window when `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` lowers it. A plan
+/// that would move another model's trigger is left by hand.
+pub(crate) fn window_change(
+    c: &CompactionCheck,
+    reowned: Option<&Reowned>,
+    window: i64,
+    profile: &Profile,
+) -> How {
+    let Some(reowned) = reowned.filter(|_| c.base.current != Some(window)) else {
+        return window_how(c, window, profile);
+    };
+    let how = reown(reowned, profile);
+    if reowned.unkept.is_empty() {
+        return how;
+    }
+    let unkept = format!(
+        "changing this window removes {}, and {}",
+        crate::controls::PERCENT_KEY,
+        reowned.unkept.join("; ")
+    );
+    match how {
+        How::Edit(patch) => How::Manual {
+            step: steps(&patch),
+            reason: unkept,
+        },
+        // A step already by hand still warns that it moves another model's trigger.
+        How::Manual { step, reason } => How::Manual {
+            step,
+            reason: format!("{reason}; {unkept}"),
+        },
+    }
+}
+
+/// The window change as steps by hand, for a window no edit is known to hold, keeping the
+/// plan that removes the percentage override so the trigger lands on `window`.
+pub(crate) fn window_by_hand(
+    c: &CompactionCheck,
+    reowned: Option<&Reowned>,
+    window: i64,
+    profile: &Profile,
+    reason: &str,
+) -> How {
+    if reowned.is_none() || c.base.current == Some(window) {
+        return How::Manual {
+            step: format!("set {} to {window}", c.base.owner),
+            reason: reason.into(),
+        };
+    }
+    match window_change(c, reowned, window, profile) {
+        How::Edit(patch) => How::Manual {
+            step: steps(&patch),
+            reason: reason.into(),
+        },
+        How::Manual { step, reason: why } => How::Manual {
+            step,
+            reason: format!("{reason}; {why}"),
+        },
     }
 }
 
@@ -1847,6 +1903,15 @@ impl Plan {
     /// What became of each change, by the report lines it came from.
     pub fn choices(&self) -> &[(Origin, Choice)] {
         &self.choices
+    }
+
+    /// The lines whose changes the plan writes.
+    pub fn accepted(&self) -> Vec<Origin> {
+        self.choices
+            .iter()
+            .filter(|(_, c)| *c == Choice::Accepted)
+            .map(|(o, _)| *o)
+            .collect()
     }
 
     /// The accepted changes' summed saving after `label`, such as "Accepted"; empty when
@@ -5960,6 +6025,7 @@ mod tests {
             sources: vec![],
             how: Some(how),
             quiet: false,
+            after: vec![],
         };
         let owner = crate::vibes::owner(&[item], None, 100.0);
         let plan = owner

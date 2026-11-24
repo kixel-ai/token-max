@@ -359,13 +359,14 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
 }
 
 /// Whether a tool family's recorded `tools` end its name at `server`. The family's name
-/// stops at its tools' first `__`, so a tool holding another may belong to a longer name,
-/// such as `mcp__docs__v2__read` to `docs__v2`.
+/// stops at its tools' first `__`, so a tool holding another, or starting with `_`, may
+/// belong to a longer name, such as `mcp__docs__v2__read` to `docs__v2` or
+/// `mcp__docs___read` to `docs_`.
 fn ends_at<'a>(server: &str, mut tools: impl Iterator<Item = &'a str>) -> bool {
     let family = format!("mcp__{server}__");
     !tools.any(|tool| {
         tool.strip_prefix(&family)
-            .is_some_and(|tool| tool.contains("__"))
+            .is_some_and(|tool| tool.contains("__") || tool.starts_with('_'))
     })
 }
 
@@ -5320,6 +5321,7 @@ mod tests {
             "docs",
             ["mcp__docs__read", "mcp__docs__v2__read"].into_iter()
         ));
+        assert!(!ends_at("docs", ["mcp__docs___read"].into_iter()));
 
         // A name the file denies already is not offered again, one name twice is offered
         // once, and a denylist that is not a list leaves it by hand.

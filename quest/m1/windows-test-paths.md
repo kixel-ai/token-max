@@ -34,3 +34,8 @@ Recommendations:
   a literal that really is `/`-separated, such as a settings key.
   Prove it on the three culprit assertions above, restored on a scratch
   branch.
+- A literal bound first and asserted later (`let expected = "a/b.json";`
+  then `assert_eq!(actual, expected)`) escapes a scan of assertion lines.
+  Weigh scanning every such path-shaped literal in test code instead, which
+  catches both forms at the cost of more opt-outs, and pick the narrower rule
+  only if the wider one flags too many legitimate literals.

@@ -1265,7 +1265,11 @@ on requests priced at an assumed tier only when no tier could reverse it. A
 service tier multiplies all of a request's token rates by one positive factor,
 so scaling a saving never flips its sign. Each session's saving at an assumed
 tier, and the saving at recorded tiers pooled, must go the same way as the
-verdict: every one saves for a change, or none saves for keeping the current
+verdict. A session's charges are split wherever one tier would scale them
+differently: a model whose premium rate differs, such as 2x against 2.5x, a
+summary priced at its sample's requested tier rather than the session's, or a
+side of a context threshold whose premium rate is unpublished. Each part must
+go the verdict's way: every one saves for a change, or none saves for keeping the current
 setting. One that went the other way could be scaled past the rest by a dearer
 or cheaper tier, so the line gives no verdict. The rule assumes one tier bills
 every request of a session, in history and in the replay; a tier changed within
@@ -1275,8 +1279,8 @@ verdict always adds summaries or pings, which cost, so it settles only when
 each session's saving outweighs them. For a window or threshold, the rule
 settles the winner against the current setting; a tier could still make another
 candidate cheaper than the winner.
-Bounds over the documented tier multipliers are not shown, since Flex and Scale
-have no verified rate.
+Flex and Scale have no verified rate, so charges pool by their documented
+default, fast and ultrafast rates, and no bound over the multipliers is shown.
 
 ## Background generation
 

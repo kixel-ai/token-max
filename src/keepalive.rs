@@ -20,8 +20,8 @@ use crate::model::{
     Scan, ScenarioWindow, StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate, Usd,
 };
 use crate::prices::{
-    Catalog, PRICE_SOURCES, Sample, Signs, TIER_SENSITIVITY, TIER_SIGNS, price_part,
-    tier_sensitive, write_billing,
+    Catalog, PRICE_SOURCES, Sample, Signs, TIER_SENSITIVITY, TIER_SIGNS, TierSavings, TierScale,
+    price_part, tier_scale, tier_sensitive, write_billing,
 };
 
 const MINUTE: Millis = 60_000;
@@ -200,8 +200,8 @@ struct Run {
     pings: Vec<Usd>,
     finals: Vec<Usd>,
     reads: HashMap<Text, i64>,
-    /// Every charge above, split into those at a recorded tier and those at an assumed one.
-    tiers: [Usd; 2],
+    /// Every charge above by what scales it with the billed tier, None at a recorded tier.
+    tiers: HashMap<Option<TierScale>, Usd>,
 }
 
 struct Session<'a> {
@@ -578,10 +578,9 @@ impl Replayer<'_> {
                 }
                 if r.time >= self.since {
                     let priced = price_part(self.options.catalog, r, &billed);
-                    let assumed = tier_sensitive(&priced);
-                    run.conditional |= assumed;
+                    run.conditional |= tier_sensitive(&priced);
                     cost += priced.total_usd?;
-                    run.tiers[usize::from(assumed)] += priced.total_usd?;
+                    *run.tiers.entry(tier_scale(r, &billed)).or_default() += priced.total_usd?;
                 }
             }
             if r.time < self.since {
@@ -600,10 +599,9 @@ impl Replayer<'_> {
             }
         }
         for added in simulation.added {
-            let assumed = tier_sensitive(&added.summary_cost);
-            run.conditional |= assumed;
+            run.conditional |= tier_sensitive(&added.summary_cost);
             let cost = added.summary_cost.total_usd?;
-            run.tiers[usize::from(assumed)] += cost;
+            *run.tiers.entry(added.summary_scale.clone()).or_default() += cost;
             match positions.get(&*added.request) {
                 Some(&(true, i)) => run.finals[i] += cost,
                 Some(&(false, i)) => run.pings[i] += cost,
@@ -814,9 +812,7 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
     let mut final_costs: Vec<Vec<Usd>> = vec![vec![]; caps.len()];
     // Each cap's savings per priced session, weighted by its periods, to extrapolate from.
     let mut extrapolations = vec![[Sample::default(); 4]; caps.len()];
-    let mut signs = vec![Signs::default(); caps.len()];
-    // Each cap's saving at recorded tiers, which no tier scales, so it counts once in all.
-    let mut recorded_tiers = vec![Usd::ZERO; caps.len()];
+    let mut savings = vec![TierSavings::default(); caps.len()];
     let mut sessions = 0;
     let mut uncertainty = vec![
         "current ping state is unknown: scheduled-task metadata does not establish a task's purpose; recorded turns remain activity, with hypothetical pings added on top".into(),
@@ -920,8 +916,13 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
                 ping_sample.add_weighted(session_ping, weight);
                 avoided_sample.add_weighted(session_avoided, weight);
                 savings_sample.add_weighted(session_avoided - session_ping, weight);
-                signs[i].add(baseline.tiers[1] - run.tiers[1]);
-                recorded_tiers[i] += baseline.tiers[0] - run.tiers[0];
+                let session = Text::from(session);
+                for (scale, &usd) in &baseline.tiers {
+                    savings[i].add(&session, scale.as_ref(), usd);
+                }
+                for (scale, &usd) in &run.tiers {
+                    savings[i].add(&session, scale.as_ref(), -usd);
+                }
                 closed_sample.add_weighted(session_closed, weight);
                 *avoided += session_avoided;
                 *ping += session_ping;
@@ -936,9 +937,7 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
     } else {
         unpriced = returns + finals;
     }
-    for (signs, saving) in signs.iter_mut().zip(recorded_tiers) {
-        signs.add(saving);
-    }
+    let signs: Vec<Signs> = savings.iter().map(TierSavings::signs).collect();
     // Unpriced periods are extrapolated over from the priced ones, as their share of all.
     let scale = if priced > 0 {
         (priced + unpriced) as f64 / priced as f64

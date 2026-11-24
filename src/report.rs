@@ -6645,6 +6645,7 @@ mod tests {
                         request: "synthetic-resumed".into(),
                     }],
                     summary_cost: cost(Some(0.625), 0.625),
+                    summary_scale: None,
                     prefix_cost: cost(None, 0.0),
                 }],
                 affected_requests: 12,

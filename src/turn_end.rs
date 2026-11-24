@@ -830,6 +830,24 @@ mod tests {
             "{text}"
         );
 
+        // A summary priced at the sample's requested fast tier scales apart from the
+        // session's requests at the default tier, so its cost cannot pool with their saving.
+        let mut fast_sample = untiered(data(HOUR, limit()));
+        fast_sample.requests[0].requested_speed = Some(crate::model::RequestedSpeed {
+            tier: Some("fast".into()),
+            speed: None,
+        });
+        let c = check(&fast_sample);
+        assert_eq!(
+            usd(&at_percent(&c, 90).added[0].summary_cost).map(|s| (s * 1e6).round() / 1e6),
+            Some(0.764)
+        );
+        assert_eq!(
+            (c.base.action, c.base.recommended),
+            (Action::Advisory, None)
+        );
+        assert!(c.base.uncertainty.iter().any(|s| s == TIER_SENSITIVITY));
+
         // Both sessions together lose $0.3636 - $0.066 at recorded tiers, so off stays; at
         // an assumed tier, a dearer one on the cold session could reverse that.
         let mut both = data(HOUR, limit());

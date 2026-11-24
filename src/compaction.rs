@@ -18,9 +18,9 @@ use crate::model::{
     Usage, UsageEstimate, Usd, WindowBasisKind, WindowControl, WindowScenario, WindowSensitivity,
 };
 use crate::prices::{
-    Catalog, PRICE_SOURCES, Pairs, Signs, Sum, TIER_SENSITIVITY, TIER_SIGNS, add_costs,
-    price_components, price_part, server_cost, tier_sensitive, unknown_cost, write_billing,
-    zero_cost,
+    Catalog, PRICE_SOURCES, Pairs, Signs, Sum, TIER_SENSITIVITY, TIER_SIGNS, TierSavings,
+    add_costs, price_components, price_part, server_cost, tier_scale, tier_sensitive, unknown_cost,
+    write_billing, zero_cost,
 };
 use crate::scenarios::{PartReplay, ReplayOptions, ReplayTtls, ReplayedPart, replay_parts};
 use crate::version::claude_at_least;
@@ -836,6 +836,7 @@ impl<'r, 'o> Simulator<'r, 'o> {
             matches.median.output
         };
         let (input, read) = summary;
+        let part = summary_part(template, input, read, output, cold);
         self.result.added.push(AddedCompaction {
             request: req.id.clone(),
             input_tokens: input,
@@ -851,14 +852,11 @@ impl<'r, 'o> Simulator<'r, 'o> {
                 .collect(),
             // No one sample's rate stands for samples that disagree.
             summary_cost: if matches.uniform {
-                price_part(
-                    self.options.catalog,
-                    template.summary_request,
-                    &summary_part(template, input, read, output, cold),
-                )
+                price_part(self.options.catalog, template.summary_request, &part)
             } else {
                 unknown_cost(DISAGREE)
             },
+            summary_scale: tier_scale(template.summary_request, &part),
             prefix_cost: zero_cost(),
         });
         self.result.added.len() - 1
@@ -1464,9 +1462,8 @@ struct Candidate<'r, 'o, 'b> {
     baseline: Sum,
     alternative: Sum,
     pairs: Pairs,
-    /// The priced pairs' savings at an assumed tier by session, and at recorded tiers under
-    /// None, for the signs of the comparison.
-    sessions: HashMap<Option<Text>, Usd>,
+    /// The priced pairs' savings, for the signs of the comparison.
+    savings: TierSavings,
     cache_evidence: Vec<CacheReplayEvidence>,
 }
 
@@ -1487,7 +1484,12 @@ impl Candidate<'_, '_, '_> {
             self.baseline.add(b);
             self.alternative.add(a);
             self.pairs.add(b, a);
-            add_saving(&mut self.sessions, &item.request.session, b, a);
+            if let (Some(b), Some(a)) = (b.total_usd, a.total_usd) {
+                let session = &item.request.session;
+                let scale = |r: &ReplayedPart| tier_scale(r.request, &r.p);
+                self.savings.add(session, scale(original).as_ref(), b);
+                self.savings.add(session, scale(item).as_ref(), -a);
+            }
         };
         if uncertain {
             let reason = "session replay is unknown after a request it cannot model";
@@ -1509,15 +1511,6 @@ impl Candidate<'_, '_, '_> {
             alternative_parts.push(&components.output);
         }
         pair(&add_costs(baseline_parts), &add_costs(alternative_parts));
-    }
-}
-
-/// Add a priced pair's saving to its session's when an assumed tier priced it, else to the
-/// recorded tiers' under None, which no tier scales.
-fn add_saving(savings: &mut HashMap<Option<Text>, Usd>, session: &Text, b: &Cost, a: &Cost) {
-    if let (Some(baseline), Some(alternative)) = (b.total_usd, a.total_usd) {
-        let key = (tier_sensitive(b) || tier_sensitive(a)).then(|| session.clone());
-        *savings.entry(key).or_default() += baseline - alternative;
     }
 }
 
@@ -1634,7 +1627,7 @@ impl<'r> Lockstep<'_, 'r> {
                     baseline: Sum::new(),
                     alternative: Sum::new(),
                     pairs: Pairs::default(),
-                    sessions: HashMap::default(),
+                    savings: TierSavings::default(),
                     cache_evidence: vec![],
                 })
                 .collect();
@@ -1721,40 +1714,42 @@ impl<'r> Lockstep<'_, 'r> {
             for c in candidates {
                 // One pair per request that gains or loses a summary, so the unpriced
                 // bound compares against single differences rather than their total.
-                let mut summaries: IndexMap<&str, (Vec<&Cost>, Vec<&Cost>)> = IndexMap::default();
+                let mut summaries: IndexMap<&str, (Vec<&AddedCompaction>, Vec<&AddedCompaction>)> =
+                    IndexMap::default();
                 for a in before.iter().flat_map(|(_, added)| added.iter()) {
-                    summaries
-                        .entry(&*a.request)
-                        .or_default()
-                        .0
-                        .push(&a.summary_cost);
+                    summaries.entry(&*a.request).or_default().0.push(a);
                 }
                 let own = c.stream.as_ref().or(current.as_ref());
                 let added = own.map_or(&[][..], |s| s.simulator.result.added.as_slice());
                 for a in added {
-                    summaries
-                        .entry(&*a.request)
-                        .or_default()
-                        .1
-                        .push(&a.summary_cost);
+                    summaries.entry(&*a.request).or_default().1.push(a);
                 }
                 // Summary pairs come first, then the parts, then each replay's errors,
                 // which keeps the first-seen order of every unknown reason.
                 let mut pairs = c.pairs;
-                let mut savings = c.sessions;
+                let mut savings = c.savings;
                 let mut baseline_sum = Sum::new();
                 let mut alternative_sum = Sum::new();
-                for (request, (b, a)) in summaries {
-                    let (b, a) = (add_costs(b), add_costs(a));
+                for (request, (before, after)) in summaries {
+                    let total = |added: &[&AddedCompaction]| {
+                        add_costs(added.iter().map(|a| &a.summary_cost))
+                    };
+                    let (b, a) = (total(&before), total(&after));
                     baseline_sum.add(&b);
                     alternative_sum.add(&a);
                     pairs.add(&b, &a);
-                    add_saving(&mut savings, sessions[request], &b, &a);
+                    if b.total_usd.is_some() && a.total_usd.is_some() {
+                        let session = sessions[request];
+                        for (added, baseline) in [(&before, true), (&after, false)] {
+                            for s in added.iter() {
+                                let usd = s.summary_cost.total_usd.unwrap_or(Usd::ZERO);
+                                let usd = if baseline { usd } else { -usd };
+                                savings.add(session, s.summary_scale.as_ref(), usd);
+                            }
+                        }
+                    }
                 }
-                let mut signs = Signs::default();
-                for saving in savings.into_values() {
-                    signs.add(saving);
-                }
+                let signs = savings.signs();
                 baseline_sum.add(&c.baseline.cost());
                 alternative_sum.add(&c.alternative.cost());
                 let owned_total;
@@ -2600,7 +2595,7 @@ mod tests {
                 baseline: Sum::new(),
                 alternative: Sum::new(),
                 pairs: Pairs::default(),
-                sessions: HashMap::default(),
+                savings: TierSavings::default(),
                 cache_evidence: vec![],
             };
             candidate.compare(&catalog, original, item, false, false);

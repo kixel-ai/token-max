@@ -1104,6 +1104,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         fable: crate::fable::fable_use(&scan, catalog, since, now),
         inbound: crate::inbound::inbound_use(&scan, catalog, since, now),
         checks,
+        advisor: crate::advisor::advisor_use(&scan, catalog, since),
         bash,
         assumptions: [
             "host-local read-only analysis; network access is only for public prices and doctor's check for a newer token-max release",

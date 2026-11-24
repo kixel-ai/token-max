@@ -13,12 +13,12 @@ use crate::discovery::{TTL_API_DEFAULT, TTL_BILLING_UNKNOWN, TTL_PLAN_DEFAULT};
 use crate::doctor::How;
 use crate::keepalive::duration as keepalive_duration;
 use crate::model::{
-    Action, BackgroundCheck, BackgroundFeature, BashCap, Billing, CacheReplayEvidence, CheckBase,
-    CheckResult, ContextCost, ContextKind, ControlValue, Cost, Coverage, EffortCheck, EffortRun,
-    Estimate, EstimateEvidence, Evidence, FableUse, FableWeek, Harness, InboundControl, InboundUse,
-    KeepaliveCheck, Margin, MemoryCheck, Millis, ModelSource, PeriodStatus, Profile, Report,
-    RequestEvidence, ReturnTiming, Scalar, Share, SubagentCost, T3IdleCheck, T3TextGeneration, Ttl,
-    UsageEstimate, Verdict,
+    Action, AdvisorControl, AdvisorUse, BackgroundCheck, BackgroundFeature, BashCap, Billing,
+    CacheReplayEvidence, CheckBase, CheckResult, ContextCost, ContextKind, ControlValue, Cost,
+    Coverage, EffortCheck, EffortRun, Estimate, EstimateEvidence, Evidence, FableUse, FableWeek,
+    Harness, InboundControl, InboundUse, KeepaliveCheck, Margin, MemoryCheck, Millis, ModelSource,
+    PeriodStatus, Profile, Report, RequestEvidence, ReturnTiming, Scalar, Share, SubagentCost,
+    T3IdleCheck, T3TextGeneration, Ttl, UsageEstimate, Verdict,
 };
 use crate::prices::{TIER_SENSITIVITY, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
@@ -4360,6 +4360,121 @@ fn tagged(name: String, profile: &str) -> String {
     }
 }
 
+/// Whose advice the advisor pairing is, before Claude Code's page on the advisor.
+const ADVISOR_PICK: &str =
+    "The maintainer's pick of one rank above the main-session default. Claude Code's docs:";
+
+/// What an advisor line's recorded calls cost, as a sentence.
+fn advisor_calls(u: &AdvisorUse) -> String {
+    if u.calls == 0 {
+        return "No advisor call is recorded in the window.".into();
+    }
+    let models: Vec<&str> = u.models.iter().map(|m| m.name.as_str()).collect();
+    format!(
+        "{} on {} ran on {}, costing {} at API prices over the window.",
+        plural(u.calls, "advisor call"),
+        plural(u.requests, "request"),
+        models.join(", "),
+        figure(u.estimate)
+    )
+}
+
+/// The advisor's `doctor` line, for a line that sets one or recorded a call: what the calls
+/// cost, with no verdict, since what the advisor saves against a stronger main model is not
+/// measured.
+fn advisor_row(u: &AdvisorUse, control: &AdvisorControl, out: &Out<'_>) -> Row {
+    let mut row = Row::new(
+        Mark::Info,
+        "Advisor model".into(),
+        "A second, stronger model Claude consults at decision points, which reads the whole conversation at its own rates.".into(),
+    );
+    row.sources = vec![crate::advisor::DOCS];
+    let set = match (&control.model, &control.blocked) {
+        (Some(m), None) => format!("Set to {m}."),
+        (Some(m), Some(b)) => format!("Set to {m}, but no advisor loads: {b}."),
+        (None, _) => {
+            "No settings file read sets it now; a session's --advisor flag or /advisor turns it on."
+                .into()
+        }
+    };
+    row.value = control.model.clone().unwrap_or_else(|| "none".into());
+    row.evidence = out.home_in(&format!("{} {set}", advisor_calls(u)));
+    row.setting = out.home(&control.owner);
+    row
+}
+
+/// The advisor `vibes` suggests for a line of Claude profiles with no `advisorModel`, one
+/// rank above its main-session default, or what stops one loading or keeps it unsuggested.
+fn advisor_item(u: &AdvisorUse, p: &Profile, profile: &str, out: &Out<'_>) -> Item {
+    use crate::advisor::Pick;
+    let control = p.advisor.as_ref().expect("an advisor line has its control");
+    let effort = p.effort.as_ref();
+    let main = effort.and_then(|e| e.model.as_deref());
+    let calls = advisor_calls(u);
+    let file = control
+        .owner
+        .strip_suffix(":advisorModel")
+        .unwrap_or(&control.owner);
+    let quiet = |text: String| (String::new(), text, None, true);
+    let (value, text, how, quiet) = match (&control.model, &control.blocked, main) {
+        (Some(m), Some(b), _) => (
+            String::new(),
+            format!("Set to {m} in {file}, but no advisor loads: {b}. {calls}"),
+            None,
+            false,
+        ),
+        (Some(m), None, _) => quiet(format!("Set to {m} in {file}. {calls}")),
+        (None, Some(b), _) => quiet(format!(
+            "No advisor is suggested, since none would load: {b}."
+        )),
+        (None, None, None) => quiet(format!(
+            "No advisor is suggested: the main-session default is unknown, since {}.",
+            effort
+                .and_then(|e| e.unresolved.as_deref())
+                .unwrap_or("no effort control was read")
+        )),
+        (None, None, Some(main)) => match crate::advisor::pick(main) {
+            Pick::Top => quiet(format!(
+                "No advisor is suggested: nothing ranks above {main}, the main-session default, and Claude Code pairs a Fable main model only with a Fable advisor."
+            )),
+            Pick::Unsupported => quiet(format!(
+                "No advisor is suggested: Claude Code attaches none to {main}, the main-session default. It takes one on Fable, on Opus and Sonnet 4.6 or later, and on Haiku 4.5 or later."
+            )),
+            Pick::Advisor(pick) => {
+                let owner = effort.map_or("", |e| e.model_owner.as_str());
+                let mut text = format!(
+                    "Claude consults the advisor at decision points rather than on every turn, so a faster main model with a stronger advisor \"typically costs less than running the stronger model throughout\", Claude Code's page says. {} ranks one above {main}, the main-session default ({owner}). Each call reads the whole conversation again at the advisor's rates, uncached, and what the pairing saves or costs is not measured. {calls} The advisor is experimental, and Amazon Bedrock, Google Cloud's Agent Platform and Microsoft Foundry have none.",
+                    capitalize(pick)
+                );
+                if let Some(gateway) = &control.gateway {
+                    let _ = write!(
+                        text,
+                        " {gateway} sends requests through a gateway, which must pass the advisor tool on intact."
+                    );
+                }
+                if pick == "fable" {
+                    text += " A Fable advisor needs Fable access, and on plans that bill Fable to usage credits, the one-time consent /model fable asks for; until then Claude Code sends requests without it.";
+                }
+                (
+                    format!("none {} {pick}", out.arrow),
+                    text,
+                    Some(crate::doctor::advisor_how(&control.owner, pick, p)),
+                    false,
+                )
+            }
+        },
+    };
+    Item {
+        name: tagged("Advisor model".into(), profile),
+        value,
+        what: "A second, stronger model Claude consults at decision points.".into(),
+        text: out.home_in(&text),
+        sources: vec![ADVISOR_PICK.into(), crate::advisor::DOCS.into()],
+        how,
+        quiet,
+    }
+}
+
 /// Whose advice the Bash cap's margin is, before the pages on how the cap and cache work.
 const BASH_PICK: &str =
     "The maintainer's pick of a margin under the cache TTL. Claude Code's docs:";
@@ -5906,6 +6021,27 @@ fn summary(
         }
         rows.push(row);
     }
+    for u in &report.advisor {
+        let Some(p) = out.profiles.get(u.profiles[0].as_str()).copied() else {
+            continue;
+        };
+        let owner = |p: &Profile| {
+            p.advisor
+                .as_ref()
+                .map_or_else(String::new, |a| a.owner.clone())
+        };
+        let profile = tag(&u.profiles, &owner, out);
+        let control = p.advisor.as_ref().expect("an advisor line has its control");
+        if control.model.is_some() || u.calls > 0 {
+            let mut row = advisor_row(u, control, out);
+            row.profile = profile.clone();
+            if u.calls > 0 {
+                row.costs(u.estimate, false, &spend);
+            }
+            rows.push(row);
+        }
+        vibes.push(advisor_item(u, p, &profile, out));
+    }
     // Context with no switch: worth seeing, but not a setting to change.
     let fixed: Vec<&ContextCost> = report
         .context
@@ -6832,6 +6968,7 @@ mod tests {
             subagents: vec![],
             fable: vec![],
             bash: vec![],
+            advisor: vec![],
             inbound: vec![],
             generated_at: "2026-12-01T00:00:00.000Z".into(),
             scan: Scan {
@@ -9266,6 +9403,167 @@ mod tests {
         );
         // With no Fable use, there is nothing for the plan rule to advise about.
         assert_eq!(advice(&report, ReportOptions::default()), []);
+    }
+
+    #[test]
+    fn the_advisor_card_suggests_one_rank_up_and_the_line_prices_recorded_calls() {
+        let mut report = synthetic();
+        let file = format!("{ROOT}/settings.json");
+        let set = |report: &mut Report,
+                   model: Option<&str>,
+                   blocked: Option<&str>,
+                   main: Option<&str>| {
+            let p = &mut report.scan.profiles[0];
+            p.settings_file = file.clone();
+            p.advisor = Some(AdvisorControl {
+                model: model.map(Into::into),
+                owner: format!("{file}:advisorModel"),
+                blocked: blocked.map(Into::into),
+                gateway: None,
+            });
+            p.effort = Some(crate::model::EffortControl {
+                model: main.map(Into::into),
+                model_owner: format!("{file}:model"),
+                level: None,
+                owner: String::new(),
+                effective: None,
+                lowered: None,
+                caps: vec![],
+                default: None,
+                unresolved: main.is_none().then(|| "no setting names the model".into()),
+            });
+        };
+        report.advisor.push(AdvisorUse {
+            profiles: vec!["profile".into()],
+            requests: 0,
+            calls: 0,
+            models: vec![],
+            estimate: Some(Estimate {
+                usd: 0.0,
+                margin: None,
+            }),
+        });
+        let card = |report: &Report| {
+            advice(report, ReportOptions::default())
+                .into_iter()
+                .find(|i| i.name == "Advisor model")
+                .unwrap()
+        };
+        // A Sonnet main gets Opus, offered as one edit to the file that would set it.
+        set(&mut report, None, None, Some("claude-sonnet-5-5"));
+        let sonnet = card(&report);
+        assert_eq!(
+            (sonnet.value.as_str(), sonnet.quiet),
+            ("none -> opus", false)
+        );
+        assert!(
+            sonnet.text.contains("Opus ranks one above claude-sonnet-5-5, the main-session default (/synthetic/home/.claude/settings.json:model)."),
+            "{}",
+            sonnet.text
+        );
+        assert!(
+            sonnet
+                .text
+                .contains("No advisor call is recorded in the window.")
+        );
+        assert!(!sonnet.text.contains("Fable access"));
+        assert_eq!(sonnet.sources[1], crate::advisor::DOCS);
+        match &sonnet.how {
+            Some(How::Edit(patch)) => {
+                assert_eq!(patch.file, file);
+                assert_eq!(
+                    patch
+                        .edits
+                        .iter()
+                        .map(|e| e.text(Harness::Claude))
+                        .collect::<Vec<_>>(),
+                    ["\"advisorModel\": \"opus\""]
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        // An Opus main gets Fable, with what Fable needs.
+        set(&mut report, None, None, Some("claude-opus-5-5"));
+        let opus = card(&report);
+        assert_eq!(opus.value, "none -> fable");
+        assert!(opus.text.contains("Fable access"), "{}", opus.text);
+        // No edit is offered when none applies: a Fable main, an old one, an unknown one,
+        // or an advisor that would not load.
+        for (main, blocked, says) in [
+            (
+                Some("claude-fable-5-2"),
+                None,
+                "nothing ranks above claude-fable-5-2",
+            ),
+            (
+                Some("claude-sonnet-4-5"),
+                None,
+                "attaches none to claude-sonnet-4-5",
+            ),
+            (None, None, "unknown, since no setting names the model."),
+            (
+                Some("claude-sonnet-5-5"),
+                Some(
+                    "DISABLE_TELEMETRY, set in the environment, turns off the feature-flag fetch the advisor needs",
+                ),
+                "since none would load: DISABLE_TELEMETRY",
+            ),
+        ] {
+            set(&mut report, None, blocked, main);
+            let c = card(&report);
+            assert!(c.text.contains(says), "{says} in {}", c.text);
+            assert_eq!((c.how, c.quiet, c.value.as_str()), (None, true, ""));
+        }
+        // Unset and never called, doctor has no line for it.
+        assert!(!text(&report, None, false).contains("Advisor model"));
+        // Set and called: doctor's line gives the calls' cost with no verdict, and the card
+        // advises nothing unless something stops the advisor loading.
+        report.advisor[0] = AdvisorUse {
+            profiles: vec!["profile".into()],
+            requests: 3,
+            calls: 4,
+            models: vec![Share {
+                name: "claude-opus-5-5".into(),
+                count: 4,
+            }],
+            estimate: Some(Estimate {
+                usd: 2.5,
+                margin: None,
+            }),
+        };
+        set(&mut report, Some("opus"), None, Some("claude-sonnet-5-5"));
+        let row = report_line(&text(&report, None, true), "Advisor model");
+        assert_eq!(row.mark, "info");
+        assert!(
+            row.head == "Advisor model opus costs $2.50 <1%",
+            "{}",
+            row.head
+        );
+        assert_eq!(
+            row.evidence,
+            "4 advisor calls on 3 requests ran on claude-opus-5-5, costing $2.50 at API prices over the window. Set to opus."
+        );
+        let c = card(&report);
+        assert_eq!((c.how, c.quiet), (None, true));
+        assert!(
+            c.text.starts_with(
+                "Set to opus in /synthetic/home/.claude/settings.json. 4 advisor calls"
+            )
+        );
+        set(
+            &mut report,
+            Some("opus"),
+            Some(
+                "CLAUDE_CODE_DISABLE_ADVISOR_TOOL, set in the environment, turns the advisor tool off",
+            ),
+            Some("claude-sonnet-5-5"),
+        );
+        let c = card(&report);
+        assert_eq!((c.how, c.quiet), (None, false));
+        assert!(
+            c.text
+                .contains("but no advisor loads: CLAUDE_CODE_DISABLE_ADVISOR_TOOL")
+        );
     }
 
     #[test]

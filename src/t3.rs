@@ -872,6 +872,8 @@ pub(crate) fn discover(
                         .into(),
                 ),
             });
+            // T3 picks each thread's main model, which an advisor must rank against.
+            profile.advisor = None;
             // These terminal-client features do not run in T3's SDK/app-server client.
             profile.background.clear();
             profile.idle = None;

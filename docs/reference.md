@@ -1239,6 +1239,7 @@ an exit code.
 | An instruction file | A CLAUDE.md of 200 lines or more, past Claude Code's [guidance](https://code.claude.com/docs/en/memory#write-effective-instructions), or an AGENTS.md at or above the byte budget Codex [loads](https://learn.chatgpt.com/docs/agent-configuration/agents-md), with what each 100 lines of it costs. |
 | Explore subagent | Claude's built-in Explore ran off Haiku: what it cost, the same tokens on the cheapest model, and the model guide's tip. |
 | Fable weekly use | Any Fable request in the window: what they cost, and Anthropic's [plan rule](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan). |
+| [Advisor model](#advisor-model) | Every Claude settings file: with no `advisorModel`, the advisor one rank above the main-session default, citing Claude Code's [advisor page](https://code.claude.com/docs/en/advisor). |
 
 The effort, instruction-file, subagent and Fable lines stay in `doctor`, where
 their costs are measured; only the advice about them is here.
@@ -1386,6 +1387,47 @@ with `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` or
 `CLAUDE_CODE_USE_FOUNDRY` is billed by its cloud provider and gets no line.
 Change the model with `/model` or the `model` setting.
 See [Fable weekly use](semantics.md#fable-weekly-use).
+
+## Advisor model
+
+Claude Code's [advisor](https://code.claude.com/docs/en/advisor) is a
+second model Claude consults at decision points, which reads the whole
+conversation at its own rates. Each Claude settings file gets a
+[`vibes`](#vibes) card for it, ranked against the main-session default that
+[effort](semantics.md#main-session-effort) resolves: the `model` setting or
+`ANTHROPIC_MODEL`, else the latest recorded main-session model.
+
+With no `advisorModel` set, the card suggests one rank above that default,
+the maintainer's pick: `opus` for a Haiku or Sonnet main, `fable` for an Opus
+main, and none for a Fable main, which Claude Code pairs only with a Fable
+advisor. It cites the page's claim that a faster main model with a stronger
+advisor "typically costs less than running the stronger model throughout",
+and offers to write `advisorModel` to the profile's settings file. What the
+pairing saves or costs is not measured. A main model Claude Code attaches no
+advisor to (Sonnet or Opus before 4.6, Haiku before 4.5), or one token-max
+can't resolve, gets a card that advises nothing.
+
+The card says no advisor would load, and offers no edit, when the settings or
+environment read set `CLAUDE_CODE_DISABLE_ADVISOR_TOOL`, send requests to
+Amazon Bedrock (or its Mantle endpoint), Google Cloud's Agent Platform or
+Microsoft Foundry, or turn off the feature flag the advisor needs:
+`DISABLE_TELEMETRY` or `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` with any
+value, or a true `DO_NOT_TRACK`, `CLAUDE_CODE_DISABLE_FEATURE_FLAGS` or
+`DISABLE_GROWTHBOOK`. Claude Platform on AWS and Claude Models on Google
+Cloud (Anthropic managed) need no flag. An `ANTHROPIC_BASE_URL` gateway must
+pass the advisor tool on intact, and a Fable advisor needs Fable access and,
+on plans that bill Fable to usage credits, the consent `/model fable` asks
+for; the card says both. An `advisorModel` already set gets a card that
+advises nothing, unless one of those stops it loading.
+
+When an advisor is set or a request recorded an advisor call, `doctor` shows
+an `Advisor model` line: how many calls ran on how many requests, on which
+models, and what the advisor iterations alone cost at API prices over the
+window. Like the subagent lines it is evidence with no verdict, since the
+advisor's alternative is a stronger main model, which a replay can't price
+the work of. T3 Code picks each thread's main model, so T3 instances get no
+card or line; their sessions' advisor calls count on the native profile's
+line when they share its history.
 
 ## Messages from other sessions
 

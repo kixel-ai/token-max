@@ -912,6 +912,37 @@ pub struct SpeedControl {
     pub reason: String,
 }
 
+/// Claude Code's `advisorModel` as the settings read now set it, and what keeps an advisor
+/// from loading.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdvisorControl {
+    /// The advisor model as set, such as `opus`; None when no settings file sets one.
+    pub model: Option<String>,
+    /// The `advisorModel` setting that sets it, or the user file's to set it in.
+    pub owner: String,
+    /// Why Claude Code loads no advisor, naming the variable that stops it; None when
+    /// nothing read does.
+    pub blocked: Option<String>,
+    /// The variable that sends requests through an LLM gateway, which must pass the advisor
+    /// tool on intact.
+    pub gateway: Option<String>,
+}
+
+/// What a line of Claude profiles' advisor calls cost over the window.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdvisorUse {
+    pub profiles: Vec<String>,
+    /// Requests that called the advisor.
+    pub requests: u64,
+    /// Advisor calls, one per advisor iteration a request recorded.
+    pub calls: u64,
+    /// The advisor models the calls ran on, most calls first.
+    pub models: Vec<Share>,
+    /// What the calls cost, extrapolated from the priced requests to every one; None when
+    /// none was priced.
+    pub estimate: Option<Estimate>,
+}
+
 /// A profile's main-session default reasoning effort, the setting that decides it and the
 /// level its session runs at.
 #[derive(Clone, Debug, PartialEq)]
@@ -975,6 +1006,8 @@ pub struct Profile {
     pub bash: Option<BashCapControl>,
     /// The main session's default reasoning effort.
     pub effort: Option<EffortControl>,
+    /// Claude Code's advisor model; None for Codex and T3, whose threads pick their own model.
+    pub advisor: Option<AdvisorControl>,
     pub speed_directories: Option<IndexMap<String, SpeedControl>>,
     /// Current project controls observed at recorded working directories.
     pub idle_directories: Option<IndexMap<String, IdleControl>>,
@@ -3195,6 +3228,8 @@ pub struct Report {
     pub checks: Vec<CheckResult>,
     /// Each foreground Bash timeout cap and its long waits, which `vibes` shows as advice.
     pub bash: Vec<BashCap>,
+    /// Each Claude `advisorModel` line's advisor calls, as evidence beside `vibes`' card.
+    pub advisor: Vec<AdvisorUse>,
     /// What the report assumes beyond the measurements.
     pub assumptions: Vec<String>,
 }

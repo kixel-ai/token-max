@@ -414,20 +414,35 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     assert!(!report.contains("WARNINGS"), "{report}");
     assert!(
         report.ends_with(
-            "\n\n  token-max vibes has 1 piece of advice the transcripts can't price. Run token-max vibes with the same profile, host, --since and price options to see it.\n"
+            "\n\n  token-max vibes has 2 pieces of advice the transcripts can't price. Run token-max vibes with the same profile, host, --since and price options to see them.\n"
         ),
         "{report}"
     );
-    // The same scan's advice: one cited card, its change named and not made, exit 0.
+    // The same scan's advice: cited cards, each change named and not made, exit 0.
     let (status, stdout, stderr) = invoke("vibes", &[]);
     assert_eq!((status, stderr.as_str()), (0, ""), "{stdout}");
+    let (bash, advisor) = stdout.split_at(
+        stdout
+            .find("\n  [2/2] Advisor model  not measured\n")
+            .unwrap_or_else(|| panic!("{stdout}")),
+    );
     assert_eq!(
-        stdout,
+        bash,
         format!(
-            "token-max vibes: 1 piece of advice the transcripts can't price.\n  None of it is measured, so none of it is a verdict. Each card names whose advice it is.\n\n  [1/1] Bash timeout cap  not measured\n        2h -> 4m\n        What    The longest Claude waits on a foreground Bash command before Claude Code moves it to the background.\n        Advice  A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess. A command past the cap is not killed: it keeps running in the background, where Claude checks on it in later turns. Some commands need longer in the foreground; keep the cap if yours do. Project and local settings, which override it, are not read.\n        Source  The maintainer's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching\n        Change  \"env\": {{\"BASH_MAX_TIMEOUT_MS\": \"240000\"}} in ~{}.claude{}settings.json\n",
+            "token-max vibes: 2 pieces of advice the transcripts can't price.\n  None of it is measured, so none of it is a verdict. Each card names whose advice it is.\n\n  [1/2] Bash timeout cap  not measured\n        2h -> 4m\n        What    The longest Claude waits on a foreground Bash command before Claude Code moves it to the background.\n        Advice  A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess. A command past the cap is not killed: it keeps running in the background, where Claude checks on it in later turns. Some commands need longer in the foreground; keep the cap if yours do. Project and local settings, which override it, are not read.\n        Source  The maintainer's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching\n        Change  \"env\": {{\"BASH_MAX_TIMEOUT_MS\": \"240000\"}} in ~{}.claude{}settings.json\n",
             std::path::MAIN_SEPARATOR,
             std::path::MAIN_SEPARATOR
         )
+    );
+    // The fixture's Opus main gets a Fable advisor, one rank up.
+    assert!(
+        advisor.starts_with("\n  [2/2] Advisor model  not measured\n        none -> fable\n")
+            && advisor.contains("Fable ranks one above claude-opus-5-5, the main-session default (the latest recorded main-session model).")
+            && advisor.ends_with(&format!(
+                "        Change  \"advisorModel\": \"fable\" in ~{0}.claude{0}settings.json\n",
+                std::path::MAIN_SEPARATOR
+            )),
+        "{advisor}"
     );
     assert_eq!(
         std::fs::read_to_string(w.claude.join("settings.json")).unwrap(),
@@ -436,8 +451,11 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     // Settings pretended away are not the ones vibes reads, so --defaults names no count.
     let (_, report, _) = invoke("doctor", &["--defaults"]);
     assert!(!report.contains("token-max vibes"), "{report}");
-    // A cap already at the margin keeps its card, and doctor has nothing to name.
-    w.settings(r#"{"promptCacheTtl":"1h","env":{"BASH_MAX_TIMEOUT_MS":"3300000"}}"#);
+    // A cap already at the margin, and an advisor already set, keep their cards, and doctor
+    // has nothing to name.
+    w.settings(
+        r#"{"promptCacheTtl":"1h","advisorModel":"fable","env":{"BASH_MAX_TIMEOUT_MS":"3300000"}}"#,
+    );
     let (status, report, _) = invoke("doctor", &[]);
     assert_eq!(status, 0, "{report}");
     assert!(!report.contains("token-max vibes"), "{report}");
@@ -445,11 +463,12 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     assert_eq!(status, 0);
     // The heading counts advice as doctor does, so the card that advises nothing is not in it.
     assert!(
-        stdout.starts_with("token-max vibes: no advice for these settings.\n\n  [1/1] "),
+        stdout.starts_with("token-max vibes: no advice for these settings.\n\n  [1/2] "),
         "{stdout}"
     );
     assert!(
-        stdout.contains("\n  [1/1] Bash timeout cap  not measured\n        What    ")
+        stdout.contains("\n  [1/2] Bash timeout cap  not measured\n        What    ")
+            && stdout.contains("\n  [2/2] Advisor model  not measured\n        What    ")
             && stdout.contains("Capped at 55m, the margin suggested under the 1h cache, the current main-agent cache TTL setting.")
             && !stdout.contains("Change"),
         "{stdout}"
@@ -1543,8 +1562,8 @@ mod unix {
         // open until the child exits, as a person's would.
         let mut keyboard = std::fs::File::from(master);
         // A plan pays, then yes to the TTL and to writing it; then yes to seeing `vibes`'
-        // advice, yes to its Bash cap and to writing that.
-        keyboard.write_all(b"p\ny\ny\ny\ny\ny\n").unwrap();
+        // advice, yes to its Bash cap, no to its advisor and yes to writing the cap.
+        keyboard.write_all(b"p\ny\ny\ny\ny\nn\ny\n").unwrap();
         let status = child.wait().unwrap().code().unwrap();
         let (stdout, stderr) = (out.join().unwrap(), err.join().unwrap());
         assert_eq!(status, 0, "{stderr}");
@@ -1615,13 +1634,14 @@ mod unix {
         // Once the walk ends, doctor offers the advice it can't measure, from the same scan:
         // nothing is asked or scanned again.
         let offer = at(
-            "\n  token-max vibes has 1 piece of advice the transcripts can't price. Show it?\n  [y]es, [n]o: ",
+            "\n  token-max vibes has 2 pieces of advice the transcripts can't price. Show them?\n  [y]es, [n]o: ",
         );
-        let advice = at("\ntoken-max vibes: 1 piece of advice the transcripts can't price.\n");
-        let card = at("\n  [1/1] Bash timeout cap ");
+        let advice = at("\ntoken-max vibes: 2 pieces of advice the transcripts can't price.\n");
+        let card = at("\n  [1/2] Bash timeout cap ");
+        let advisor = at("\n  [2/2] Advisor model ");
         assert_eq!(
             words(&stdout[advice..card]),
-            "token-max vibes: 1 piece of advice the transcripts can't price. None of it is measured, so none of it is a verdict. Each card names whose advice it is. Nothing is written until you confirm the list at the end."
+            "token-max vibes: 2 pieces of advice the transcripts can't price. None of it is measured, so none of it is a verdict. Each card names whose advice it is. Nothing is written until you confirm the list at the end."
         );
         assert!(confirm < wrote && wrote < offer && offer < advice && advice < card);
         assert_eq!(stdout.matches("How is ~/.claude paid for?").count(), 1);
@@ -1631,9 +1651,10 @@ mod unix {
             .find("\n  ~/.claude/settings.json\n  @@")
             .map(|at| card + at)
             .unwrap_or_else(|| panic!("{stdout}"));
-        let entry = words(&stdout[card..again]);
+        assert!(card < advisor && advisor < again, "{stdout}");
+        let entry = words(&stdout[card..advisor]);
         assert!(
-            entry.starts_with("[1/1] Bash timeout cap not measured 2h -> 4m What The longest Claude waits on a foreground Bash command before Claude Code moves it to the background. Advice A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess."),
+            entry.starts_with("[1/2] Bash timeout cap not measured 2h -> 4m What The longest Claude waits on a foreground Bash command before Claude Code moves it to the background. Advice A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess."),
             "{entry}"
         );
         assert!(
@@ -1641,6 +1662,11 @@ mod unix {
             "{entry}"
         );
         assert!(!entry.contains("Recommended") && !entry.contains("Worth considering"));
+        // The advisor card asks too, and its no writes nothing.
+        assert!(
+            words(&stdout[advisor..again]).ends_with(r#"Change "advisorModel": "fable" in ~/.claude/settings.json Accept? [y]es, [n]o, [q]uit:"#),
+            "{stdout}"
+        );
         // The card is from the scan before doctor wrote 1h, so its cap is for the 5m cache
         // set then; the next run moves it to 55m.
         // Its edit is checked against the file as doctor just wrote it, and confirmed alone.

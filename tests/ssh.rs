@@ -118,9 +118,10 @@ HOME="$TEST_ROOT/homes/$host" PATH="$TEST_ROOT/remote/$host:$TEST_PATH" exec sh 
         let project = home.join(".claude/projects/my project");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::copy(fixture("claude.jsonl"), project.join("main.jsonl")).unwrap();
+        // An advisor already set, so its `vibes` card advises nothing and asks nothing.
         std::fs::write(
             home.join(".claude/settings.json"),
-            r#"{"promptCacheTtl":"1h"}"#,
+            r#"{"promptCacheTtl":"1h","advisorModel":"fable"}"#,
         )
         .unwrap();
         home
@@ -482,7 +483,7 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     let home = hosts.host("devbox");
     std::fs::write(
         home.join(".claude/settings.json"),
-        r#"{"promptCacheTtl":"1h","env":{"BASH_MAX_TIMEOUT_MS":"7200000"}}"#,
+        r#"{"promptCacheTtl":"1h","advisorModel":"fable","env":{"BASH_MAX_TIMEOUT_MS":"7200000"}}"#,
     )
     .unwrap();
     let transcript = home.join(".claude/projects/my project/main.jsonl");
@@ -538,7 +539,7 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     );
     // Each host's card names its host, its own waits and the edit to make there, in its home.
     let here = flat(cards[1]);
-    assert!(here.starts_with("[1/2] Bash timeout cap not measured 10m -> 55m Host this host"));
+    assert!(here.starts_with("[1/4] Bash timeout cap not measured 10m -> 55m Host this host"));
     assert!(
         here.contains("No foreground Bash wait outlasted the cache."),
         "{here}"
@@ -549,8 +550,13 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
         ),
         "{here}"
     );
-    let there = flat(cards[2]);
-    assert!(there.starts_with("[2/2] Bash timeout cap not measured 2h -> 55m Host devbox"));
+    // Each host's advisor card, already set, advises nothing.
+    assert!(
+        flat(cards[2]).starts_with("[2/4] Advisor model not measured Host this host What"),
+        "{stdout}"
+    );
+    let there = flat(cards[3]);
+    assert!(there.starts_with("[3/4] Bash timeout cap not measured 2h -> 55m Host devbox"));
     assert!(
         there.contains(
             "1 foreground Bash wait outlasted the cache (1 hit the timeout, 1 polled in a loop)"
@@ -569,7 +575,7 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     let alone = flat(alone.split("\n\n").nth(1).unwrap());
     assert_eq!(
         there
-            .replace("[2/2]", "[1/1]")
+            .replace("[3/4]", "[1/2]")
             .replace(" Host devbox", "")
             .replace("devbox:~", "~"),
         alone
@@ -1484,11 +1490,12 @@ fn flat(text: &str) -> String {
 }
 
 /// Each walked home's settings: a 1h TTL, and a Bash cap that outlasts it, which `vibes`
-/// offers to lower on every host with a saving not measured.
-const HOME_SETTINGS: &str = r#"{"promptCacheTtl":"1h","env":{"BASH_MAX_TIMEOUT_MS":"7200000"}}"#;
+/// offers to lower on every host with a saving not measured, and an advisor already set.
+const HOME_SETTINGS: &str =
+    r#"{"promptCacheTtl":"1h","advisorModel":"fable","env":{"BASH_MAX_TIMEOUT_MS":"7200000"}}"#;
 
 /// [`HOME_SETTINGS`] with the cap lowered under the TTL, as accepting its change writes them.
-const CAP_LOWERED: &str = "{\n  \"promptCacheTtl\": \"1h\",\n  \"env\": {\n    \"BASH_MAX_TIMEOUT_MS\": \"3300000\"\n  }\n}";
+const CAP_LOWERED: &str = "{\n  \"promptCacheTtl\": \"1h\",\n  \"advisorModel\": \"fable\",\n  \"env\": {\n    \"BASH_MAX_TIMEOUT_MS\": \"3300000\"\n  }\n}";
 
 impl Hosts {
     /// `vibes` on this host, devbox and laptop, walked on a terminal after the billing questions.

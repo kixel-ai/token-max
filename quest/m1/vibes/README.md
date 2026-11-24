@@ -54,7 +54,7 @@ codex-cli 0.167.1 settings worth turning on):
   `doctor` lines.
 - Settings worth turning on: ✅
   [code intelligence plugins](/quest/m1/vibes/language-servers.md), ✅
-  [an advisor model](/quest/m1/vibes/advisor.md) (rejected:
+  an advisor model (rejected:
   `includeGitInstructions: false`, spend caps, and Codex code mode, which the
   model catalog already turns on). The one measurable find,
   Codex turn-end compaction, is

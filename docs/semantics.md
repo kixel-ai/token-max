@@ -1470,6 +1470,27 @@ Fable request, as
 `--details` gives each line's spans with their unknown costs, the caveats
 and the sources.
 
+## Advisor model
+
+`Profile.advisor` is resolved where `Profile.effort` is: the user and managed
+settings, plus the project and local files of the latest main-session
+request's directory, with the active profile's shell environment, settings
+`env` overriding it. `advisorModel` comes from the highest scope that sets it
+to anything but null; a non-string is an error, and an empty name sets no
+advisor. What stops an advisor loading is checked in Claude Code's order: the
+tool turned off, then an unsupported provider, then a variable that turns off
+feature-flag fetching, which Claude Platform on AWS and Claude Models on
+Google Cloud (Anthropic managed) don't need. T3 instances have none.
+
+`Report.advisor` gives one entry per line of profiles that share the
+`advisorModel` owner, the resolved main-session default and what stops the
+advisor. A request counts when it recorded an `advisor_message` iteration,
+each iteration is a call, and only those iterations are priced, extrapolated
+over requests whose usage is unverified as other lines are. The suggested
+advisor is `advisor::pick`: Opus above Haiku 4.5 or later and Sonnet 4.6 or
+later, Fable above Opus 4.6 or later, none above Fable, by the main model's
+canonical ID.
+
 ## Messages from other sessions
 
 The reader marks three kinds of record, keeping no text. A Claude `user`

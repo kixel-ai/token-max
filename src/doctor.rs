@@ -637,6 +637,17 @@ fn manual(owner: &str, profile: &Profile, step: String) -> How {
     How::Manual { step, reason }
 }
 
+/// How to set `advisorModel` to `model` where `owner` names it, in `profile`'s settings.
+pub(crate) fn advisor_how(owner: &str, model: &str, profile: &Profile) -> How {
+    let key = "advisorModel";
+    owned(
+        owner,
+        profile,
+        vec![(key.into(), vec![Edit::set(key, model)])],
+        format!("set \"{key}\": \"{model}\""),
+    )
+}
+
 /// How to move a Bash timeout cap to the one suggested, in `profile`'s settings; None when
 /// it suggests no other cap.
 pub(crate) fn bash_how(cap: &BashCap, profile: &Profile) -> Option<How> {

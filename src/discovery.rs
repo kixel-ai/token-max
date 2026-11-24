@@ -1162,20 +1162,27 @@ pub fn discover_claude_controls(
         // directory; without one, the user and managed files decide.
         let latest = crate::memory::deciding_request(&relevant).and_then(|r| r.cwd.clone());
         let recorded = latest_model(&relevant);
+        let base = [
+            SettingsScope {
+                config: &user,
+                file: &profile.settings_file,
+            },
+            SettingsScope {
+                config: &managed,
+                file: managed_file,
+            },
+        ];
         profile.effort = Some(claude_effort(
-            &[
-                SettingsScope {
-                    config: &user,
-                    file: &profile.settings_file,
-                },
-                SettingsScope {
-                    config: &managed,
-                    file: managed_file,
-                },
-            ],
+            &base,
             &profile.settings_file,
             local_env,
             recorded,
+        )?);
+        // Read where effort is: the advisor card ranks against that main-session default.
+        profile.advisor = Some(crate::advisor::control(
+            &base,
+            local_env,
+            &profile.settings_file,
         )?);
         if relevant
             .iter()
@@ -1278,6 +1285,11 @@ pub fn discover_claude_controls(
                     &profile.settings_file,
                     local_env,
                     recorded,
+                )?);
+                profile.advisor = Some(crate::advisor::control(
+                    &scopes,
+                    local_env,
+                    &profile.settings_file,
                 )?);
             }
             let settings_env = scoped_environment(&scopes, &empty);
@@ -2511,6 +2523,7 @@ pub(crate) fn profile(
         speed: Some(speed),
         bash,
         effort: None,
+        advisor: None,
         speed_directories: None,
         idle_directories: None,
         background,

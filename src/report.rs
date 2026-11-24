@@ -6171,7 +6171,18 @@ fn summary(
         rows.push(row);
     }
     for u in &report.lsp {
-        let profile = tag(&u.profiles, &switch, out);
+        let mut profile = tag(&u.profiles, &switch, out);
+        // Profiles that share a settings file but not a plugins directory get a card each.
+        if report
+            .lsp
+            .iter()
+            .filter(|o| o.settings_file == u.settings_file)
+            .count()
+            > 1
+        {
+            let dir = crate::lsp::plugins_dir(&u.root, u.cache_dir.as_deref());
+            profile = tagged(profile, &format!("(plugins in {})", out.home_in(&dir)));
+        }
         let view = crate::lsp::View {
             home: out.home.as_deref(),
             arrow: out.arrow,
@@ -9672,6 +9683,47 @@ mod tests {
         );
         // With no Fable use, there is nothing for the plan rule to advise about.
         assert_eq!(advice(&report, ReportOptions::default()), []);
+    }
+
+    #[test]
+    fn code_intelligence_cards_sharing_a_settings_file_name_their_plugins_directory() {
+        use crate::lsp::{LanguageUse, Lsp, LspUse, Plugin};
+        let mut report = synthetic();
+        let card = |cache_dir: Option<&str>| LspUse {
+            profiles: vec!["profile".into()],
+            sessions: 1,
+            languages: vec![LanguageUse {
+                lsp: Lsp::of("main.rs").unwrap(),
+                sessions: 1,
+                uncovered: 1,
+                directories: vec![],
+                plugin: Plugin::Missing,
+                binary: true,
+            }],
+            settings_file: format!("{ROOT}/settings.json"),
+            root: ROOT.into(),
+            cache_dir: cache_dir.map(str::to_string),
+            unresolved: false,
+        };
+        report.lsp = vec![card(None)];
+        let names = |report: &Report| -> Vec<String> {
+            advice(report, ReportOptions::default())
+                .into_iter()
+                .map(|i| i.name)
+                .filter(|n| n.contains("code intelligence"))
+                .collect()
+        };
+        let plain = names(&report);
+        assert_eq!(plain.len(), 1);
+        assert!(!plain[0].contains("plugins in"), "{plain:?}");
+        report.lsp.push(card(Some("/synthetic/cache")));
+        let both = names(&report);
+        assert_eq!(both.len(), 2);
+        assert_ne!(both[0], both[1]);
+        assert!(
+            both[1].ends_with("(plugins in /synthetic/cache)"),
+            "{both:?}"
+        );
     }
 
     #[test]

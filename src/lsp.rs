@@ -203,11 +203,7 @@ pub fn controls(
     path: Option<&str>,
 ) -> Result<Controls, ScanError> {
     let cache_dir = cache_dir.filter(|d| !d.is_empty());
-    let plugins = match cache_dir {
-        Some(dir) => dir.to_string(),
-        None => join(&[root, "plugins"]),
-    };
-    let file = join(&[&plugins, "installed_plugins.json"]);
+    let file = join(&[&plugins_dir(root, cache_dir), "installed_plugins.json"]);
     let installed = installs(&file)?;
     let enabled = |settings: &Map<String, Value>, id: &str| {
         let entries = settings.get("enabledPlugins").and_then(Value::as_object);
@@ -277,12 +273,23 @@ pub fn controls(
                 let best = match best {
                     Plugin::Projects { .. } => Plugin::Projects { projects, blocked },
                     Plugin::Missing if blocked => Plugin::Blocked,
+                    // Policy on another marketplace's copy leaves the official one to install.
+                    Plugin::Blocked if !blocked => Plugin::Missing,
                     other => other,
                 };
                 (best, on_path(s.binary, path))
             })
             .collect(),
     })
+}
+
+/// The plugins directory of the Claude home `root`: `CLAUDE_CODE_PLUGIN_CACHE_DIR`, else
+/// `plugins` in it.
+pub fn plugins_dir(root: &str, cache_dir: Option<&str>) -> String {
+    match cache_dir {
+        Some(dir) => dir.to_string(),
+        None => join(&[root, "plugins"]),
+    }
 }
 
 /// A plugin id's name, before its `@marketplace`.
@@ -326,7 +333,10 @@ fn installs(file: &str) -> Result<IndexMap<String, Vec<Option<String>>>, ScanErr
             let project = record.get("projectPath").and_then(Value::as_str);
             scopes.push(match (scope, project) {
                 (None | Some("user" | "managed"), _) => None,
-                (Some("project" | "local"), Some(project)) => Some(project.to_string()),
+                // An empty or relative path names no project, and would hold every directory.
+                (Some("project" | "local"), Some(project)) if Path::new(project).is_absolute() => {
+                    Some(project.to_string())
+                }
                 _ => return Err(invalid()),
             });
         }
@@ -648,7 +658,9 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
         } => {
             text += &installed_for(projects);
             text += &format!(" Managed settings turn {id} off.");
-            ((!l.binary).then(server_only), l.binary)
+            // The server matters only where a recorded directory loads a copy.
+            let serves = l.directories.iter().any(|(d, _)| l.plugin.covers(d));
+            ((!l.binary && serves).then(server_only), l.binary || !serves)
         }
         // Every session worked where the plugin loads, so only its server is missing.
         Plugin::Projects { projects, .. } if l.uncovered == 0 => {
@@ -886,6 +898,7 @@ mod tests {
             "swift-lsp@corp": true,
             "ruby-lsp@corp": false,
             "lua-lsp@claude-plugins-official": false,
+            "jdtls-lsp@corp": false,
         }});
         let bin = program(&w, "rust-analyzer");
         let path = std::env::join_paths([w.home.join("empty"), bin]).unwrap();
@@ -950,6 +963,8 @@ mod tests {
         assert_eq!(state("clangd-lsp").0, Plugin::Blocked);
         assert_eq!(state("swift-lsp").0, Plugin::On);
         assert_eq!(state("typescript-lsp"), (Plugin::Missing, false));
+        // Policy on only another marketplace's copy leaves the official one to install.
+        assert_eq!(state("jdtls-lsp").0, Plugin::Missing);
 
         // CLAUDE_CODE_PLUGIN_CACHE_DIR moves the records; a directory with none installs nothing.
         let empty = Map::new();
@@ -972,6 +987,9 @@ mod tests {
             r#"{"plugins": {"x@y": 1}}"#,
             r#"{"plugins": {"x@y": [null]}}"#,
             r#"{"plugins": {"x@y": [{"scope": 1}]}}"#,
+            // A project install must name an absolute directory, or it would hold every one.
+            r#"{"plugins": {"x@y": [{"scope": "local", "projectPath": ""}]}}"#,
+            r#"{"plugins": {"x@y": [{"scope": "project", "projectPath": "repo"}]}}"#,
             "{",
         ] {
             fs::write(plugins.join("installed_plugins.json"), invalid).unwrap();
@@ -1290,6 +1308,13 @@ mod tests {
             assert_eq!(partly[0].quiet, blocked);
             assert_eq!(partly[0].how.is_none(), blocked);
         }
+        // Blocked, with no recorded directory where a copy loads: its server serves nothing.
+        let elsewhere = Plugin::Projects {
+            projects: vec![text(&w.home.join("elsewhere"))],
+            blocked: true,
+        };
+        let unserved = card(language(10, 10, 10, elsewhere, false));
+        assert!(unserved[0].quiet && unserved[0].how.is_none());
         // Turned off in the user file: one edit there, which the walk writes.
         let id = "rust-analyzer-lsp@claude-plugins-official".to_string();
         let off = card(language(

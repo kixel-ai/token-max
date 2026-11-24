@@ -2831,6 +2831,8 @@ fn card(result: &CheckResult, action: Option<Action>, out: &mut Out<'_>) {
                 &s.current_estimate.premium,
             );
         }
+        CheckResult::TurnEnd(c) if c.scenarios.is_empty() => {}
+        CheckResult::Compaction(c) if c.scenarios.is_empty() => {}
         CheckResult::TurnEnd(c) => {
             out.cost("Current-threshold baseline", &c.baseline_cost);
             for scenario in &c.scenarios {

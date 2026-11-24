@@ -1310,11 +1310,16 @@ mod tests {
         }
     }
 
-    /// The window and turn-end lines of a scan whose only requests are earlier history.
-    fn unmeasured_lines(user: Value) -> Vec<CheckResult> {
+    /// The report of a scan whose only requests are earlier history.
+    fn unmeasured_report(user: Value) -> crate::model::Report {
         let mut scan = data(HOUR, user);
         scan.cache_context.requests = std::mem::take(&mut scan.requests);
         report(&scan)
+    }
+
+    /// The window and turn-end lines of that report.
+    fn unmeasured_lines(user: Value) -> Vec<CheckResult> {
+        unmeasured_report(user)
             .checks
             .into_iter()
             .filter(|c| matches!(c, CheckResult::Compaction(_) | CheckResult::TurnEnd(_)))
@@ -1347,6 +1352,29 @@ mod tests {
             assert!(base.owner.starts_with(FILE));
         }
         assert!(window.scenarios.is_empty() && turn.scenarios.is_empty());
+
+        // --details shows no replay field for a limit nothing replayed.
+        let user = json!({
+            "model_auto_compact_token_limit": 180_000,
+            TURN_END_KEY: 80,
+        });
+        let text = crate::report::rendered(
+            &unmeasured_report(user),
+            crate::report::ReportOptions {
+                details: true,
+                ..Default::default()
+            },
+        );
+        assert!(text.contains("Turn-end compaction"));
+        for field in [
+            "Usable window",
+            "Auto-compact limit replayed with it",
+            "Current-threshold baseline",
+            "Current-window baseline",
+            "Existing summaries",
+        ] {
+            assert!(!text.contains(field), "{field} shown without a replay");
+        }
     }
 
     #[test]

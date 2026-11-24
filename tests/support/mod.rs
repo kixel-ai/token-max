@@ -1,6 +1,6 @@
-//! Fixture releases served over HTTP as GitHub serves them, for the run script and doctor's
-//! release check, so no test reaches GitHub.
-#![allow(dead_code, reason = "each test binary uses part of it")]
+//! Helpers the integration tests share: fixture releases served over HTTP as GitHub serves them,
+//! for the run script and doctor's release check so no test reaches GitHub, and expected paths.
+#![allow(dead_code, unused_imports, reason = "each test binary uses part of it")]
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -10,6 +10,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use sha2::{Digest, Sha256};
+
+#[path = "../../src/test_support/paths.rs"]
+mod paths;
+pub use paths::native_path;
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub const TARGET: &str = "x86_64-unknown-linux-musl";

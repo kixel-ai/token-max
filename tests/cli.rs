@@ -5,6 +5,7 @@ mod support;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use support::native_path;
 
 use serde_json::{Value, json};
 use token_max::{Action, BackgroundFeature, CheckResult, Usd, Verdict};
@@ -92,16 +93,6 @@ fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("test/fixtures")
         .join(name)
-}
-
-fn text(path: &Path) -> String {
-    // Windows paths joined from "a/b" keep the slash; the code under test normalizes it.
-    let path: std::path::PathBuf = if cfg!(windows) {
-        path.components().collect()
-    } else {
-        path.to_path_buf()
-    };
-    path.to_string_lossy().into_owned()
 }
 
 /// The binary with only this workspace's environment and no inherited settings controls.
@@ -216,9 +207,9 @@ fn run(command: &mut Command) -> (i32, String, String) {
 fn prices_args(w: &Workspace) -> Vec<String> {
     vec![
         "--claude-dir".into(),
-        text(&w.claude),
+        native_path(&w.claude),
         "--prices-file".into(),
-        text(&fixture("prices.json")),
+        native_path(fixture("prices.json")),
     ]
 }
 
@@ -239,14 +230,14 @@ fn analysis(
     use token_max::{Reach, ScanOptions, scan};
 
     let mut discovery = DiscoveryOptions {
-        home: text(&w.home),
+        home: native_path(&w.home),
         env: Env::default(),
         claude_dirs: vec![],
         codex_dirs: vec![],
         t3_dirs: vec![],
-        managed_settings_file: text(&w.home.join("managed-settings.json")),
-        codex_system_config_file: text(&w.home.join("system.toml")),
-        codex_requirements_file: text(&w.home.join("requirements.toml")),
+        managed_settings_file: native_path(w.home.join("managed-settings.json")),
+        codex_system_config_file: native_path(w.home.join("system.toml")),
+        codex_requirements_file: native_path(w.home.join("requirements.toml")),
         defaults: false,
         billing: Default::default(),
     };
@@ -311,11 +302,11 @@ fn conditional_codex_prices_keep_assumptions_in_the_analysis_and_text() {
         std::fs::write(&path, format!("{meta}\n{context}\n{usage}\n")).unwrap();
         let base = vec![
             "--codex-dir".into(),
-            text(&w.codex),
+            native_path(&w.codex),
             "--prices-file".into(),
-            text(&fixture("prices.json")),
+            native_path(fixture("prices.json")),
         ];
-        let report = analysis(&w, |d| d.codex_dirs = vec![text(&w.codex)], 1.0);
+        let report = analysis(&w, |d| d.codex_dirs = vec![native_path(&w.codex)], 1.0);
         let row = &report.historical[0];
         assert_eq!(row.cost.total_usd.map(Usd::to_f64), expected, "{tier:?}");
         assert_eq!(row.conditional_requests, u64::from(expected.is_some()));
@@ -424,7 +415,7 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     assert_eq!(
         stdout,
         format!(
-            "token-max vibes: 1 piece of advice the transcripts can't price.\n  None of it is measured, so none of it is a verdict. Each card names whose advice it is.\n\n  [1/1] Bash timeout cap  not measured\n        2h -> 4m\n        What    The longest Claude waits on a foreground Bash command before Claude Code moves it to the background.\n        Advice  A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess. A command past the cap is not killed: it keeps running in the background, where Claude checks on it in later turns. Some commands need longer in the foreground; keep the cap if yours do. Project and local settings, which override it, are not read.\n        Source  The maintainer's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching\n        Change  \"env\": {{\"BASH_MAX_TIMEOUT_MS\": \"240000\"}} in ~{}.claude{}settings.json\n",
+            "token-max vibes: 1 piece of advice the transcripts can't price.\n  None of it is measured, so none of it is a verdict. Each card names whose advice it is.\n\n  [1/2] Bash timeout cap  not measured\n        2h -> 4m\n        What    The longest Claude waits on a foreground Bash command before Claude Code moves it to the background.\n        Advice  A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess. A command past the cap is not killed: it keeps running in the background, where Claude checks on it in later turns. Some commands need longer in the foreground; keep the cap if yours do. Project and local settings, which override it, are not read.\n        Source  The maintainer's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching\n        Change  \"env\": {{\"BASH_MAX_TIMEOUT_MS\": \"240000\"}} in ~{}.claude{}settings.json\n\n  [2/2] Main-session default  not measured\n        What    The model and reasoning effort a main session starts with.\n        Advice  Defaults to claude-opus-5-5 at medium, the maintainer's pick. Ran claude-opus-5-5 at an unrecorded effort 2 times, $0.01.\n        Source  The maintainer's pick of a default. Anthropic's guidance: https://claude.dev/blog/which-claude-model-should-you-build-with/ https://code.claude.com/docs/en/model-config#choose-an-effort-level\n",
             std::path::MAIN_SEPARATOR,
             std::path::MAIN_SEPARATOR
         )
@@ -445,11 +436,11 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     assert_eq!(status, 0);
     // The heading counts advice as doctor does, so the card that advises nothing is not in it.
     assert!(
-        stdout.starts_with("token-max vibes: no advice for these settings.\n\n  [1/1] "),
+        stdout.starts_with("token-max vibes: no advice for these settings.\n\n  [1/2] "),
         "{stdout}"
     );
     assert!(
-        stdout.contains("\n  [1/1] Bash timeout cap  not measured\n        What    ")
+        stdout.contains("\n  [1/2] Bash timeout cap  not measured\n        What    ")
             && stdout.contains("Capped at 55m, the margin suggested under the 1h cache, the current main-agent cache TTL setting.")
             && !stdout.contains("Change"),
         "{stdout}"
@@ -577,7 +568,7 @@ fn a_tool_only_recommendation_sets_exit_one() {
     ));
     assert_eq!(status, 1, "{stderr}\n{stdout}");
     assert!(stdout.contains("mcp__docs__write"), "{stdout}");
-    let report = analysis(&w, |d| d.claude_dirs = vec![text(&w.claude)], 0.001);
+    let report = analysis(&w, |d| d.claude_dirs = vec![native_path(&w.claude)], 0.001);
     assert!(report.checks.iter().all(|c| c.action() != Action::Change));
     let server = report.context.iter().find(|c| c.name == "docs").unwrap();
     assert_eq!(server.verdict, Some(Verdict::Keep));
@@ -654,7 +645,7 @@ fn renders_priced_compaction_windows_alongside_ttl_checks() {
     std::fs::write(w.transcript(), compaction_transcript()).unwrap();
     w.settings(r#"{"promptCacheTtl":"5m","autoCompactWindow":400000}"#);
     let base = prices_args(&w);
-    let report = analysis(&w, |d| d.claude_dirs = vec![text(&w.claude)], 1.0);
+    let report = analysis(&w, |d| d.claude_dirs = vec![native_path(&w.claude)], 1.0);
     let CheckResult::Compaction(result) =
         check(&report, |c| matches!(c, CheckResult::Compaction(_)))
     else {
@@ -723,8 +714,8 @@ fn text_handles_all_clear_empty_windows_missing_histories_offline_prices_and_hel
     assert_eq!(status, 0, "{stderr}");
     assert!(stdout.contains("No requests found"));
     assert!(stdout.contains("earlier --since"));
-    let cache = text(&fixture("prices.json"));
-    let claude = text(&w.claude);
+    let cache = native_path(fixture("prices.json"));
+    let claude = native_path(&w.claude);
     let (status, stdout, stderr) = run(&mut command(
         &w,
         &[
@@ -738,7 +729,7 @@ fn text_handles_all_clear_empty_windows_missing_histories_offline_prices_and_hel
     ));
     assert_eq!(status, 0, "{stderr}");
     assert!(stdout.contains("Prices: cached from"));
-    let absent = text(&w.home.join("absent-prices"));
+    let absent = native_path(w.home.join("absent-prices"));
     let (status, stdout, stderr) = run(&mut command(
         &w,
         &[
@@ -889,7 +880,7 @@ fn sessions_prints_one_json_line_per_session_and_only_takes_its_options() {
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0]["harness"], "claude");
     assert_eq!(lines[0]["session"], "session-a");
-    assert_eq!(lines[0]["files"], json!([text(&w.transcript())]));
+    assert_eq!(lines[0]["files"], json!([native_path(w.transcript())]));
     assert!(lines[0]["costUsd"].as_f64().unwrap() > 0.0);
     // This host, and no directory to find a checkout in.
     for field in ["host", "cwd", "repositories", "repositoriesSource"] {
@@ -1017,14 +1008,14 @@ fn explicit_windows_match_the_library_replay() {
         let since = 18 * MIN;
         let selected = scan(&ScanOptions {
             discovery: DiscoveryOptions {
-                home: text(&w.home),
+                home: native_path(&w.home),
                 env: Env::default(),
                 claude_dirs: vec![],
                 codex_dirs: vec![],
                 t3_dirs: vec![],
-                managed_settings_file: text(&w.home.join("managed-settings.json")),
-                codex_system_config_file: text(&w.home.join("system.toml")),
-                codex_requirements_file: text(&w.home.join("requirements.toml")),
+                managed_settings_file: native_path(w.home.join("managed-settings.json")),
+                codex_system_config_file: native_path(w.home.join("system.toml")),
+                codex_requirements_file: native_path(w.home.join("requirements.toml")),
                 defaults: false,
                 billing: Default::default(),
             },
@@ -1045,8 +1036,8 @@ fn explicit_windows_match_the_library_replay() {
             matches!(report.checks.first(), Some(CheckResult::Ttl(_))),
             "{mode}: no TTL check"
         );
-        let claude = text(&w.claude);
-        let prices = text(&fixture("prices.json"));
+        let claude = native_path(&w.claude);
+        let prices = native_path(fixture("prices.json"));
         let window = iso(18);
         let mut c = command(
             &w,
@@ -1303,9 +1294,9 @@ fn a_fast_setting_with_no_recorded_usage_has_no_verdict_and_skips_unreadable_lin
     std::fs::write(&settings, config).unwrap();
     let base = [
         "--codex-dir".to_string(),
-        text(&w.codex),
+        native_path(&w.codex),
         "--prices-file".into(),
-        text(&fixture("prices.json")),
+        native_path(fixture("prices.json")),
     ];
     let invoke = || {
         let mut c = command(&w, &args(&base, &[]));
@@ -1316,7 +1307,7 @@ fn a_fast_setting_with_no_recorded_usage_has_no_verdict_and_skips_unreadable_lin
     let (status, stdout, stderr) = invoke();
     assert_eq!(status, 0, "{stderr}");
     assert_eq!(report_line(&stdout, "Fast mode").0, "unknown", "{stdout}");
-    let report = analysis(&w, |d| d.codex_dirs = vec![text(&w.codex)], 1.0);
+    let report = analysis(&w, |d| d.codex_dirs = vec![native_path(&w.codex)], 1.0);
     let fast = check(&report, |c| matches!(c, CheckResult::Speed(_)));
     let CheckResult::Speed(fast) = fast else {
         unreachable!()
@@ -1579,9 +1570,9 @@ mod unix {
         std::fs::write(&costly, prices.to_string()).unwrap();
         let base = [
             "--claude-dir".to_string(),
-            text(&w.claude),
+            native_path(&w.claude),
             "--prices-file".into(),
-            text(&costly),
+            native_path(&costly),
         ];
         let mut c = command(&w, &args(&base, &["--plain"]));
         let input = Pty::new(80);
@@ -1672,7 +1663,7 @@ mod unix {
             "\n  token-max vibes has 1 piece of advice the transcripts can't price. Show it?\n  [y]es, [n]o: ",
         );
         let advice = at("\ntoken-max vibes: 1 piece of advice the transcripts can't price.\n");
-        let card = at("\n  [1/1] Bash timeout cap ");
+        let card = at("\n  [1/2] Bash timeout cap ");
         assert_eq!(
             words(&stdout[advice..card]),
             "token-max vibes: 1 piece of advice the transcripts can't price. None of it is measured, so none of it is a verdict. Each card names whose advice it is. Nothing is written until you confirm the list at the end."
@@ -1685,9 +1676,12 @@ mod unix {
             .find("\n  ~/.claude/settings.json\n  @@")
             .map(|at| card + at)
             .unwrap_or_else(|| panic!("{stdout}"));
-        let entry = words(&stdout[card..again]);
+        // The card on the default advises nothing, so it asks nothing before the diff.
+        let next = at("\n  [2/2] Main-session default ");
+        assert!(next < again, "{stdout}");
+        let entry = words(&stdout[card..next]);
         assert!(
-            entry.starts_with("[1/1] Bash timeout cap not measured 2h -> 4m What The longest Claude waits on a foreground Bash command before Claude Code moves it to the background. Advice A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess."),
+            entry.starts_with("[1/2] Bash timeout cap not measured 2h -> 4m What The longest Claude waits on a foreground Bash command before Claude Code moves it to the background. Advice A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess."),
             "{entry}"
         );
         assert!(
@@ -1937,8 +1931,8 @@ mod unix {
     fn sigint_and_sigterm_cancel_a_pending_price_fetch_atomically() {
         let w = Workspace::new();
         w.fixture();
-        let claude = text(&w.claude);
-        let cache = text(&w.home.join("prices.json"));
+        let claude = native_path(&w.claude);
+        let cache = native_path(w.home.join("prices.json"));
         for sig in [libc::SIGINT, libc::SIGTERM] {
             {
                 let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -2003,7 +1997,7 @@ fn background_reports_keep_project_overrides_and_unresolved_history_separate() {
         for line in template.lines() {
             let mut row: Value = serde_json::from_str(line).unwrap();
             row["sessionId"] = format!("session-{index}").into();
-            row["cwd"] = cwd.as_ref().map(|p| text(p)).into();
+            row["cwd"] = cwd.as_ref().map(native_path).into();
             row["entrypoint"] = "cli".into();
             if row["type"] == "api-request" {
                 row["querySource"] = "repl_main_thread".into();
@@ -2025,7 +2019,7 @@ fn background_reports_keep_project_overrides_and_unresolved_history_separate() {
         )
         .unwrap();
     }
-    let report = analysis(&w, |d| d.claude_dirs = vec![text(&w.claude)], 0.0);
+    let report = analysis(&w, |d| d.claude_dirs = vec![native_path(&w.claude)], 0.0);
     let feature = |directory: Option<&Path>, name: BackgroundFeature| {
         report
             .checks
@@ -2033,7 +2027,7 @@ fn background_reports_keep_project_overrides_and_unresolved_history_separate() {
             .find_map(|c| match c {
                 CheckResult::Background(b)
                     if b.feature == name
-                        && b.directories[0].as_deref() == directory.map(text).as_deref() =>
+                        && b.directories[0].as_deref() == directory.map(native_path).as_deref() =>
                 {
                     Some(b)
                 }
@@ -2047,7 +2041,7 @@ fn background_reports_keep_project_overrides_and_unresolved_history_separate() {
     assert_eq!(disabled.base.requests, 2);
     assert_eq!(
         disabled.off_file.as_deref(),
-        Some(&*text(&off.join(".claude/settings.local.json")))
+        Some(&*native_path(off.join(".claude/settings.local.json")))
     );
     // Uses are not recorded, so a cost above the per-use limit is only advisory.
     let enabled = feature(Some(&on), BackgroundFeature::PromptSuggestions);
@@ -2096,9 +2090,9 @@ fn t3_cli_keeps_native_usage_and_reports_optional_and_auxiliary_gaps() {
     std::fs::write(w.transcript(), native).unwrap();
     let state = w.home.join("selected-t3");
     std::fs::create_dir_all(&state).unwrap();
-    std::fs::write(state.join("settings.json"),json!({"idleCompaction":"off","providerInstances":{"claudeAgent":{"driver":"claudeAgent","config":{"homePath":text(&w.claude),"autoCompactWindow":"300000"}},"other":{"driver":"unsupported","config":{"homePath":{"PRIVATE_CONFIG":"not-a-home"}}}}}).to_string()).unwrap();
-    let state = text(&state);
-    let prices = text(&fixture("prices.json"));
+    std::fs::write(state.join("settings.json"),json!({"idleCompaction":"off","providerInstances":{"claudeAgent":{"driver":"claudeAgent","config":{"homePath":native_path(&w.claude),"autoCompactWindow":"300000"}},"other":{"driver":"unsupported","config":{"homePath":{"PRIVATE_CONFIG":"not-a-home"}}}}}).to_string()).unwrap();
+    let state = native_path(&state);
+    let prices = native_path(fixture("prices.json"));
     let invoke = |output| {
         run(&mut command(
             &w,
@@ -2184,10 +2178,10 @@ fn defaults_report_pretends_the_settings_files_away_and_writes_nothing() {
             _ => {}
         }
         let input = 1000 * tools.len();
-        records.push(json!({"type": "api-request", "id": format!("api-{i}"), "cwd": text(&repo), "sessionId": format!("session-{i}"), "timestamp": format!("2026-11-0{}T00:00:00Z", i + 1), "params": {
+        records.push(json!({"type": "api-request", "id": format!("api-{i}"), "cwd": native_path(&repo), "sessionId": format!("session-{i}"), "timestamp": format!("2026-11-0{}T00:00:00Z", i + 1), "params": {
             "model": "claude-opus-5-5", "system": "synthetic system", "messages": [], "tools": tools
         }}));
-        records.push(json!({"type": "assistant", "uuid": format!("block-{i}"), "cwd": text(&repo), "sessionId": format!("session-{i}"), "timestamp": format!("2026-11-0{}T00:00:01Z", i + 1), "entrypoint": "sdk-ts", "requestRef": format!("api-{i}"), "message": {
+        records.push(json!({"type": "assistant", "uuid": format!("block-{i}"), "cwd": native_path(&repo), "sessionId": format!("session-{i}"), "timestamp": format!("2026-11-0{}T00:00:01Z", i + 1), "entrypoint": "sdk-ts", "requestRef": format!("api-{i}"), "message": {
             "id": format!("message-{i}"), "model": "claude-opus-5-5", "content": [{"type": "tool_use", "id": format!("call-{i}"), "name": "Bash", "input": {}}], "usage": {
                 "input_tokens": input, "output_tokens": 100, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
                 "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 0}, "service_tier": "standard", "speed": "standard", "inference_geo": "global"
@@ -2267,7 +2261,7 @@ fn defaults_report_pretends_the_settings_files_away_and_writes_nothing() {
         let report = analysis(
             &w,
             |d| {
-                d.claude_dirs = vec![text(&w.claude)];
+                d.claude_dirs = vec![native_path(&w.claude)];
                 if defaults {
                     d.pretend_defaults();
                 }
@@ -2308,7 +2302,7 @@ fn defaults_report_pretends_the_settings_files_away_and_writes_nothing() {
     let report = analysis(
         &w,
         |d| {
-            d.claude_dirs = vec![text(&w.claude)];
+            d.claude_dirs = vec![native_path(&w.claude)];
             d.pretend_defaults();
         },
         1.0,

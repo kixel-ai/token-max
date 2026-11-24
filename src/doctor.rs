@@ -17,7 +17,8 @@ use crate::context::{json_value, setting_text, typed_only};
 use crate::mcp::{Definition, Entry, Lock};
 use crate::model::{
     BackgroundFeature, BashCap, Billing, Bucket, CheckResult, CompactionCheck, ContextKind,
-    Control, Harness, Margin, Profile, Reowned, Report, RetentionControl, Setting, Verdict,
+    Control, EffortControl, Harness, Margin, Profile, Reowned, Report, RetentionControl, Setting,
+    Verdict,
 };
 use crate::report::{
     AT_LEAST, Choice, Listing, Origin, Recommendation, Source, UP_TO, about, approx, capitalize,
@@ -189,6 +190,15 @@ impl Edit {
     }
 }
 
+/// The edit adding the MCP server `name` to Claude Code's `deniedMcpServers`.
+fn deny(name: &str) -> Edit {
+    Edit {
+        path: vec!["deniedMcpServers".into()],
+        value: serde_json::json!({ "serverName": name }),
+        op: Op::Append,
+    }
+}
+
 /// Every change the report recommends or suggests, biggest saving first, each with its
 /// edit or the step to take by hand. An edit another line already makes is listed once,
 /// naming both lines. Each fix's description and evidence are empty until `explain` fills them
@@ -312,7 +322,23 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
                     g.kind == ContextKind::McpServer && g.reason == Reason::Unused
                 });
                 if unused && matches!(how, How::Edit(_)) {
-                    removal = crate::mcp::definitions(&c.name, control, &members);
+                    let versions = claude_versions(report, &ids);
+                    let whole = ends_at(&c.name, c.details.iter().map(|d| d.name.as_str()));
+                    let own = holds_its_tools(&c.name);
+                    removal = crate::mcp::definitions(&c.name, control, &members)
+                        .into_iter()
+                        .map(|d| match d {
+                            Definition::Entry(entry) if !own => Definition::Manual {
+                                step: format!("remove {} from {}", entry.text(), entry.file),
+                                reason: SHORTER.into(),
+                            },
+                            Definition::Deny(deny) if !own => deny.by_hand(SHORTER),
+                            Definition::Deny(deny) if !whole => {
+                                deny.by_hand("its tools' names do not show where its name ends")
+                            }
+                            d => gate(d, &versions),
+                        })
+                        .collect();
                 }
                 how
             }
@@ -337,6 +363,68 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
         group,
         removal,
     }
+}
+
+/// Whether a tool family's recorded `tools` end its name at `server`. The family's name
+/// stops at its tools' first `__`, so a tool holding another, or starting with `_`, may
+/// belong to a longer name, such as `mcp__docs__v2__read` to `docs__v2` or
+/// `mcp__docs___read` to `docs_`.
+fn ends_at<'a>(server: &str, mut tools: impl Iterator<Item = &'a str>) -> bool {
+    let family = format!("mcp__{server}__");
+    !tools.any(|tool| {
+        tool.strip_prefix(&family)
+            .is_some_and(|tool| tool.contains("__") || tool.starts_with('_'))
+    })
+}
+
+/// Why a server named with `__`, or ending in `_`, is not shown unused.
+const SHORTER: &str =
+    "its tools are counted under a shorter name, so no use of it shows on this line";
+
+/// Whether a server's own tools would be counted on its line: the line of a tool stops at
+/// its name's first `__`, so `docs__v2`'s tools count toward `docs`, and `docs_`'s
+/// (`mcp__docs___read`) too.
+fn holds_its_tools(server: &str) -> bool {
+    !server.contains("__") && !server.ends_with('_')
+}
+
+/// The Claude Code each profile in `ids` last recorded a request from, for those with any.
+fn claude_versions<'r>(report: &'r Report, ids: &[&str]) -> Vec<Option<&'r str>> {
+    ids.iter()
+        .filter_map(|id| {
+            let mut requests = report.scan.requests.iter().rev();
+            let last = requests.find(|r| r.profiles.iter().any(|p| p == id))?;
+            Some(last.version.as_deref())
+        })
+        .collect()
+}
+
+/// A `deniedMcpServers` entry where every profile's latest Claude Code matches it by name,
+/// else its step by hand.
+fn gate(definition: Definition, versions: &[Option<&str>]) -> Definition {
+    let Definition::Deny(deny) = definition else {
+        return definition;
+    };
+    let (minor, patch) = deny.since;
+    if !versions.is_empty()
+        && versions
+            .iter()
+            .all(|v| crate::version::claude_at_least(*v, minor, patch))
+    {
+        return Definition::Deny(deny);
+    }
+    // The first version that fails the check, which may be unrecorded.
+    let ran = versions
+        .iter()
+        .find(|v| !crate::version::claude_at_least(**v, minor, patch))
+        .copied()
+        .flatten()
+        .map_or("an unrecorded Claude Code".to_string(), |v| {
+            format!("Claude Code {v}")
+        });
+    deny.by_hand(&format!(
+        "its latest sessions ran {ran}, before 2.{minor}.{patch}, where a deniedMcpServers entry blocks just this server by name"
+    ))
 }
 
 /// The group a feature's change joins: its kind and why it is offered, as its verdict says.
@@ -675,6 +763,135 @@ pub(crate) fn retention_how(control: &RetentionControl, days: u64, profile: &Pro
         )],
         format!("set cleanupPeriodDays to {days}"),
     )
+}
+
+/// How to move a main-session default to the maintainer's pick in `profile`'s settings,
+/// the model and the effort in one edit; None when the default is the pick or one they accept.
+pub(crate) fn default_how(control: &EffortControl, profile: &Profile) -> Option<How> {
+    if crate::effort::accepted(control, profile.harness) {
+        return None;
+    }
+    let ((model, effort), _) = crate::effort::pick(profile.harness);
+    let file = profile.settings_file.as_str();
+    // Each change: the setting that decides it, its edit when it is in `file`, and its step.
+    let mut changes: Vec<(&str, Option<Edit>, String)> = vec![];
+    // The pick's model may take its level from another setting than the current model's.
+    let target = control.picked.as_deref().unwrap_or(control);
+    // A Claude pick is unresolved only when a setting only it reads is invalid, and that
+    // setting would decide its level, so it is fixed first. A Codex pick's unknown default
+    // does not matter, as the edit names the level.
+    if let Some(why) = target
+        .unresolved
+        .as_ref()
+        .filter(|_| profile.harness == Harness::Claude)
+    {
+        return Some(How::Manual {
+            step: format!(
+                "fix {}, then set the default to {model} at {effort}",
+                target.owner
+            ),
+            reason: why.clone(),
+        });
+    }
+    if control.model.as_deref() != Some(model) {
+        // As the settings will name it, which keeps a `[1m]` context window.
+        let model = target.model.as_deref().unwrap_or(model);
+        let owner = control.model_owner.as_str();
+        let (setting, edit) = if owner == crate::effort::RECORDED {
+            (format!("{file}:model"), Some(Edit::set("model", model)))
+        } else if names(owner, file, "model") {
+            (owner.to_string(), Some(Edit::set("model", model)))
+        } else if profile.harness == Harness::Claude && names(owner, file, "env.ANTHROPIC_MODEL") {
+            (owner.to_string(), Some(env("ANTHROPIC_MODEL", model)))
+        } else {
+            (owner.to_string(), None)
+        };
+        let step = match &control.provider {
+            // A cloud provider names its models its own way, which token-max does not write.
+            Some(provider) => {
+                format!("set {setting} to {model}, in {provider}'s spelling of that model")
+            }
+            None => format!("set {setting} to {model}"),
+        };
+        changes.push((owner, edit, step));
+    }
+    if target.level.as_deref() != Some(effort) {
+        let owner = target.owner.as_str();
+        let setting = owner
+            .strip_suffix(crate::effort::MODEL_DEFAULT)
+            .unwrap_or(owner);
+        let edit = setting
+            .strip_prefix(file)
+            .and_then(|rest| rest.strip_prefix(':'))
+            .and_then(|key| effort_edit(profile.harness, key, effort));
+        changes.push((owner, edit, format!("set {setting} to {effort}")));
+    }
+    // A cap below the pick's level would lower it again, and caps are raised by hand.
+    for cap in &target.caps {
+        if crate::effort::below(&cap.value, effort) {
+            changes.push((
+                cap.owner.as_str(),
+                None,
+                format!("raise {} to {effort}", cap.owner),
+            ));
+        }
+    }
+    let step = changes
+        .iter()
+        .map(|(_, _, step)| step.as_str())
+        .collect::<Vec<_>>()
+        .join(" and ");
+    if let Some(provider) = &control.provider
+        && control.model.as_deref() != Some(model)
+    {
+        return Some(How::Manual {
+            step,
+            reason: format!(
+                "the profile runs on {provider}, whose model IDs token-max does not write"
+            ),
+        });
+    }
+    let mut edits = vec![];
+    for (owner, edit, _) in changes {
+        match edit {
+            Some(edit) => edits.push(edit),
+            None => return Some(manual(owner, profile, step)),
+        }
+    }
+    Some(How::Edit(Patch {
+        file: file.into(),
+        harness: profile.harness,
+        edits,
+    }))
+}
+
+/// The edit that sets a main-session default level at `key` in the profile's own file, or
+/// None for a key token-max does not write.
+fn effort_edit(harness: Harness, key: &str, level: &str) -> Option<Edit> {
+    let set = |path: Vec<String>| Edit {
+        path,
+        value: level.into(),
+        op: Op::Set,
+    };
+    match harness {
+        // The user file's top-level `effortLevel` never decides the level of a current
+        // model, which is all the pick names.
+        Harness::Claude => {
+            if key == "env.CLAUDE_CODE_EFFORT_LEVEL" {
+                return Some(env("CLAUDE_CODE_EFFORT_LEVEL", level));
+            }
+            // A model's key can hold dots, such as a Bedrock ID, so it is not split.
+            let model = key
+                .strip_prefix("modelSettings.")?
+                .strip_suffix(".effortLevel")?;
+            Some(set(vec![
+                "modelSettings".into(),
+                model.into(),
+                "effortLevel".into(),
+            ]))
+        }
+        Harness::Codex => (key == "model_reasoning_effort").then(|| set(vec![key.into()])),
+    }
 }
 
 fn check_how(result: &CheckResult, profile: &Profile) -> How {
@@ -2134,6 +2351,8 @@ pub enum Event {
     Choose { offer: usize, yes: bool },
     /// After a yes, also remove one of the entries the offer named.
     Remove { offer: usize, entry: usize },
+    /// After a yes, also add one of the offer's `deniedMcpServers` entries.
+    Deny { offer: usize, name: usize },
     /// Remove the configuration of an MCP server that is off already.
     Cleanup { entry: usize },
 }
@@ -2148,6 +2367,8 @@ pub struct Selection {
     events: Vec<Event>,
     /// The offers answered yes, whose entries a removal may name.
     yes: Vec<usize>,
+    /// How many `deniedMcpServers` entries were accepted.
+    denials: usize,
 }
 
 impl Selection {
@@ -2203,6 +2424,21 @@ impl Selection {
                     .ok_or_else(missing)?;
                 self.remove(*target, entry);
             }
+            Event::Deny { offer, name } => {
+                if !self.yes.contains(&offer) {
+                    return Err(format!(
+                        "the walk blocked a server of a change it did not accept ({event:?})"
+                    ));
+                }
+                let offer = offers.offers.get(offer).ok_or_else(missing)?;
+                let name = offer.denials.get(name).ok_or_else(missing)?;
+                let edits = &mut self.at(offer.target).1;
+                let edit = deny(name);
+                if !edits.contains(&edit) {
+                    edits.push(edit);
+                    self.denials += 1;
+                }
+            }
             Event::Cleanup { entry } => {
                 let (target, entry) = offers.cleanup.get(entry).ok_or_else(missing)?;
                 self.remove(*target, entry);
@@ -2234,6 +2470,7 @@ impl Selection {
                 .collect(),
             changes: self.total.changes(),
             removals: self.accepted.iter().map(|(_, _, r)| r.len()).sum(),
+            denials: self.denials,
         }
     }
 }
@@ -2251,6 +2488,8 @@ pub struct Summary {
     changes: usize,
     /// How many MCP server entries are to be removed.
     removals: usize,
+    /// How many MCP servers are to be added to `deniedMcpServers`.
+    denials: usize,
 }
 
 impl Summary {
@@ -2318,7 +2557,8 @@ impl Targets {
     }
 }
 
-/// An offered change, with the MCP server entries it may also remove.
+/// An offered change, with the MCP server entries it may also remove, and the servers it
+/// may also add to `deniedMcpServers` in its own file.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Offer {
@@ -2326,6 +2566,8 @@ struct Offer {
     fix: Fix,
     /// Each entry with its target.
     entries: Vec<(usize, Entry)>,
+    /// Each name to deny, once.
+    denials: Vec<String>,
     /// Removals to make by hand: the step, and why.
     manual: Vec<(String, String)>,
 }
@@ -2460,9 +2702,30 @@ impl Owner {
                 continue;
             }
             let mut entries = vec![];
+            let mut denials: Vec<String> = vec![];
+            let mut named: Vec<&str> = vec![];
             let mut by_hand = vec![];
             for definition in &fix.removal {
                 let definition = match definition {
+                    Definition::Deny(d) if named.contains(&d.name.as_str()) => continue,
+                    Definition::Deny(d) => {
+                        named.push(&d.name);
+                        let Ok(target) = &targets.all[index] else {
+                            unreachable!("the change's target opened")
+                        };
+                        let edits = [patch.edits.as_slice(), &[deny(&d.name)]].concat();
+                        match apply(target, &edits, &[]) {
+                            // Denied already.
+                            Ok(text) if Ok(&text) == apply(target, &patch.edits, &[]).as_ref() => {
+                                continue;
+                            }
+                            Ok(_) => {
+                                denials.push(d.name.clone());
+                                continue;
+                            }
+                            Err(reason) => d.clone().by_hand(&reason),
+                        }
+                    }
                     Definition::Entry(entry) => {
                         offered_entries.push(entry.clone());
                         match targets.entry(entry) {
@@ -2483,6 +2746,7 @@ impl Owner {
                 target: index,
                 fix,
                 entries,
+                denials,
                 manual: by_hand,
             });
         }
@@ -2717,8 +2981,9 @@ impl Walk<'_, '_> {
     }
 
     /// After a yes to turning never-used MCP servers off, offer to remove their configuration
-    /// too, which the confirm then lists; whether the walk goes on. Removals only by hand are
-    /// named without a question.
+    /// and block the servers token-max cannot remove with `deniedMcpServers`, which the
+    /// confirm then lists; whether the walk goes on. Removals only by hand are named without
+    /// a question.
     fn offer_removal(
         &mut self,
         members: &[&Member<'_>],
@@ -2736,39 +3001,74 @@ impl Walk<'_, '_> {
                     .map(|(i, (_, e))| (*m, i, e))
             })
             .collect();
+        let denials: Vec<(&Member<'_>, usize, &String)> = members
+            .iter()
+            .flat_map(|m| m.offer.denials.iter().enumerate().map(|(i, n)| (*m, i, n)))
+            .collect();
+        let count = entries.len() + denials.len();
         let mut text = String::new();
-        if !entries.is_empty() {
+        if count > 0 {
             let stays = if members.len() == 1 {
                 "It stays"
             } else {
                 "They stay"
             };
-            text += &style.line(&format!("{stays} configured; token-max can also remove:"));
+            text += &style.line(&format!("{stays} configured; token-max can also:"));
             for (_, _, entry) in &entries {
-                let place = format!("{} in {}", entry.text(), style.path(&entry.file));
+                let place = format!("remove {} in {}", entry.text(), style.path(&entry.file));
                 text += &style.raw(&place, MARGIN + 2, DIM);
             }
+            for (member, _, name) in &denials {
+                let file = &self.hosts[member.host].offers.files[member.offer.target];
+                let block = format!(
+                    "add {} to deniedMcpServers in {}",
+                    serde_json::json!({ "serverName": name }),
+                    style.path(file)
+                );
+                text += &style.raw(&block, MARGIN + 2, DIM);
+            }
+            if !denials.is_empty() {
+                text += &style.dim(
+                    "Claude Code then connects no server by that name, wherever it is configured.",
+                );
+            }
         }
-        for (step, reason) in members.iter().flat_map(|m| &m.offer.manual) {
-            text += &style.line(&home_in(
-                &format!("To remove it by hand, since {reason}: {step}."),
-                style.home.as_deref(),
-            ));
+        for member in members {
+            // A group's step names its server.
+            let it = match (&member.offer.fix.group, members.len()) {
+                (Some(group), 2..) => group.member.as_str(),
+                _ => "it",
+            };
+            for (step, reason) in &member.offer.manual {
+                text += &style.line(&home_in(
+                    &format!("To remove {it} by hand, since {reason}: {step}."),
+                    style.home.as_deref(),
+                ));
+            }
         }
         write!(output, "{text}")?;
-        if entries.is_empty() {
+        if count == 0 {
             return Ok(true);
         }
-        let question = if entries.len() == 1 {
-            "Remove it too?".to_string()
+        let verb = match (entries.is_empty(), denials.is_empty()) {
+            (false, true) => "Remove",
+            (true, false) => "Block",
+            _ => "Do",
+        };
+        let question = if count == 1 {
+            format!("{verb} it too?")
         } else {
-            format!("Remove all {} too?", entries.len())
+            format!("{verb} all {count} too?")
         };
         let answer = answer(&style.prompt(&question, false), input, output)?;
         if answer == Answer::Yes {
             for (member, entry, _) in entries {
                 let offer = member.index;
                 self.record(member.host, Event::Remove { offer, entry });
+            }
+            for (member, name, _) in denials {
+                let offer = member.index;
+                self.record(member.host, Event::Deny { offer, name });
             }
         }
         Ok(answer != Answer::Quit)
@@ -3135,7 +3435,18 @@ pub fn confirm(
             if removals == 1 { "" } else { "s" }
         ));
     }
-    let question = format!("Write the {} to {files}?", what.join(" and "));
+    let denials: usize = confirm.hosts.iter().map(|(s, _)| s.denials).sum();
+    if denials > 0 {
+        what.push(format!(
+            "{denials} deniedMcpServers entr{}",
+            if denials == 1 { "y" } else { "ies" }
+        ));
+    }
+    let what = match what.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => what.concat(),
+    };
+    let question = format!("Write the {what} to {files}?");
     yes_or_no(&question, style, input, output)
 }
 
@@ -4099,6 +4410,7 @@ mod tests {
         assert_eq!(ask("/home/dev/.claude", &remote, "p\n"), None);
         questions.finish(&mut printed).unwrap();
         let printed = String::from_utf8(printed).unwrap();
+        // slash ok: the home is abbreviated in the string it was given
         assert_eq!(printed.matches("How is ~/.claude-a paid for?").count(), 4);
         assert!(
             printed.contains("How is devbox:~/.claude paid for?"),
@@ -4168,10 +4480,12 @@ mod tests {
         let text = opening(&found, &[], &style(true, Some(100)));
         assert!(text.contains("  ▀█▀ █▀█"), "{text}");
         assert!(
+            // slash ok: the fake /home/u root is abbreviated as given
             text.contains("\n  ✓ Claude Code  ~/.claude  2 transcripts  1.5 GB\n"),
             "{text}"
         );
         assert!(
+            // slash ok: the fake /home/u root is abbreviated as given
             text.contains("\n  ✓ Codex        ~/.codex   1 transcript      1 B\n"),
             "{text}"
         );
@@ -4188,10 +4502,12 @@ mod tests {
         let text = opening(&found, &devbox, &style(true, Some(40)));
         assert!(text.lines().all(|l| l.chars().count() <= 40), "{text}");
         assert!(
+            // slash ok: the fake /home/u root is abbreviated as given
             text.contains("\n  ✓ Claude Code  ~/.claude\n    2 transcripts  1.5 GB\n"),
             "{text}"
         );
         assert!(
+            // slash ok: the fake /home/u root is abbreviated as given
             text.contains("\n  ✓ Codex        ~/.codex\n    1 transcript      1 B\n"),
             "{text}"
         );
@@ -4646,6 +4962,7 @@ mod tests {
             "n\n",
         );
         assert!(
+            // slash ok: the locations are formatted with / and abbreviated as given
             printed.contains("  Which  review (~/a/SKILL.md), review (~/b/SKILL.md), lint.\n"),
             "{printed}"
         );
@@ -5084,7 +5401,20 @@ mod tests {
                         Definition::Entry(b_local.clone()),
                     ],
                 ),
-                server("C", 1.0, &settings, vec![plugin.clone()]),
+                server(
+                    "C",
+                    1.0,
+                    &settings,
+                    vec![
+                        plugin.clone(),
+                        Definition::Deny(crate::mcp::Deny {
+                            name: "claude.ai Gmail".into(),
+                            since: (1, 330),
+                            step: "disconnect it at claude.ai".into(),
+                            reason: "it is a claude.ai connector".into(),
+                        }),
+                    ],
+                ),
             ]
         };
         let off = entry(&config, Harness::Codex, &["mcp_servers", "off"]);
@@ -5106,11 +5436,12 @@ mod tests {
         );
         let sep = std::path::MAIN_SEPARATOR;
         assert!(printed.contains(&format!(
-            "  It stays configured; token-max can also remove:\n    mcpServers.A in ~{sep}.claude.json\n  Remove it too? [y]es, [n]o, [q]uit: "
+            "  It stays configured; token-max can also:\n    remove mcpServers.A in ~{sep}.claude.json\n  Remove it too? [y]es, [n]o, [q]uit: "
         )), "{printed}");
-        // A group's removal is one question, naming what only a person can remove.
+        // A group's removal is one question, with the servers it can only block, naming what
+        // only a person can remove.
         assert!(printed.contains(&format!(
-            "  They stay configured; token-max can also remove:\n    mcpServers.B in ~{sep}.claude.json\n    mcpServers.B of project /p in ~{sep}.claude.json\n  To remove it by hand, since a plugin adds it: uninstall or disable the plugin that provides it.\n  Remove all 2 too? [y]es, [n]o, [q]uit: "
+            "  They stay configured; token-max can also:\n    remove mcpServers.B in ~{sep}.claude.json\n    remove mcpServers.B of project /p in ~{sep}.claude.json\n    add {{\"serverName\":\"claude.ai Gmail\"}} to deniedMcpServers in ~{sep}.claude{sep}settings.json\n  Claude Code then connects no server by that name, wherever it is configured.\n  To remove c by hand, since a plugin adds it: uninstall or disable the plugin that provides it.\n  Do all 3 too? [y]es, [n]o, [q]uit: "
         )), "{printed}");
         assert!(printed.contains(&format!(
             "\n  [3/3] MCP server off  saves nothing\n        off -> removed  Worth considering\n        Why    Its tools are off already, so no session uses this configuration.\n        Where  [mcp_servers.off] in ~{sep}.codex{sep}config.toml\n  Remove it? [y]es, [n]o, [q]uit: "
@@ -5138,7 +5469,9 @@ mod tests {
             "{shown}"
         );
         assert!(
-            shown.contains("Write the 3 accepted changes and 3 removals to "),
+            shown.contains(
+                "Write the 3 accepted changes, 3 removals and 1 deniedMcpServers entry to "
+            ),
             "{shown}"
         );
         // An entry it would remove changed during the walk: nothing is written, since the
@@ -5190,7 +5523,13 @@ mod tests {
             std::fs::read_to_string(&config).unwrap(),
             "model = \"m\" # mine\n\n[mcp_servers.on]\ncommand = \"x\"\n"
         );
-        assert_eq!(written.iter().map(|w| w.edits).sum::<usize>(), 6);
+        assert_eq!(written.iter().map(|w| w.edits).sum::<usize>(), 7);
+        let blocked: Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(
+            blocked["deniedMcpServers"],
+            serde_json::json!([{ "serverName": "claude.ai Gmail" }])
+        );
 
         // A no to the removal keeps the change; a no to the change asks nothing more.
         let mut printed = vec![];
@@ -5206,6 +5545,92 @@ mod tests {
         assert_eq!(printed.matches("too? ").count(), 1, "{printed}");
         assert_eq!(choice(&plan, "A"), &Choice::Accepted);
         assert!(plan.files.iter().all(|p| p.removals.is_empty()));
+    }
+
+    #[test]
+    fn a_server_is_blocked_only_where_its_entry_is_new_and_its_claude_code_matches_it() {
+        let w = Workspace::new();
+        let settings = w.claude.join("settings.json");
+        let blocked = |name: &str| {
+            Definition::Deny(crate::mcp::Deny {
+                name: name.into(),
+                since: (1, 182),
+                step: "uninstall the plugin".into(),
+                reason: "a plugin adds it".into(),
+            })
+        };
+        // Every profile's latest Claude Code must match it by name.
+        let new = [Some("2.1.182"), Some("2.1.331")];
+        assert_eq!(gate(blocked("p"), &new), blocked("p"));
+        let Definition::Manual { step, reason } =
+            gate(blocked("p"), &[Some("2.1.331"), Some("2.1.90"), None])
+        else {
+            panic!("an older Claude Code is a step by hand")
+        };
+        assert_eq!(step, "uninstall the plugin");
+        assert!(
+            reason.starts_with(
+                "a plugin adds it, and its latest sessions ran Claude Code 2.1.90, before 2.1.182"
+            ),
+            "{reason}"
+        );
+        // The reason names the version that failed, even when another was recorded.
+        let Definition::Manual { reason, .. } = gate(blocked("p"), &[Some("2.1.331"), None]) else {
+            panic!("an unrecorded Claude Code is a step by hand")
+        };
+        assert!(
+            reason.contains("ran an unrecorded Claude Code, before"),
+            "{reason}"
+        );
+        assert!(matches!(
+            gate(blocked("p"), &[None]),
+            Definition::Manual { .. }
+        ));
+        assert!(matches!(gate(blocked("p"), &[]), Definition::Manual { .. }));
+
+        // A tool family whose tools may belong to a longer name is not denied by its own.
+        assert!(ends_at(
+            "docs",
+            ["mcp__docs__read", "mcp__docs__write", "discovery"].into_iter()
+        ));
+        assert!(!ends_at(
+            "docs",
+            ["mcp__docs__read", "mcp__docs__v2__read"].into_iter()
+        ));
+        assert!(!ends_at("docs", ["mcp__docs___read"].into_iter()));
+        // A line named by its instructions alone may not hold its own tools.
+        assert!(holds_its_tools("docs") && holds_its_tools("_docs"));
+        assert!(!holds_its_tools("docs__v2") && !holds_its_tools("docs_"));
+
+        // A name the file denies already is not offered again, one name twice is offered
+        // once, and a denylist that is not a list leaves it by hand.
+        std::fs::write(
+            &settings,
+            r#"{"deniedMcpServers": [{"serverName": "old"}]}"#,
+        )
+        .unwrap();
+        let fix = server(
+            "A",
+            5.0,
+            &settings,
+            vec![blocked("old"), blocked("new"), blocked("new")],
+        );
+        let owner = Owner::new(vec![fix.clone()], vec![], None, 0.0);
+        let offer = &owner.offers().offers[0];
+        assert_eq!(offer.denials, ["new"]);
+        assert!(offer.manual.is_empty());
+        std::fs::write(&settings, r#"{"deniedMcpServers": {}}"#).unwrap();
+        let owner = Owner::new(vec![fix], vec![], None, 0.0);
+        let offer = &owner.offers().offers[0];
+        assert!(offer.denials.is_empty());
+        assert_eq!(offer.manual.len(), 2);
+        assert!(
+            offer.manual[0]
+                .1
+                .starts_with("a plugin adds it, and deniedMcpServers is not a list"),
+            "{:?}",
+            offer.manual
+        );
     }
 
     /// A change adding `key` to `file`, as the walk accepts it.
@@ -5541,5 +5966,240 @@ mod tests {
         );
         // A value over several lines keeps them, so the diff's line numbers match the file.
         assert_eq!(masked.lines().count(), text.lines().count());
+    }
+
+    /// The main-session default `file` gives on `harness`, resolved as discovery does.
+    fn default_in(file: &str, harness: Harness, env: &[(&str, &str)]) -> EffortControl {
+        let config = crate::discovery::settings(file, harness).unwrap();
+        let scopes = [crate::controls::SettingsScope {
+            config: &config,
+            file,
+        }];
+        let env = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let catalog: IndexMap<String, crate::effort::CodexModel> = [(
+            "gpt-6.2-sol".to_string(),
+            crate::effort::CodexModel {
+                default: "low".into(),
+            },
+        )]
+        .into_iter()
+        .collect();
+        match harness {
+            Harness::Claude => crate::effort::claude_effort(&scopes, file, &env, None),
+            Harness::Codex => crate::effort::codex_effort(&scopes, file, Some(&catalog), None),
+        }
+        .unwrap()
+    }
+
+    /// Accept `how` as a `vibes` card's one edit and write it.
+    fn accept(how: How) {
+        let item = crate::vibes::Item {
+            name: "Main-session default".into(),
+            value: String::new(),
+            what: String::new(),
+            text: String::new(),
+            sources: vec![],
+            how: Some(how),
+            quiet: false,
+        };
+        let owner = crate::vibes::owner(&[item], None, 100.0);
+        let plan = owner
+            .plan(&[Event::Choose {
+                offer: 0,
+                yes: true,
+            }])
+            .unwrap();
+        assert_eq!(write(&plan).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_default_moves_to_the_pick_in_one_edit_and_resolves_to_it_after() {
+        use crate::test_support::make_profile;
+        let w = Workspace::new();
+        let claude = make_profile("claude", &w.claude.to_string_lossy());
+        let file = claude.settings_file.clone();
+        // The model and the level its variable sets, both in the user file: one edit of two keys.
+        std::fs::write(
+            &file,
+            r#"{"model": "claude-fable-5-2", "env": {"CLAUDE_CODE_EFFORT_LEVEL": "xhigh"}}"#,
+        )
+        .unwrap();
+        let control = default_in(&file, Harness::Claude, &[]);
+        let Some(How::Edit(patch)) = default_how(&control, &claude) else {
+            panic!("both settings are in the user file")
+        };
+        assert_eq!(
+            patch.edits,
+            [
+                Edit::set("model", "claude-opus-5-5"),
+                env("CLAUDE_CODE_EFFORT_LEVEL", "medium")
+            ]
+        );
+        accept(How::Edit(patch));
+        // Read again, the settings give the pick, which has nothing more to change.
+        let after = default_in(&file, Harness::Claude, &[]);
+        assert_eq!(
+            (after.model.as_deref(), after.effective.as_deref()),
+            (Some("claude-opus-5-5"), Some("medium"))
+        );
+        assert!(crate::effort::accepted(&after, Harness::Claude));
+        assert_eq!(default_how(&after, &claude), None);
+        // Only the level: the pick's model's own entry, keyed as the file spells it.
+        std::fs::write(
+            &file,
+            r#"{"model": "claude-opus-5-5", "modelSettings": {"claude-opus-5-5[1m]": {"effortLevel": "low"}}}"#,
+        )
+        .unwrap();
+        let control = default_in(&file, Harness::Claude, &[]);
+        let Some(How::Edit(patch)) = default_how(&control, &claude) else {
+            panic!("the level is in the user file")
+        };
+        let path: Vec<&str> = patch.edits[0].path.iter().map(String::as_str).collect();
+        assert_eq!(
+            path,
+            ["modelSettings", "claude-opus-5-5[1m]", "effortLevel"]
+        );
+        assert_eq!(patch.edits.len(), 1);
+        // A shell variable outranks the file, so the whole change is by hand, naming each step.
+        std::fs::write(&file, r#"{"model": "claude-fable-5-2"}"#).unwrap();
+        let control = default_in(
+            &file,
+            Harness::Claude,
+            &[("CLAUDE_CODE_EFFORT_LEVEL", "max")],
+        );
+        let Some(How::Manual { step, reason }) = default_how(&control, &claude) else {
+            panic!("a shell variable is set by hand")
+        };
+        assert_eq!(
+            step,
+            format!(
+                "set {file}:model to claude-opus-5-5 and set CLAUDE_CODE_EFFORT_LEVEL to medium"
+            )
+        );
+        assert!(
+            reason.contains("CLAUDE_CODE_EFFORT_LEVEL environment variable"),
+            "{reason}"
+        );
+        // A cap below the pick's level is raised by hand too.
+        std::fs::write(&file, r#"{"maxEffortLevel": "low"}"#).unwrap();
+        let control = default_in(
+            &file,
+            Harness::Claude,
+            &[("ANTHROPIC_MODEL", "claude-opus-5-5")],
+        );
+        let Some(How::Manual { step, .. }) = default_how(&control, &claude) else {
+            panic!("a cap is raised by hand")
+        };
+        assert!(
+            step.ends_with(&format!("raise {file}:maxEffortLevel to medium")),
+            "{step}"
+        );
+        // A `[1m]` context window carries over to the pick.
+        std::fs::write(&file, r#"{"model": "claude-fable-5-2[1M]"}"#).unwrap();
+        let control = default_in(&file, Harness::Claude, &[]);
+        let Some(How::Edit(patch)) = default_how(&control, &claude) else {
+            panic!("the model is in the user file")
+        };
+        assert_eq!(patch.edits, [Edit::set("model", "claude-opus-5-5[1m]")]);
+        // A cloud provider spells its models its own way, so the model is changed by hand,
+        // and the step names the level too.
+        std::fs::write(
+            &file,
+            r#"{"model": "claude-fable-5-2", "env": {"CLAUDE_CODE_EFFORT_LEVEL": "max"}}"#,
+        )
+        .unwrap();
+        let control = default_in(&file, Harness::Claude, &[("CLAUDE_CODE_USE_BEDROCK", "1")]);
+        let Some(How::Manual { step, reason }) = default_how(&control, &claude) else {
+            panic!("a provider's model is set by hand")
+        };
+        assert!(
+            step.contains("in amazon-bedrock's spelling of that model")
+                && step.ends_with("to medium"),
+            "{step}"
+        );
+        assert!(reason.contains("amazon-bedrock"), "{reason}");
+        // A null model in a file above the user file outranks the edit, so it is by hand.
+        std::fs::write(&file, r#"{"model": "claude-fable-5-2"}"#).unwrap();
+        let user = crate::discovery::settings(&file, Harness::Claude).unwrap();
+        let project: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"model": null}"#).unwrap();
+        let scopes = [
+            crate::controls::SettingsScope {
+                config: &user,
+                file: &file,
+            },
+            crate::controls::SettingsScope {
+                config: &project,
+                file: "/repo/.claude/settings.json",
+            },
+        ];
+        let control = crate::effort::claude_effort(
+            &scopes,
+            &file,
+            &Default::default(),
+            Some("claude-fable-5-2"),
+        )
+        .unwrap();
+        let Some(How::Manual { step, .. }) = default_how(&control, &claude) else {
+            panic!("a null model above the user file is changed by hand")
+        };
+        assert!(step.contains("/repo/.claude/settings.json:model"), "{step}");
+        // An invalid level in the pick's own row is fixed by hand before the switch.
+        std::fs::write(
+            &file,
+            r#"{"model": "claude-fable-5-2", "modelSettings": {"claude-opus-5-5": {"effortLevel": "max"}}}"#,
+        )
+        .unwrap();
+        let control = default_in(&file, Harness::Claude, &[]);
+        let Some(How::Manual { step, reason }) = default_how(&control, &claude) else {
+            panic!("an invalid level the pick reads is fixed by hand")
+        };
+        assert!(step.starts_with(&format!("fix {file}, then")), "{step}");
+        assert!(
+            reason.starts_with("invalid modelSettings effortLevel"),
+            "{reason}"
+        );
+        // A home whose path holds " (" still takes the edit.
+        let odd = w.home.join("a (b)");
+        std::fs::create_dir_all(&odd).unwrap();
+        let odd = make_profile("odd", &odd.to_string_lossy());
+        std::fs::write(
+            &odd.settings_file,
+            r#"{"model": "claude-opus-5-5", "env": {"CLAUDE_CODE_EFFORT_LEVEL": "xhigh"}}"#,
+        )
+        .unwrap();
+        let control = default_in(&odd.settings_file, Harness::Claude, &[]);
+        assert!(matches!(default_how(&control, &odd), Some(How::Edit(_))));
+
+        // Codex: no model set, so the user file takes both, and the pick's level is not its default.
+        let mut codex = make_profile("codex", &w.codex.to_string_lossy());
+        codex.harness = Harness::Codex;
+        codex.settings_file = format!("{}/config.toml", w.codex.to_string_lossy());
+        let file = codex.settings_file.clone();
+        std::fs::write(&file, "model_reasoning_effort = \"ultra\"\n").unwrap();
+        let control = default_in(&file, Harness::Codex, &[]);
+        assert_eq!(control.model_owner, crate::effort::RECORDED);
+        let how = default_how(&control, &codex).expect("ultra is off the pick");
+        accept(how);
+        let after = default_in(&file, Harness::Codex, &[]);
+        assert_eq!(
+            (after.model.as_deref(), after.effective.as_deref()),
+            (Some("gpt-6.2-sol"), Some("high"))
+        );
+        assert_eq!(default_how(&after, &codex), None);
+        // Codex's built-in OpenAI provider, named, still takes the edit; another is by hand.
+        for (provider, edited) in [("openai", true), ("azure", false)] {
+            std::fs::write(
+                &file,
+                format!("model_provider = \"{provider}\"\nmodel = \"gpt-6.1-sol\"\n"),
+            )
+            .unwrap();
+            let control = default_in(&file, Harness::Codex, &[]);
+            let how = default_how(&control, &codex).expect("off the pick");
+            assert_eq!(matches!(how, How::Edit(_)), edited, "{provider}");
+        }
     }
 }

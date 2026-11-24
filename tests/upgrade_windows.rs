@@ -98,7 +98,9 @@ mod windows {
         // Without it, Winsock cannot open a socket.
         env.extend(std::env::var("SystemRoot").map(|root| ("SystemRoot".into(), root)));
 
-        let (code, screen) = on_console(&exe, &args, &env, b"y\r");
+        // After the yes, what a failed upgrade's walk needs to end: skip how the profile pays,
+        // then quit. A rerun never reads them.
+        let (code, screen) = on_console(&exe, &args, &env, b"y\rs\rq\r");
         let screen = words(&screen);
         assert_eq!(code, RERUN_CODE as u32, "{screen}");
         for said in [
@@ -131,10 +133,7 @@ mod windows {
             .stdin(Stdio::null())
             .stdout(Stdio::null());
         let output = next.output().unwrap();
-        assert!(
-            output.status.code().is_some_and(|code| code < 2),
-            "{output:?}"
-        );
+        assert!(matches!(output.status.code(), Some(0 | 1)), "{output:?}");
         assert_eq!(names(&dir), ["token-max.exe"]);
     }
 

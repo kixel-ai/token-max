@@ -1433,7 +1433,8 @@ Claude Code deletes a transcript, with its subagent transcripts and spilled tool
 results, once it is older than `cleanupPeriodDays`, 30 days unless set. token-max
 replays those transcripts, so a shorter period leaves it less history to measure
 and to compare, and a deleted transcript is gone: the setting stops only future
-deletion. When a profile's value is under 365, the card advises 365 and says how
+deletion. Claude Desktop and Cowork transcripts are exempt from the sweep by
+default, so the period is not a limit on every transcript. When a profile's value is under 365, the card advises 365 and says how
 much disk the transcripts the scan read take today, from their sizes. A year is
 the maintainer's pick: a longer period grows disk without bound for a heavy
 user, and 90 days loses longer comparisons. The card names whose file sets the

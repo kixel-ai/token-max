@@ -4758,7 +4758,7 @@ fn retention_item(
             "How long Claude Code keeps session transcripts before its startup sweep deletes them."
                 .into(),
         text: format!(
-            "Claude Code deletes transcripts after {kept}, so token-max can replay no more history than that.{held} Keeping {to} costs disk that grows with use. The setting only stops future deletion: history already deleted is gone. {set_in} Project and local settings, which override it, are not read."
+            "Claude Code deletes eligible transcripts after {kept}, so token-max has less history to replay.{held} Keeping {to} costs disk that grows with use. The setting only stops future deletion: history already deleted is gone. {set_in} Project and local settings, which override it, are not read."
         ),
         sources: [
             RETENTION_PICK,

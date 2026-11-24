@@ -50,6 +50,9 @@ pub struct Releases {
     pub root: PathBuf,
     /// The `/releases` URL, as `TOKEN_MAX_RELEASES` takes it.
     pub url: String,
+    /// What a Windows release packs as `token-max.exe`: this build, unless a test swaps in a
+    /// stand-in. Elsewhere a release packs a shell script.
+    pub binary: PathBuf,
     server: Arc<Mutex<Server>>,
 }
 
@@ -80,7 +83,12 @@ impl Releases {
                 serve(stream.unwrap(), &files, &state, &base);
             }
         });
-        Self { root, url, server }
+        Self {
+            root,
+            url,
+            binary: env!("CARGO_BIN_EXE_token-max").into(),
+            server,
+        }
     }
 
     /// Make `tag` the latest release without publishing its archive.
@@ -103,7 +111,7 @@ impl Releases {
         let dir = self.root.join("files/releases/download").join(tag);
         std::fs::create_dir_all(&stage).unwrap();
         std::fs::create_dir_all(&dir).unwrap();
-        let name = archive(&stage, &dir, tag.trim_start_matches('v'));
+        let name = archive(&stage, &dir, tag.trim_start_matches('v'), &self.binary);
         let bytes = std::fs::read(dir.join(&name)).unwrap();
         let mut hash: String = Sha256::digest(&bytes)
             .iter()
@@ -150,7 +158,7 @@ impl Drop for Releases {
     ),
     target_os = "macos"
 ))]
-fn archive(stage: &Path, dir: &Path, version: &str) -> String {
+fn archive(stage: &Path, dir: &Path, version: &str, _binary: &Path) -> String {
     use std::os::unix::fs::PermissionsExt;
     // A stand-in that reports its version and shows what else it was run with, so the archive
     // stays small.
@@ -179,9 +187,9 @@ fn archive(stage: &Path, dir: &Path, version: &str) -> String {
 }
 
 #[cfg(windows)]
-fn archive(stage: &Path, dir: &Path, _version: &str) -> String {
-    // The real binary: a stand-in would need its own executable.
-    std::fs::copy(env!("CARGO_BIN_EXE_token-max"), stage.join("token-max.exe")).unwrap();
+fn archive(stage: &Path, dir: &Path, _version: &str, binary: &Path) -> String {
+    // A stand-in is an executable of its own, so it reports whatever version its test gives it.
+    std::fs::copy(binary, stage.join("token-max.exe")).unwrap();
     let name = format!("token-max-{TARGET}.zip");
     let status = Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command"])

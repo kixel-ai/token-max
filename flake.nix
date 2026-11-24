@@ -38,6 +38,7 @@
               ./Cargo.lock
               ./src
               ./tests/ssh_windows.rs
+              ./tests/upgrade_windows.rs
             ];
           };
           cargoLock.lockFile = ./Cargo.lock;

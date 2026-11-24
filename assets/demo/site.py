@@ -1,11 +1,12 @@
 """Write max.kixel.me's terminal: the maintainer's `token-max doctor --defaults`, as HTML.
 
 Usage, from the repository root after `cargo build --release`, on the maintainer's host:
-    python3 assets/demo/site.py site/public ~/.claude=p ~/.claude-api-credits=a --since 2026-10-25 --ssh desktop ...
+    python3 assets/demo/site.py site/public ~/.claude=p desktop:~/.claude=p --since 2026-10-25 --ssh desktop ...
 
 Runs the release binary in a pseudo-terminal against this host's own transcripts and those of
 any --ssh destination, passing every argument that is not a PROFILE=ANSWER on to doctor and
-answering each "How is PROFILE paid for?" question with the PROFILE=ANSWER given for it, and replaces
+answering each "How is PROFILE paid for?" question with the PROFILE=ANSWER given for it, a
+destination's PROFILE named after its host as in desktop:~/.claude, and replaces
 what sits between index.html's <!-- doctor --> and <!-- /doctor --> markers. Each question
 becomes a .step the page reveals in turn, then each section of the report; the run's timing
 goes between style.css's run markers, since the page's CSP allows no inline styles. Two more
@@ -231,17 +232,26 @@ CHANGE = re.compile(
 )
 
 
+def roots(api: set[str], host: str | None) -> set[str]:
+    """The profiles in `api` on `host`, None for this one, as that host names them."""
+    if host is None:
+        return {p for p in api if p.startswith(("~", "/"))}
+    return {p.removeprefix(f"{host}:") for p in api if p.startswith(f"{host}:")}
+
+
 def changes(transcript: str, api: set[str], api_rates: bool) -> dict[str, list]:
     """Each setting's offered saving summed over every host's CHANGES section of a WIDE run, as
     [measured $/mo, $/mo that depends on how a profile pays, whether any part has a ~,
-    how many lines, the measured $/mo outside this host's profiles in `api`, whether any part is
+    how many lines, the measured $/mo outside the profiles in `api`, whether any part is
     a lower bound]. `api_rates` says
     every profile doctor asked about was answered as API."""
     rows: dict[str, list] = {}
-    section, here = None, False
+    section, here = None, set()
     for plain in plain_lines(transcript):
         if TITLE.match(plain):
-            section, here = None, plain.startswith("token-max: this host ")
+            host = re.match(r"token-max: (this host|\S+)  ", plain)
+            name = host[1] if host and host[1] != "this host" else None
+            section, here = None, roots(api, name)
         elif HEADING.match(plain):
             section = plain.split()[0]
         elif section == "CHANGES" and plain.startswith("  ● "):
@@ -262,9 +272,7 @@ def changes(transcript: str, api: set[str], api_rates: bool) -> dict[str, list]:
             # After its saving, a change names the file it edits, such as
             # [~/.claude/settings.json], unless its host has one profile.
             path = re.match(r"[^\[]*?\s{2}\[([^\]]+)\]", plain[m.end():])
-            paid = here and (
-                any(path[1].startswith(root + "/") for root in api) if path else bool(api)
-            )
+            paid = any(path[1].startswith(root + "/") for root in here) if path else bool(here)
             # "<$0.01" counts as nothing.
             usd = 0.0 if m["lt"] else dollars(m["usd"])
             row = rows.setdefault(m["name"], [0.0, 0.0, False, 0, 0.0, False])
@@ -335,10 +343,9 @@ LISTED = 5
 def results(shown: str, plan: str, api: str, paid: set[str], since: date, now: datetime) -> tuple[str, str]:
     """The results section and its bars' CSS: the shown run, whose totals the page's terminal
     prints, and two WIDE runs whose rows it parses: the plan run as the maintainer pays, and the
-    run with every profile answered as API. Doctor asks only about this host's profiles, so a
-    destination's main-TTL change stays "up to"; billing picks only that change's default, and
-    for a change to 1h "up to" prices it against the API's 5m, so it counts in full at API rates.
-    A destination's profiles count as the subscription, since their billing is unknown."""
+    run with every profile answered as API. A profile answered s keeps its main-TTL change "up
+    to"; billing picks only that change's default, and for a change to 1h "up to" prices it
+    against the API's 5m, so it counts in full at API rates."""
     # The boxes and the subscription column repeat the terminal's figures; the rows come from
     # a later run, so they are checked against that run's own totals.
     total, shown_offer = offered(shown)

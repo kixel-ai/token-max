@@ -1255,6 +1255,9 @@ pub struct MemoryControl {
     pub overrides: Vec<String>,
     /// Whether Codex's memory store exists, so memories were generated at some point.
     pub stored: bool,
+    /// Each working directory the profile's main sessions in the window recorded, and
+    /// whether a project instruction file sits there now; None for one that no longer exists.
+    pub instructed: IndexMap<String, Option<bool>>,
 }
 
 /// One background feature's current state and the control that owns it.
@@ -1950,6 +1953,27 @@ pub struct MemoryCheck {
     /// Whether a request that carried or wrote memory recorded no service tier, so its price
     /// depends on the tier that served it and the cost per use is not settled.
     pub tier_unknown: bool,
+    /// Where the line's main sessions in the window ran, for `vibes`' memory card.
+    pub places: SessionPlaces,
+}
+
+/// A line's main sessions in the window, by whether they ran in a repository with a project
+/// instruction file.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SessionPlaces {
+    pub sessions: u64,
+    /// Those whose transcript recorded loading a project instruction file, or whose directory
+    /// holds one now.
+    pub instructed: u64,
+    /// Those that recorded loading none and ran where no directory remains to read.
+    pub unknown: u64,
+}
+
+impl SessionPlaces {
+    /// Whether more than half of the sessions are known to have run in such a repository.
+    pub fn most(&self) -> bool {
+        self.instructed * 2 > self.sessions
+    }
 }
 
 impl MemoryCheck {

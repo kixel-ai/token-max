@@ -31,6 +31,10 @@ pub(crate) const NAMESPACE_DESCRIPTION: &str = "deferred-namespace-description";
 /// one, so its text belongs to no single tool or server.
 pub(crate) const UNMAPPED_DELTA: &str = "unmapped-rendered-delta";
 
+/// The provenance of an instruction file Claude Code recorded loading as the project's,
+/// rather than the user's, a local or a managed one.
+pub(crate) const PROJECT_INSTRUCTIONS: &str = "project-instruction-attachment";
+
 /// Prefer recorded counts; a missing calibration leaves token and dollar estimates unknown.
 pub fn measure_size(text: Option<&str>) -> Size {
     Size {
@@ -1696,8 +1700,13 @@ impl ExposureCollector {
                 } else {
                     Category::Instructions
                 };
+                let provenance = if is(f, "type", "Project") {
+                    PROJECT_INSTRUCTIONS
+                } else {
+                    "instruction-attachment"
+                };
                 self.component(
-                    New::active(category, path, "instruction-attachment"),
+                    New::active(category, path, provenance),
                     Content::Text(content),
                     at,
                 );

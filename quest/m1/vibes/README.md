@@ -44,7 +44,7 @@ Expanded 2026-11-23 (maintainer, /quest-plan after a pass over their
 token-max transcripts and dotfiles, and a survey of Claude Code 2.1.322 and
 codex-cli 0.167.1 settings worth turning on):
 
-- The maintainer's opinions: ✅ [auto memory off](/quest/m1/vibes/memory.md),
+- The maintainer's opinions: ✅ auto memory off,
   ✅ [a smaller compaction window](/quest/m1/vibes/window.md), ✅
   [a year of transcripts](/quest/m1/vibes/retention.md) (rejected: telemetry
   opt-outs, which are about privacy rather than cost or capability, and turn

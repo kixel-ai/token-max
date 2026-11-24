@@ -1239,6 +1239,7 @@ an exit code.
 | An instruction file | A CLAUDE.md of 200 lines or more, past Claude Code's [guidance](https://code.claude.com/docs/en/memory#write-effective-instructions), or an AGENTS.md at or above the byte budget Codex [loads](https://learn.chatgpt.com/docs/agent-configuration/agents-md), with what each 100 lines of it costs. |
 | Explore subagent | Claude's built-in Explore ran off Haiku: what it cost, the same tokens on the cheapest model, and the model guide's tip. |
 | Fable weekly use | Any Fable request in the window: what they cost, and Anthropic's [plan rule](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan). |
+| [Auto memory](#auto-memory-in-vibes) | Every auto memory or Codex memories line: off is advised when most main sessions ran in a repository with a CLAUDE.md or AGENTS.md. |
 
 The effort, instruction-file, subagent and Fable lines stay in `doctor`, where
 their costs are measured; only the advice about them is here.
@@ -1300,6 +1301,36 @@ says so.
 Background commands and the user's own processes are unaffected by the cap.
 Codex's `background_terminal_max_timeout` bounds one poll of a background
 terminal, and each poll reads the cache, so it has no card.
+
+### Auto memory in vibes
+
+The maintainer's pick: a lasting fact about a project belongs in its
+repository, where it is reviewed and every host and teammate sees it, not
+saved silently on one machine by Claude Code's auto memory
+(`autoMemoryEnabled`) or Codex memories (`features.memories`). So when memory
+is on and more than half of a line's main sessions in the window ran in a
+repository with a `CLAUDE.md`, `.claude/CLAUDE.md` or `AGENTS.md`, the card
+advises turning it off, and says what share of sessions qualified.
+
+A session counts at the directory of its latest main-agent request. It ran in
+such a repository when its transcript recorded Claude Code loading one of those
+files as the project's, from that directory or one above it; or when one sits
+now between that directory and the root of the Git checkout that holds it,
+outside the profile's own directory, where the user's file lives. Whether Git tracks
+the file is not read. Codex records its AGENTS.md text without a path, so its
+sessions are read from the directory alone. A session with neither, because
+its directory is gone or unrecorded, counts as without one, and the card
+names how many did.
+
+Where the advice doesn't hold, the card advises nothing: memory already off,
+or too few sessions in a repository, where memory may be the only place a fact
+is kept. It never repeats [`doctor`'s measured line](#reading-the-report),
+which judges memory by its cost per use and stays as it is; the card quotes
+that line's total cost and uses as evidence. When that line already
+recommends or suggests memory off, `doctor`'s walk asks, and the card advises
+nothing. Otherwise the card offers the same edit `doctor` would make,
+including its steps by hand for a named Codex profile or an untrusted project
+that may set memories too.
 
 ## Main-session effort
 

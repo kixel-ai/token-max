@@ -9,11 +9,12 @@ use crate::exposure::{MEMORY_SECTION, calibrate, cohort};
 use crate::model::{
     Action, Agent, Category, CheckBase, Component, ContextCost, ContextKind, Estimate, Evidence,
     Harness, Linkage, Margin, MemoryAccess, MemoryCheck, Millis, PartKind, Profile, ProfileShare,
-    Request, Scan, Usd,
+    Request, Scan, SessionPlaces, Usd,
 };
 use crate::prices::{Catalog, Sample, output_rate};
 
-const SOURCES: [&str; 2] = [
+/// The providers' pages on auto memory and Codex memories.
+pub(crate) const SOURCES: [&str; 2] = [
     "https://code.claude.com/docs/en/memory#auto-memory (2026-11-11)",
     "https://developers.openai.com/codex/memories (2026-11-11)",
 ];
@@ -92,6 +93,8 @@ fn check(
     let mut sessions: HashMap<&str, (Millis, bool)> = HashMap::default();
     let mut unmeasured = 0;
     let mut recorded_requests = crate::collections::HashSet::default();
+    // Main sessions whose transcript recorded loading a project instruction file.
+    let mut loaded = crate::collections::HashSet::default();
     // Recorded main-agent requests, and those of them that carried memory.
     let (mut main_recorded, mut main_carried) = (0u64, 0u64);
     for e in &scan.exposure.requests {
@@ -106,6 +109,22 @@ fn check(
             (Harness::Codex, Linkage::Chronological) => (&e.view.candidates, true),
             _ => (&e.view.components, false),
         };
+        // A file the session loaded shows where it ran, whether the request recorded it on
+        // the wire or it was active in the transcript before the request.
+        if r.agent == Agent::Main
+            && let Some(cwd) = r.cwd.as_deref()
+            && e.view
+                .components
+                .iter()
+                .chain(e.view.candidates.iter())
+                .map(|id| components[&**id])
+                .any(|c| {
+                    &*c.provenance == crate::exposure::PROJECT_INSTRUCTIONS
+                        && project_file(&c.name, cwd)
+                })
+        {
+            loaded.insert(&*r.session);
+        }
         if !recorded {
             continue;
         }
@@ -133,6 +152,7 @@ fn check(
             }
         }
     }
+    let places = places(line, &mine, &loaded);
     let on = control.value;
     // Unknown when a setting the scan cannot resolve, such as a Codex --profile
     // selection, could change it.
@@ -427,7 +447,67 @@ fn check(
         unpriced_reads,
         use_unproven,
         tier_unknown,
+        places,
     }
+}
+
+/// Where the line's main sessions ran, each at its latest request's directory: in a
+/// repository with a project instruction file when its transcript recorded loading one, as
+/// `loaded` holds, or its directory holds one now; unknown when neither settles it.
+fn places(
+    line: &crate::rows::Group<'_>,
+    mine: &[&Request],
+    loaded: &crate::collections::HashSet<&str>,
+) -> SessionPlaces {
+    let mut latest: HashMap<&str, &Request> = HashMap::default();
+    for r in mine.iter().filter(|r| r.agent == Agent::Main) {
+        let seen = latest.entry(&r.session).or_insert(r);
+        if r.time >= seen.time {
+            *seen = r;
+        }
+    }
+    let mut places = SessionPlaces {
+        sessions: latest.len() as u64,
+        ..SessionPlaces::default()
+    };
+    for (session, r) in latest {
+        if loaded.contains(session) {
+            places.instructed += 1;
+            continue;
+        }
+        // Each member read the directories its own sessions ran in.
+        let now = r.cwd.as_deref().and_then(|cwd| {
+            line.members
+                .iter()
+                .filter_map(|p| p.memory.as_ref()?.instructed.get(cwd).copied())
+                .next()
+                .flatten()
+        });
+        match now {
+            Some(true) => places.instructed += 1,
+            Some(false) => {}
+            None => places.unknown += 1,
+        }
+    }
+    places
+}
+
+/// Whether `file`, an instruction file a session at `cwd` loaded as its project's, is one
+/// its repository checks in: a CLAUDE.md or AGENTS.md at `cwd` or above it.
+fn project_file(file: &str, cwd: &str) -> bool {
+    let path = std::path::Path::new(file);
+    crate::discovery::PROJECT_INSTRUCTIONS.iter().any(|parts| {
+        let mut base = Some(path);
+        for part in parts.iter().rev() {
+            match base {
+                Some(p) if p.file_name() == Some(std::ffi::OsStr::new(part)) => base = p.parent(),
+                _ => return false,
+            }
+        }
+        base.is_some_and(|dir| {
+            !dir.as_os_str().is_empty() && std::path::Path::new(cwd).starts_with(dir)
+        })
+    })
 }
 
 /// What memory cost over `recorded` requests that recorded their context and `unrecorded`
@@ -518,6 +598,98 @@ mod tests {
             s.unrecorded.add(Usd::from_f64(10.0));
         }
         s
+    }
+
+    #[test]
+    fn a_project_file_is_a_known_name_at_or_above_the_session() {
+        for (file, cwd, project) in [
+            ("/repo/AGENTS.md", "/repo/src", true),
+            ("/repo/CLAUDE.md", "/repo", true),
+            ("/repo/.claude/CLAUDE.md", "/repo/src", true),
+            // Below the session, beside it, or another name is no file of its repository.
+            ("/repo/src/CLAUDE.md", "/repo", false),
+            ("/other/AGENTS.md", "/repo", false),
+            ("/repo/CLAUDE.local.md", "/repo", false),
+            ("/repo/docs/CLAUDE.md.bak", "/repo/docs", false),
+            ("CLAUDE.md", "/repo", false),
+        ] {
+            assert_eq!(project_file(file, cwd), project, "{file} at {cwd}");
+        }
+    }
+
+    #[test]
+    fn sessions_count_where_their_latest_request_ran_and_records_win_over_directories() {
+        let mut profile = crate::test_support::make_profile("profile", "/home/.claude");
+        profile.memory = Some(crate::model::MemoryControl {
+            value: true,
+            owner: String::new(),
+            off: String::new(),
+            off_file: None,
+            directory: None,
+            unresolved: None,
+            overrides: vec![],
+            stored: false,
+            instructed: [
+                ("/repo".to_string(), Some(true)),
+                ("/plain".to_string(), Some(false)),
+                ("/gone".to_string(), None),
+            ]
+            .into_iter()
+            .collect(),
+        });
+        let request = |session: &str, time: Millis, cwd: Option<&str>, agent: Agent| {
+            let mut r = crate::test_support::make_request();
+            r.time = time;
+            let meta = std::sync::Arc::make_mut(&mut r.meta);
+            meta.session = session.into();
+            meta.cwd = cwd.map(Into::into);
+            meta.agent = agent;
+            r
+        };
+        let requests = [
+            // Moved from a plain directory into the repository: counted where it ended.
+            request("moved", 1, Some("/plain"), Agent::Main),
+            request("moved", 2, Some("/repo"), Agent::Main),
+            request("plain", 1, Some("/plain"), Agent::Main),
+            // Gone and unrecorded: nothing settles it.
+            request("gone", 1, Some("/gone"), Agent::Main),
+            request("nowhere", 1, None, Agent::Main),
+            // Gone, but its transcript recorded loading a project file.
+            request("recorded", 1, Some("/gone"), Agent::Main),
+            // A subagent's requests are no session of their own.
+            request("subagent", 1, Some("/repo"), Agent::Subagent),
+        ];
+        let mine: Vec<&Request> = requests.iter().collect();
+        let loaded = ["recorded"].into_iter().collect();
+        let line = crate::rows::Group::one(&profile);
+        let p = places(&line, &mine, &loaded);
+        assert_eq!(
+            p,
+            SessionPlaces {
+                sessions: 5,
+                instructed: 2,
+                unknown: 2,
+            }
+        );
+        // Two of five is not most, though three are unknown or known to be in one.
+        assert!(!p.most());
+        assert!(
+            SessionPlaces {
+                sessions: 4,
+                instructed: 3,
+                unknown: 1
+            }
+            .most()
+        );
+        assert!(
+            !SessionPlaces {
+                sessions: 4,
+                instructed: 2,
+                unknown: 0
+            }
+            .most()
+        );
+        assert!(!SessionPlaces::default().most());
     }
 
     #[test]

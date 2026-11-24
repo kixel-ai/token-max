@@ -53,7 +53,12 @@ Type "y"
 Sleep 300ms
 Enter
 Sleep 5s
-# Its Bash cap, lowered under the 5m cache the scan saw, then the write.
+# Its Bash cap, lowered under the 5m cache the scan saw, auto memory off, since the
+# sessions ran in a repository with an AGENTS.md, then the write.
+Type "y"
+Sleep 300ms
+Enter
+Sleep 4s
 Type "y"
 Sleep 300ms
 Enter

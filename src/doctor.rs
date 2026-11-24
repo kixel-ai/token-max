@@ -663,7 +663,8 @@ pub(crate) fn bash_how(cap: &BashCap, profile: &Profile) -> Option<How> {
     Some(how)
 }
 
-fn check_how(result: &CheckResult, profile: &Profile) -> How {
+/// The edit or step that makes a check's change in `profile`'s settings.
+pub(crate) fn check_how(result: &CheckResult, profile: &Profile) -> How {
     let file = profile.settings_file.as_str();
     match result {
         CheckResult::Ttl(t) => {

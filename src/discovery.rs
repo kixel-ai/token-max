@@ -3541,11 +3541,12 @@ mod tests {
         let project = w.home.join("repo/.codex/config.toml");
         fs::create_dir_all(w.home.join("repo/.git")).unwrap();
         write(&project, &format!("{key} = 80\n"));
+        let suffix = Path::new("repo").join(".codex").join("config.toml");
         assert!(
             resolve()
                 .unresolved
                 .unwrap()
-                .contains("repo/.codex/config.toml")
+                .contains(&*suffix.to_string_lossy())
         );
         fs::remove_file(&project).unwrap();
         assert_eq!(resolve().unresolved, None);

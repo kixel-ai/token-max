@@ -686,6 +686,8 @@ pub struct StructuralEvent {
     pub idle_attribution: IdleAttribution,
     /// Claude Bash call details on its tool start and end, without the command.
     pub shell: Option<ShellCall>,
+    /// The language of the file a Claude file tool's start named, never the path.
+    pub language: Option<crate::lsp::Lsp>,
     pub meta: std::sync::Arc<EventMeta>,
 }
 
@@ -990,6 +992,8 @@ pub struct Profile {
     /// Claude's `crossSessionInbound`; None for Codex, which has no such setting.
     pub inbound: Option<InboundControl>,
     pub t3: Option<T3Instance>,
+    /// Claude's code intelligence plugins; None for Codex.
+    pub lsp: Option<crate::lsp::Controls>,
     /// Current controls that choose subagent models and efforts.
     pub agents: AgentControls,
     /// The file that sets Codex's `project_doc_max_bytes` in `settings`, when one does.
@@ -3191,6 +3195,8 @@ pub struct Report {
     pub fable: Vec<FableUse>,
     /// Each `crossSessionInbound` line's message-started turns, as evidence only.
     pub inbound: Vec<InboundUse>,
+    /// The languages each Claude settings file's sessions worked in, for `vibes`' cards.
+    pub lsp: Vec<crate::lsp::LspUse>,
     /// One result per setting checked.
     pub checks: Vec<CheckResult>,
     /// Each foreground Bash timeout cap and its long waits, which `vibes` shows as advice.

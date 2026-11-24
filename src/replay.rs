@@ -1103,6 +1103,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         subagents: crate::subagents::subagent_costs(&scan, catalog),
         fable: crate::fable::fable_use(&scan, catalog, since, now),
         inbound: crate::inbound::inbound_use(&scan, catalog, since, now),
+        lsp: crate::lsp::lsp_use(&scan, since, now),
         checks,
         bash,
         assumptions: [
@@ -1276,6 +1277,7 @@ mod tests {
             settings: Default::default(),
             idle_attribution: IdleAttribution::Unknown,
             shell: None,
+            language: None,
             meta: crate::model::EventMeta {
                 harness: Harness::Claude,
                 session: session.into(),

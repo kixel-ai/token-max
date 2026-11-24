@@ -1406,6 +1406,7 @@ mod tests {
             settings: Default::default(),
             idle_attribution: crate::model::IdleAttribution::Unknown,
             shell: None,
+            language: None,
             meta: crate::model::EventMeta {
                 harness: Harness::Claude,
                 session: "copy".into(),
@@ -1479,6 +1480,7 @@ mod tests {
             settings: Default::default(),
             idle_attribution: IdleAttribution::Unknown,
             shell: None,
+            language: None,
             meta: crate::model::EventMeta {
                 session: "other-alias".into(),
                 harness: Harness::Claude,

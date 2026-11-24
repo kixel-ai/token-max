@@ -52,8 +52,8 @@ codex-cli 0.167.1 settings worth turning on):
   [the default-model card](/quest/m1/vibes/default-model.md)'s picks, and fast
   mode, unused skills and MCP servers and the Artifact tool are measured
   `doctor` lines.
-- Settings worth turning on: ✅
-  [code intelligence plugins](/quest/m1/vibes/language-servers.md), ✅
+- Settings worth turning on: ✅ code intelligence plugins, which shipped as
+  the Code intelligence card, ✅
   [an advisor model](/quest/m1/vibes/advisor.md) (rejected:
   `includeGitInstructions: false`, spend caps, and Codex code mode, which the
   model catalog already turns on). The one measurable find,

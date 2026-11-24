@@ -1239,6 +1239,7 @@ an exit code.
 | An instruction file | A CLAUDE.md of 200 lines or more, past Claude Code's [guidance](https://code.claude.com/docs/en/memory#write-effective-instructions), or an AGENTS.md at or above the byte budget Codex [loads](https://learn.chatgpt.com/docs/agent-configuration/agents-md), with what each 100 lines of it costs. |
 | Explore subagent | Claude's built-in Explore ran off Haiku: what it cost, the same tokens on the cheapest model, and the model guide's tip. |
 | Fable weekly use | Any Fable request in the window: what they cost, and Anthropic's [plan rule](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan). |
+| [Code intelligence](#code-intelligence) | A Claude session read or edited a file of a language whose official language server plugin it ran without, or whose server isn't on `PATH`: Anthropic's [costs page](https://code.claude.com/docs/en/costs#install-code-intelligence-plugins-for-typed-languages). |
 
 The effort, instruction-file, subagent and Fable lines stay in `doctor`, where
 their costs are measured; only the advice about them is here.
@@ -1300,6 +1301,41 @@ says so.
 Background commands and the user's own processes are unaffected by the cap.
 Codex's `background_terminal_max_timeout` bounds one poll of a background
 terminal, and each poll reads the cache, so it has no card.
+
+### Code intelligence
+
+A [code intelligence plugin](https://code.claude.com/docs/en/plugins/code-intelligence)
+runs a language server for Claude Code, so Claude looks up symbols instead of
+searching text and sees the type errors its edits introduce. Anthropic's
+[costs page](https://code.claude.com/docs/en/costs#install-code-intelligence-plugins-for-typed-languages)
+recommends one for typed languages; what it saves is not measured.
+
+Each Claude settings file gets one card per language of that page's table
+whose files its sessions read or edited (`Read`, `Edit`, `MultiEdit` or
+`Write`), by the extensions each plugin's marketplace entry maps: the share of
+the window's sessions that touched one, a subagent's counted as its parent's,
+and the projects they ran in. Only the language is kept, never the path. A
+project is the main checkout of the Git repository holding the session's
+directory, or for a directory removed since, such as a worktree, the nearest
+one that remains. Marker files such as `Cargo.toml` are not read: most
+recorded directories are gone by the time the report runs.
+
+A card names the plugin's state, read from `installed_plugins.json` in the
+profile's plugins directory (`CLAUDE_CODE_PLUGIN_CACHE_DIR`, else `plugins`
+in the profile) and `enabledPlugins` in the user and managed settings, and
+whether its server's program is on the `PATH` token-max runs with, which may
+not be the one Claude Code starts with:
+
+| State | Change |
+| --- | --- |
+| Not installed, or installed only for other projects | By hand: `claude plugin install <plugin>@claude-plugins-official`, since `enabledPlugins` turns a plugin on but doesn't download it. |
+| Installed and turned off in the user settings | `enabledPlugins` set to `true` there, offered as an edit. |
+| Turned off by managed settings | None; the card advises nothing. |
+| Installed, with its server not on `PATH` | By hand: install the program its README names. |
+
+A plugin installed everywhere with its server on `PATH` gets no card.
+Project and local `enabledPlugins`, plugins synced from claude.ai and plugins
+of your own that run the same server are not read.
 
 ## Main-session effort
 

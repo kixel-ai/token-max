@@ -2490,6 +2490,23 @@ pub(crate) fn profile(
             ..codex_memory(&speed_scopes, &settings_file)?
         }
     };
+    let lsp = if claude {
+        let cache = environment.values.get("CLAUDE_CODE_PLUGIN_CACHE_DIR");
+        Some(crate::lsp::controls(
+            &canonical,
+            cache.and_then(Value::as_str),
+            &user,
+            &managed,
+            // Windows names it `Path`, and reads variable names in any case.
+            options
+                .env
+                .iter()
+                .find(|(k, _)| k == &"PATH" || (cfg!(windows) && k.eq_ignore_ascii_case("PATH")))
+                .map(|(_, v)| v.as_str()),
+        )?)
+    } else {
+        None
+    };
     // A shell's CLAUDE_CONFIG_DIR keeps Claude Code's state inside it, even when it names
     // the default directory.
     let explicit = options.env.contains_key(variable) && active == canonical;
@@ -2519,6 +2536,7 @@ pub(crate) fn profile(
         memory: Some(memory),
         inbound: None,
         t3: None,
+        lsp,
         agents: crate::model::AgentControls::default(),
         instruction_budget_file,
         instruction_budget_unresolved: None,

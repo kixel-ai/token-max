@@ -5865,6 +5865,18 @@ fn summary(
             .to_string();
         rows.push(row);
     }
+    for u in &report.lsp {
+        let profile = tag(&u.profiles, &switch, out);
+        let view = crate::lsp::View {
+            home: out.home.as_deref(),
+            arrow: out.arrow,
+        };
+        let cards = crate::lsp::items(u, &view);
+        vibes.extend(cards.into_iter().map(|i| Item {
+            name: tagged(i.name.clone(), &profile),
+            ..i
+        }));
+    }
     for u in &report.inbound {
         let mut row = inbound_row(u, out);
         let owner = |p: &Profile| {
@@ -6833,6 +6845,7 @@ mod tests {
             fable: vec![],
             bash: vec![],
             inbound: vec![],
+            lsp: vec![],
             generated_at: "2026-12-01T00:00:00.000Z".into(),
             scan: Scan {
                 subagents: vec![],

@@ -789,6 +789,7 @@ fn event(
         settings: Settings::default(),
         idle_attribution: IdleAttribution::Unknown,
         shell: None,
+        language: None,
         meta: EventMeta {
             harness: snapshot.harness,
             session: context.session.clone(),
@@ -1365,8 +1366,15 @@ impl Reader {
                         e.tool = text(member(b, "name"));
                         e.tool_id = opaque(b, "id")?.map(Id::from);
                         e.request = Some(request_id.clone());
+                        let input = nested(b, "input");
+                        // Only the language is kept, never the path.
+                        if matches!(
+                            string(b, "name"),
+                            Some("Read" | "Edit" | "MultiEdit" | "Write")
+                        ) {
+                            e.language = string(input, "file_path").and_then(crate::lsp::Lsp::of);
+                        }
                         if is(b, "name", "Bash") {
-                            let input = nested(b, "input");
                             e.shell = Some(ShellCall {
                                 background: is_true(input, "run_in_background"),
                                 polls: string(input, "command").is_some_and(polling_loop),

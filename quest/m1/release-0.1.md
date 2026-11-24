@@ -26,5 +26,4 @@ checks.
 ## Required
 
 - [Advisor card](/quest/m1/vibes/advisor.md) - a vibes card shipped in 0.1.0
-- [Language servers card](/quest/m1/vibes/language-servers.md) - a vibes card shipped in 0.1.0
 - [Memory card](/quest/m1/vibes/memory.md) - a vibes card shipped in 0.1.0

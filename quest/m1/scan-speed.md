@@ -27,4 +27,6 @@ discovery, of the T3 state too (`--t3-dir`), with the same `--prices-file`
 and `--since`, and the analysis clock pinned, since it is read after the
 scan and scales every monthly figure. No option pins it today; add the
 smallest way to, or compare through a harness that calls `render` with a
-fixed `now`, rather than mask the monthly figures.
+fixed `now`, rather than mask the monthly figures. Compare the `--details`
+reports, which show the scan's coverage, normalizing only the snapshot start
+and finish times the scan records as it runs.

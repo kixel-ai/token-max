@@ -12,8 +12,8 @@ use crate::compaction::{
 use crate::controls::TURN_END_KEY;
 use crate::discovery::locale_compare;
 use crate::model::{
-    Action, CheckBase, CompactionCharge, CompactionCheck, EventKind, Evidence, Harness, Id, Millis,
-    PerBucket, Profile, Request, Scan, StructuralEvent, Text, TurnEndCheck, UsableWindow,
+    Action, CheckBase, CompactionCharge, CompactionCheck, Cost, EventKind, Evidence, Harness, Id,
+    Millis, PerBucket, Profile, Request, Scan, StructuralEvent, Text, TurnEndCheck, UsableWindow,
     UsageEstimate, WindowScenario,
 };
 use crate::prices::{Catalog, PRICE_SOURCES, Sum, TIER_SENSITIVITY, server_cost, tier_sensitive};
@@ -71,6 +71,30 @@ fn percent_of(tokens: i64, usable: i64) -> i64 {
     (i128::from(tokens) * 100 / i128::from(usable)) as i64
 }
 
+/// A threshold that is set, with no selected request to replay it against.
+fn unmeasured(
+    group: &crate::rows::Group<'_>,
+    control: &crate::model::TurnEndControl,
+    since: Option<Millis>,
+) -> Option<TurnEndCheck> {
+    if control.unset {
+        return None;
+    }
+    let mut base = CheckBase::unmeasured(group, control.percent, control.owner.clone(), since);
+    base.sources = SOURCES.iter().map(|s| s.to_string()).collect();
+    base.uncertainty.extend(control.unresolved.clone());
+    Some(TurnEndCheck {
+        base,
+        unset: false,
+        usable: vec![],
+        window: None,
+        window_offered: false,
+        baseline_cost: Cost::default(),
+        scenarios: vec![],
+        usage_estimates: vec![],
+    })
+}
+
 fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<TurnEndCheck> {
     let TurnEndOptions {
         scan, catalog, now, ..
@@ -103,7 +127,9 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
         .copied()
         .filter(|r| selected_ids.contains(&*r.id))
         .collect();
-    let first_selected = selected.iter().map(|r| r.time).min()?;
+    let Some(first_selected) = selected.iter().map(|r| r.time).min() else {
+        return unmeasured(group, control, options.since);
+    };
     let first_boundary = scan
         .events
         .iter()
@@ -1282,5 +1308,55 @@ mod tests {
             let error = resolve(json!({}), json!({ TURN_END_KEY: invalid })).unwrap_err();
             assert!(error.to_string().contains("turn-end compaction threshold"));
         }
+    }
+
+    /// The window and turn-end lines of a scan whose only requests are earlier history.
+    fn unmeasured_lines(user: Value) -> Vec<CheckResult> {
+        let mut scan = data(HOUR, user);
+        scan.cache_context.requests = std::mem::take(&mut scan.requests);
+        report(&scan)
+            .checks
+            .into_iter()
+            .filter(|c| matches!(c, CheckResult::Compaction(_) | CheckResult::TurnEnd(_)))
+            .collect()
+    }
+
+    #[test]
+    fn set_values_keep_their_lines_when_no_request_is_selected() {
+        let user = json!({
+            "model_auto_compact_token_limit": 180_000,
+            TURN_END_KEY: 80,
+        });
+        let lines = unmeasured_lines(user);
+        let [CheckResult::Compaction(window), CheckResult::TurnEnd(turn)] = &lines[..] else {
+            panic!("expected a window line and a turn-end line, got {lines:?}");
+        };
+        assert_eq!(window.base.current, Some(180_000));
+        assert_eq!(turn.base.current, Some(80));
+        for base in [&window.base, &turn.base] {
+            assert_eq!(
+                (
+                    base.action,
+                    base.evidence,
+                    base.recommended,
+                    base.savings_usd
+                ),
+                (Action::Advisory, Evidence::Unknown, None, None)
+            );
+            assert_eq!(base.requests, 0);
+            assert!(base.owner.starts_with(FILE));
+        }
+        assert!(window.scenarios.is_empty() && turn.scenarios.is_empty());
+    }
+
+    #[test]
+    fn a_default_gets_no_line_when_no_request_is_selected() {
+        assert!(unmeasured_lines(json!({})).is_empty());
+        // Only the value that is set gets one.
+        let lines = unmeasured_lines(json!({ TURN_END_KEY: 0 }));
+        let [CheckResult::TurnEnd(turn)] = &lines[..] else {
+            panic!("expected only the turn-end line, got {lines:?}");
+        };
+        assert_eq!(turn.base.current, Some(0));
     }
 }

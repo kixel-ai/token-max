@@ -1413,21 +1413,24 @@ the window's sessions that touched one, a subagent's counted as its parent's,
 and the projects they ran in. Only the language is kept, never the path. A
 project is the main checkout of the Git repository holding the session's
 directory, or for a directory removed since, such as a worktree, the nearest
-one that remains. Marker files such as `Cargo.toml` are not read: most
+one that remains. A repository at or above home, such as one of dotfiles, holds
+no project. Marker files such as `Cargo.toml` are not read: most
 recorded directories are gone by the time the report runs.
 
 A card names the plugin's state, read from `installed_plugins.json` in the
 profile's plugins directory (`CLAUDE_CODE_PLUGIN_CACHE_DIR`, else `plugins`
 in the profile) and `enabledPlugins` in the user and managed settings, and
 whether its server's program is on the `PATH` token-max runs with, which may
-not be the one Claude Code starts with:
+not be the one Claude Code starts with. `doctor --defaults` keeps that `PATH`
+and `CLAUDE_CODE_PLUGIN_CACHE_DIR`, which say where programs and plugins are,
+not how they are set:
 
 | State | Change |
 | --- | --- |
-| Not installed, or installed only for other projects | By hand: `claude plugin install <plugin>@claude-plugins-official`, since `enabledPlugins` turns a plugin on but doesn't download it. The step names the profile's `CLAUDE_CONFIG_DIR`, since a bare install goes to whichever home the shell selects. When managed settings turn the official copy off, the card advises nothing. |
+| Not installed, or installed only for other projects | By hand: `claude plugin install <plugin>@claude-plugins-official`, since `enabledPlugins` turns a plugin on but doesn't download it. The step names the profile's `CLAUDE_CONFIG_DIR`, and `CLAUDE_CODE_PLUGIN_CACHE_DIR` when it is set, since a bare install goes to whichever directories the shell selects. When managed settings turn the official copy off, the card advises nothing but the server below. |
 | Installed, and turned off in the user settings or not listed there | `enabledPlugins` set to `true` there, offered as an edit; by hand for a T3 instance whose launch arguments can replace the settings it reads. |
 | Turned off by managed settings | None; the card advises nothing. |
-| Installed, with its server not on `PATH` | By hand: install the program its README names. |
+| Installed, with its server not on `PATH` | By hand: install the program its README names. A plugin installed only for some projects gets only this step when every session worked in them. |
 
 Each plugin ID is read on its own, so policy that blocks one marketplace's
 copy leaves another's on; the copy closest to loading speaks for the
@@ -1435,7 +1438,9 @@ language, and every copy's projects count as covered. Profiles share a card only
 record of installed plugins. A plugin installed everywhere with its server on
 `PATH` gets no card.
 Project and local `enabledPlugins`, plugins synced from claude.ai and plugins
-of your own that run the same server are not read.
+of your own that run the same server are not read: a plugin of another
+marketplace with an official plugin's name counts as that plugin, without
+reading whether it runs a server.
 
 ## Main-session effort
 

@@ -616,9 +616,18 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
         share(l.sessions, u.sessions),
         named(&projects(&l.directories, view.home), &home),
     );
+    // With the official copy blocked, the server matters only where a recorded directory
+    // loads another copy.
+    let unserved = matches!(l.plugin, Plugin::Projects { blocked: true, .. })
+        && !l.directories.iter().any(|(d, _)| l.plugin.covers(d));
     let binary = if l.binary {
         format!(
             "Its language server, {}, is on the PATH token-max runs with.",
+            s.binary
+        )
+    } else if unserved {
+        format!(
+            "Its language server, {}, is not on the PATH token-max runs with, but no recorded directory loads a copy of the plugin that would start it.",
             s.binary
         )
     } else {
@@ -658,9 +667,10 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
         } => {
             text += &installed_for(projects);
             text += &format!(" Managed settings turn {id} off.");
-            // The server matters only where a recorded directory loads a copy.
-            let serves = l.directories.iter().any(|(d, _)| l.plugin.covers(d));
-            ((!l.binary && serves).then(server_only), l.binary || !serves)
+            (
+                (!l.binary && !unserved).then(server_only),
+                l.binary || unserved,
+            )
         }
         // Every session worked where the plugin loads, so only its server is missing.
         Plugin::Projects { projects, .. } if l.uncovered == 0 => {
@@ -1315,6 +1325,24 @@ mod tests {
         };
         let unserved = card(language(10, 10, 10, elsewhere, false));
         assert!(unserved[0].quiet && unserved[0].how.is_none());
+        assert!(
+            unserved[0].text.contains(
+                "but no recorded directory loads a copy of the plugin that would start it."
+            ),
+            "{}",
+            unserved[0].text
+        );
+        assert!(!unserved[0].text.contains("can't start without it"));
+        // One covered directory among uncovered ones still needs the server, even though no
+        // session worked only there.
+        let mixed = Plugin::Projects {
+            projects: vec![dirs[4].0.clone()],
+            blocked: true,
+        };
+        let one = card(language(10, 10, 10, mixed, false));
+        assert_eq!(one[0].how, server);
+        assert!(!one[0].quiet);
+        assert!(one[0].text.contains("can't start without it"));
         // Turned off in the user file: one edit there, which the walk writes.
         let id = "rust-analyzer-lsp@claude-plugins-official".to_string();
         let off = card(language(

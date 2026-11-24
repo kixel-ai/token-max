@@ -3,8 +3,10 @@
 //! `~/.claude.json`, and Codex's `[mcp_servers.<id>]` tables in `config.toml`.
 //!
 //! A project's `.mcp.json` is shared with everyone who uses the project, and a plugin's
-//! server or a claude.ai connector is not in any file token-max edits, so those are steps
-//! by hand.
+//! server, a claude.ai connector, or one from `--mcp-config` or `managed-mcp.json` is not
+//! in any file token-max edits. Claude Code's `deniedMcpServers` blocks each of them by
+//! name instead, where its name can be spelled exactly and the Claude Code in use matches
+//! it; otherwise it is a step by hand.
 
 use std::fs;
 use std::io::{self, ErrorKind};
@@ -28,7 +30,31 @@ pub enum Definition {
     Entry(Entry),
     /// What to do by hand, and why token-max cannot.
     Manual { step: String, reason: String },
+    /// A server token-max cannot remove, which a `deniedMcpServers` entry blocks.
+    Deny(Deny),
 }
+
+/// A server `deniedMcpServers` blocks by name, and what to do by hand where it cannot.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Deny {
+    /// The name its entry matches, such as `claude.ai Slack` or `plugin:github:github`.
+    pub name: String,
+    /// The first Claude Code, as 2.`minor`.`patch`, whose name entry blocks just this server.
+    pub since: (u64, u64),
+    /// What to do by hand before that version.
+    pub step: String,
+    /// Why token-max cannot remove it.
+    pub reason: String,
+}
+
+/// Versions measured by loading each kind of server under a name entry: a plugin's
+/// server from 2.1.182 and an `--mcp-config` one from 2.1.83, while a project's
+/// `.mcp.json` and `managed-mcp.json` already matched in 2.1.0, the oldest tried. Before
+/// 2.1.330, a connector's name entry also hid other connectors at its URL.
+const PLUGIN: (u64, u64) = (1, 182);
+const CONNECTOR: (u64, u64) = (1, 330);
+const PROJECT: (u64, u64) = (1, 0);
+const ELSEWHERE: (u64, u64) = (1, 83);
 
 /// A server's entry in a configuration file: the key at `path`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -123,18 +149,31 @@ pub fn definitions(server: &str, control: &Control, profiles: &[&Profile]) -> Ve
             }],
         };
     }
-    if server.starts_with("plugin_") {
-        return vec![Definition::Manual {
-            step: "uninstall or disable the plugin that provides it, with /plugin in Claude Code"
-                .into(),
-            reason: "a plugin adds it".into(),
+    if let Some(rest) = server.strip_prefix("plugin_") {
+        let step = "uninstall or disable the plugin that provides it, with /plugin in Claude Code";
+        let reason = "a plugin adds it";
+        // Claude Code names it `plugin:<plugin>:<server>`, whose colons its tools carry as
+        // `_`; with no other `_` in the prefix, neither name held one or a character read
+        // as one.
+        return vec![match rest.split_once('_') {
+            Some((plugin, name))
+                if !plugin.is_empty() && !name.is_empty() && !name.contains('_') =>
+            {
+                Definition::Deny(Deny {
+                    name: format!("plugin:{plugin}:{name}"),
+                    since: PLUGIN,
+                    step: step.into(),
+                    reason: reason.into(),
+                })
+            }
+            _ => Definition::Manual {
+                step: step.into(),
+                reason: format!("{reason}, and its tools' prefix does not spell its name"),
+            },
         }];
     }
     if server.starts_with("claude_ai_") {
-        return vec![Definition::Manual {
-            step: "disconnect it at claude.ai, under Settings > Connectors".into(),
-            reason: "it is a claude.ai connector".into(),
-        }];
+        return vec![connector(server, &state_files(profiles))];
     }
     let mut found = vec![];
     let mut files = vec![];
@@ -161,15 +200,18 @@ pub fn definitions(server: &str, control: &Control, profiles: &[&Profile]) -> Ve
             let Ok(config) = settings(&shared, Harness::Claude) else {
                 continue;
             };
-            if members(config.get("mcpServers"))
+            // Each key its tools' prefix may have come from.
+            for key in members(config.get("mcpServers"))
                 .keys()
-                .any(|k| tool_name(k) == server)
+                .filter(|k| tool_name(k) == server)
             {
-                found.push(Definition::Manual {
+                found.push(Definition::Deny(Deny {
+                    name: key.clone(),
+                    since: PROJECT,
                     step: format!("remove it from {shared}"),
                     reason: "a project's .mcp.json is shared with everyone who uses the project"
                         .into(),
-                });
+                }));
             }
         }
         files.push(file);
@@ -180,14 +222,75 @@ pub fn definitions(server: &str, control: &Control, profiles: &[&Profile]) -> Ve
         } else {
             format!("{} or a project's .mcp.json", files.join(", "))
         };
-        found.push(Definition::Manual {
-            step:
-                "remove it where it is configured, such as a --mcp-config file or managed-mcp.json"
-                    .into(),
-            reason: format!("token-max did not find it in {searched}"),
+        let step =
+            "remove it where it is configured, such as a --mcp-config file or managed-mcp.json";
+        let reason = format!("token-max did not find it in {searched}");
+        // Only a prefix with no `_` is the name it came from, unchanged.
+        found.push(if server.contains('_') {
+            Definition::Manual {
+                step: step.into(),
+                reason: format!("{reason}, and its tools' prefix does not spell its name"),
+            }
+        } else {
+            Definition::Deny(Deny {
+                name: server.into(),
+                since: ELSEWHERE,
+                step: step.into(),
+                reason,
+            })
         });
     }
     found
+}
+
+/// A claude.ai connector, named as its tools name it: blocked by the one display name, such
+/// as `claude.ai Slack`, that a state file records it connected under and that gives its
+/// tools this prefix.
+fn connector(server: &str, files: &[String]) -> Definition {
+    let step = "disconnect it at claude.ai, under Settings > Connectors";
+    let reason = "it is a claude.ai connector";
+    let mut names: IndexSet<String> = IndexSet::default();
+    for file in files {
+        let state = match settings(file, Harness::Claude) {
+            Ok(state) => state,
+            Err(e) => {
+                return Definition::Manual {
+                    step: step.into(),
+                    reason: format!("{reason}, and {} ({file})", e.message),
+                };
+            }
+        };
+        let connected = state
+            .get("claudeAiMcpEverConnected")
+            .and_then(Value::as_array);
+        names.extend(
+            connected
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter(|name| tool_name(name) == server)
+                .map(String::from),
+        );
+    }
+    let mut names = names.into_iter();
+    match (names.next(), names.next()) {
+        (Some(name), None) => Definition::Deny(Deny {
+            name,
+            since: CONNECTOR,
+            step: step.into(),
+            reason: reason.into(),
+        }),
+        (None, _) => Definition::Manual {
+            step: step.into(),
+            reason: format!("{reason} whose name no state file records"),
+        },
+        (Some(_), Some(_)) => Definition::Manual {
+            step: step.into(),
+            reason: format!(
+                "{reason}, and more than one of its recorded names gives its tools' prefix"
+            ),
+        },
+    }
 }
 
 /// Servers configured for `profiles` whose tools are all off already: a Claude server
@@ -356,18 +459,29 @@ fn entries(file: &str, config: &Map<String, Value>) -> Vec<Entry> {
     found
 }
 
-/// A Claude server's name as its tools carry it, `mcp__<name>__<tool>`.
+/// A Claude server's name as its tools carry it, `mcp__<name>__<tool>`. A claude.ai
+/// connector's, such as `claude.ai Slack (2)`, also collapses runs of `_` and trims them
+/// from its ends, to `claude_ai_Slack_2`, as Claude Code does. Its JavaScript writes a `_`
+/// for each UTF-16 unit, so a character outside the BMP, such as an emoji, gives two.
 pub(crate) fn tool_name(server: &str) -> String {
-    server
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+    let mut name = String::with_capacity(server.len());
+    for c in server.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+            name.push(c);
+        } else {
+            name.extend(std::iter::repeat_n('_', c.len_utf16()));
+        }
+    }
+    if !server.starts_with("claude.ai ") {
+        return name;
+    }
+    let mut collapsed = String::with_capacity(name.len());
+    for c in name.chars() {
+        if !(c == '_' && collapsed.ends_with('_')) {
+            collapsed.push(c);
+        }
+    }
+    collapsed.trim_matches('_').into()
 }
 
 /// Claude Code's lock on its state file, held while token-max rewrites it. Claude Code
@@ -535,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn a_claude_server_is_found_in_each_scope_and_named_by_hand_where_token_max_cannot_edit() {
+    fn a_claude_server_is_found_in_each_scope_its_state_file_and_projects_declare() {
         let w = Workspace::new();
         let project = w.home.join("project");
         let project = project.to_string_lossy();
@@ -568,12 +682,16 @@ mod tests {
             found[1],
             entry(&["projects", &project, "mcpServers", "docs.v2"])
         );
-        let Definition::Manual { step, .. } = &found[2] else {
+        // A project's .mcp.json is denied by the key it declares, which its tools spell
+        // as `docs_v2`.
+        let Definition::Deny(shared) = &found[2] else {
             panic!("{found:?}")
         };
+        assert_eq!(shared.name, "docs.v2");
+        assert_eq!(shared.since, PROJECT);
         assert_eq!(
-            step,
-            &format!(
+            shared.step,
+            format!(
                 "remove it from {}",
                 Path::new(project.as_ref()).join(".mcp.json").display()
             )
@@ -585,15 +703,64 @@ mod tests {
             local.text(),
             format!("mcpServers.docs.v2 of project {project}")
         );
+    }
 
-        // Plugins, connectors and servers configured elsewhere are steps by hand.
-        for server in ["plugin_github_github", "claude_ai_Gmail", "missing"] {
-            let found = definitions(server, &deny(server), &[&p]);
+    #[test]
+    fn a_server_token_max_cannot_remove_is_denied_by_the_name_it_can_spell() {
+        let w = Workspace::new();
+        write(
+            w.home.join(".claude.json"),
+            &serde_json::json!({
+                "claudeAiMcpEverConnected": [
+                    "claude.ai Google Drive", "claude.ai Slack (2)", "claude.ai A.B", "claude.ai A B",
+                ],
+            })
+            .to_string(),
+        );
+        let p = claude(&w);
+        let one = |server: &str| match definitions(server, &deny(server), &[&p]).as_slice() {
+            [one] => one.clone(),
+            all => panic!("{server}: {all:?}"),
+        };
+        let denied = |server: &str| match one(server) {
+            Definition::Deny(d) => (d.name, d.since),
+            other => panic!("{server}: {other:?}"),
+        };
+        let by_hand = |server: &str| match one(server) {
+            Definition::Manual { reason, .. } => reason,
+            other => panic!("{server}: {other:?}"),
+        };
+        // A connector by the display name its tools came from, the suffix's `__` collapsed.
+        assert_eq!(
+            denied("claude_ai_Google_Drive"),
+            ("claude.ai Google Drive".into(), CONNECTOR)
+        );
+        assert_eq!(
+            denied("claude_ai_Slack_2"),
+            ("claude.ai Slack (2)".into(), CONNECTOR)
+        );
+        assert!(by_hand("claude_ai_Gmail").ends_with("whose name no state file records"));
+        assert!(by_hand("claude_ai_A_B").contains("more than one of its recorded names"));
+        // A plugin's server only when the prefix splits into its two names one way.
+        assert_eq!(
+            denied("plugin_github_github"),
+            ("plugin:github:github".into(), PLUGIN)
+        );
+        assert_eq!(
+            denied("plugin_my-tools_my-docs"),
+            ("plugin:my-tools:my-docs".into(), PLUGIN)
+        );
+        for server in ["plugin_a_b_c", "plugin_github", "plugin__x"] {
             assert!(
-                matches!(found.as_slice(), [Definition::Manual { .. }]),
-                "{server}: {found:?}"
+                by_hand(server).ends_with("does not spell its name"),
+                "{server}"
             );
         }
+        assert_eq!(tool_name("docs\u{1F600}"), "docs__");
+        assert_eq!(tool_name("claude.ai _A \u{1F600}_"), "claude_ai_A");
+        // One found in no file only when its prefix is its name unchanged.
+        assert_eq!(denied("docs-v2"), ("docs-v2".into(), ELSEWHERE));
+        assert!(by_hand("my_docs").ends_with("does not spell its name"));
     }
 
     #[test]
@@ -719,6 +886,7 @@ mod tests {
             .map(|d| match d {
                 Definition::Entry(e) => e.text(),
                 Definition::Manual { step, .. } => step.clone(),
+                Definition::Deny(d) => d.name.clone(),
             })
             .collect();
         assert_eq!(

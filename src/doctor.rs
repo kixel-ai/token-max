@@ -189,6 +189,15 @@ impl Edit {
     }
 }
 
+/// The edit adding the MCP server `name` to Claude Code's `deniedMcpServers`.
+fn deny(name: &str) -> Edit {
+    Edit {
+        path: vec!["deniedMcpServers".into()],
+        value: serde_json::json!({ "serverName": name }),
+        op: Op::Append,
+    }
+}
+
 /// Every change the report recommends or suggests, biggest saving first, each with its
 /// edit or the step to take by hand. An edit another line already makes is listed once,
 /// naming both lines. Each fix's description and evidence are empty until `explain` fills them
@@ -312,7 +321,11 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
                     g.kind == ContextKind::McpServer && g.reason == Reason::Unused
                 });
                 if unused && matches!(how, How::Edit(_)) {
-                    removal = crate::mcp::definitions(&c.name, control, &members);
+                    let versions = claude_versions(report, &ids);
+                    removal = crate::mcp::definitions(&c.name, control, &members)
+                        .into_iter()
+                        .map(|d| gate(d, &versions))
+                        .collect();
                 }
                 how
             }
@@ -336,6 +349,47 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
         origins: vec![line.origin],
         group,
         removal,
+    }
+}
+
+/// The Claude Code each profile in `ids` last recorded a request from, for those with any.
+fn claude_versions<'r>(report: &'r Report, ids: &[&str]) -> Vec<Option<&'r str>> {
+    ids.iter()
+        .filter_map(|id| {
+            let mut requests = report.scan.requests.iter().rev();
+            let last = requests.find(|r| r.profiles.iter().any(|p| p == id))?;
+            Some(last.version.as_deref())
+        })
+        .collect()
+}
+
+/// A `deniedMcpServers` entry where every profile's latest Claude Code matches it by name,
+/// else its step by hand.
+fn gate(definition: Definition, versions: &[Option<&str>]) -> Definition {
+    let Definition::Deny(deny) = definition else {
+        return definition;
+    };
+    let (minor, patch) = deny.since;
+    if !versions.is_empty()
+        && versions
+            .iter()
+            .all(|v| crate::version::claude_at_least(*v, minor, patch))
+    {
+        return Definition::Deny(deny);
+    }
+    let ran = versions
+        .iter()
+        .flatten()
+        .min_by_key(|v| crate::version::plain(v))
+        .map_or("an unrecorded Claude Code".to_string(), |v| {
+            format!("Claude Code {v}")
+        });
+    Definition::Manual {
+        step: deny.step,
+        reason: format!(
+            "{}, and its latest sessions ran {ran}, before 2.{minor}.{patch}, where a deniedMcpServers entry blocks just this server by name",
+            deny.reason
+        ),
     }
 }
 
@@ -2084,6 +2138,8 @@ pub enum Event {
     Choose { offer: usize, yes: bool },
     /// After a yes, also remove one of the entries the offer named.
     Remove { offer: usize, entry: usize },
+    /// After a yes, also add one of the offer's `deniedMcpServers` entries.
+    Deny { offer: usize, name: usize },
     /// Remove the configuration of an MCP server that is off already.
     Cleanup { entry: usize },
 }
@@ -2098,6 +2154,8 @@ pub struct Selection {
     events: Vec<Event>,
     /// The offers answered yes, whose entries a removal may name.
     yes: Vec<usize>,
+    /// How many `deniedMcpServers` entries were accepted.
+    denials: usize,
 }
 
 impl Selection {
@@ -2153,6 +2211,21 @@ impl Selection {
                     .ok_or_else(missing)?;
                 self.remove(*target, entry);
             }
+            Event::Deny { offer, name } => {
+                if !self.yes.contains(&offer) {
+                    return Err(format!(
+                        "the walk blocked a server of a change it did not accept ({event:?})"
+                    ));
+                }
+                let offer = offers.offers.get(offer).ok_or_else(missing)?;
+                let name = offer.denials.get(name).ok_or_else(missing)?;
+                let edits = &mut self.at(offer.target).1;
+                let edit = deny(name);
+                if !edits.contains(&edit) {
+                    edits.push(edit);
+                    self.denials += 1;
+                }
+            }
             Event::Cleanup { entry } => {
                 let (target, entry) = offers.cleanup.get(entry).ok_or_else(missing)?;
                 self.remove(*target, entry);
@@ -2184,6 +2257,7 @@ impl Selection {
                 .collect(),
             changes: self.total.changes(),
             removals: self.accepted.iter().map(|(_, _, r)| r.len()).sum(),
+            denials: self.denials,
         }
     }
 }
@@ -2201,6 +2275,8 @@ pub struct Summary {
     changes: usize,
     /// How many MCP server entries are to be removed.
     removals: usize,
+    /// How many MCP servers are to be added to `deniedMcpServers`.
+    denials: usize,
 }
 
 impl Summary {
@@ -2268,7 +2344,8 @@ impl Targets {
     }
 }
 
-/// An offered change, with the MCP server entries it may also remove.
+/// An offered change, with the MCP server entries it may also remove, and the servers it
+/// may also add to `deniedMcpServers` in its own file.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Offer {
@@ -2276,6 +2353,8 @@ struct Offer {
     fix: Fix,
     /// Each entry with its target.
     entries: Vec<(usize, Entry)>,
+    /// Each name to deny, once.
+    denials: Vec<String>,
     /// Removals to make by hand: the step, and why.
     manual: Vec<(String, String)>,
 }
@@ -2387,9 +2466,33 @@ impl Owner {
                 continue;
             }
             let mut entries = vec![];
+            let mut denials: Vec<String> = vec![];
+            let mut named: Vec<&str> = vec![];
             let mut by_hand = vec![];
             for definition in &fix.removal {
                 let definition = match definition {
+                    Definition::Deny(d) if named.contains(&d.name.as_str()) => continue,
+                    Definition::Deny(d) => {
+                        named.push(&d.name);
+                        let Ok(target) = &targets.all[index] else {
+                            unreachable!("the change's target opened")
+                        };
+                        let edits = [patch.edits.as_slice(), &[deny(&d.name)]].concat();
+                        match apply(target, &edits, &[]) {
+                            // Denied already.
+                            Ok(text) if Ok(&text) == apply(target, &patch.edits, &[]).as_ref() => {
+                                continue;
+                            }
+                            Ok(_) => {
+                                denials.push(d.name.clone());
+                                continue;
+                            }
+                            Err(reason) => Definition::Manual {
+                                step: d.step.clone(),
+                                reason: format!("{}, and {reason}", d.reason),
+                            },
+                        }
+                    }
                     Definition::Entry(entry) => {
                         offered_entries.push(entry.clone());
                         match targets.entry(entry) {
@@ -2410,6 +2513,7 @@ impl Owner {
                 target: index,
                 fix,
                 entries,
+                denials,
                 manual: by_hand,
             });
         }
@@ -2644,8 +2748,9 @@ impl Walk<'_, '_> {
     }
 
     /// After a yes to turning never-used MCP servers off, offer to remove their configuration
-    /// too, which the confirm then lists; whether the walk goes on. Removals only by hand are
-    /// named without a question.
+    /// and block the servers token-max cannot remove with `deniedMcpServers`, which the
+    /// confirm then lists; whether the walk goes on. Removals only by hand are named without
+    /// a question.
     fn offer_removal(
         &mut self,
         members: &[&Member<'_>],
@@ -2663,39 +2768,74 @@ impl Walk<'_, '_> {
                     .map(|(i, (_, e))| (*m, i, e))
             })
             .collect();
+        let denials: Vec<(&Member<'_>, usize, &String)> = members
+            .iter()
+            .flat_map(|m| m.offer.denials.iter().enumerate().map(|(i, n)| (*m, i, n)))
+            .collect();
+        let count = entries.len() + denials.len();
         let mut text = String::new();
-        if !entries.is_empty() {
+        if count > 0 {
             let stays = if members.len() == 1 {
                 "It stays"
             } else {
                 "They stay"
             };
-            text += &style.line(&format!("{stays} configured; token-max can also remove:"));
+            text += &style.line(&format!("{stays} configured; token-max can also:"));
             for (_, _, entry) in &entries {
-                let place = format!("{} in {}", entry.text(), style.path(&entry.file));
+                let place = format!("remove {} in {}", entry.text(), style.path(&entry.file));
                 text += &style.raw(&place, MARGIN + 2, DIM);
             }
+            for (member, _, name) in &denials {
+                let file = &self.hosts[member.host].offers.files[member.offer.target];
+                let block = format!(
+                    "add {} to deniedMcpServers in {}",
+                    serde_json::json!({ "serverName": name }),
+                    style.path(file)
+                );
+                text += &style.raw(&block, MARGIN + 2, DIM);
+            }
+            if !denials.is_empty() {
+                text += &style.dim(
+                    "Claude Code then connects no server by that name, wherever it is configured.",
+                );
+            }
         }
-        for (step, reason) in members.iter().flat_map(|m| &m.offer.manual) {
-            text += &style.line(&home_in(
-                &format!("To remove it by hand, since {reason}: {step}."),
-                style.home.as_deref(),
-            ));
+        for member in members {
+            // A group's step names its server.
+            let it = match (&member.offer.fix.group, members.len()) {
+                (Some(group), 2..) => group.member.as_str(),
+                _ => "it",
+            };
+            for (step, reason) in &member.offer.manual {
+                text += &style.line(&home_in(
+                    &format!("To remove {it} by hand, since {reason}: {step}."),
+                    style.home.as_deref(),
+                ));
+            }
         }
         write!(output, "{text}")?;
-        if entries.is_empty() {
+        if count == 0 {
             return Ok(true);
         }
-        let question = if entries.len() == 1 {
-            "Remove it too?".to_string()
+        let verb = match (entries.is_empty(), denials.is_empty()) {
+            (false, true) => "Remove",
+            (true, false) => "Block",
+            _ => "Do",
+        };
+        let question = if count == 1 {
+            format!("{verb} it too?")
         } else {
-            format!("Remove all {} too?", entries.len())
+            format!("{verb} all {count} too?")
         };
         let answer = answer(&style.prompt(&question, false), input, output)?;
         if answer == Answer::Yes {
             for (member, entry, _) in entries {
                 let offer = member.index;
                 self.record(member.host, Event::Remove { offer, entry });
+            }
+            for (member, name, _) in denials {
+                let offer = member.index;
+                self.record(member.host, Event::Deny { offer, name });
             }
         }
         Ok(answer != Answer::Quit)
@@ -3062,7 +3202,18 @@ pub fn confirm(
             if removals == 1 { "" } else { "s" }
         ));
     }
-    let question = format!("Write the {} to {files}?", what.join(" and "));
+    let denials: usize = confirm.hosts.iter().map(|(s, _)| s.denials).sum();
+    if denials > 0 {
+        what.push(format!(
+            "{denials} deniedMcpServers entr{}",
+            if denials == 1 { "y" } else { "ies" }
+        ));
+    }
+    let what = match what.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => what.concat(),
+    };
+    let question = format!("Write the {what} to {files}?");
     let prompt = style.ask(&question, "[y]es, [n]o");
     loop {
         write!(output, "\n{prompt}")?;
@@ -4971,7 +5122,20 @@ mod tests {
                         Definition::Entry(b_local.clone()),
                     ],
                 ),
-                server("C", 1.0, &settings, vec![plugin.clone()]),
+                server(
+                    "C",
+                    1.0,
+                    &settings,
+                    vec![
+                        plugin.clone(),
+                        Definition::Deny(crate::mcp::Deny {
+                            name: "claude.ai Gmail".into(),
+                            since: (1, 330),
+                            step: "disconnect it at claude.ai".into(),
+                            reason: "it is a claude.ai connector".into(),
+                        }),
+                    ],
+                ),
             ]
         };
         let off = entry(&config, Harness::Codex, &["mcp_servers", "off"]);
@@ -4993,11 +5157,12 @@ mod tests {
         );
         let sep = std::path::MAIN_SEPARATOR;
         assert!(printed.contains(&format!(
-            "  It stays configured; token-max can also remove:\n    mcpServers.A in ~{sep}.claude.json\n  Remove it too? [y]es, [n]o, [q]uit: "
+            "  It stays configured; token-max can also:\n    remove mcpServers.A in ~{sep}.claude.json\n  Remove it too? [y]es, [n]o, [q]uit: "
         )), "{printed}");
-        // A group's removal is one question, naming what only a person can remove.
+        // A group's removal is one question, with the servers it can only block, naming what
+        // only a person can remove.
         assert!(printed.contains(&format!(
-            "  They stay configured; token-max can also remove:\n    mcpServers.B in ~{sep}.claude.json\n    mcpServers.B of project /p in ~{sep}.claude.json\n  To remove it by hand, since a plugin adds it: uninstall or disable the plugin that provides it.\n  Remove all 2 too? [y]es, [n]o, [q]uit: "
+            "  They stay configured; token-max can also:\n    remove mcpServers.B in ~{sep}.claude.json\n    remove mcpServers.B of project /p in ~{sep}.claude.json\n    add {{\"serverName\":\"claude.ai Gmail\"}} to deniedMcpServers in ~{sep}.claude{sep}settings.json\n  Claude Code then connects no server by that name, wherever it is configured.\n  To remove c by hand, since a plugin adds it: uninstall or disable the plugin that provides it.\n  Do all 3 too? [y]es, [n]o, [q]uit: "
         )), "{printed}");
         assert!(printed.contains(&format!(
             "\n  [3/3] MCP server off  saves nothing\n        off -> removed  Worth considering\n        Why    Its tools are off already, so no session uses this configuration.\n        Where  [mcp_servers.off] in ~{sep}.codex{sep}config.toml\n  Remove it? [y]es, [n]o, [q]uit: "
@@ -5025,7 +5190,9 @@ mod tests {
             "{shown}"
         );
         assert!(
-            shown.contains("Write the 3 accepted changes and 3 removals to "),
+            shown.contains(
+                "Write the 3 accepted changes, 3 removals and 1 deniedMcpServers entry to "
+            ),
             "{shown}"
         );
         // An entry it would remove changed during the walk: nothing is written, since the
@@ -5077,7 +5244,13 @@ mod tests {
             std::fs::read_to_string(&config).unwrap(),
             "model = \"m\" # mine\n\n[mcp_servers.on]\ncommand = \"x\"\n"
         );
-        assert_eq!(written.iter().map(|w| w.edits).sum::<usize>(), 6);
+        assert_eq!(written.iter().map(|w| w.edits).sum::<usize>(), 7);
+        let blocked: Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(
+            blocked["deniedMcpServers"],
+            serde_json::json!([{ "serverName": "claude.ai Gmail" }])
+        );
 
         // A no to the removal keeps the change; a no to the change asks nothing more.
         let mut printed = vec![];
@@ -5093,6 +5266,70 @@ mod tests {
         assert_eq!(printed.matches("too? ").count(), 1, "{printed}");
         assert_eq!(choice(&plan, "A"), &Choice::Accepted);
         assert!(plan.files.iter().all(|p| p.removals.is_empty()));
+    }
+
+    #[test]
+    fn a_server_is_blocked_only_where_its_entry_is_new_and_its_claude_code_matches_it() {
+        let w = Workspace::new();
+        let settings = w.claude.join("settings.json");
+        let blocked = |name: &str| {
+            Definition::Deny(crate::mcp::Deny {
+                name: name.into(),
+                since: (1, 182),
+                step: "uninstall the plugin".into(),
+                reason: "a plugin adds it".into(),
+            })
+        };
+        // Every profile's latest Claude Code must match it by name.
+        let new = [Some("2.1.182"), Some("2.1.331")];
+        assert_eq!(gate(blocked("p"), &new), blocked("p"));
+        let Definition::Manual { step, reason } =
+            gate(blocked("p"), &[Some("2.1.331"), Some("2.1.90"), None])
+        else {
+            panic!("an older Claude Code is a step by hand")
+        };
+        assert_eq!(step, "uninstall the plugin");
+        assert!(
+            reason.starts_with(
+                "a plugin adds it, and its latest sessions ran Claude Code 2.1.90, before 2.1.182"
+            ),
+            "{reason}"
+        );
+        assert!(matches!(
+            gate(blocked("p"), &[None]),
+            Definition::Manual { .. }
+        ));
+        assert!(matches!(gate(blocked("p"), &[]), Definition::Manual { .. }));
+
+        // A name the file denies already is not offered again, one name twice is offered
+        // once, and a denylist that is not a list leaves it by hand.
+        std::fs::write(
+            &settings,
+            r#"{"deniedMcpServers": [{"serverName": "old"}]}"#,
+        )
+        .unwrap();
+        let fix = server(
+            "A",
+            5.0,
+            &settings,
+            vec![blocked("old"), blocked("new"), blocked("new")],
+        );
+        let owner = Owner::new(vec![fix.clone()], vec![], None, 0.0);
+        let offer = &owner.offers().offers[0];
+        assert_eq!(offer.denials, ["new"]);
+        assert!(offer.manual.is_empty());
+        std::fs::write(&settings, r#"{"deniedMcpServers": {}}"#).unwrap();
+        let owner = Owner::new(vec![fix], vec![], None, 0.0);
+        let offer = &owner.offers().offers[0];
+        assert!(offer.denials.is_empty());
+        assert_eq!(offer.manual.len(), 2);
+        assert!(
+            offer.manual[0]
+                .1
+                .starts_with("a plugin adds it, and deniedMcpServers is not a list"),
+            "{:?}",
+            offer.manual
+        );
     }
 
     /// A change adding `key` to `file`, as the walk accepts it.

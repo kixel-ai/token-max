@@ -623,7 +623,11 @@ pub fn audit(
             if let Err(error) = offers.check() {
                 return Err(session.fail(true, |_| format!("token-max there {error}")));
             }
-            let remote = Remote { session, stream };
+            let remote = Remote {
+                since,
+                session,
+                stream,
+            };
             return Ok(match reply {
                 Reply::Report(printed) => Reply::Walk {
                     printed,
@@ -657,6 +661,8 @@ pub fn audit(
 
 /// A destination's audit kept open for this host's walk through its changes.
 pub struct Remote {
+    /// The window the audit was asked for, which every result of its scan names.
+    since: Option<Millis>,
     session: Session,
     stream: Box<Stream<BufReader<ChildStdout>>>,
 }
@@ -719,10 +725,11 @@ impl Remote {
         let doing = "before its advice arrived; no further settings were changed there";
         match self.exchange(&Answer::Vibes, doing)? {
             Outcome::Vibes {
+                since,
                 items,
                 offers: Some(offers),
                 ..
-            } => match offers.check() {
+            } if since == self.since => match offers.check() {
                 Ok(()) => Ok((items, offers)),
                 Err(error) => Err(self
                     .session
@@ -813,12 +820,7 @@ impl Walked {
     /// `vibes`' advice and the changes it offers, checked against the files as they are
     /// now, which the walk goes on with.
     fn advise(&mut self) -> Outcome {
-        self.owner = Owner::new(
-            crate::vibes::fixes(&self.vibes),
-            vec![],
-            self.home.clone(),
-            self.monthly,
-        );
+        self.owner = crate::vibes::owner(&self.vibes, self.home.clone(), self.monthly);
         self.listing = None;
         Outcome::Vibes {
             since: self.since,
@@ -896,7 +898,7 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
             reach,
             reading: None,
         })?;
-        // The stdin thread keeps the sender until it exits this process.
+        // The stdin thread sends the request before anything ends it.
         let Ok(Incoming::Request(request)) = incoming.recv() else {
             unreachable!("the request comes first")
         };
@@ -941,8 +943,13 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
                 home: home.as_deref(),
             },
         )?;
+        // A walk of `vibes` alone reads only the files its own changes name.
+        let owner = |home: Option<String>| match advice {
+            true => crate::vibes::owner(&vibes, home, totals.monthly),
+            false => Owner::new(fixes, turned_off, home, totals.monthly),
+        };
         let mut walked = walk.then(|| Walked {
-            owner: Owner::new(fixes, turned_off, home.clone(), totals.monthly),
+            owner: owner(home.clone()),
             listing: Some(listing),
             style: format.style(home.clone()),
             vibes: vibes.clone(),
@@ -1029,9 +1036,9 @@ fn walk_here(
         }))
         .unwrap_or_else(|_| {
             Err(ScanError::new(if write {
-                "doctor failed while applying changes"
+                "token-max failed while applying changes"
             } else {
-                "doctor failed while reviewing changes"
+                "token-max failed while reviewing changes"
             }))
         });
         let outcome = match outcome {

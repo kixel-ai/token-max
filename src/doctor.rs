@@ -1452,13 +1452,11 @@ impl Target {
             // Check again just before replacing it, so a write by another tool since the
             // walk's check is kept rather than overwritten.
             if !self.unchanged()? {
-                return Err(io::Error::other(
-                    "it changed while token-max doctor was writing",
-                ));
+                return Err(io::Error::other("it changed while token-max was writing"));
             }
             if lock.is_some_and(|l| !l.held()) {
                 return Err(io::Error::other(
-                    "another program took over its lock while token-max doctor was writing",
+                    "another program took over its lock while token-max was writing",
                 ));
             }
             fs::rename(&temp, &self.resolved)

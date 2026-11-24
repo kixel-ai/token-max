@@ -875,8 +875,7 @@ impl WalkHost {
                 listing,
                 monthly,
             } => {
-                let fixes = vibes::fixes(&self.items);
-                *owner = Owner::new(fixes, vec![], self.style.home.clone(), *monthly);
+                *owner = vibes::owner(&self.items, self.style.home.clone(), *monthly);
                 *listing = None;
             }
             Side::There { offers, remote } => {
@@ -1558,25 +1557,25 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
             None => text.push_str(&printed.text),
         }
     }
+    // Several hosts get one total at the head, beside each host's own section.
+    let head = match sum {
+        Some(sum) if sections > 1 && !advice => {
+            let mut head = totals_section(
+                &sum,
+                sections,
+                ReportOptions {
+                    width: style.width,
+                    color,
+                    unicode,
+                    ..ReportOptions::default()
+                },
+            );
+            head.push('\n');
+            head
+        }
+        _ => String::new(),
+    };
     if walk {
-        // Several hosts get one total at the head, beside each host's own section.
-        let head = match sum {
-            Some(sum) if sections > 1 && !advice => {
-                let mut head = totals_section(
-                    &sum,
-                    sections,
-                    ReportOptions {
-                        width: style.width,
-                        color,
-                        unicode,
-                        ..ReportOptions::default()
-                    },
-                );
-                head.push('\n');
-                head
-            }
-            _ => String::new(),
-        };
         let walk = Walk {
             hosts,
             head,
@@ -1597,23 +1596,6 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
             .collect();
         return Ok((Output::Text(vibes::text(&hosts, &style)), 0));
     }
-    let head = match sum {
-        Some(sum) if sections > 1 => {
-            let mut head = totals_section(
-                &sum,
-                sections,
-                ReportOptions {
-                    width: style.width,
-                    color,
-                    unicode,
-                    ..ReportOptions::default()
-                },
-            );
-            head.push('\n');
-            head
-        }
-        _ => String::new(),
-    };
     // Off a terminal, the advice this report leaves out is one command away. Under
     // `--defaults` the count is of settings pretended away, which `vibes` reads as they are.
     let hint = if pending > 0 && !values.defaults {
@@ -1921,7 +1903,7 @@ pub fn main() -> ExitCode {
                 Err(_) => {
                     diagnose(
                         json,
-                        &ScanError::new("doctor failed while applying changes"),
+                        &ScanError::new("token-max failed while applying changes"),
                     );
                     return ExitCode::from(2);
                 }

@@ -9,7 +9,9 @@ use std::io::{self, BufRead, Write};
 
 use serde::{Deserialize, Serialize};
 
-use crate::doctor::{Answer, Card, Change, Event, Fix, How, Offers, Selection, Standing, Style};
+use crate::doctor::{
+    Answer, Card, Change, Event, Fix, How, Offers, Owner, Selection, Standing, Style,
+};
 use crate::report::Origin;
 use crate::terminal::BOLD;
 
@@ -61,6 +63,12 @@ pub fn fixes(items: &[Item]) -> Vec<Fix> {
         })
     });
     crate::doctor::fixes_from(fixes.collect())
+}
+
+/// The host that owns `items`' changes, each checked against its file as it is now. `home`
+/// and `monthly` are that host's.
+pub fn owner(items: &[Item], home: Option<String>, monthly: f64) -> Owner {
+    Owner::new(fixes(items), vec![], home, monthly)
 }
 
 /// `items` with each change as the walk would offer it, for a host that only prints them.
@@ -268,7 +276,7 @@ fn pieces(count: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::doctor::{Edit, Op, Owner, Patch};
+    use crate::doctor::{Edit, Op, Patch};
     use crate::model::Harness;
     use crate::test_support::Workspace;
     use serde_json::json;

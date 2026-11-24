@@ -1599,7 +1599,12 @@ impl Reader {
             if let Some(cwd) = absolute_cwd {
                 set(&mut context.cwd, Some(cwd));
             }
+            let model = context.model.clone();
             set(&mut context.model, label(member(p, "model")).as_deref());
+            // A window was recorded for the model that ran then, not for the one that runs now.
+            if context.model != model {
+                context.usable_window = None;
+            }
             let mode = nested(nested(p, "collaboration_mode"), "settings");
             set(
                 &mut context.effort,
@@ -3184,6 +3189,12 @@ mod tests {
                 },
             }),
             end(3, "second"),
+            json!({
+                "type": "turn_context",
+                "timestamp": "2026-11-01T00:04:00Z",
+                "payload": { "turn_id": "third", "model": "gpt-6.1-luna" },
+            }),
+            end(5, "third"),
         ]);
         write(w.codex.join("sessions/thread.jsonl"), &raw);
         let result = scan(&options(&w)).unwrap();
@@ -3193,7 +3204,8 @@ mod tests {
             .filter(|e| e.kind == EventKind::TurnEnd)
             .map(|e| e.usable_window)
             .collect();
-        assert_eq!(windows, [None, Some(258_400)]);
+        // The window belongs to the model that recorded it, so a switch forgets it.
+        assert_eq!(windows, [None, Some(258_400), None]);
     }
 
     #[test]

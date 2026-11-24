@@ -910,9 +910,10 @@ usable context window; unset or zero is off, and the auto-compact limit still
 applies ([config reference](https://developers.openai.com/codex/config-reference),
 [Codex's source](https://github.com/openai/codex/blob/rust-v0.171.0/codex-rs/core/src/session/context_window.rs),
 checked 2026-11-23). The line replays candidate thresholds against the current
-one, after the change the [compaction window](#compaction-window) line
+one, under the limit the [compaction window](#compaction-window) line
 recommends, and recommends the cheapest. Its baseline names the threshold and
-the limit it replayed.
+the limit it replayed. Both replay in one pass, so a turn's end that compacts
+first spares the limit's compaction before the next request.
 
 A turn ends where the transcript records its completion, so an interrupted turn
 compacts nothing. Its context is its final request's input and output, and the
@@ -929,7 +930,9 @@ dropped.
 A summary at a turn's end reads the conversation while its cache is warm: what
 the turn's final request read from the cache is read again, and the rest is
 ordinary input. Its output and the prefix the next request resumes from use the
-same calibration as the window replay. That next request starts cold, later ones
+same calibration as the window replay. It replaces only the context the turn
+finished with, so what the next turn adds stays, and a next request on another
+model leaves the threshold unpriced. That next request starts cold, later ones
 reuse the prefix, and a session's final turn pays for its summary and gets
 nothing back. Every recorded compaction stays charged once, and a turn that one
 follows adds none. Larger summaries, a summary that reads nothing from the
@@ -937,7 +940,8 @@ cache, and the re-read spend that would erase a saving accompany the winner.
 
 A threshold no recorded turn reached decides nothing, and a tie with the current
 threshold, or a candidate that could not be priced beside none that wins, is not
-enough evidence. A named profile, a `profiles` table or a project's
+enough evidence. Neither is any threshold beside an auto-compact limit the
+replay cannot model, such as one scoped to the body after the prefix. A named profile, a `profiles` table or a project's
 `.codex/config.toml` that sets the threshold keeps the line advisory, since
 which applied is not recorded, as does a latest recorded Codex before v0.156.0,
 which added the setting. Lost detail and changed work remain unmeasured risks.

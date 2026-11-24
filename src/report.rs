@@ -2470,7 +2470,7 @@ fn card(result: &CheckResult, action: Option<Action>, out: &mut Out<'_>) {
                 );
             }
             out.field(
-                "Auto-compact limit replayed first",
+                "Auto-compact limit replayed with it",
                 &c.window
                     .map_or_else(|| "none set".into(), |w| format!("{w} tokens")),
             );
@@ -5175,7 +5175,7 @@ fn summary(
             }
             CheckResult::TurnEnd(c) => {
                 let after = match c.window {
-                    Some(window) => format!(" after the {} auto-compact limit", tokens(window)),
+                    Some(window) => format!(" under the {} auto-compact limit", tokens(window)),
                     None => String::new(),
                 };
                 match mark {

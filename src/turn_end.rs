@@ -1,13 +1,13 @@
 //! Codex turn-end compaction check: replay compacting after a turn's final response at
-//! candidate thresholds, after the window line's recommendation, and compare them with the
-//! current threshold.
+//! candidate thresholds, under the limit the window line recommends, and compare them with
+//! the current threshold.
 
 use std::collections::BTreeSet;
 
 use crate::collections::{HashMap, HashSet, IndexMap, IndexSet};
 use crate::compaction::{
     Lockstep, Pass, Simulator, Stream, Trigger, TurnEnds, WindowEvents, WindowOptions,
-    WindowSetting, compaction_samples, is_conversation, replay_windows, scenarios, skipped_lines,
+    compaction_samples, is_conversation, scenarios, skipped_lines,
 };
 use crate::controls::TURN_END_KEY;
 use crate::discovery::locale_compare;
@@ -35,7 +35,7 @@ pub struct TurnEndOptions<'a> {
     pub catalog: &'a Catalog,
     pub summaries: &'a [CompactionCharge],
     pub estimates: &'a IndexMap<Text, UsageEstimate>,
-    /// Window checks whose recommendations the replay applies first.
+    /// Window checks whose recommended limits the replay applies.
     pub windows: &'a [&'a CompactionCheck],
     pub since: Option<Millis>,
     pub now: Millis,
@@ -143,7 +143,7 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
         usable.iter().map(|u| (u.model.clone(), u.tokens)).collect(),
     );
 
-    // The window line's recommendation comes first, as `doctor` applies it.
+    // The limit is the window line's recommendation, as `doctor` applies it first.
     let window_check = options
         .windows
         .iter()
@@ -165,18 +165,9 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
             subagent: None,
         },
     };
-    let windowed = replay_windows(
-        requests.iter().copied(),
-        &[WindowSetting {
-            value: window,
-            models: &models,
-        }],
-        &window_options,
-    );
-    let modeled: Vec<&Request> = windowed.requests.iter().map(|m| &**m).collect();
 
-    // Charges no threshold changes: summaries the transcripts record without a request,
-    // server tools, and the summaries the window adds.
+    // Charges no threshold changes: summaries the transcripts record without a request and
+    // server tools.
     let summary_ids: HashSet<&Id> = events
         .iter()
         .filter(|e| e.time >= since)
@@ -191,9 +182,6 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
     for r in selected.iter().filter(|r| r.time >= since) {
         fixed.add(&server_cost(r));
     }
-    for added in &windowed.added {
-        fixed.add(&added.summary_cost);
-    }
     let fixed = fixed.cost();
 
     // Thresholds where the cost of a turn's end can change: each model's price tiers and the
@@ -201,7 +189,7 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
     let current = control.percent;
     let mut candidates: BTreeSet<i64> = BTreeSet::from([current]);
     let mut providers: IndexMap<&Option<Text>, IndexSet<&str>> = IndexMap::default();
-    for r in &modeled {
+    for r in &requests {
         for p in r.parts.iter().filter(|p| is_conversation(p)) {
             if let (Some(provider), Some(_)) = (&r.provider, &p.model) {
                 providers.entry(&p.model).or_default().insert(provider);
@@ -229,7 +217,7 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
         .filter(|&p| p == current || (1..=ceiling).contains(&p))
         .collect();
 
-    let last: HashMap<&str, usize> = modeled
+    let last: HashMap<&str, usize> = requests
         .iter()
         .enumerate()
         .map(|(i, r)| (&*r.session, i))
@@ -245,11 +233,12 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
         attempt_scenario: Default::default(),
     };
     let lockstep = Lockstep {
-        requests: &modeled,
+        requests: &requests,
         last: &last,
         catalog,
         fixed: &fixed,
-        unknown: None,
+        // A limit the replay cannot model leaves every threshold beside it unpriced.
+        unknown: profile.compaction.default.comparison_unknown.as_deref(),
         skipped: skipped_lines(scan, &group.ids),
     };
     let replay = || PartReplay::new([&index.cache], &replay_options);
@@ -258,20 +247,22 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
         &percents,
         |percent, scenario| {
             Stream::new(
+                // One pass replays the limit and the threshold in time order, so a turn's end
+                // that compacts first spares the limit's compaction before the next request.
                 Simulator::new(
-                    &windowed.events,
-                    (!windowed.applied).then_some(options.estimates),
+                    &[],
+                    Some(options.estimates),
                     Pass {
                         trigger: Trigger::TurnEnd {
                             percent,
                             turns: &turns,
+                            window,
                         },
                         larger: scenario == 1,
                         cold: scenario == 2,
                     },
                     &window_options,
-                )
-                .carry(&windowed.uncertain),
+                ),
                 replay(),
             )
         },
@@ -279,10 +270,26 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
     );
     let scenarios = scenarios(&percents, runs);
 
-    // A threshold no turn reached replays as the current one does, so it decides nothing.
+    // A threshold that adds the summaries the current one does replays as it does, so it
+    // decides nothing. One whose replay fails where the current one's does not is
+    // unresolved, not untouched.
+    let summaries = |s: &WindowScenario| -> Vec<(Text, i64, i64)> {
+        s.added
+            .iter()
+            .map(|a| (a.request.clone(), a.input_tokens, a.prefix_tokens))
+            .collect()
+    };
+    let unchanged = scenarios
+        .iter()
+        .find(|s| s.window == current)
+        .map(summaries);
     let acting: Vec<&WindowScenario> = scenarios
         .iter()
-        .filter(|s| s.window != current && (s.affected_requests > 0 || !s.added.is_empty()))
+        .filter(|s| {
+            s.window != current
+                && (Some(summaries(s)) != unchanged
+                    || s.comparison_cost.unknown != s.baseline_comparison_cost.unknown)
+        })
         .collect();
     let conditional = scenarios
         .iter()
@@ -342,7 +349,6 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
     if profiles.iter().any(|p| !group.ids.contains(p)) {
         uncertainty.insert("shared history has ambiguous profile attribution".into());
     }
-    uncertainty.extend(windowed.errors.iter().map(|e| e.to_string()));
     for s in &scenarios {
         uncertainty.extend(s.comparison_cost.unknown.iter().cloned());
         uncertainty.extend(s.cost.unknown.iter().cloned());
@@ -393,7 +399,7 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
             }
             .into(),
             baseline: format!(
-                "{state}, applied to recorded requests after {after_window}; observed summaries retained once; savings are incremental and checks must not be summed"
+                "{state}, applied to recorded requests under {after_window}; observed summaries retained once; savings are incremental and checks must not be summed"
             ),
             requests: selected.iter().filter(|r| r.time >= since).count() as u64,
             coverage,
@@ -408,9 +414,9 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
                 )
             }),
             assumptions: vec![
-                "a turn's end compacts when its final request's input and output reach the threshold's share of the model's usable window, the window Codex last recorded for the model; the usual auto-compact limit still applies and is replayed first".into(),
+                "a turn's end compacts when its final request's input and output reach the threshold's share of the model's usable window, the window Codex last recorded for the model; the usual auto-compact limit still applies in the same replay, so a turn's end that compacts first spares the limit's compaction before the next request".into(),
                 "candidate thresholds are the current one and, as percentages of each model's usable window, its catalog price tiers and the auto-compact limit; this is not an exhaustive optimizer over every percentage".into(),
-                "a turn-end summary reads the finished turn's context while its cache is warm: what the turn's final request read from the cache is read again, and the rest is ordinary input; output and the resumed prefix use cohort medians from linked billed summaries and first subsequent requests".into(),
+                "a turn-end summary replaces only the context the turn finished with, so what the next turn adds stays, and a next request on another model, agent, provider or speed leaves it unpriced; it reads that context while its cache is warm: what the turn's final request read from the cache is read again, and the rest is ordinary input; output and the resumed prefix use cohort medians from linked billed summaries and first subsequent requests".into(),
                 "the next request starts from the resumed prefix, cold, and later requests reuse it within the documented 30m billed Codex lifetime; a session's final turn pays for its summary and gets nothing back".into(),
                 "only added compactions are modeled; every observed compaction is retained once, a turn followed by one adds none, and a threshold above the current one or off cannot be replayed, since the detail recorded summaries dropped is gone".into(),
                 "ordinary requests, outputs, tools and incremental growth are held fixed until each observed boundary; proportional quality or behavioral improvements are not assumed".into(),
@@ -717,7 +723,7 @@ mod tests {
         // Nothing reaches the whole usable window, so 100% decides nothing.
         assert_eq!(at_percent(&c, 100).affected_requests, 0);
         assert!(c.base.baseline.starts_with(
-            "turn-end compaction off, applied to recorded requests after the current 180000-token auto-compact limit"
+            "turn-end compaction off, applied to recorded requests under the current 180000-token auto-compact limit"
         ));
     }
 
@@ -763,7 +769,84 @@ mod tests {
         assert!(
             c.base
                 .baseline
-                .contains("after the auto-compact window line's recommended 20000-token limit")
+                .contains("under the auto-compact window line's recommended 20000-token limit")
+        );
+    }
+
+    #[test]
+    fn a_turn_end_summary_leaves_what_the_next_turn_added() {
+        // The turn ends with 150k of input and 44.5k of output, 194.5k of context, past 97%
+        // of the usable window. The next turn's first request carries 500 tokens more.
+        let mut s = data(HOUR, json!({ "model_auto_compact_token_limit": 195_000 }));
+        s.requests[2].parts[0].usage = usage(150_000, 0, 44_500);
+        s.requests[3].parts[0].usage = usage(195_000, 0, 1000);
+        for r in &mut s.requests[4..] {
+            r.parts[0].usage = usage(195_000, 195_000, 1000);
+        }
+        let c = check(&s);
+        let on = at_percent(&c, 97);
+        assert_eq!(on.added[0].input_tokens, 194_500);
+        // Off, the return writes 195k tokens and three requests read them: $0.4875 + $0.0585.
+        // On, the 20k prefix and the 500 new tokens are written and read: $0.05125 +
+        // $0.00615, after a summary of 194.5k ordinary tokens and 2k of output: $0.409.
+        near(on.savings_usd, 0.546 - 0.0574 - 0.409);
+    }
+
+    #[test]
+    fn a_turn_end_that_compacts_first_spares_the_limits_compaction() {
+        // The next turn opens over the 180k limit, so off compacts there: a cold summary of
+        // 185k tokens, $0.37 + $0.02, then the 20k prefix written and read, $0.05 + $0.006.
+        let mut s = data(HOUR, limit());
+        s.requests[3].parts[0].usage = usage(185_000, 0, 1000);
+        for r in &mut s.requests[4..] {
+            r.parts[0].usage = usage(185_000, 185_000, 1000);
+        }
+        let c = check(&s);
+        let off = at_percent(&c, 0);
+        assert_eq!(off.added.len(), 1);
+        assert_eq!(off.added[0].input_tokens, 185_000);
+        // At 90% the turn's end summarizes its 181k tokens first, $0.382, the next request
+        // opens at 24k, under the limit, and that is written and read: $0.06 + $0.0072.
+        let on = at_percent(&c, 90);
+        assert_eq!(on.added.len(), 1);
+        assert_eq!(on.added[0].input_tokens, 181_000);
+        near(on.savings_usd, 0.446 - 0.4492);
+        assert_eq!((c.base.action, c.base.recommended), (Action::Keep, Some(0)));
+    }
+
+    #[test]
+    fn a_model_switch_after_the_turn_or_a_limit_the_replay_cannot_model_stays_unpriced() {
+        // The summary runs on the model that finished the turn, which the next request's
+        // model cannot calibrate, so the threshold is unresolved rather than untouched.
+        let mut switched = data(HOUR, limit());
+        for r in &mut switched.requests[3..] {
+            r.model = Some("gpt-6.1-luna".into());
+            r.parts[0].model = r.model.clone();
+        }
+        let c = check(&switched);
+        let on = at_percent(&c, 90);
+        assert!(on.added.is_empty());
+        assert_eq!(on.savings_usd, None);
+        assert_eq!(
+            (c.base.action, c.base.recommended),
+            (Action::Advisory, None)
+        );
+        assert!(
+            c.base
+                .uncertainty
+                .iter()
+                .any(|u| u.contains("changed after a turn whose end compacts")),
+            "{:?}",
+            c.base.uncertainty
+        );
+
+        let mut user = limit();
+        user["model_auto_compact_token_limit_scope"] = json!("body_after_prefix");
+        let c = check(&data(HOUR, user));
+        assert!(c.scenarios.iter().all(|s| s.savings_usd.is_none()));
+        assert_eq!(
+            (c.base.action, c.base.recommended),
+            (Action::Advisory, None)
         );
     }
 
@@ -941,7 +1024,7 @@ mod tests {
             fix.evidence
         );
         assert!(
-            fix.evidence.contains("after the 180k auto-compact limit"),
+            fix.evidence.contains("under the 180k auto-compact limit"),
             "{}",
             fix.evidence
         );

@@ -647,7 +647,13 @@ pub(crate) enum Trigger<'m> {
     },
     /// After a turn's final response, once its context reaches `percent` of its model's
     /// usable window, as Codex's `model_post_turn_compact_threshold_percent` does. Zero is off.
-    TurnEnd { percent: i64, turns: &'m TurnEnds },
+    /// Codex's auto-compact limit still applies before any request whose context exceeds
+    /// `window`, so a turn's end that compacts first can spare the limit's compaction.
+    TurnEnd {
+        percent: i64,
+        turns: &'m TurnEnds,
+        window: Option<i64>,
+    },
 }
 
 /// Why a turn-end pass cannot tell whether a turn's end compacts.
@@ -697,6 +703,8 @@ struct WindowState {
     /// request read from the cache, which a summary right after it reads again.
     active: Option<i64>,
     read: Option<i64>,
+    /// The recorded context after the last request, which a turn's end summarizes away.
+    recorded: Option<i64>,
 }
 
 /// One window pass over a profile's requests in time order, one request at a time, so a
@@ -778,20 +786,18 @@ impl<'r, 'o> Simulator<'r, 'o> {
         self.result.added.len() - 1
     }
 
-    /// Leave these sessions unknown from their times on, as an earlier pass found them.
-    pub(crate) fn carry(mut self, uncertain: &IndexMap<Text, Millis>) -> Self {
-        self.result.uncertain = uncertain.clone();
-        self
-    }
-
     /// Apply the pass to the next request in time order; `last` when its session has no more.
     fn step(&mut self, source: Modeled<'r>, last: bool) -> Modeled<'r> {
         let Pass {
             trigger, larger, ..
         } = self.pass;
-        let (window, models) = match trigger {
-            Trigger::Window { window, models } => (window, Some(models)),
-            Trigger::TurnEnd { .. } => (i64::MAX, None),
+        let (window, models, turn_end) = match trigger {
+            Trigger::Window { window, models } => (window, Some(models), None),
+            Trigger::TurnEnd {
+                percent,
+                turns,
+                window,
+            } => (window.unwrap_or(i64::MAX), None, Some((percent, turns))),
         };
         let options = self.options;
         let estimates = self.estimates;
@@ -830,8 +836,8 @@ impl<'r, 'o> Simulator<'r, 'o> {
         let mut aliased = state.is_some();
         // A turn that ended since the session's last request, with no boundary between: at
         // or after that request and before this one.
-        let ended = match (trigger, &state) {
-            (Trigger::TurnEnd { turns, .. }, Some(s)) => {
+        let ended = match (turn_end, &state) {
+            (Some((_, turns)), Some(s)) => {
                 turns.ends.crossed(&req.session, s.time - 1, req.time - 1)
             }
             _ => false,
@@ -855,11 +861,12 @@ impl<'r, 'o> Simulator<'r, 'o> {
                 prefix: None,
                 active: None,
                 read: None,
+                recorded: None,
             });
             let selected = req.time >= options.since;
             // Whether the turn that ended before this request compacts; None when unknown.
-            let ended_due = match trigger {
-                Trigger::TurnEnd { percent, turns } if ended && selected => {
+            let ended_due = match turn_end {
+                Some((percent, turns)) if ended && selected => {
                     turns.due(percent, st.active, &st.cohort.model)
                 }
                 _ => Some(false),
@@ -881,6 +888,7 @@ impl<'r, 'o> Simulator<'r, 'o> {
                 st.input = None;
                 st.active = None;
                 st.read = None;
+                st.recorded = None;
                 continue;
             }
             if ended_due.is_none() {
@@ -909,10 +917,18 @@ impl<'r, 'o> Simulator<'r, 'o> {
                 st.removed = 0;
             }
             let mut added: Option<usize> = None;
-            let due = match trigger {
-                Trigger::Window { .. } => u.input.is_some_and(|input| input - st.removed > window),
-                Trigger::TurnEnd { .. } => ended_due == Some(true),
-            };
+            let mut turn_due = ended_due == Some(true);
+            // The model that ran the turn writes its summary, which a request on another
+            // model cannot calibrate.
+            if turn_due && !same_cohort {
+                self.result.fail(
+                    &req.session,
+                    req.time,
+                    "the model, agent, provider or speed changed after a turn whose end compacts, so its summary has no calibration",
+                );
+                turn_due = false;
+            }
+            let due = turn_due || u.input.is_some_and(|input| input - st.removed > window);
             if selected
                 && eligible
                 && due
@@ -927,15 +943,18 @@ impl<'r, 'o> Simulator<'r, 'o> {
                             &matches.median
                         };
                         let resumed = geometry.prefix;
-                        let ordinary = input - old_prefix;
-                        let turn_end = matches!(trigger, Trigger::TurnEnd { .. });
-                        if (!turn_end && resumed + ordinary > window)
-                            || resumed >= old_prefix - st.removed
+                        // A turn's end summarizes only the context it finished with: what
+                        // the next turn added since stays.
+                        let replaced = match st.recorded {
+                            Some(recorded) if turn_due => old_prefix.min(recorded),
+                            _ => old_prefix,
+                        };
+                        if input - (replaced - resumed) > window || resumed >= replaced - st.removed
                         {
                             self.result.fail(
                                 &req.session,
                                 req.time,
-                                if turn_end {
+                                if turn_due {
                                     "observed resumed-prefix proxy does not shrink this context after its turn"
                                 } else {
                                     "observed resumed-prefix proxy does not shrink this context below the candidate window"
@@ -945,7 +964,7 @@ impl<'r, 'o> Simulator<'r, 'o> {
                             // A turn-end summary reads the finished turn's context while
                             // the cache its last request read is still warm.
                             let summary = match st.active {
-                                Some(active) if turn_end => {
+                                Some(active) if turn_due => {
                                     (active, st.read.unwrap_or(0).clamp(0, active))
                                 }
                                 _ => (input - st.removed, 0),
@@ -970,7 +989,7 @@ impl<'r, 'o> Simulator<'r, 'o> {
                                 built.session = req.session.clone();
                                 built
                             });
-                            st.removed = old_prefix - resumed;
+                            st.removed = replaced - resumed;
                         }
                     }
                     _ => self.result.fail(
@@ -1076,6 +1095,7 @@ impl<'r, 'o> Simulator<'r, 'o> {
             let modeled = &req.parts[index].usage;
             st.active = modeled.input.zip(modeled.output).map(|(i, o)| i + o);
             st.read = modeled.read;
+            st.recorded = u.input.zip(u.output).map(|(i, o)| i + o);
             if !same_cohort {
                 st.cohort = ContextCohort::of(&req, &req.parts[index]);
             }
@@ -1085,7 +1105,7 @@ impl<'r, 'o> Simulator<'r, 'o> {
         // A session's final turn pays for its summary and has no later request to shrink,
         // unless a recorded compaction already follows it.
         if last
-            && let Trigger::TurnEnd { percent, turns } = trigger
+            && let Some((percent, turns)) = turn_end
             && req.time >= options.since
             && let Some(st) = state.as_ref().filter(|_| aliased)
             && turns.ends.first_after(&req.session, req.time - 1).is_some()

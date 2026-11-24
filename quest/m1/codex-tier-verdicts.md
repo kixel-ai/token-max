@@ -13,7 +13,7 @@ verdict that rests on one is withheld
 ## Plan
 
 Found 2026-11-23 while measuring turn-end compaction: on the maintainer's
-host the line priced a threshold at ~$1,275 a window saved and still gave no
+host the line priced a threshold at ~$142 a window saved and still gave no
 verdict, as the window line beside it does.
 
 Recommendations:

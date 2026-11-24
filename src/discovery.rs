@@ -8,7 +8,7 @@ use std::io::ErrorKind;
 use serde_json::{Map, Value};
 
 use crate::controls::{
-    CLAUDE_BACKGROUND_ENV, CompactionSources, Env, SettingsScope, bash_cap_control,
+    CLAUDE_BACKGROUND_ENV, CompactionSources, Env, SettingsScope, TURN_END_KEY, bash_cap_control,
     claude_background, claude_inbound, claude_memory, codex_background, codex_memory,
     compaction_controls, idle_controls, js_string, members, scoped_environment, speed_controls,
 };
@@ -1542,6 +1542,13 @@ pub fn discover_codex_controls(
             .into_iter()
             .collect();
         let mut outranking: Vec<String> = vec![];
+        // Other files that set the turn-end compaction threshold, which a --profile selection
+        // or a project could apply.
+        let mut turn_end_files: Vec<String> = members(user.get("profiles"))
+            .iter()
+            .filter(|(_, p)| members(Some(p)).contains_key(TURN_END_KEY))
+            .map(|(name, _)| format!("{}:profiles.{name}", profile.settings_file))
+            .collect();
         // Named profile files that set the model or its effort, which a --profile selection could apply.
         let mut effort_profile_files: Vec<String> = vec![];
         for name in named_profile_files(options, &profile.root)? {
@@ -1555,6 +1562,9 @@ pub fn discover_codex_controls(
             }
             if sets_codex_effort(&config) {
                 effort_profile_files.push(file.clone());
+            }
+            if config.contains_key(TURN_END_KEY) {
+                turn_end_files.push(file.clone());
             }
             if config.contains_key(AGENTS_BUDGET) {
                 budget_overrides.push(file.clone());
@@ -1674,6 +1684,12 @@ pub fn discover_codex_controls(
                 {
                     budget_overrides.push(file.clone());
                 }
+                if config.contains_key(TURN_END_KEY)
+                    && !same_file(&file, &profile.settings_file)
+                    && !turn_end_files.contains(&file)
+                {
+                    turn_end_files.push(file.clone());
+                }
                 // A layer Codex may read, unless it is the user's own file again. Under
                 // --defaults one holds only server declarations, which set no switch.
                 if !config.is_empty()
@@ -1696,7 +1712,17 @@ pub fn discover_codex_controls(
                     &options.home,
                     keep,
                 )? {
-                    if !same_file(&file, &profile.settings_file) && !outranking.contains(&file) {
+                    if same_file(&file, &profile.settings_file) {
+                        continue;
+                    }
+                    if options
+                        .settings(&file, Harness::Codex)?
+                        .contains_key(TURN_END_KEY)
+                        && !turn_end_files.contains(&file)
+                    {
+                        turn_end_files.push(file.clone());
+                    }
+                    if !outranking.contains(&file) {
                         outranking.push(file);
                     }
                 }
@@ -1831,6 +1857,14 @@ pub fn discover_codex_controls(
                 }
             }
             profile.background_directories.insert(cwd.into(), controls);
+        }
+        if let Some(control) = &mut profile.turn_end
+            && !turn_end_files.is_empty()
+        {
+            control.unresolved = Some(format!(
+                "{} can set {TURN_END_KEY} for some runs, and which applied is not recorded",
+                turn_end_files.join(", ")
+            ));
         }
         profile.outranking_files = outranking;
         profile.instruction_budget_unresolved = (!budget_overrides.is_empty()).then(|| {
@@ -2362,6 +2396,14 @@ pub(crate) fn profile(
     };
     let mut speed = speed_controls(harness, &speed_scopes, local_env)?;
     let bash = claude.then(|| bash_cap_control(&speed_scopes, local_env));
+    let turn_end = if claude {
+        None
+    } else {
+        Some(crate::controls::turn_end_control(
+            &speed_scopes,
+            &settings_file,
+        )?)
+    };
     if !claude {
         codex_speed(
             &mut speed,
@@ -2487,6 +2529,7 @@ pub(crate) fn profile(
         idle,
         speed: Some(speed),
         bash,
+        turn_end,
         effort: None,
         speed_directories: None,
         idle_directories: None,

@@ -681,6 +681,7 @@ mod tests {
                 pre_tokens: None,
                 post_tokens: None,
                 duration_ms: None,
+                usable_window: None,
                 tool: None,
                 t3: None,
                 pricing: None,

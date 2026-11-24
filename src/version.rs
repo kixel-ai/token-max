@@ -1,6 +1,6 @@
-//! The one comparison every Claude Code version gate shares.
+//! The one comparison every client version gate shares.
 
-/// A Claude Code version's numbers, when it is plain `major.minor.patch` digits.
+/// A client version's numbers, when it is plain `major.minor.patch` digits.
 pub(crate) fn claude_version(version: &str) -> Option<(u64, u64, u64)> {
     let mut parts = version.split('.').map(|part| {
         if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
@@ -21,6 +21,14 @@ pub(crate) fn claude_at_least(version: Option<&str>, minor: u64, patch: u64) -> 
     version
         .and_then(claude_version)
         .is_some_and(|v| v >= (2, minor, patch))
+}
+
+/// Whether `version` is a plain Codex version at least v0.`minor`.`patch`; a missing or
+/// malformed one is not.
+pub(crate) fn codex_at_least(version: Option<&str>, minor: u64, patch: u64) -> bool {
+    version
+        .and_then(claude_version)
+        .is_some_and(|v| v >= (0, minor, patch))
 }
 
 #[cfg(test)]

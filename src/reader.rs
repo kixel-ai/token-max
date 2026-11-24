@@ -666,6 +666,8 @@ struct Context {
     source: Option<Text>,
     cwd: Option<Text>,
     effort: Option<Text>,
+    /// The context window Codex last recorded as usable.
+    usable_window: Option<i64>,
     pricing: Option<Arc<Pricing>>,
     profiles: Profiles,
 }
@@ -744,6 +746,7 @@ impl FileState {
                 source: None,
                 cwd: None,
                 effort: None,
+                usable_window: None,
                 pricing: None,
                 profiles: strings.profiles(&snapshot.profiles),
             },
@@ -801,6 +804,7 @@ fn event(
             pre_tokens: None,
             post_tokens: None,
             duration_ms: None,
+            usable_window: context.usable_window,
             tool: None,
             t3: None,
             pricing: context.pricing.clone(),
@@ -1658,6 +1662,11 @@ impl Reader {
             let info = nested(p, "info");
             if info.is_empty() {
                 return Ok(());
+            }
+            // Codex records the window less the share it reserves, which is what a turn-end
+            // threshold is a percentage of.
+            if let Some(window) = info.get("model_context_window").and_then(Value::as_i64) {
+                context.usable_window = Some(window).filter(|w| *w > 0);
             }
             let total = match usage(member(info, "total_token_usage"), Harness::Codex) {
                 Ok(total) => total,

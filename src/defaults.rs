@@ -136,6 +136,12 @@ pub fn check(result: &CheckResult, profile: Option<&Profile>) -> Option<Baseline
             };
             baseline(&default, Saving::NotMeasured)
         }
+        // Off is the default, and a threshold in force cannot be replayed off: the detail
+        // its summaries dropped is gone.
+        CheckResult::TurnEnd(c) => match c.base.current? {
+            0 => None,
+            _ => baseline("off", Saving::NotMeasured),
+        },
         CheckResult::Idle(i) => {
             if i.base.current != Some(false) {
                 return None;

@@ -250,6 +250,8 @@ fn date(text: &str) -> &str {
 enum Setting<'a> {
     Ttl(Ttl),
     Window(i64),
+    /// A percentage of the context window, zero when off.
+    Percent(i64),
     Idle(bool),
     T3Idle(crate::model::T3IdleMode),
     Speed(&'a str),
@@ -337,6 +339,13 @@ fn common(result: &CheckResult) -> Common<'_> {
             &c.base,
             &c.usage_estimates,
             |n| Setting::Window(*n),
+        ),
+        CheckResult::TurnEnd(c) => base(
+            "turn-end-compaction",
+            "all",
+            &c.base,
+            &c.usage_estimates,
+            |n| Setting::Percent(*n),
         ),
         CheckResult::Idle(c) => base(
             "idle-compaction",
@@ -564,7 +573,7 @@ fn plan_note(
                 "https://code.claude.com/docs/en/costs#background-token-usage",
             ))
         }
-        CheckResult::Compaction(_) | CheckResult::Keepalive(_)
+        CheckResult::Compaction(_) | CheckResult::Keepalive(_) | CheckResult::TurnEnd(_)
             if harness == Some(Harness::Codex) =>
         {
             Some((
@@ -701,6 +710,8 @@ fn setting(value: Option<Setting<'_>>) -> String {
         None => "unknown".into(),
         Some(Setting::Ttl(t)) => t.as_str().into(),
         Some(Setting::Window(n)) => format!("{n} tokens"),
+        Some(Setting::Percent(0)) => "off".into(),
+        Some(Setting::Percent(n)) => format!("{n}%"),
         Some(Setting::Idle(b)) => b.to_string(),
         Some(Setting::T3Idle(mode)) => mode.as_str().into(),
         Some(Setting::Speed(s)) => s.into(),
@@ -719,6 +730,8 @@ fn setting_value(value: Option<Setting<'_>>) -> String {
         Some(Setting::Speed("standard")) => "off".into(),
         Some(Setting::Speed(s)) => s.into(),
         Some(Setting::Window(n)) => format!("{} tokens", count(n)),
+        Some(Setting::Percent(0)) => "off".into(),
+        Some(Setting::Percent(n)) => format!("{n}%"),
         Some(Setting::Ttl(t)) => t.as_str().into(),
         Some(Setting::Cap(ms)) => duration(ms),
         Some(Setting::Keepalive(s) | Setting::Effort(s)) => s.into(),
@@ -2445,6 +2458,32 @@ fn card(result: &CheckResult, action: Option<Action>, out: &mut Out<'_>) {
                 "Recorded cache categories held constant; Claude cache-switch effects excluded. API-price premium, which a plan can count differently (see Plan). Work held constant; latency value excluded.",
             );
         }
+        CheckResult::TurnEnd(c) => {
+            for u in &c.usable {
+                out.field(
+                    "Usable window",
+                    &format!(
+                        "{}: {} tokens",
+                        u.model.as_deref().map_or_else(|| "unknown".into(), display),
+                        u.tokens
+                    ),
+                );
+            }
+            out.field(
+                "Auto-compact limit replayed first",
+                &c.window
+                    .map_or_else(|| "none set".into(), |w| format!("{w} tokens")),
+            );
+            out.field("Current-threshold baseline cost", &money(&c.baseline_cost));
+            let suggested = c
+                .scenarios
+                .iter()
+                .find(|s| Some(s.window) == c.base.recommended);
+            out.field(
+                "Suggested-threshold cost",
+                &suggested.map_or_else(|| "unknown".into(), |s| money(&s.cost)),
+            );
+        }
         CheckResult::Compaction(c) => {
             let models: Vec<String> = c
                 .models
@@ -2515,7 +2554,7 @@ fn card(result: &CheckResult, action: Option<Action>, out: &mut Out<'_>) {
         "Limits",
         &format!(
             "{}Fixed-behavior replay with current settings applied to history; monthly values extrapolate the comparison window. Full assumptions and uncertainty: --details.",
-            if r.check == "compaction-window" {
+            if matches!(r.check, "compaction-window" | "turn-end-compaction") {
                 "Earlier compaction loses detail and can add re-reads or changed work. "
             } else {
                 ""
@@ -2728,6 +2767,41 @@ fn card(result: &CheckResult, action: Option<Action>, out: &mut Out<'_>) {
                 &s.current_estimate.premium,
             );
         }
+        CheckResult::TurnEnd(c) => {
+            out.cost("Current-threshold baseline", &c.baseline_cost);
+            for scenario in &c.scenarios {
+                out.field(
+                    "Candidate threshold",
+                    &format!(
+                        "{}; {} affected requests; {} added compactions",
+                        setting(Some(Setting::Percent(scenario.window))),
+                        scenario.affected_requests,
+                        scenario.added.len()
+                    ),
+                );
+                out.cost("Candidate full cost", &scenario.cost);
+                out.cost(
+                    "Candidate baseline comparison",
+                    &scenario.baseline_comparison_cost,
+                );
+                out.cost("Candidate comparison", &scenario.comparison_cost);
+                out.field(
+                    "Candidate net saving vs baseline",
+                    &scenario
+                        .savings_usd
+                        .map_or_else(|| "unknown".into(), |v| approx_usd(v, scenario.margin)),
+                );
+                out.field(
+                    "Candidate sensitivity",
+                    &format!(
+                        "larger observed summary/prefix net saving {}; cold summary net saving {}; extra re-read break-even {}",
+                        estimate(scenario.sensitivity.larger_summary_savings_usd),
+                        estimate(scenario.sensitivity.cold_summary_savings_usd),
+                        estimate(scenario.sensitivity.reread_break_even_usd)
+                    ),
+                );
+            }
+        }
         CheckResult::Compaction(c) => {
             out.cost("Current-window baseline", &c.baseline_cost);
             out.cost("Existing summaries", &c.observed_summary_cost);
@@ -2825,6 +2899,7 @@ fn card(result: &CheckResult, action: Option<Action>, out: &mut Out<'_>) {
         CheckResult::Ttl(t) => out.witnesses(&t.cache_evidence),
         CheckResult::Compaction(c) => out.witnesses(&c.cache_evidence),
         CheckResult::T3Idle(_)
+        | CheckResult::TurnEnd(_)
         | CheckResult::Idle(_)
         | CheckResult::Speed(_)
         | CheckResult::Background(_)
@@ -2904,7 +2979,7 @@ fn reason(result: &CheckResult, r: &Common<'_>) -> String {
     if r.action == Action::Advisory {
         return "Conditional replay winner; current effective setting or applicability is unresolved.".into();
     }
-    if r.check == "compaction-window" {
+    if matches!(r.check, "compaction-window" | "turn-end-compaction") {
         "Lowest estimated aggregate net cost, including added summaries and resumed-prefix charges; existing boundaries retained."
     } else {
         "Lowest estimated aggregate cache cost under the stated replay assumptions."
@@ -2931,6 +3006,7 @@ fn setting_name(result: &CheckResult) -> String {
             }
         }
         CheckResult::T3Idle(_) => "T3 idle compaction".into(),
+        CheckResult::TurnEnd(_) => "Turn-end compaction".into(),
         CheckResult::Idle(_) => "Idle compaction".into(),
         CheckResult::Speed(_) => "Fast mode".into(),
         CheckResult::Keepalive(_) => "Keepalive pings".into(),
@@ -3215,6 +3291,7 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
                 None => "No request a different window would change has recorded usage to compare windows.".into(),
             }
         }
+        CheckResult::TurnEnd(c) => turn_end_unresolved(c),
         CheckResult::T3Idle(c) => t3_idle_unresolved(c, r),
         CheckResult::Idle(i) => {
             let a = &i.after_recommendations;
@@ -3246,6 +3323,44 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
         | CheckResult::Keepalive(_)
         | CheckResult::Memory(_)
         | CheckResult::Effort(_) => "No verdict could be reached.".into(),
+    }
+}
+
+/// One plain sentence on why a turn-end compaction line has no verdict.
+fn turn_end_unresolved(c: &crate::model::TurnEndCheck) -> String {
+    if c.usable.is_empty() {
+        return "No transcript records how much of the context window Codex could use, so a threshold has nothing to be a percentage of.".into();
+    }
+    let acting: Vec<&crate::model::WindowScenario> = c
+        .scenarios
+        .iter()
+        .filter(|s| Some(s.window) != c.base.current)
+        .filter(|s| s.affected_requests > 0 || !s.added.is_empty())
+        .collect();
+    if acting.is_empty() {
+        let unknown = c
+            .scenarios
+            .iter()
+            .flat_map(|s| &s.comparison_cost.unknown)
+            .find(|u| u.contains("compaction summary"));
+        return if unknown.is_some() {
+            "Too few recorded compactions to model a summary at a turn's end.".into()
+        } else if c.scenarios.len() < 2 {
+            "No lower threshold can be replayed.".into()
+        } else {
+            "No recorded turn ended with enough context to compact at a candidate threshold.".into()
+        };
+    }
+    if acting.iter().any(|s| s.savings_usd == Some(0.0)) {
+        return "The best threshold and the current one cost the same on replay, so neither is cheaper.".into();
+    }
+    match acting
+        .iter()
+        .find(|s| s.savings_usd.is_none())
+        .and_then(|s| s.comparison_cost.unknown.first())
+    {
+        Some(reason) => capitalize(reason) + ".",
+        None => "No threshold could be priced against the current one.".into(),
     }
 }
 
@@ -4403,8 +4518,10 @@ fn warnings_section(warnings: &[Warning], out: &mut Out<'_>) {
 /// A comparison with no requests is not a verdict, whatever the tie-break said. Window
 /// coverage counts only changed parts, so zero there can still be a keep.
 fn check_action(result: &CheckResult, r: &Common<'_>) -> Action {
-    let empty =
-        matches!(result, CheckResult::Ttl(_) | CheckResult::Compaction(_)) && r.requests == 0;
+    let empty = matches!(
+        result,
+        CheckResult::Ttl(_) | CheckResult::Compaction(_) | CheckResult::TurnEnd(_)
+    ) && r.requests == 0;
     if empty { Action::Advisory } else { r.action }
 }
 
@@ -4503,6 +4620,7 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
             }
         };
         if matches!(result, CheckResult::Compaction(c) if c.unset)
+            || matches!(result, CheckResult::TurnEnd(c) if c.unset)
             || answered_main_ttl(result, &r, &out).is_some()
         {
             current += " (default)";
@@ -4949,6 +5067,7 @@ fn summary(
         };
         row.value = current.clone();
         if matches!(result, CheckResult::Compaction(c) if c.unset)
+            || matches!(result, CheckResult::TurnEnd(c) if c.unset)
             || answered_main_ttl(result, r, out).is_some()
         {
             row.value += " (default)";
@@ -5053,6 +5172,31 @@ fn summary(
                     _ => unknown(),
                 };
                 text
+            }
+            CheckResult::TurnEnd(c) => {
+                let after = match c.window {
+                    Some(window) => format!(" after the {} auto-compact limit", tokens(window)),
+                    None => String::new(),
+                };
+                match mark {
+                    Mark::Change => {
+                        let added = c
+                            .scenarios
+                            .iter()
+                            .find(|s| r.recommended == Some(Setting::Percent(s.window)))
+                            .map_or(0, |s| s.added.len());
+                        format!(
+                            "Replayed{after}, assuming the same sessions{}, net of {} added summar{}. Detail lost to summaries is not measured. {set_in}",
+                            coverage_note(r, MEASURED),
+                            count(added as u64),
+                            if added == 1 { "y" } else { "ies" }
+                        )
+                    }
+                    Mark::Keep => format!(
+                        "No other threshold was cheaper, replayed{after} assuming the same sessions. {set_in}"
+                    ),
+                    _ => unknown(),
+                }
             }
             CheckResult::Idle(_) => {
                 let on = |s: Option<Setting<'_>>| s == Some(Setting::Idle(true));

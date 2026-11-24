@@ -129,8 +129,12 @@ impl Lsp {
 pub enum Plugin {
     /// Installed for every project and turned on, or forced on by managed settings.
     On,
-    /// Installed only at project or local scope, for these projects.
-    Projects(Vec<String>),
+    /// Installed only at project or local scope, for these projects; `blocked` when managed
+    /// settings turn the official copy off, so it can't be installed for the rest.
+    Projects {
+        projects: Vec<String>,
+        blocked: bool,
+    },
     /// Installed for every project, and turned off by `enabledPlugins` in the user settings
     /// file, or not listed there, which no record shows turns it on.
     Off {
@@ -147,7 +151,7 @@ impl Plugin {
     fn covers(&self, cwd: &str) -> bool {
         match self {
             Plugin::On => true,
-            Plugin::Projects(projects) => projects.iter().any(|p| within(cwd, p)),
+            Plugin::Projects { projects, .. } => projects.iter().any(|p| within(cwd, p)),
             _ => false,
         }
     }
@@ -156,7 +160,7 @@ impl Plugin {
     fn rank(&self) -> u8 {
         match self {
             Plugin::On => 5,
-            Plugin::Projects(_) => 4,
+            Plugin::Projects { .. } => 4,
             Plugin::Off { listed: true, .. } => 3,
             Plugin::Off { listed: false, .. } => 2,
             Plugin::Blocked => 1,
@@ -224,7 +228,10 @@ pub fn controls(
             };
         }
         match scopes.iter().flatten().cloned().collect::<Vec<_>>() {
-            projects if !projects.is_empty() => Plugin::Projects(projects),
+            projects if !projects.is_empty() => Plugin::Projects {
+                projects,
+                blocked: false,
+            },
             _ => Plugin::Missing,
         }
     };
@@ -248,11 +255,26 @@ pub fn controls(
         plugins: SERVERS
             .iter()
             .map(|s| {
-                let best = ids(s.plugin)
+                let states: Vec<Plugin> = ids(s.plugin).iter().map(|id| state(id)).collect();
+                // Every copy's projects load it; the advice installs the official copy.
+                let projects: Vec<String> = states
                     .iter()
-                    .map(|id| state(id))
+                    .flat_map(|p| match p {
+                        Plugin::Projects { projects, .. } => projects.clone(),
+                        _ => vec![],
+                    })
+                    .collect();
+                let official = format!("{}@{MARKETPLACE}", s.plugin);
+                let blocked = enabled(managed, &official) == Some(false);
+                let best = states
+                    .into_iter()
                     .max_by_key(Plugin::rank)
                     .unwrap_or(Plugin::Missing);
+                let best = match best {
+                    Plugin::Projects { .. } => Plugin::Projects { projects, blocked },
+                    Plugin::Missing if blocked => Plugin::Blocked,
+                    other => other,
+                };
                 (best, on_path(s.binary, path))
             })
             .collect(),
@@ -579,23 +601,27 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
             s.binary
         )
     };
-    // A bare install goes to the shell's Claude home, so another home is named.
-    let default = view
-        .home
-        .is_some_and(|h| Path::new(&u.root) == Path::new(h).join(".claude"));
-    let install = if default {
-        format!("run `claude plugin install {id}`, then start a new session")
-    } else {
-        format!(
-            "with CLAUDE_CONFIG_DIR set to {}, run `claude plugin install {id}`, then start a new session",
-            home(&u.root)
-        )
-    };
+    // A bare install goes to whichever Claude home the shell selects, so the home is named.
+    let install = format!(
+        "with CLAUDE_CONFIG_DIR set to {}, run `claude plugin install {id}`, then start a new session",
+        home(&u.root)
+    );
     let server = format!("install {}, as the plugin's README says", s.binary);
     let (how, quiet) = match &l.plugin {
-        Plugin::Missing | Plugin::Projects(_) => {
+        Plugin::Projects {
+            blocked: true,
+            projects,
+        } => {
+            text += &format!(
+                " The {} plugin is installed only for {}, which {loaded} of them ran in, and managed settings turn {id} off.",
+                s.plugin,
+                list(&projects.iter().map(|p| home(p)).collect::<Vec<_>>()),
+            );
+            (None, true)
+        }
+        Plugin::Missing | Plugin::Projects { .. } => {
             text += &match &l.plugin {
-                Plugin::Projects(projects) => format!(
+                Plugin::Projects { projects, .. } => format!(
                     " The {} plugin is installed only for {}, which {} of them ran in.",
                     s.plugin,
                     list(&projects.iter().map(|p| home(p)).collect::<Vec<_>>()),
@@ -814,6 +840,8 @@ mod tests {
                 "clangd-lsp@claude-plugins-official": [{"scope": "user"}],
                 "kotlin-lsp@claude-plugins-official": [{"scope": "user"}],
                 "ruby-lsp@claude-plugins-official": [{"scope": "user"}],
+                "lua-lsp@corp": [{"scope": "project", "projectPath": text(&w.home.join("a"))}],
+                "lua-lsp@claude-plugins-official": [{"scope": "local", "projectPath": text(&w.home.join("b"))}],
             }})
             .to_string(),
         )
@@ -827,6 +855,7 @@ mod tests {
             "clangd-lsp@claude-plugins-official": false,
             "swift-lsp@corp": true,
             "ruby-lsp@corp": false,
+            "lua-lsp@claude-plugins-official": false,
         }});
         let bin = program(&w, "rust-analyzer");
         let path = std::env::join_paths([w.home.join("empty"), bin]).unwrap();
@@ -863,12 +892,28 @@ mod tests {
         );
         // Policy that blocks one marketplace's copy leaves another's on.
         assert_eq!(state("ruby-lsp").0, Plugin::On);
+        // Every copy's projects load the language; a blocked official copy can't be installed.
+        assert_eq!(
+            state("lua-lsp").0,
+            Plugin::Projects {
+                // The official copy's own project install is blocked too.
+                projects: vec![text(&w.home.join("a"))],
+                blocked: true,
+            }
+        );
         assert_eq!(
             state("pyright-lsp").0,
-            Plugin::Projects(vec![project.clone()])
+            Plugin::Projects {
+                projects: vec![project.clone()],
+                blocked: false
+            }
         );
-        assert!(Plugin::Projects(vec![project.clone()]).covers(&format!("{project}/sub")));
-        assert!(!Plugin::Projects(vec![project.clone()]).covers(&format!("{project}-other")));
+        let projects = Plugin::Projects {
+            projects: vec![project.clone()],
+            blocked: false,
+        };
+        assert!(projects.covers(&format!("{project}/sub")));
+        assert!(!projects.covers(&format!("{project}-other")));
         // Managed settings win both ways, whatever is installed.
         assert_eq!(state("clangd-lsp").0, Plugin::Blocked);
         assert_eq!(state("swift-lsp").0, Plugin::On);
@@ -1036,7 +1081,10 @@ mod tests {
         assert_eq!(
             items[0].how,
             Some(How::Manual {
-                step: "run `claude plugin install rust-analyzer-lsp@claude-plugins-official`, then start a new session".into(),
+                step: format!(
+                    "with CLAUDE_CONFIG_DIR set to {}, run `claude plugin install rust-analyzer-lsp@claude-plugins-official`, then start a new session",
+                    home(&text(&w.claude))
+                ),
                 reason: "no setting installs a plugin".into(),
             })
         );
@@ -1053,7 +1101,7 @@ mod tests {
         let Some(How::Manual { step, .. }) = &items[1].how else {
             panic!("{:?}", items[1].how)
         };
-        assert!(step.starts_with("install pyright-langserver, as the plugin's README says, then run `claude plugin install pyright-lsp@"));
+        assert!(step.starts_with("install pyright-langserver, as the plugin's README says, then with CLAUDE_CONFIG_DIR set to "));
     }
 
     #[test]

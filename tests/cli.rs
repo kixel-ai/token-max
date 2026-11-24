@@ -1098,7 +1098,8 @@ fn without_a_terminal_a_newer_release_or_a_failed_check_is_one_line_on_stderr() 
             )
         )
     );
-    // A directory this user cannot write keeps its binary.
+    // A run without a terminal never probes the directory, which writes beside the binary, so
+    // even one this user cannot write only hears that a terminal run upgrades.
     #[cfg(unix)]
     // SAFETY: geteuid has no preconditions. Root can write anything.
     if unsafe { libc::geteuid() } != 0 {
@@ -1117,10 +1118,7 @@ fn without_a_terminal_a_newer_release_or_a_failed_check_is_one_line_on_stderr() 
             (
                 1,
                 report.clone(),
-                format!(
-                    "{stale} This user cannot write to {}, so install it again as https://github.com/kixel-ai/token-max#install describes.\n",
-                    locked.canonicalize().unwrap().display()
-                )
+                format!("{stale} Run token-max doctor on a terminal to upgrade.\n")
             )
         );
     }
@@ -1690,6 +1688,32 @@ mod unix {
             )
         );
         assert_eq!(releases.downloads(), before);
+        // A directory this user cannot write keeps its binary, and gets the install link
+        // instead of the question.
+        // SAFETY: geteuid has no preconditions. Root can write anything.
+        if unsafe { libc::geteuid() } != 0 {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = w.home.join("locked");
+            std::fs::create_dir_all(&locked).unwrap();
+            let bin = locked.join("token-max");
+            std::fs::hard_link(BIN, &bin).unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+            let mut c = command_at(&bin, &w, &doctor);
+            c.env("TOKEN_MAX_RELEASES", &releases.url);
+            let (status, stdout, stderr) = typed(&mut c, b"s\nq\n");
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(status, code, "{stderr}");
+            let (before_opening, _) = stdout.split_once(&opening).expect(&stdout);
+            // The line wraps inside the path, so compare without whitespace.
+            let bare = |text: &str| text.split_whitespace().collect::<String>();
+            let said = format!(
+                "token-max v99.0.0 is out; this is v{ours}, and its advice may be out of date. This user cannot write to {}, so install it again as https://github.com/kixel-ai/token-max#install describes.",
+                locked.canonicalize().unwrap().display()
+            );
+            assert_eq!(bare(before_opening), bare(&said));
+            assert_eq!(releases.downloads(), before);
+            assert_eq!(names(&locked), ["token-max"]);
+        }
     }
 
     fn signal(pid: u32, signal: libc::c_int) {

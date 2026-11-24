@@ -106,8 +106,8 @@ pub enum Install {
     Replace { exe: PathBuf, target: &'static str },
     /// A package manager owns the binary, and this command upgrades it.
     Manager(&'static str),
-    /// Why the binary cannot be replaced here, such as an unwritable directory, so it must be
-    /// installed again.
+    /// Why the binary cannot be replaced here, such as a platform with no release, so it must
+    /// be installed again.
     Reinstall(String),
 }
 
@@ -169,30 +169,30 @@ impl Paths {
         let Some(target) = TARGET else {
             return Install::Reinstall("no release is built for this platform".into());
         };
-        match self.exe.parent() {
-            Some(dir) if can_write(dir) => Install::Replace {
-                exe: self.exe,
-                target,
-            },
-            dir => {
-                let dir = dir.unwrap_or(&self.exe).to_string_lossy();
-                Install::Reinstall(format!("this user cannot write to {dir}"))
-            }
+        Install::Replace {
+            exe: self.exe,
+            target,
         }
     }
 }
 
-/// Whether this user can create a file in `dir`, as staging a release there does. Only trying
-/// answers it on Windows, whose read-only mark ignores the access lists that keep most users
-/// out of a directory such as `Program Files`.
-fn can_write(dir: &Path) -> bool {
+/// Check that this user can create a file beside `exe`, as staging a release there does, or
+/// say why not. Only trying answers it on Windows, whose read-only mark ignores the access
+/// lists that keep most users out of a directory such as `Program Files`, so only a run about
+/// to offer the upgrade calls this: it writes, briefly, beside the binary.
+pub fn writable(exe: &Path) -> Result<(), String> {
+    let dir = exe.parent().unwrap_or(exe);
     let probe = dir.join(format!(".token-max-{}.probe", unique()));
     let created = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&probe)
         .is_ok();
-    created && fs::remove_file(&probe).is_ok()
+    if created && fs::remove_file(&probe).is_ok() {
+        Ok(())
+    } else {
+        Err(format!("this user cannot write to {}", dir.display()))
+    }
 }
 
 /// A release staged beside the binary it replaces, deleted unless [`Staged::install`] moves it
@@ -455,10 +455,15 @@ mod tests {
                 target
             }
         );
+        // The probe leaves nothing behind.
+        let names = || fs::read_dir(&w.home).unwrap().count();
+        let before = names();
+        assert_eq!(writable(&exe), Ok(()));
+        assert_eq!(names(), before);
         let missing = w.home.join("missing/token-max");
         assert_eq!(
-            paths(missing.to_str().unwrap(), None).install(),
-            Install::Reinstall(format!(
+            writable(&missing),
+            Err(format!(
                 "this user cannot write to {}",
                 w.home.join("missing").display()
             ))

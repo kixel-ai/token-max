@@ -46,8 +46,9 @@ archive for this platform, refuses it unless it matches the release's
 and checks that it runs and reports that version. Only then does it rename
 the new binary over the running one, from the same directory, and run it with
 the same options. A failure before the rename leaves the old binary as it
-was, and a rerun that cannot start leaves the new one; either way this run
-goes on with the build already running. Windows cannot replace a running
+was, and this run goes on with it. A rerun that cannot start leaves the new
+binary installed and ends the run with its error, asking to run doctor again,
+since the old binary is gone. Windows cannot replace a running
 program, so there the old binary moves aside to `token-max.exe.old` first,
 and a later run deletes it. Ctrl-C waits for the rename, then ends the run
 without rerunning. A download that stops answering for 30 seconds fails
@@ -59,8 +60,11 @@ or `~/.cargo/bin`), belongs to that tool, so doctor prints the command that
 upgrades it instead of asking; so does one in the run scripts' cache, which
 names each binary for its release. A binary in a directory this user cannot
 write, such as a root-owned `/usr/local/bin`, or on a platform with no
-prebuilt release, gets a link to the install methods instead. Without a
-terminal, the same news is one line on stderr. A declined or failed upgrade
+prebuilt release, gets a link to the install methods instead. Telling that
+directory apart means creating and deleting a file in it, so only a terminal
+run about to ask does. Without a terminal, the same news is one line on
+stderr, which says to run doctor on a terminal to upgrade a binary it might
+replace. A declined or failed upgrade
 changes neither the report nor the exit code. `run.sh` and `run.ps1` always
 run the latest release, so they never see the offer.
 

@@ -1613,7 +1613,8 @@ fn joined(handle: thread::JoinHandle<(String, Check)>) -> (String, Check) {
 
 /// Say on a terminal what the release check found, offering to upgrade and rerun when `offer`
 /// and a newer release can replace this binary. Returns the rerun's exit code once it has run
-/// in this process's place; otherwise this run goes on with this build.
+/// in this process's place, and fails when it cannot start; otherwise this run goes on with
+/// this build.
 fn offer_upgrade(
     releases: &str,
     check: Check,
@@ -1649,7 +1650,15 @@ fn offer_upgrade(
             say(&mut stdout, &text, false)?;
             return Ok(None);
         }
-        Install::Replace { exe, target } => (exe, target),
+        // Only a run about to ask probes the directory, since probing writes beside the binary.
+        Install::Replace { exe, target } => match upgrade::writable(&exe) {
+            Ok(()) => (exe, target),
+            Err(why) => {
+                let text = format!("\ntoken-max {} {}", stale(&latest), reinstall(&why));
+                say(&mut stdout, &text, false)?;
+                return Ok(None);
+            }
+        },
         Install::Manager(command) => {
             let text = format!("\ntoken-max {} Upgrade with {command}.", stale(&latest));
             say(&mut stdout, &text, false)?;
@@ -1692,17 +1701,13 @@ fn offer_upgrade(
         &format!("Upgraded to {latest}; rerunning."),
         false,
     )?;
-    match rerun(&exe) {
-        Ok(code) => Ok(Some(code)),
-        // The upgraded binary is in place and ran its version check, so only this run falls
-        // back to the build already running.
-        Err(error) => {
-            let version = upgrade::VERSION;
-            let text = format!("Could not rerun {latest}: {error}. Continuing with v{version}.");
-            say(&mut stdout, &text, false)?;
-            Ok(None)
-        }
-    }
+    // This build's binary is gone, and an SSH audit copies the binary at its path, so a rerun
+    // that cannot start ends the run rather than go on with this build.
+    rerun(&exe).map(Some).map_err(|error| {
+        ScanError::new(format!(
+            "could not rerun {latest}: {error}; it is installed, so run token-max doctor again"
+        ))
+    })
 }
 
 /// Stdin read a byte at a time, so the answer takes no more than its own line: the rerun

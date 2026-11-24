@@ -4806,18 +4806,17 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
     } else {
         "Anthropic's docs say accuracy and recall degrade as a context grows."
     };
-    // The line's own replay of the cap, against the window it compared every candidate with;
-    // a replay whose service tier is unsettled prices nothing, as on the line.
-    let conditional = c
-        .base
-        .uncertainty
-        .iter()
-        .any(|u| u == crate::prices::TIER_SENSITIVITY);
+    // The line's own replay of the cap, against the window it compared every candidate with.
+    // A cap priced at an assumed service tier is unmeasured even when the line's winner is
+    // settled, since no tier reversing the winner says nothing of the cap.
     let priced = c
         .scenarios
         .iter()
         .find(|s| s.window == cap)
-        .filter(|_| !conditional)
+        .filter(|s| {
+            !crate::prices::tier_sensitive(&s.comparison_cost)
+                && !crate::prices::tier_sensitive(&s.baseline_comparison_cost)
+        })
         .and_then(|s| Some((s.savings_usd?, s.margin)));
     let against = match (doctor, c.base.current) {
         (Doctor::Wrote(_), Some(w)) => format!("the {} window before that change", tokens(w)),

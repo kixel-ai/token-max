@@ -5513,6 +5513,28 @@ mod tests {
                 )),
                 "{text}"
             );
+            // A cap priced at an assumed service tier stays unmeasured, whatever the line's
+            // winner settled.
+            let CheckResult::Compaction(c) = &mut report.checks[index] else {
+                unreachable!()
+            };
+            let cap = c.scenarios.last_mut().unwrap();
+            cap.comparison_cost
+                .assumptions
+                .push(crate::prices::TIER_SENSITIVITY.into());
+            assert!(
+                !c.base
+                    .uncertainty
+                    .iter()
+                    .any(|u| u == crate::prices::TIER_SENSITIVITY)
+            );
+            let text = card(&report).text;
+            assert!(
+                text.contains(
+                    " Its replay did not price a 400k window, so what the cap costs is not measured. "
+                ),
+                "{text}"
+            );
             // A window already under the cap advises nothing, and `doctor` does not offer it.
             scan.profiles[0].compaction = controls(
                 Harness::Claude,

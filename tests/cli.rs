@@ -1574,8 +1574,7 @@ mod unix {
             target_os = "linux",
             any(target_arch = "x86_64", target_arch = "aarch64")
         ),
-        target_os = "macos",
-        windows
+        target_os = "macos"
     ))]
     fn a_newer_release_is_offered_first_and_a_yes_replaces_the_binary_and_reruns() {
         let w = Workspace::new();
@@ -1624,8 +1623,7 @@ mod unix {
             target_os = "linux",
             any(target_arch = "x86_64", target_arch = "aarch64")
         ),
-        target_os = "macos",
-        windows
+        target_os = "macos"
     ))]
     fn a_declined_or_failed_upgrade_runs_this_build_and_leaves_it_in_place() {
         let w = Workspace::new();

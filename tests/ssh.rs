@@ -538,7 +538,7 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     );
     // Each host's card names its host, its own waits and the edit to make there, in its home.
     let here = flat(cards[1]);
-    assert!(here.starts_with("[1/4] Bash timeout cap not measured 10m -> 55m Host this host"));
+    assert!(here.starts_with("[1/6] Bash timeout cap not measured 10m -> 55m Host this host"));
     assert!(
         here.contains("No foreground Bash wait outlasted the cache."),
         "{here}"
@@ -553,19 +553,22 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     let window = flat(cards[2]);
     assert!(
         window.starts_with(
-            "[2/4] Auto-compact window (claude-opus-5-5) not measured 967k -> 400k Host this host"
+            "[2/6] Auto-compact window (claude-opus-5-5) not measured 967k -> 400k Host this host"
         ) && window.ends_with(r#"in ~/.claude/settings.json"#),
         "{window}"
     );
-    let window = flat(cards[4]);
+    let window = flat(cards[5]);
     assert!(
         window.starts_with(
-            "[4/4] Auto-compact window (claude-opus-5-5) not measured 967k -> 400k Host devbox"
+            "[5/6] Auto-compact window (claude-opus-5-5) not measured 967k -> 400k Host devbox"
         ) && window.ends_with(r#"in devbox:~/.claude/settings.json"#),
         "{window}"
     );
-    let there = flat(cards[3]);
-    assert!(there.starts_with("[3/4] Bash timeout cap not measured 2h -> 55m Host devbox"));
+    // Each host's default has its own card, which advises nothing on the pick.
+    assert!(flat(cards[3]).starts_with("[3/6] Main-session default not measured Host this host"));
+    assert!(flat(cards[6]).starts_with("[6/6] Main-session default not measured Host devbox"));
+    let there = flat(cards[4]);
+    assert!(there.starts_with("[4/6] Bash timeout cap not measured 2h -> 55m Host devbox"));
     assert!(
         there.contains(
             "1 foreground Bash wait outlasted the cache (1 hit the timeout, 1 polled in a loop)"
@@ -584,7 +587,7 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     let alone = flat(alone.split("\n\n").nth(1).unwrap());
     assert_eq!(
         there
-            .replace("[3/4]", "[1/2]")
+            .replace("[4/6]", "[1/3]")
             .replace(" Host devbox", "")
             .replace("devbox:~", "~"),
         alone

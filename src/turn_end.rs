@@ -16,7 +16,9 @@ use crate::model::{
     PerBucket, Profile, Request, Scan, StructuralEvent, Text, TurnEndCheck, UsableWindow,
     UsageEstimate, WindowScenario,
 };
-use crate::prices::{Catalog, PRICE_SOURCES, Sum, TIER_SENSITIVITY, server_cost, tier_sensitive};
+use crate::prices::{
+    Catalog, PRICE_SOURCES, Signs, Sum, TIER_SENSITIVITY, TIER_SIGNS, server_cost, tier_sensitive,
+};
 use crate::scenarios::{PartReplay, ReplayOptions, ReplayTtls};
 use crate::version::codex_at_least;
 
@@ -271,39 +273,46 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
     );
     // A threshold whose turn ends compact where the current one's do replays as it does, so
     // it decides nothing. One that could not decide or price a turn end still acts.
-    let acts: Vec<bool> = runs[0].iter().map(|r| r.acts).collect();
+    let acts: Vec<(bool, Signs)> = runs[0].iter().map(|r| (r.acts, r.signs)).collect();
     let scenarios = scenarios(&percents, runs);
-    let acting: Vec<&WindowScenario> = scenarios
+    let acting: Vec<(&WindowScenario, Signs)> = scenarios
         .iter()
         .zip(acts)
-        .filter_map(|(s, acts)| acts.then_some(s))
+        .filter_map(|(s, (acts, signs))| acts.then_some((s, signs)))
         .collect();
     let conditional = scenarios
         .iter()
         .any(|s| tier_sensitive(&s.baseline_comparison_cost) || tier_sensitive(&s.comparison_cost));
-    let mut best: Option<&WindowScenario> = None;
-    for &s in acting.iter().filter(|s| s.savings_usd.is_some()) {
+    let mut best: Option<(&WindowScenario, Signs)> = None;
+    for &(s, signs) in acting.iter().filter(|(s, _)| s.savings_usd.is_some()) {
         // The higher threshold wins a tie, since it summarizes less.
-        if best.is_none_or(|b| s.savings_usd >= b.savings_usd) {
-            best = Some(s);
+        if best.is_none_or(|(b, _)| s.savings_usd >= b.savings_usd) {
+            best = Some((s, signs));
         }
     }
-    let winning = best.filter(|b| b.savings_usd.is_some_and(|s| s > 0.0));
-    let every_priced = acting.iter().all(|s| s.savings_usd.is_some());
-    let losing = best.is_some_and(|b| b.savings_usd.is_some_and(|s| s < 0.0)) && every_priced;
+    let winning = best.filter(|(b, _)| b.savings_usd.is_some_and(|s| s > 0.0));
+    let every_priced = acting.iter().all(|(s, _)| s.savings_usd.is_some());
+    let losing = best.is_some_and(|(b, _)| b.savings_usd.is_some_and(|s| s < 0.0)) && every_priced;
+    // Priced at an assumed tier, a verdict holds only when no tier could reverse it.
+    let settled = !conditional
+        || match winning {
+            Some((_, signs)) => signs.never_loses(),
+            None => acting.iter().all(|(_, signs)| signs.never_saves()),
+        };
+    let winning = winning.map(|(w, _)| w);
     // A tie, or a threshold that could not be priced beside none that wins, gives no verdict.
     let recommended = winning
         .map(|w| w.window)
         .or(losing.then_some(current))
-        .filter(|_| !conditional);
+        .filter(|_| settled);
     let recent = selected.iter().max_by_key(|r| r.time);
     let supported = recent.is_some_and(|r| codex_at_least(r.version.as_deref(), SINCE_MINOR, 0));
     let applicable = control.unresolved.is_none() && supported;
     let savings = winning
         .and_then(|w| w.savings_usd)
         .or(recommended.map(|_| 0.0))
-        .filter(|_| !conditional);
-    let margin = winning.and_then(|w| w.margin).filter(|_| !conditional);
+        .filter(|_| settled);
+    let margin = winning.and_then(|w| w.margin).filter(|_| settled);
 
     let mut uncertainty: IndexSet<String> = [
         "compaction loses detail; re-reading files, repeated tool calls or changed reasoning may erase savings; that work is unmeasured, not priced at zero",
@@ -312,7 +321,7 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
     .map(String::from)
     .into_iter()
     .collect();
-    if conditional {
+    if !settled {
         uncertainty.insert(TIER_SENSITIVITY.into());
     }
     uncertainty.extend(control.unresolved.clone());
@@ -344,7 +353,7 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
         uncertainty.insert(issue.to_string());
     }
     let coverage = winning
-        .or(best)
+        .or(best.map(|(b, _)| b))
         .or_else(|| scenarios.iter().find(|s| s.window == current))
         .map(|s| s.coverage);
     let after_window = match (offered, window) {
@@ -371,6 +380,9 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
             ];
     if window.is_none() {
         assumptions.push("with no auto-compact limit set, Codex's built-in limit is not recorded: the compactions it caused are in the transcripts and stay charged, a turn the session carried on from without one ended under it, and a session's final turn under its threshold is decided only when it ended with no more context than some request the model carried into a next request on the same model".into());
+    }
+    if conditional && recommended.is_some() {
+        assumptions.push(TIER_SIGNS.into());
     }
     Some(TurnEndCheck {
         base: CheckBase {
@@ -770,6 +782,113 @@ mod tests {
         // The cold-summary sensitivity charges all 181k as a 12h write instead.
         let cold = at_percent(&c, 90).sensitivity.cold_summary_savings_usd;
         assert!(cold < at_percent(&c, 90).savings_usd);
+    }
+
+    /// `scan` as native Codex records it: no service tier or speed on any request or summary.
+    fn untiered(mut scan: Scan) -> Scan {
+        for p in scan.requests.iter_mut().flat_map(|r| &mut r.parts) {
+            p.tier = None;
+            p.speed = None;
+        }
+        for e in &mut scan.events {
+            let mut meta = (*e.meta).clone();
+            meta.pricing = meta.pricing.map(|p| {
+                std::sync::Arc::new(Pricing {
+                    tier: None,
+                    speed: None,
+                    ..(*p).clone()
+                })
+            });
+            e.meta = std::sync::Arc::new(meta);
+        }
+        scan
+    }
+
+    #[test]
+    fn an_assumed_tier_decides_only_when_every_session_goes_one_way() {
+        // A cold return saves at any tier, and a warm one loses at any tier.
+        let cold = check(&untiered(data(HOUR, limit())));
+        assert_eq!(
+            (cold.base.action, cold.base.recommended),
+            (Action::Change, Some(100))
+        );
+        near(cold.base.savings_usd, 0.066);
+        assert!(cold.base.assumptions.iter().any(|s| s == TIER_SIGNS));
+        let warm = check(&untiered(data(10 * MINUTE, limit())));
+        assert_eq!(
+            (warm.base.action, warm.base.recommended),
+            (Action::Keep, Some(0))
+        );
+        assert!(warm.base.assumptions.iter().any(|s| s == TIER_SIGNS));
+        let options = crate::report::ReportOptions {
+            details: true,
+            ..Default::default()
+        };
+        let text = crate::report::rendered(&report_of(&data(HOUR, limit()), cold), options);
+        assert!(
+            text.contains("dollars are at an assumed service tier"),
+            "{text}"
+        );
+
+        // A summary priced at the sample's requested fast tier scales apart from the
+        // session's requests at the default tier, so its cost cannot pool with their saving.
+        let mut fast_sample = untiered(data(HOUR, limit()));
+        fast_sample.requests[0].requested_speed = Some(crate::model::RequestedSpeed {
+            tier: Some("fast".into()),
+            speed: None,
+        });
+        let c = check(&fast_sample);
+        assert_eq!(
+            usd(&at_percent(&c, 90).added[0].summary_cost).map(|s| (s * 1e6).round() / 1e6),
+            Some(0.764)
+        );
+        assert_eq!(
+            (c.base.action, c.base.recommended),
+            (Action::Advisory, None)
+        );
+        assert!(c.base.uncertainty.iter().any(|s| s == TIER_SENSITIVITY));
+
+        // Both sessions together lose $0.3636 - $0.066 at recorded tiers, so off stays; at
+        // an assumed tier, a dearer one on the cold session could reverse that.
+        let mut both = data(HOUR, limit());
+        let returned = data(10 * MINUTE, limit());
+        for mut r in returned.requests {
+            if &*r.session == "session" {
+                r.id = format!("warm-{}", r.id).into();
+                r.session = "warm".into();
+                both.requests.push(r);
+            }
+        }
+        both.requests.sort_by_key(|r| r.time);
+        both.events.push(turn_end("warm", HOUR + 1000));
+        both.events
+            .push(turn_end("warm", HOUR + 10 * MINUTE + 3 * MINUTE + 1000));
+        let n = both.requests.len() as u64;
+        both.coverage = ScanCoverage {
+            requests: n,
+            source_known: n,
+            tier_known: n,
+            ..ScanCoverage::default()
+        };
+        let recorded = check(&both);
+        assert_eq!(
+            (recorded.base.action, recorded.base.recommended),
+            (Action::Keep, Some(0))
+        );
+        let assumed = check(&untiered(both));
+        assert_eq!(
+            (assumed.base.action, assumed.base.recommended),
+            (Action::Advisory, None)
+        );
+        assert_eq!(assumed.base.savings_usd, None);
+        assert!(
+            assumed
+                .base
+                .uncertainty
+                .iter()
+                .any(|s| s == TIER_SENSITIVITY)
+        );
+        assert!(!assumed.base.assumptions.iter().any(|s| s == TIER_SIGNS));
     }
 
     #[test]

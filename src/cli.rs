@@ -1636,9 +1636,9 @@ fn offer_upgrade(
     };
     let latest = match check {
         Check::Current => return Ok(None),
-        Check::Failed(why) => {
-            let text = format!("\nCould not check for a newer release: {why}.");
-            say(&mut stdout, &text, true)?;
+        // A failed check is a diagnostic, so it goes to stderr as it does without a terminal.
+        failed @ Check::Failed(_) => {
+            warn_upgrade(failed);
             return Ok(None);
         }
         Check::Newer(latest) => latest,

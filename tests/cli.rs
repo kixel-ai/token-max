@@ -1688,6 +1688,16 @@ mod unix {
             )
         );
         assert_eq!(releases.downloads(), before);
+        // A check that cannot run is one diagnostic line on stderr, and the run goes on.
+        let mut c = command_at(&bin, &w, &doctor);
+        let nowhere = "http://127.0.0.1:1/releases";
+        c.env("TOKEN_MAX_RELEASES", nowhere);
+        let (status, stdout, stderr) = typed(&mut c, b"s\nq\n");
+        assert_eq!(status, code, "{stderr}");
+        assert!(stdout.starts_with(&opening), "{stdout}");
+        let failed =
+            format!("token-max: could not check for a newer release: could not reach {nowhere}: ");
+        assert!(words(&stderr).contains(&words(&failed)), "{stderr}");
         // A directory this user cannot write keeps its binary, and gets the install link
         // instead of the question.
         // SAFETY: geteuid has no preconditions. Root can write anything.

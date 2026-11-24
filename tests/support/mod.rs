@@ -79,6 +79,15 @@ impl Releases {
     }
 
     /// Publish `tag` as the latest release, with a checksum file that lies when `corrupt`.
+    /// Only the platforms with a release have an archive to publish.
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos",
+        windows
+    ))]
     pub fn publish(&self, tag: &str, corrupt: bool) {
         let stage = self.root.join("stage").join(tag);
         let dir = self.root.join("files/releases/download").join(tag);
@@ -124,7 +133,13 @@ impl Drop for Releases {
 
 /// Packs a release binary for this target from `stage` into `dir`, as cargo-dist lays it out,
 /// and returns the archive's name.
-#[cfg(unix)]
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    target_os = "macos"
+))]
 fn archive(stage: &Path, dir: &Path, version: &str) -> String {
     use std::os::unix::fs::PermissionsExt;
     // A stand-in that reports its version and shows what else it was run with, so the archive

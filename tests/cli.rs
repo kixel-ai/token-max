@@ -1049,6 +1049,15 @@ fn a_relocated_binary_runs_from_any_directory_with_relative_paths() {
 /// Piped, a newer release is a line on stderr naming how to upgrade, and the run goes on with
 /// this build and its exit code; offline, nothing is asked.
 #[test]
+// Only a platform with a release has one to offer.
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    target_os = "macos",
+    windows
+))]
 fn without_a_terminal_a_newer_release_or_a_failed_check_is_one_line_on_stderr() {
     let w = Workspace::new();
     w.fixture();
@@ -1563,6 +1572,15 @@ mod unix {
     }
 
     #[test]
+    // Only a platform with a release has one to offer.
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos",
+        windows
+    ))]
     fn a_newer_release_is_offered_first_and_a_yes_replaces_the_binary_and_reruns() {
         let w = Workspace::new();
         w.fixture();
@@ -1572,7 +1590,9 @@ mod unix {
         let base = prices_args(&w);
         let doctor = args(&base, &["--plain"]);
         let mut c = command_at(&bin, &w, &doctor);
-        c.env("TOKEN_MAX_RELEASES", &releases.url);
+        // The upgrade unpacks with the host's tar.
+        c.env("TOKEN_MAX_RELEASES", &releases.url)
+            .env("PATH", std::env::var_os("PATH").unwrap());
         let (status, stdout, stderr) = typed(&mut c, b"y\n");
         assert_eq!(status, 0, "{stderr}");
         let ours = env!("CARGO_PKG_VERSION");
@@ -1602,6 +1622,15 @@ mod unix {
     }
 
     #[test]
+    // Only a platform with a release has one to offer.
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos",
+        windows
+    ))]
     fn a_declined_or_failed_upgrade_runs_this_build_and_leaves_it_in_place() {
         let w = Workspace::new();
         w.fixture();
@@ -1610,12 +1639,12 @@ mod unix {
         // The checksum file lies, so only a yes downloads anything and nothing is replaced.
         releases.publish("v99.0.0", true);
         let base = prices_args(&w);
-        let doctor = args(&base, &["--plain", "--defaults"]);
+        let doctor = args(&base, &["--plain"]);
         let ours = env!("CARGO_PKG_VERSION");
         let offer = format!(
             "\n  token-max v99.0.0 is out; this is v{ours}, and its advice may be out of date.\n  Upgrade to v99.0.0 and rerun? [y]es, [n]o: "
         );
-        let (code, _, stderr) = typed(&mut command_at(&bin, &w, &doctor), b"s\n");
+        let (code, _, stderr) = typed(&mut command_at(&bin, &w, &doctor), b"s\nq\n");
         assert_ne!(code, 2, "{stderr}");
         let opening = format!("\n  token-max {ours}\n");
         let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -1626,14 +1655,15 @@ mod unix {
         for (keys, said) in [
             // An unknown answer asks again; then no, then skip how the profile pays.
             (
-                &b"maybe\nn\ns\n"[..],
+                &b"maybe\nn\ns\nq\n"[..],
                 "Upgrade to v99.0.0 and rerun? [y]es, [n]o:".to_string(),
             ),
-            (&b"y\ns\n"[..], failed),
+            (&b"y\ns\nq\n"[..], failed),
         ] {
             let before = releases.downloads();
             let mut c = command_at(&bin, &w, &doctor);
-            c.env("TOKEN_MAX_RELEASES", &releases.url);
+            c.env("TOKEN_MAX_RELEASES", &releases.url)
+                .env("PATH", std::env::var_os("PATH").unwrap());
             let (status, stdout, stderr) = typed(&mut c, keys);
             // The exit code a run with no newer release gets.
             assert_eq!(status, code, "{stderr}");
@@ -1648,6 +1678,20 @@ mod unix {
             assert_eq!(std::fs::read(&bin).unwrap(), std::fs::read(BIN).unwrap());
             assert_eq!(names(bin.parent().unwrap()), ["token-max"]);
         }
+        // Reporting as a default user would, it changes nothing, so it only says how.
+        let before = releases.downloads();
+        let mut c = command_at(&bin, &w, &args(&base, &["--plain", "--defaults"]));
+        c.env("TOKEN_MAX_RELEASES", &releases.url);
+        let (status, stdout, stderr) = typed(&mut c, b"s\n");
+        assert_ne!(status, 2, "{stderr}");
+        let (before_opening, _) = stdout.split_once(&opening).expect(&stdout);
+        assert_eq!(
+            words(before_opening),
+            format!(
+                "token-max v99.0.0 is out; this is v{ours}, and its advice may be out of date. Run token-max doctor without --defaults to upgrade."
+            )
+        );
+        assert_eq!(releases.downloads(), before);
     }
 
     fn signal(pid: u32, signal: libc::c_int) {

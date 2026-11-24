@@ -141,6 +141,19 @@ impl Paths {
 
     /// How the binary here can be upgraded.
     pub fn install(self) -> Install {
+        // The run scripts cache each release under its own tag's name, which a newer binary
+        // must not take.
+        if self
+            .exe
+            .parent()
+            .is_some_and(|dir| dir.ends_with("token-max/run"))
+        {
+            return Install::Manager(if cfg!(windows) {
+                "irm https://max.kixel.me/run.ps1 | iex"
+            } else {
+                "curl -LsSf https://max.kixel.me/run.sh | sh"
+            });
+        }
         if self.exe.starts_with("/nix/store") {
             return Install::Manager("nix run github:kixel-ai/token-max -- doctor");
         }
@@ -168,9 +181,37 @@ impl Paths {
     }
 }
 
+/// A release staged beside the binary it replaces, deleted unless [`Staged::install`] moves it
+/// into place.
+pub struct Staged {
+    new: Discard,
+    exe: PathBuf,
+    _archive: Discard,
+}
+
+impl Staged {
+    /// Put the staged binary in place of the old one in one rename. A cancellation must not
+    /// interrupt this, since on Windows it is two renames.
+    pub fn install(self) -> Result<(), String> {
+        let exe = &self.exe;
+        swap(&self.new.0, exe).map_err(|error| format!("cannot replace {}: {error}", exe.display()))
+    }
+}
+
+/// Timeouts for a release download, so a server that stops answering ends the upgrade rather
+/// than the run; a slow but steady one may take its time.
+fn downloader() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_recv_response(Some(Duration::from_secs(30)))
+        .timeout_per_read(Some(Duration::from_secs(30)))
+        .build()
+        .into()
+}
+
 /// The release `tag` from `releases`, checked against its published checksum and that it runs
-/// here as that version, put in place of `exe` in one rename.
-pub fn replace(releases: &str, tag: &str, exe: &Path, target: &str) -> Result<(), String> {
+/// here as that version, staged beside `exe` to replace it.
+pub fn stage(releases: &str, tag: &str, exe: &Path, target: &str) -> Result<Staged, String> {
     let dir = exe.parent().ok_or("this binary has no directory")?;
     let (archive, member) = if cfg!(windows) {
         (
@@ -187,16 +228,15 @@ pub fn replace(releases: &str, tag: &str, exe: &Path, target: &str) -> Result<()
     // Beside the binary, so the final move is a rename on the same filesystem; registered, so
     // Ctrl-C deletes them too.
     let stem = format!(".token-max-{}", unique());
-    let packed = dir.join(format!("{stem}.download"));
-    let _packed = Discard(&packed);
-    let unpacked = dir.join(format!("{stem}{}", std::env::consts::EXE_SUFFIX));
-    let _unpacked = Discard(&unpacked);
+    let packed = Discard(dir.join(format!("{stem}.download")));
+    let unpacked = Discard(dir.join(format!("{stem}{}", std::env::consts::EXE_SUFFIX)));
     let cannot_write = |error: io::Error| format!("cannot write to {}: {error}", dir.display());
 
     let url = format!("{releases}/download/{tag}/{archive}");
     let not_downloaded = || format!("could not download {archive}");
-    let mut response = ureq::get(&url).call().map_err(|_| not_downloaded())?;
-    let mut file = create_temporary(&packed).map_err(cannot_write)?;
+    let agent = downloader();
+    let mut response = agent.get(&url).call().map_err(|_| not_downloaded())?;
+    let mut file = create_temporary(&packed.0).map_err(cannot_write)?;
     let mut hasher = Sha256::new();
     let mut body = response
         .body_mut()
@@ -215,7 +255,8 @@ pub fn replace(releases: &str, tag: &str, exe: &Path, target: &str) -> Result<()
     drop(file);
     let actual = crate::safe::hex(&hasher.finalize());
     let sum = format!("{url}.sha256");
-    let expected = ureq::get(&sum)
+    let expected = agent
+        .get(&sum)
         .call()
         .and_then(|mut r| {
             r.body_mut()
@@ -232,7 +273,7 @@ pub fn replace(releases: &str, tag: &str, exe: &Path, target: &str) -> Result<()
         return Err(format!("{archive} does not match its checksum"));
     }
 
-    unpack(&tar, &packed, &member, &unpacked).map_err(|error| match error {
+    unpack(&tar, &packed.0, &member, &unpacked.0).map_err(|error| match error {
         Unpack::Write(error) => cannot_write(error),
         Unpack::Failed => format!("could not unpack {archive}"),
     })?;
@@ -240,9 +281,9 @@ pub fn replace(releases: &str, tag: &str, exe: &Path, target: &str) -> Result<()
     {
         use std::os::unix::fs::PermissionsExt;
         let mode = fs::metadata(exe).map_or(0o755, |m| m.permissions().mode()) & 0o7777;
-        fs::set_permissions(&unpacked, fs::Permissions::from_mode(mode)).map_err(cannot_write)?;
+        fs::set_permissions(&unpacked.0, fs::Permissions::from_mode(mode)).map_err(cannot_write)?;
     }
-    let version = Command::new(&unpacked)
+    let version = Command::new(&unpacked.0)
         .arg("--version")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -253,7 +294,11 @@ pub fn replace(releases: &str, tag: &str, exe: &Path, target: &str) -> Result<()
     if version.as_deref().map(str::trim) != Some(tag.trim_start_matches('v')) {
         return Err(format!("the {tag} binary does not run here as {tag}"));
     }
-    swap(&unpacked, exe).map_err(|error| format!("cannot replace {}: {error}", exe.display()))
+    Ok(Staged {
+        new: unpacked,
+        exe: exe.to_path_buf(),
+        _archive: packed,
+    })
 }
 
 /// The `tar` that unpacks a release: Windows' own, which reads `.zip`, rather than whichever a
@@ -372,6 +417,11 @@ mod tests {
         assert!(matches!(
             paths("/home/u/.cargo/bin/token-max", Some("/home/u/.cargo")).install(),
             Install::Manager(command) if command.contains("cargo install --locked token-max")
+        ));
+        // The run scripts' cache keeps each release under its tag's name.
+        assert!(matches!(
+            paths("/home/u/.cache/token-max/run/token-max-v0.0.1-x86_64-unknown-linux-musl", None).install(),
+            Install::Manager(command) if command.contains("max.kixel.me/run.")
         ));
         let Some(target) = TARGET else {
             let elsewhere = paths("/home/u/.local/bin/token-max", None).install();

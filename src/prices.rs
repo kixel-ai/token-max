@@ -428,7 +428,7 @@ fn parse_catalog(reader: impl Read) -> Result<Catalog, Failure> {
     })
 }
 
-/// Explicit offline and fixture modes never make network requests.
+/// Explicit offline and fixture modes never fetch prices.
 #[derive(Clone, Debug, Default)]
 pub struct PriceOptions {
     /// A prices file to read instead of fetching.
@@ -499,13 +499,13 @@ pub(crate) fn create_temporary(temporary: &Path) -> io::Result<File> {
 }
 
 /// Removes this operation's partial download however it ends; other downloads own other names.
-pub(crate) struct Discard<'a>(pub(crate) &'a Path);
+pub(crate) struct Discard(pub(crate) PathBuf);
 
-impl Drop for Discard<'_> {
+impl Drop for Discard {
     fn drop(&mut self) {
         let mut downloads = downloads();
-        downloads.files.retain(|file| file != self.0);
-        let _ = fs::remove_file(self.0);
+        downloads.files.retain(|file| file != &self.0);
+        let _ = fs::remove_file(&self.0);
     }
 }
 
@@ -577,7 +577,7 @@ pub fn load_prices(options: &PriceOptions) -> Result<Catalog, ScanError> {
     let mut temporary = options.cache.clone().into_os_string();
     temporary.push(format!(".{}.tmp", unique()));
     let temporary = PathBuf::from(temporary);
-    let _discard = Discard(&temporary);
+    let _discard = Discard(temporary.clone());
     match download(&options.cache, &temporary) {
         Ok(catalog) => Ok(Catalog {
             fetched_at: Some(iso(crate::reader::now())),
@@ -1683,7 +1683,7 @@ mod tests {
         let mut file = create_temporary(&partial).unwrap();
         file.write_all(b"{\"anthropic\":").unwrap();
         create_temporary(&finished).unwrap();
-        drop(Discard(&finished));
+        drop(Discard(finished.clone()));
         assert!(!finished.exists());
         assert_eq!(downloads().files, vec![partial.clone()]);
         cancel_downloads();

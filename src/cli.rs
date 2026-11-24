@@ -1298,8 +1298,9 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
     };
     let home = std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned());
     let style = format.style(home.clone());
-    // Every run but an offline one asks for the latest release, while discovery reads the disk.
-    let check = (!values.offline).then(|| {
+    // Every run but an offline one asks for the latest release, alongside discovery on a
+    // terminal and alongside the whole scan otherwise.
+    let mut check = (!values.offline).then(|| {
         thread::spawn(|| {
             if let Ok(paths) = upgrade::Paths::here() {
                 upgrade::tidy(&paths.exe);
@@ -1309,22 +1310,15 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
             (releases, check)
         })
     });
-    let check = move || {
-        check.map(|handle| {
-            handle.join().unwrap_or_else(|_| {
-                let failed = Check::Failed("the check failed".into());
-                (upgrade::releases(), failed)
-            })
-        })
-    };
     // On a terminal, offer a newer release before anything else, then open with what the run
     // is about to read, then ask how each of this host's Claude profiles on the Anthropic API
     // pays, which picks its main TTL's default; without a terminal the report names both
     // defaults.
     if terminal {
         let found = discover(&discovery)?;
-        if let Some((releases, check)) = check()
-            && let Some(code) = offer_upgrade(&releases, check, &style)?
+        // A run reporting as a default user would changes nothing, so it only says how.
+        if let Some((releases, check)) = check.take().map(joined)
+            && let Some(code) = offer_upgrade(&releases, check, !values.defaults, &style)?
         {
             return Ok((Output::Written, code));
         }
@@ -1354,8 +1348,6 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
         )
         .map_err(failed)?;
         enter(Phase::Running);
-    } else if let Some((_, check)) = check() {
-        warn_upgrade(check);
     }
     let replies = gather(Gather {
         since,
@@ -1372,6 +1364,10 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
         progress: (stdout && io::stderr().is_terminal() && !term_dumb)
             .then_some(Look { color, unicode }),
     })?;
+    // Without a terminal the check ran alongside the scan, and the news goes to stderr.
+    if let Some((_, check)) = check.take().map(joined) {
+        warn_upgrade(check);
+    }
     let sections = replies.len();
     let mut code = 0;
     let mut text = String::new();
@@ -1461,14 +1457,31 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
     Ok((Output::Text(format!("{head}{text}")), code))
 }
 
-/// Say on a terminal what the release check found, offering to upgrade and rerun when a newer
-/// release can replace this binary. Returns the rerun's exit code once it has run in this
-/// process's place; otherwise this run goes on with this build.
-fn offer_upgrade(releases: &str, check: Check, style: &Style) -> Result<Option<u8>, ScanError> {
+/// The release check's result once its thread finishes, with the releases it asked.
+fn joined(handle: thread::JoinHandle<(String, Check)>) -> (String, Check) {
+    handle.join().unwrap_or_else(|_| {
+        let failed = Check::Failed("the check failed".into());
+        (upgrade::releases(), failed)
+    })
+}
+
+/// Say on a terminal what the release check found, offering to upgrade and rerun when `offer`
+/// and a newer release can replace this binary. Returns the rerun's exit code once it has run
+/// in this process's place; otherwise this run goes on with this build.
+fn offer_upgrade(
+    releases: &str,
+    check: Check,
+    offer: bool,
+    style: &Style,
+) -> Result<Option<u8>, ScanError> {
     let failed = |_| ScanError::new("cannot use the terminal; no report produced");
     let mut stdout = io::stdout().lock();
+    // A leading line break is a blank line before the text, which styling would escape.
     let say = |stdout: &mut io::StdoutLock, text: &str, note: bool| {
-        let line = upgrade_line(text, note, style);
+        let (gap, text) = text
+            .strip_prefix('\n')
+            .map_or(("", text), |text| ("\n", text));
+        let line = format!("{gap}{}", upgrade_line(text, note, style));
         stdout
             .write_all(line.as_bytes())
             .and_then(|()| stdout.flush())
@@ -1484,6 +1497,12 @@ fn offer_upgrade(releases: &str, check: Check, style: &Style) -> Result<Option<u
         Check::Newer(latest) => latest,
     };
     let (exe, target) = match upgrade::install() {
+        Install::Replace { .. } if !offer => {
+            let how = "Run token-max doctor without --defaults to upgrade.";
+            let text = format!("\ntoken-max {} {how}", stale(&latest));
+            say(&mut stdout, &text, false)?;
+            return Ok(None);
+        }
         Install::Replace { exe, target } => (exe, target),
         Install::Manager(command) => {
             let text = format!("\ntoken-max {} Upgrade with {command}.", stale(&latest));
@@ -1497,13 +1516,20 @@ fn offer_upgrade(releases: &str, check: Check, style: &Style) -> Result<Option<u
         }
     };
     enter(Phase::Asking);
-    let yes = ask_upgrade(&latest, style, &mut io::stdin().lock(), &mut stdout).map_err(failed)?;
+    let yes = ask_upgrade(&latest, style, &mut unbuffered_stdin()?, &mut stdout).map_err(failed)?;
     enter(Phase::Running);
     if !yes {
         return Ok(None);
     }
     say(&mut stdout, &format!("Downloading {latest}..."), true)?;
-    if let Err(why) = upgrade::replace(releases, &latest, &exe, target) {
+    let installed = upgrade::stage(releases, &latest, &exe, target).and_then(|staged| {
+        // Windows' swap is two renames, which a cancellation must not split.
+        enter(Phase::Writing);
+        let installed = staged.install();
+        enter(Phase::Running);
+        installed
+    });
+    if let Err(why) = installed {
         let version = upgrade::VERSION;
         let text = format!("Could not upgrade: {why}. Continuing with v{version}.");
         say(&mut stdout, &text, false)?;
@@ -1516,6 +1542,21 @@ fn offer_upgrade(releases: &str, check: Check, style: &Style) -> Result<Option<u
     )?;
     drop(stdout);
     rerun(&exe).map(Some)
+}
+
+/// Stdin read a byte at a time, so the answer takes no more than its own line: the rerun
+/// reads the same input, and anything typed ahead is its.
+fn unbuffered_stdin() -> Result<io::BufReader<std::fs::File>, ScanError> {
+    let failed = |_| ScanError::new("cannot use the terminal; no report produced");
+    #[cfg(unix)]
+    let owned = std::os::fd::AsFd::as_fd(&io::stdin())
+        .try_clone_to_owned()
+        .map_err(failed)?;
+    #[cfg(windows)]
+    let owned = std::os::windows::io::AsHandle::as_handle(&io::stdin())
+        .try_clone_to_owned()
+        .map_err(failed)?;
+    Ok(io::BufReader::with_capacity(1, std::fs::File::from(owned)))
 }
 
 /// Run the upgraded binary at `exe` with this run's arguments, in this process's place.

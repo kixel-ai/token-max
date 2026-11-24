@@ -1111,7 +1111,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         inbound: crate::inbound::inbound_use(&scan, catalog, since, now),
         checks,
         assumptions: [
-            "host-local read-only analysis; network access is only for public prices",
+            "host-local read-only analysis; network access is only for public prices and doctor's check for a newer token-max release",
             "measured usage is replayed at present public API rates, the closest public measure of a plan's usage, not historical invoices",
             "compaction summary proxies are separate from recorded request charges",
             "unlogged or unresumed summary generation is unknown; a missing final boundary does not establish zero cost",

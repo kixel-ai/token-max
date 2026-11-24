@@ -32,8 +32,9 @@ in PowerShell,
 Claude Code and Codex change fast enough that an older build's advice can be
 out of date, so `doctor` first asks
 `https://github.com/kixel-ai/token-max/releases/latest` for the latest
-release, as `run.sh` does, while it finds this host's transcripts. Only
-`doctor` checks, and `--offline` skips it. No answer is remembered, so a
+release, as `run.sh` does, alongside finding this host's transcripts on a
+terminal and alongside the whole scan otherwise. Only `doctor` checks, and
+`--offline` skips it. No answer is remembered, so a
 declined release is offered again on the next run. The check gives up after 5
 seconds; when it cannot run, doctor says so on one line and goes on with this
 build.
@@ -46,11 +47,15 @@ and checks that it runs and reports that version. Only then does it rename
 the new binary over the running one, from the same directory, and run it with
 the same options; a failure at any step leaves the old binary as it was.
 Windows cannot replace a running program, so there the old binary moves aside
-to `token-max.exe.old` first, and a later run deletes it.
+to `token-max.exe.old` first, and a later run deletes it; Ctrl-C cannot
+interrupt the rename. A download that stops answering for 30 seconds fails
+the upgrade. With `--defaults`, which changes nothing, doctor only says to run
+it without `--defaults` to upgrade.
 
 A binary under `/nix/store`, or in Cargo's `bin` directory (`$CARGO_HOME/bin`
 or `~/.cargo/bin`), belongs to that tool, so doctor prints the command that
-upgrades it instead of asking. A binary in a directory this user cannot
+upgrades it instead of asking; so does one in the run scripts' cache, which
+names each binary for its release. A binary in a directory this user cannot
 write, such as a root-owned `/usr/local/bin`, or on a platform with no
 prebuilt release, gets a link to the install methods instead. Without a
 terminal, the same news is one line on stderr. A declined or failed upgrade

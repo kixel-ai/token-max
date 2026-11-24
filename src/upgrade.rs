@@ -437,6 +437,7 @@ mod tests {
         // The run scripts' cache keeps each release under its tag's name.
         assert!(matches!(
             paths("/home/u/.cache/token-max/run/token-max-v0.0.1-x86_64-unknown-linux-musl", None).install(),
+            // slash ok: a URL
             Install::Manager(command) if command.contains("max.kixel.me/run.")
         ));
         let Some(target) = TARGET else {

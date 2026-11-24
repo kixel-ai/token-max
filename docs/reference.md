@@ -980,7 +980,9 @@ charged once, including when earlier hypothetical passes might replace them.
 Summary generation and cold resumed prefixes are included in net savings. Larger
 observed summaries/prefixes, cold-summary costs, and the extra re-read spend that
 would erase a saving accompany the aggregate winner. Lost detail and changed work
-remain unmeasured risks, not zero-cost observations.
+remain unmeasured risks, not zero-cost observations. Requests priced at an
+assumed service tier decide only as
+[Tier-sensitive verdicts](#tier-sensitive-verdicts) describes.
 
 ## Turn-end compaction
 
@@ -1038,10 +1040,10 @@ which applied is not recorded, as does a latest recorded Codex before v0.156.0,
 which added the setting. Lost detail and changed work remain unmeasured risks.
 
 Native Codex transcripts record no billed service tier, so their requests are
-priced at an assumed one and, as for the compaction window, a winner that
-rests on it is withheld (see [Fast mode](#fast-mode)):
-`--details` shows each threshold's priced saving, and the line gives no
-verdict.
+priced at an assumed one and, as for the compaction window, the line gives a
+verdict only when no tier could reverse it (see
+[Tier-sensitive verdicts](#tier-sensitive-verdicts)); otherwise `--details`
+shows each threshold's priced saving, and the line gives no verdict.
 
 ## Idle compaction
 
@@ -1233,7 +1235,9 @@ once, and how soon they would need to close for pinging to pay.
 
 Neither harness has a capped keepalive setting: a `/loop` task pings on a fixed
 schedule until cancelled or for seven days, and Codex cannot schedule pings. A
-priced result is therefore advisory and never changes the exit code. Current
+priced result is therefore advisory and never changes the exit code; one priced
+at an assumed service tier is reported only as
+[Tier-sensitive verdicts](#tier-sensitive-verdicts) describes. Current
 ping state stays unknown: recorded turns, including scheduled-task turns, are
 activity, and their metadata does not establish whether they are keepalive pings.
 
@@ -1284,8 +1288,33 @@ Reports count conditional requests separately from recorded tier coverage.
 conditionally priced parts, preserving recorded tiers and all context/cache
 categories. Unsupported scenarios, including Flex and Scale without verified
 rates, remain unknown. These are sensitivity examples, not bounds on actual
-charges. Context keep/off, compaction and keepalive winners that depend on missing tiers stay
-advisory because tier sensitivity could reverse them. SSH reports use the same pricing and evidence.
+charges. Context keep/off winners that depend on missing tiers stay advisory because
+tier sensitivity could reverse them; compaction and keepalive winners follow
+[Tier-sensitive verdicts](#tier-sensitive-verdicts). SSH reports use the same pricing and evidence.
+
+### Tier-sensitive verdicts
+
+The compaction window, turn-end compaction and keepalive lines reach a verdict
+on requests priced at an assumed tier only when no tier could reverse it. A
+service tier multiplies all of a request's token rates by one positive factor,
+so scaling a saving never flips its sign. Each session's saving at an assumed
+tier, and the saving at recorded tiers pooled, must go the same way as the
+verdict. A session's charges are split wherever one tier would scale them
+differently: a model whose premium rate differs, such as 2x against 2.5x, a
+summary priced at its sample's requested tier rather than the session's, or a
+side of a context threshold whose premium rate is unpublished. Each part must
+go the verdict's way: every one saves for a change, or none saves for keeping the current
+setting. One that went the other way could be scaled past the rest by a dearer
+or cheaper tier, so the line gives no verdict. The rule assumes one tier bills
+every request of a session, in history and in the replay; a tier changed within
+a session, such as by `/fast` or a server serving another tier, could break it.
+The line's dollars stay priced at the assumed tier, and it says so. A change
+verdict always adds summaries or pings, which cost, so it settles only when
+each session's saving outweighs them. For a window or threshold, the rule
+settles the winner against the current setting; a tier could still make another
+candidate cheaper than the winner.
+Flex and Scale have no verified rate, so charges pool by their documented
+default, fast and ultrafast rates, and no bound over the multipliers is shown.
 
 ## Background generation
 
@@ -1331,7 +1360,7 @@ an exit code.
 | Card | When |
 | --- | --- |
 | [Bash timeout cap](#bash-timeout-cap) | Every Claude settings file: the cap beside the long waits measured under it. |
-| Main-session effort | The default level is above `high`: Anthropic's [model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/) and [model configuration docs](https://code.claude.com/docs/en/model-config#choose-an-effort-level) for Claude, OpenAI's [reasoning guide](https://developers.openai.com/api/docs/guides/reasoning) for Codex. |
+| [Main-session default](#main-session-default) | Every resolved main-session default: the maintainer's pick of a model and effort beside what each recorded pair cost, and past `high` the provider's guidance. |
 | An instruction file | A CLAUDE.md of 200 lines or more, past Claude Code's [guidance](https://code.claude.com/docs/en/memory#write-effective-instructions), or an AGENTS.md at or above the byte budget Codex [loads](https://learn.chatgpt.com/docs/agent-configuration/agents-md), with what each 100 lines of it costs. |
 | Explore subagent | Claude's built-in Explore ran off Haiku: what it cost, the same tokens on the cheapest model, the model guide's tip, and the agent file that follows it as a step by hand. |
 | Fable weekly use | Any Fable request in the window: what they cost, and Anthropic's [plan rule](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan). |
@@ -1397,6 +1426,46 @@ Background commands and the user's own processes are unaffected by the cap.
 Codex's `background_terminal_max_timeout` bounds one poll of a background
 terminal, and each poll reads the cache, so it has no card.
 
+### Main-session default
+
+The maintainer's pick of a main-session default is Claude Opus 5.5
+(`claude-opus-5-5`) at `medium` for Claude Code and Sol 6.2 (`gpt-6.2-sol`)
+at `high` for Codex; Opus 5.5 at `high` and Sol 6.2 at `xhigh` are fine
+defaults too (`PICKS` in `src/effort.rs`). Each resolved
+[`Main-session effort`](#main-session-effort) line gets a card comparing the
+model and the level it runs at with the pick. Any other default, a different
+model or a different level, is advised to move to the pick, and one the
+maintainer accepts has a card that advises nothing. The card shows what each
+recorded model and effort pair cost, as the line does; a different model or
+effort changes the output tokens, so what the pick would cost is not measured.
+Past `high`, it also quotes the provider's guidance: for Claude, `xhigh` and
+`max` cite Anthropic's
+[model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/)
+(past `high`, test the next model up at a lower effort), and `max` also the
+[model configuration docs](https://code.claude.com/docs/en/model-config#choose-an-effort-level)
+(`max` is prone to overthinking; test it before adopting it broadly). For
+Codex, `xhigh` and `max` cite OpenAI's
+[reasoning guide](https://developers.openai.com/api/docs/guides/reasoning)
+(`xhigh` only where evals show a benefit; `max` for the most complex tasks,
+evaluated against `xhigh`). A default the maintainer accepts gets no caution,
+so Sol 6.2 at `xhigh` is not warned against. An unresolved default, such as a
+T3 thread's, has no card.
+
+The change writes the settings that decide the default, model and effort
+together in one edit to the profile's own settings file: Claude's `model` (or
+the `ANTHROPIC_MODEL` that file's `env` sets) and the level setting the pick's
+model resolves to, such as `modelSettings.claude-opus-5-5.effortLevel` or
+`env.CLAUDE_CODE_EFFORT_LEVEL`; Codex's `model` and `model_reasoning_effort`.
+The level is resolved for the pick's model, since Claude keeps a level per
+model: moving from Fable to Opus 5.5 with no level set for Opus needs only the
+model, since Opus 5.5 defaults to `medium`. When no setting names the model,
+the edit sets it in the profile's file, and a `[1m]` the current model names
+carries over to the pick. When another file or a shell variable decides
+either setting, or a `maxEffortLevel` below the pick's level would lower it,
+the whole change is a step by hand naming each setting; so is a new model on
+a cloud provider, such as Bedrock, which spells model IDs its own way, whether
+the profile's or the project's settings turn it on. A Codex level with no model set or recorded has no card.
+
 ## Main-session effort
 
 Each settings file that decides it gets one `Main-session effort` line, and a
@@ -1408,16 +1477,9 @@ is repriced, no saving is claimed, and the line gives no verdict; `doctor`
 never offers to change it. A default token-max cannot resolve, such as a T3
 thread's selection, is unknown.
 
-A default above `high` gets a [`vibes`](#vibes) card citing the provider's own guidance. For
-Claude, `xhigh` and `max` cite Anthropic's
-[model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/)
-(past `high`, test the next model up at a lower effort), and `max` also the
-[model configuration docs](https://code.claude.com/docs/en/model-config#choose-an-effort-level)
-(`max` is prone to overthinking; test it before adopting it broadly). For
-Codex, `xhigh` and `max` cite OpenAI's
-[reasoning guide](https://developers.openai.com/api/docs/guides/reasoning)
-(`xhigh` only where evals show a benefit; `max` for the most complex tasks,
-evaluated against `xhigh`). See
+Each resolved default gets a [`Main-session default`](#main-session-default)
+card in `vibes`, which suggests the maintainer's pick and quotes the
+provider's guidance past `high`. See
 [default effort](semantics.md#main-session-effort) for how the default
 resolves.
 

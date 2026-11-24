@@ -32,4 +32,4 @@ release, where the upgrade offer reaches 0.1.0's users.
 ## Required
 
 - [Advisor card](/quest/m1/vibes/advisor.md) - a vibes card shipped in 0.1.0
-- [Opening credit](/quest/m1/live/credit.md) - `doctor` shows the savings credit up front, decided in the [live epic](/quest/m1/live/README.md)
+- [Opening credit](/quest/m1/live/credit.md) - `doctor` shows the savings credit up front, decided in the live epic

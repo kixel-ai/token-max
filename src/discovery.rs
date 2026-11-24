@@ -1858,13 +1858,13 @@ pub fn discover_codex_controls(
             }
             profile.background_directories.insert(cwd.into(), controls);
         }
-        if let Some(control) = &mut profile.turn_end
-            && !turn_end_files.is_empty()
-        {
-            control.unresolved = Some(format!(
-                "{} can set {TURN_END_KEY} for some runs, and which applied is not recorded",
-                turn_end_files.join(", ")
-            ));
+        if let Some(control) = &mut profile.turn_end {
+            control.unresolved = (!turn_end_files.is_empty()).then(|| {
+                format!(
+                    "{} can set {TURN_END_KEY} for some runs, and which applied is not recorded",
+                    turn_end_files.join(", ")
+                )
+            });
         }
         profile.outranking_files = outranking;
         profile.instruction_budget_unresolved = (!budget_overrides.is_empty()).then(|| {
@@ -3489,6 +3489,70 @@ mod tests {
         );
         let error = discover(&options(&w)).unwrap_err();
         assert_eq!(error.message, "invalid per-model settings");
+    }
+
+    #[test]
+    fn a_turn_end_threshold_another_file_can_set_is_unresolved() {
+        let w = Workspace::new();
+        let config = w.codex.join("config.toml");
+        let key = TURN_END_KEY;
+        let resolve = || {
+            let mut d = discover(&options(&w)).unwrap();
+            let codex = |d: &Discovery| {
+                d.profiles
+                    .iter()
+                    .find(|p| p.harness == Harness::Codex)
+                    .unwrap()
+                    .clone()
+            };
+            let r = {
+                let mut built = request(&codex(&d), Some(&w.home.join("repo")));
+                built.harness = Harness::Codex;
+                built
+            };
+            discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&r))
+                .unwrap();
+            codex(&d).turn_end.unwrap()
+        };
+        let unset = resolve();
+        assert_eq!(
+            (unset.percent, unset.unset, &unset.unresolved),
+            (0, true, &None)
+        );
+        write(&config, &format!("{key} = 60\n"));
+        let set = resolve();
+        assert_eq!(
+            (set.percent, set.unset, &set.unresolved),
+            (60, false, &None)
+        );
+        assert_eq!(set.owner, format!("{}:{key}", canonical(&config)));
+
+        // A table of profiles, a named profile's file and a project's config can each set it.
+        write(
+            &config,
+            &format!("{key} = 60\n[profiles.work]\n{key} = 80\n"),
+        );
+        assert!(resolve().unresolved.unwrap().contains(":profiles.work"));
+        write(&config, &format!("{key} = 60\n"));
+        let named = w.codex.join("work.config.toml");
+        write(&named, &format!("{key} = 80\n"));
+        assert!(resolve().unresolved.unwrap().contains("work.config.toml"));
+        fs::remove_file(&named).unwrap();
+        let project = w.home.join("repo/.codex/config.toml");
+        fs::create_dir_all(w.home.join("repo/.git")).unwrap();
+        write(&project, &format!("{key} = 80\n"));
+        assert!(
+            resolve()
+                .unresolved
+                .unwrap()
+                .contains("repo/.codex/config.toml")
+        );
+        fs::remove_file(&project).unwrap();
+        assert_eq!(resolve().unresolved, None);
+
+        write(&config, &format!("{key} = 101\n"));
+        let error = discover(&options(&w)).unwrap_err();
+        assert_eq!(error.message, "invalid turn-end compaction threshold");
     }
 
     // Active-profile environment, managed policy and current project ownership suppress stale preferences.

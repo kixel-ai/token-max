@@ -990,7 +990,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         crate::t3::constrain(&mut check.base, &scan.profiles);
     }
     let window_refs: Vec<_> = windows.iter().collect();
-    let turn_ends = crate::turn_end::turn_end_checks(&crate::turn_end::TurnEndOptions {
+    let mut turn_ends = crate::turn_end::turn_end_checks(&crate::turn_end::TurnEndOptions {
         scan: &scan,
         catalog,
         summaries: &compactions,
@@ -999,6 +999,9 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         since,
         now,
     });
+    for check in &mut turn_ends {
+        crate::t3::constrain(&mut check.base, &scan.profiles);
+    }
     let idle = idle_checks(&IdleOptions {
         scan: &scan,
         catalog,

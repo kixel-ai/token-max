@@ -3150,6 +3150,53 @@ mod tests {
     }
 
     #[test]
+    fn a_codex_turn_end_carries_the_usable_window_recorded_before_it() {
+        let w = Workspace::new();
+        let end = |minute: u8, turn: &str| {
+            json!({
+                "type": "event_msg",
+                "timestamp": format!("2026-11-01T00:{minute:02}:00Z"),
+                "payload": { "type": "task_complete", "turn_id": turn },
+            })
+        };
+        let raw = jsonl(&[
+            json!({
+                "type": "session_meta",
+                "timestamp": "2026-11-01T00:00:00Z",
+                "payload": { "id": "thread", "source": "cli", "model_provider": "openai" },
+            }),
+            json!({
+                "type": "turn_context",
+                "timestamp": "2026-11-01T00:00:00Z",
+                "payload": { "turn_id": "first", "model": "gpt-6.1-sol" },
+            }),
+            end(1, "first"),
+            json!({
+                "type": "event_msg",
+                "timestamp": "2026-11-01T00:02:00Z",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": { "input_tokens": 100, "output_tokens": 10 },
+                        "last_token_usage": { "input_tokens": 100, "output_tokens": 10 },
+                        "model_context_window": 258400,
+                    },
+                },
+            }),
+            end(3, "second"),
+        ]);
+        write(w.codex.join("sessions/thread.jsonl"), &raw);
+        let result = scan(&options(&w)).unwrap();
+        let windows: Vec<Option<i64>> = result
+            .events
+            .iter()
+            .filter(|e| e.kind == EventKind::TurnEnd)
+            .map(|e| e.usable_window)
+            .collect();
+        assert_eq!(windows, [None, Some(258_400)]);
+    }
+
+    #[test]
     fn empty_claude_iterations_keep_top_level_usage() {
         let w = Workspace::new();
         w.fixture(

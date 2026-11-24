@@ -894,6 +894,60 @@ mod tests {
     }
 
     #[test]
+    fn doctor_names_the_line_and_offers_the_config_edit() {
+        let scan = data(HOUR, limit());
+        let mut report = report(&scan);
+        let line = report
+            .checks
+            .iter()
+            .position(|c| matches!(c, CheckResult::TurnEnd(_)))
+            .unwrap();
+        report.checks[line] = CheckResult::TurnEnd(check(&scan));
+        let fixes = crate::doctor::fixes(&report, false);
+        let fix = fixes
+            .iter()
+            .find(|f| f.name == "Turn-end compaction")
+            .expect("a change is offered");
+        assert_eq!(fix.value, "off (default) -> 90%");
+        let crate::doctor::How::Edit(patch) = &fix.how else {
+            panic!("{:?} is not an edit", fix.how);
+        };
+        assert_eq!((patch.file.as_str(), patch.harness), (FILE, Harness::Codex));
+        assert_eq!(patch.edits.len(), 1);
+        assert_eq!(patch.edits[0].path, [TURN_END_KEY]);
+        assert_eq!(patch.edits[0].value, json!(90));
+
+        let text = crate::report::rendered(&report, crate::report::ReportOptions::default());
+        let line = text
+            .lines()
+            .find(|l| l.contains("Turn-end compaction"))
+            .expect("the line is shown");
+        assert!(line.contains("off (default) -> 90%"), "{line}");
+        assert!(
+            line.contains(&format!("{TURN_END_KEY} = 90 in {FILE}")),
+            "{line}"
+        );
+        let mut explained = fixes.clone();
+        let listing =
+            crate::report::format_report(&report, &fixes, crate::report::ReportOptions::default());
+        crate::doctor::explain(&mut explained, &listing);
+        let fix = explained
+            .iter()
+            .find(|f| f.name == "Turn-end compaction")
+            .unwrap();
+        assert!(
+            fix.evidence.contains("net of 1 added summary"),
+            "{}",
+            fix.evidence
+        );
+        assert!(
+            fix.evidence.contains("after the 180k auto-compact limit"),
+            "{}",
+            fix.evidence
+        );
+    }
+
+    #[test]
     fn the_setting_is_a_whole_percentage_the_user_file_owns() {
         let resolve = |system: Value, user: Value| {
             let (system, user) = (config(system), config(user));

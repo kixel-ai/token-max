@@ -12,12 +12,13 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde_json::ser::Formatter;
 
+use crate::collections::IndexMap;
 use crate::discovery::{DiscoveryOptions, discover};
 use crate::doctor::{
     BillingQuestions, Confirm, Fix, Found, Offers, Owner, Style, Walking, ask, confirm, finish,
     opening, preview, write, wrote,
 };
-use crate::model::{Location, Millis, Scan, Verdict};
+use crate::model::{Billing, Location, Millis, Scan, Verdict};
 use crate::prices::{Catalog, PriceOptions, cancel_downloads, load_prices};
 use crate::reader::{Reading, ScanOptions, scan};
 use crate::replay::{AnalyzeOptions, analyze};
@@ -1079,6 +1080,75 @@ struct Ask {
     style: Style,
 }
 
+/// The terminal failed, as when it closed.
+fn terminal_failed() -> ScanError {
+    ScanError::new("cannot use the terminal; no report produced")
+}
+
+/// The billing questions in progress, and what arrives from the hosts meanwhile.
+struct Asking<'a> {
+    questions: BillingQuestions,
+    results: &'a mpsc::Receiver<Arrival>,
+    /// Each destination's profiles, by host index, once they arrive and until asked about.
+    profiles: Vec<Option<ssh::Profiles>>,
+    /// Everything else, for the loop that renders.
+    early: Vec<Arrival>,
+}
+
+impl Asking<'_> {
+    /// Keep `arrival`, failing on a host's or the prices' error.
+    fn keep(&mut self, arrival: Arrival) -> Result<(), ScanError> {
+        match arrival {
+            Arrival::Profiles(at, profiles) => self.profiles[at] = Some(profiles),
+            Arrival::Host(_, Err(error)) | Arrival::Prices(Err(error)) => return Err(error),
+            arrival => self.early.push(arrival),
+        }
+        Ok(())
+    }
+
+    /// Ask how each profile at `roots` pays, first failing on any error that has arrived, so
+    /// a failed host stops the run at the next question rather than after the last.
+    fn ask(
+        &mut self,
+        roots: &[String],
+        style: &Style,
+    ) -> Result<IndexMap<String, Billing>, ScanError> {
+        let mut answers = IndexMap::default();
+        for root in roots {
+            while let Ok(arrival) = self.results.try_recv() {
+                self.keep(arrival)?;
+            }
+            let answer = self
+                .questions
+                .ask(
+                    root,
+                    style,
+                    &mut io::stdin().lock(),
+                    &mut io::stdout().lock(),
+                )
+                .map_err(|_| terminal_failed())?;
+            if let Some(billing) = answer {
+                answers.insert(root.clone(), billing);
+            }
+        }
+        Ok(answers)
+    }
+
+    /// Destination `index`'s profiles, waiting for them to arrive.
+    fn wait(&mut self, index: usize) -> Result<ssh::Profiles, ScanError> {
+        loop {
+            if let Some(profiles) = self.profiles[index].take() {
+                return Ok(profiles);
+            }
+            let arrival = self
+                .results
+                .recv()
+                .map_err(|_| ScanError::new("cancelled; no report produced"))?;
+            self.keep(arrival)?;
+        }
+    }
+}
+
 /// Scan every selected host and load prices at once, then run the job on each, failing on the
 /// first error. Returns each host's reply in selection order, this host first, as None.
 ///
@@ -1165,22 +1235,20 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
             let _ = sender.send(Arrival::Host(index, result));
         });
     }
-    let terminal = |_| ScanError::new("cannot use the terminal; no report produced");
-    let mut questions = BillingQuestions::default();
+    let stop = |error: ScanError| {
+        cancel_downloads();
+        ssh::cancel();
+        error
+    };
+    let mut asking = Asking {
+        questions: BillingQuestions::default(),
+        results: &results,
+        profiles: hosts.iter().map(|_| None).collect(),
+        early: vec![],
+    };
     if let Some(ask) = &ask {
         enter(Phase::Asking);
-        discovery.billing = questions
-            .ask(
-                &ask.roots,
-                &ask.style,
-                &mut io::stdin().lock(),
-                &mut io::stdout().lock(),
-            )
-            .map_err(terminal)
-            .inspect_err(|_| {
-                cancel_downloads();
-                ssh::cancel();
-            })?;
+        discovery.billing = asking.ask(&ask.roots, &ask.style).map_err(stop)?;
     }
     // A lone local scan runs on this thread, so the analysis reuses the memory the scan
     // frees rather than leaving it to another thread's allocator arena.
@@ -1206,14 +1274,11 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
             inline = Some((0, job));
         }
     }
-    // What arrives while destinations' profiles are asked about, for the loop below.
-    let mut early = vec![];
     if let Some(ask) = &ask {
         let asked = (|| {
-            let mut found: Vec<Option<ssh::Profiles>> = hosts.iter().map(|_| None).collect();
             for (index, pay) in (1..).zip(&payments) {
                 // Shown while a destination still connects, or this host still reads.
-                let waiting = (found[index].is_none())
+                let waiting = (asking.profiles[index].is_none())
                     .then_some(progress)
                     .flatten()
                     .map(|look| {
@@ -1221,42 +1286,28 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
                         meter.phase("Connecting to SSH hosts");
                         meter
                     });
-                let profiles = loop {
-                    if let Some(profiles) = found[index].take() {
-                        break profiles;
-                    }
-                    match results.recv() {
-                        Ok(Arrival::Profiles(at, profiles)) => found[at] = Some(profiles),
-                        Ok(Arrival::Host(_, Err(error)) | Arrival::Prices(Err(error))) => {
-                            return Err(error);
-                        }
-                        Ok(arrival) => early.push(arrival),
-                        Err(_) => return Err(ScanError::new("cancelled; no report produced")),
-                    }
-                };
+                let profiles = asking.wait(index)?;
                 drop(waiting);
                 let style = Style {
                     home: profiles.home,
                     host: hosts[index].clone(),
                     ..ask.style.clone()
                 };
-                let profiles = questions
-                    .ask(
-                        &profiles.roots,
-                        &style,
-                        &mut io::stdin().lock(),
-                        &mut io::stdout().lock(),
-                    )
-                    .map_err(terminal)?;
+                let profiles = asking.ask(&profiles.roots, &style)?;
                 let _ = pay.send(Paid { profiles });
             }
-            questions.finish(&mut io::stdout().lock()).map_err(terminal)
+            Ok(())
         })();
-        asked.inspect_err(|_| {
-            cancel_downloads();
-            ssh::cancel();
-        })?;
+        asked.map_err(stop)?;
         enter(Phase::Running);
+    }
+    let Asking {
+        questions, early, ..
+    } = asking;
+    if ask.is_some() {
+        questions
+            .finish(&mut io::stdout().lock())
+            .map_err(|_| stop(terminal_failed()))?;
     }
     drop(payments);
     let meter = progress.map(|look| Meter::start(look, reading.clone()));
@@ -1743,6 +1794,39 @@ pub fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_host_stops_the_questions_before_the_next_one() {
+        let (sender, results) = mpsc::channel();
+        let profiles = ssh::Profiles {
+            home: None,
+            roots: vec![],
+        };
+        sender.send(Arrival::Profiles(2, profiles)).unwrap();
+        sender
+            .send(Arrival::Host(1, Err(ScanError::new("devbox: gone"))))
+            .unwrap();
+        let mut asking = Asking {
+            questions: BillingQuestions::default(),
+            results: &results,
+            profiles: vec![None, None, None],
+            early: vec![],
+        };
+        let style = Style {
+            color: false,
+            unicode: false,
+            width: None,
+            home: None,
+            host: None,
+        };
+        // Failing before it prompts, so this test never reads its own stdin.
+        let error = asking
+            .ask(&["/home/me/.claude".into()], &style)
+            .unwrap_err();
+        assert_eq!(error.message, "devbox: gone");
+        // What arrived before the failure is kept.
+        assert!(asking.profiles[2].is_some());
+    }
 
     #[test]
     fn the_reading_bar_fills_by_eighths_fits_its_row_and_estimates_only_after_a_second() {

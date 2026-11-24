@@ -1016,14 +1016,17 @@ token-max doctor --ssh devbox --ssh user@laptop
 
 The destination discovers that host's own profiles from its home and
 environment and reads its transcripts and settings, priced from the one catalog
-this host loads and sends it. Destinations connect while this host's profiles
-are asked about; for a report, each sends back the root of each Claude profile
-it asks about, waits for the answers [How a profile pays](#how-a-profile-pays)
-describes, and scans once they arrive, while later hosts are asked. For a report it runs `token-max doctor --ssh-scan`,
+this host loads and sends it. For a report it runs `token-max doctor --ssh-scan`,
 which runs every check there and sends back only its finished report. For
 session lines it runs `token-max sessions --ssh-scan`, which sends back only
 the priced session lines of that host's transcripts. Either way its transcripts
 and scan never leave it, and this host never holds more than its own scan.
+
+Destinations connect while this host's profiles are asked about. For a report,
+each first sends the roots of the Claude profiles it asks about, waits for the
+answers [How a profile pays](#how-a-profile-pays) describes, and scans once
+they arrive, while later hosts are asked. A destination that fails while
+earlier questions are asked stops the run before the next question.
 
 Each run first asks the destination its OS and architecture, over the
 connection that then runs the audit:

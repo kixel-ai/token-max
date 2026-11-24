@@ -16,6 +16,10 @@ Found 2026-11-23 while measuring turn-end compaction: on the maintainer's
 host the line priced a threshold at ~$142 a window saved and still gave no
 verdict, as the window line beside it does.
 
+Decided 2026-11-24 (maintainer, /quest-run): ✅ a Codex comparison priced at an
+assumed tier gives a verdict only when every priced pair agrees in sign
+(rejected: keep withholding every such verdict; assume the default tier).
+
 Recommendations:
 
 - A service tier multiplies a whole request's price, so it scales both sides
@@ -28,14 +32,6 @@ Recommendations:
 - `src/prices.rs` holds the rule (`TIER_SENSITIVITY`, `tier_sensitive`) and
   `Pairs` the paired differences; `src/compaction.rs`, `src/turn_end.rs` and
   `src/keepalive.rs` read it.
-
-## Waiting
-
-- Maintainer: decide how a Codex comparison priced at an assumed tier may
-  reach a verdict. Options: a verdict only when every pair agrees in sign
-  (recommended: no tier could reverse it, so nothing is guessed); keep
-  withholding every such verdict (leaves these lines without a verdict on
-  native Codex); assume the default tier (a guess the rule exists to avoid).
 
 ## Related
 

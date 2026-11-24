@@ -938,7 +938,9 @@ nothing back. Every recorded compaction stays charged once, and a turn that one
 follows adds none. Larger summaries, a summary that reads nothing from the
 cache, and the re-read spend that would erase a saving accompany the winner.
 
-A threshold no recorded turn reached decides nothing, and a tie with the current
+A threshold no recorded turn reached decides nothing, unless some turn's end
+could not be decided, such as one on a model with no recorded usable window,
+which might compact under one threshold and not another. A tie with the current
 threshold, or a candidate that could not be priced beside none that wins, is not
 enough evidence. Neither is any threshold beside an auto-compact limit the
 replay cannot model, such as one scoped to the body after the prefix. A named profile, a `profiles` table or a project's

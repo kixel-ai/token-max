@@ -978,6 +978,55 @@ mod tests {
     }
 
     #[test]
+    fn an_undecided_turn_end_withholds_the_keep_verdict() {
+        // After a warm return 90% loses to the 95% in force. A second model's 195k usable
+        // window puts the limit at 92%, where no turn ends, so 92% replays as 95% does.
+        let mut user = limit();
+        user[TURN_END_KEY] = json!(95);
+        let mut scan = data(10 * MINUTE, user);
+        let mut small = at("small", "other", 2 * HOUR, usage(1000, 0, 10));
+        small.model = Some("gpt-6.1-terra".into());
+        small.parts[0].model = small.model.clone();
+        scan.requests.push(small);
+        let mut end = turn_end("other", 2 * HOUR + 1000);
+        end.meta = std::sync::Arc::new(crate::model::EventMeta {
+            model: Some("gpt-6.1-terra".into()),
+            usable_window: Some(195_000),
+            ..(*end.meta).clone()
+        });
+        scan.events.push(end);
+        let c = check(&scan);
+        let percents: Vec<i64> = c.scenarios.iter().map(|s| s.window).collect();
+        assert_eq!(percents, [90, 92, 95]);
+        assert_eq!(
+            (c.base.action, c.base.recommended),
+            (Action::Keep, Some(95))
+        );
+
+        // A turn that ends on a model with no recorded usable window might compact at 92%
+        // and not at 95%, so 92% is no longer known to replay the same and nothing is kept.
+        let mut blind = at("blind", "unknown", 3 * HOUR, usage(1000, 0, 10));
+        blind.model = Some("gpt-6.1-luna".into());
+        blind.parts[0].model = blind.model.clone();
+        let mut after = at("after", "unknown", 3 * HOUR + MINUTE, usage(1000, 0, 10));
+        after.model = blind.model.clone();
+        after.parts[0].model = blind.model.clone();
+        scan.requests.extend([blind, after]);
+        let mut end = turn_end("unknown", 3 * HOUR + 1000);
+        end.meta = std::sync::Arc::new(crate::model::EventMeta {
+            model: Some("gpt-6.1-luna".into()),
+            usable_window: None,
+            ..(*end.meta).clone()
+        });
+        scan.events.push(end);
+        let c = check(&scan);
+        assert_eq!(
+            (c.base.action, c.base.recommended),
+            (Action::Advisory, None)
+        );
+    }
+
+    #[test]
     fn doctor_names_the_line_and_offers_the_config_edit() {
         let scan = data(HOUR, limit());
         let mut report = report(&scan);

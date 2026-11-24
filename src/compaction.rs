@@ -578,8 +578,11 @@ pub struct Simulation<'r> {
     pub events: Vec<StructuralEvent>,
     pub estimated_parts: HashSet<(Text, usize)>,
     /// Each turn end a turn-end pass found due or could not decide, by session and the
-    /// time of the request that met it. Two passes with the same ones replay alike.
+    /// time of the request that met it. Two passes with the same ones, all decided, replay
+    /// alike.
     pub(crate) turn_ends: Vec<(Text, Millis)>,
+    /// Whether a turn-end pass could not decide a turn end, so no other pass replays like it.
+    pub(crate) undecided: bool,
 }
 
 impl Simulation<'_> {
@@ -877,6 +880,7 @@ impl<'r, 'o> Simulator<'r, 'o> {
             if ended_due != Some(false) {
                 self.result.turn_ends.push((req.session.clone(), req.time));
             }
+            self.result.undecided |= ended_due.is_none();
             let old_prefix = prefix(req.harness, &u);
             // Unknown usage could cross any window; it is not an unaffected zero-cost request.
             if selected
@@ -1133,6 +1137,7 @@ impl<'r, 'o> Simulator<'r, 'o> {
                     .turn_ends
                     .push((req.session.clone(), req.time + 1));
             }
+            self.result.undecided |= due.is_none();
             match due {
                 Some(false) => {}
                 None => self.result.fail(&req.session, req.time, TURN_END_UNKNOWN),
@@ -1449,7 +1454,7 @@ pub(crate) struct Run {
     pub(crate) added: Vec<AddedCompaction>,
     pub(crate) affected: usize,
     pub(crate) cache_evidence: Vec<CacheReplayEvidence>,
-    /// Whether its turn ends compact, or stay undecided, where the current value's do not.
+    /// Whether its turn ends compact where the current value's do not, or any is undecided.
     pub(crate) acts: bool,
 }
 
@@ -1689,7 +1694,9 @@ impl<'r> Lockstep<'_, 'r> {
                     cache_evidence: c.cache_evidence,
                     acts: c.stream.as_ref().is_some_and(|s| {
                         let before = current.as_ref().map(|c| &c.simulator.result.turn_ends);
-                        Some(&s.simulator.result.turn_ends) != before
+                        // An undecided turn end could compact under one value and not the other.
+                        s.simulator.result.undecided
+                            || Some(&s.simulator.result.turn_ends) != before
                     }),
                 });
             }

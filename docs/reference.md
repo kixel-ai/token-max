@@ -1328,12 +1328,16 @@ not be the one Claude Code starts with:
 
 | State | Change |
 | --- | --- |
-| Not installed, or installed only for other projects | By hand: `claude plugin install <plugin>@claude-plugins-official`, since `enabledPlugins` turns a plugin on but doesn't download it. |
-| Installed and turned off in the user settings | `enabledPlugins` set to `true` there, offered as an edit. |
+| Not installed, or installed only for other projects | By hand: `claude plugin install <plugin>@claude-plugins-official`, since `enabledPlugins` turns a plugin on but doesn't download it. A profile outside `~/.claude` names its `CLAUDE_CONFIG_DIR`, since a bare install goes to the shell's. |
+| Installed, and turned off in the user settings or not listed there | `enabledPlugins` set to `true` there, offered as an edit; by hand for a T3 instance whose launch arguments can replace the settings it reads. |
 | Turned off by managed settings | None; the card advises nothing. |
 | Installed, with its server not on `PATH` | By hand: install the program its README names. |
 
-A plugin installed everywhere with its server on `PATH` gets no card.
+Each plugin ID is read on its own, so policy that blocks one marketplace's
+copy leaves another's on, and the one closest to loading speaks for the
+language. Profiles share a card only when they share a settings file and a
+record of installed plugins. A plugin installed everywhere with its server on
+`PATH` gets no card.
 Project and local `enabledPlugins`, plugins synced from claude.ai and plugins
 of your own that run the same server are not read.
 

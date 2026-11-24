@@ -12,10 +12,10 @@ use std::path::Path;
 
 use serde_json::{Map, Value};
 
-use crate::collections::{HashMap, HashSet, IndexMap};
+use crate::collections::{HashMap, HashSet, IndexMap, IndexSet};
 use crate::discovery::{dirname, error, git_dir, join};
 use crate::doctor::{Edit, How, Op, Patch};
-use crate::model::{EventKind, Harness, Millis, Scan, Text};
+use crate::model::{EventKind, Harness, Millis, Profile, Scan, Text};
 use crate::report::plural;
 use crate::safe::ScanError;
 use crate::vibes::Item;
@@ -127,13 +127,15 @@ impl Lsp {
 /// Whether a profile has a language's plugin, as its files say now.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Plugin {
-    /// Installed for every project and not turned off, or forced on by managed settings.
+    /// Installed for every project and turned on, or forced on by managed settings.
     On,
     /// Installed only at project or local scope, for these projects.
     Projects(Vec<String>),
-    /// Installed, and turned off by `enabledPlugins` in the user settings file.
+    /// Installed for every project, and turned off by `enabledPlugins` in the user settings
+    /// file, or not listed there, which no record shows turns it on.
     Off {
         id: String,
+        listed: bool,
     },
     /// Turned off by `enabledPlugins` in managed settings, which nothing else overrides.
     Blocked,
@@ -149,6 +151,18 @@ impl Plugin {
             _ => false,
         }
     }
+
+    /// How close it is to loading, so the best of a language's plugin IDs speaks for it.
+    fn rank(&self) -> u8 {
+        match self {
+            Plugin::On => 5,
+            Plugin::Projects(_) => 4,
+            Plugin::Off { listed: true, .. } => 3,
+            Plugin::Off { listed: false, .. } => 2,
+            Plugin::Blocked => 1,
+            Plugin::Missing => 0,
+        }
+    }
 }
 
 /// Whether `path` is `dir` or under it.
@@ -157,9 +171,17 @@ fn within(path: &str, dir: &str) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '\\']))
 }
 
+/// Whether an environment variable's name is `PATH`, which Windows spells `Path` and reads in
+/// any case.
+pub(crate) fn is_path(name: &str) -> bool {
+    name == "PATH" || (cfg!(windows) && name.eq_ignore_ascii_case("PATH"))
+}
+
 /// A Claude profile's code intelligence plugins, read when it was discovered.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Controls {
+    /// The `installed_plugins.json` read, which profiles share only when they share it.
+    pub installs: String,
     /// Each of [`SERVERS`]' plugins, in its order, and whether its binary is on `PATH`.
     pub plugins: Vec<(Plugin, bool)>,
 }
@@ -180,48 +202,59 @@ pub fn controls(
     };
     let file = join(&[&plugins, "installed_plugins.json"]);
     let installed = installs(&file)?;
-    let enabled = |settings: &Map<String, Value>, plugin: &str| -> Vec<(String, bool)> {
+    let enabled = |settings: &Map<String, Value>, id: &str| {
         let entries = settings.get("enabledPlugins").and_then(Value::as_object);
-        entries
-            .into_iter()
-            .flatten()
-            .filter(|(id, _)| name(id) == plugin)
-            .filter_map(|(id, value)| Some((id.clone(), value.as_bool()?)))
-            .collect()
+        entries.and_then(|e| e.get(id)).and_then(Value::as_bool)
     };
-    let state = |plugin: &str| {
-        let managed = enabled(managed, plugin);
-        if managed.iter().any(|(_, on)| !on) {
-            return Plugin::Blocked;
+    // One plugin ID's state, such as `rust-analyzer-lsp@claude-plugins-official`'s.
+    let state = |id: &str| {
+        match enabled(managed, id) {
+            Some(false) => return Plugin::Blocked,
+            Some(true) => return Plugin::On,
+            None => {}
         }
-        if !managed.is_empty() {
-            return Plugin::On;
+        let scopes = installed.get(id).map_or(&[][..], Vec::as_slice);
+        if scopes.iter().any(Option::is_none) {
+            return match enabled(user, id) {
+                Some(true) => Plugin::On,
+                on => Plugin::Off {
+                    id: id.into(),
+                    listed: on.is_some(),
+                },
+            };
         }
-        let user = enabled(user, plugin);
-        let mine = installed.iter().filter(|(id, _)| name(id) == plugin);
-        let mut projects = vec![];
-        let mut off = None;
-        for (id, scopes) in mine {
-            for scope in scopes {
-                match scope {
-                    Some(project) => projects.push(project.clone()),
-                    None if user.contains(&(id.clone(), false)) => {
-                        off.get_or_insert(id.clone());
-                    }
-                    None => return Plugin::On,
-                }
-            }
+        match scopes.iter().flatten().cloned().collect::<Vec<_>>() {
+            projects if !projects.is_empty() => Plugin::Projects(projects),
+            _ => Plugin::Missing,
         }
-        match off {
-            Some(id) => Plugin::Off { id },
-            None if !projects.is_empty() => Plugin::Projects(projects),
-            None => Plugin::Missing,
-        }
+    };
+    let ids = |plugin: &str| -> Vec<String> {
+        let listed = [managed, user]
+            .into_iter()
+            .filter_map(|s| s.get("enabledPlugins").and_then(Value::as_object))
+            .flat_map(|e| e.keys());
+        let mut ids: Vec<String> = installed
+            .keys()
+            .chain(listed)
+            .filter(|id| name(id) == plugin)
+            .cloned()
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
     };
     Ok(Controls {
+        installs: file.clone(),
         plugins: SERVERS
             .iter()
-            .map(|s| (state(s.plugin), on_path(s.binary, path)))
+            .map(|s| {
+                let best = ids(s.plugin)
+                    .iter()
+                    .map(|id| state(id))
+                    .max_by_key(Plugin::rank)
+                    .unwrap_or(Plugin::Missing);
+                (best, on_path(s.binary, path))
+            })
             .collect(),
     })
 }
@@ -232,7 +265,8 @@ fn name(id: &str) -> &str {
 }
 
 /// Each plugin id `installed_plugins.json` records, with each install's project: None for
-/// user or managed scope. A missing file records none.
+/// user or managed scope. A missing file records none. The first version of the file holds
+/// one record per plugin, with no scope, which is the user's.
 fn installs(file: &str) -> Result<IndexMap<String, Vec<Option<String>>>, ScanError> {
     let bytes = match fs::read(file) {
         Ok(bytes) => bytes,
@@ -247,13 +281,17 @@ fn installs(file: &str) -> Result<IndexMap<String, Vec<Option<String>>>, ScanErr
     };
     let mut found = IndexMap::default();
     for (id, records) in plugins {
-        let records = records.as_array().ok_or_else(invalid)?;
+        let records = match records {
+            Value::Array(records) => records.as_slice(),
+            Value::Object(_) => std::slice::from_ref(records),
+            _ => return Err(invalid()),
+        };
         let mut scopes = vec![];
         for record in records {
             let scope = record.get("scope").and_then(Value::as_str);
             let project = record.get("projectPath").and_then(Value::as_str);
             scopes.push(match (scope, project) {
-                (Some("user" | "managed"), _) => None,
+                (None | Some("user" | "managed"), _) => None,
                 (Some("project" | "local"), Some(project)) => Some(project.to_string()),
                 _ => return Err(invalid()),
             });
@@ -294,7 +332,8 @@ fn executable(_: &fs::Metadata) -> bool {
     true
 }
 
-/// The languages one settings file's Claude profiles worked in over the window.
+/// The languages one settings file's Claude profiles worked in over the window, for those
+/// that share one record of installed plugins.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LspUse {
     pub profiles: Vec<String>,
@@ -304,6 +343,10 @@ pub struct LspUse {
     pub languages: Vec<LanguageUse>,
     /// The settings file an edit to `enabledPlugins` goes to.
     pub settings_file: String,
+    /// The Claude home the plugins are installed in.
+    pub root: String,
+    /// T3 launches the profile with arguments that can replace the settings it reads.
+    pub unresolved: bool,
 }
 
 /// The sessions that read or edited files of one language.
@@ -311,16 +354,18 @@ pub struct LspUse {
 pub struct LanguageUse {
     pub lsp: Lsp,
     pub sessions: u64,
-    /// Of `sessions`, those whose directory the plugin does not load in.
+    /// Of `sessions`, those with a directory the plugin does not load in.
     pub uncovered: u64,
-    /// Each recorded directory with its sessions; empty when none was recorded.
-    pub directories: Vec<(String, u64)>,
+    /// Each recorded directory with the sessions that touched the language there; empty when
+    /// none was recorded.
+    pub directories: Vec<(String, Vec<Text>)>,
     pub plugin: Plugin,
     pub binary: bool,
 }
 
-/// One line per Claude settings file: its sessions from `since`, else the scan's start, to
-/// `now`, and the languages of the files their tool calls named.
+/// One line per Claude settings file and installed-plugins record: its sessions from
+/// `since`, else the scan's start, to `now`, and the languages of the files their tool calls
+/// named. A T3 instance whose settings are unresolved keeps a line of its own.
 pub fn lsp_use(scan: &Scan, since: Option<Millis>, now: Millis) -> Vec<LspUse> {
     let window = |time: Millis| since.is_none_or(|s| time >= s) && time <= now;
     // A subagent's session is its parent's, linked by the session ID its records carry.
@@ -336,23 +381,33 @@ pub fn lsp_use(scan: &Scan, since: Option<Millis>, now: Millis) -> Vec<LspUse> {
             })
             .clone()
     };
-    let claude = scan
-        .profiles
-        .iter()
-        .filter(|p| p.harness == Harness::Claude && p.lsp.is_some());
-    let lines = crate::rows::groups(claude, |p| format!("{}:", p.settings_file));
+    let unresolved = |p: &Profile| p.t3.as_ref().is_some_and(|t| t.settings_unresolved);
+    let mut lines: IndexMap<String, Vec<&Profile>> = IndexMap::default();
+    for p in &scan.profiles {
+        let Some(controls) = p.lsp.as_ref().filter(|_| p.harness == Harness::Claude) else {
+            continue;
+        };
+        let key = if unresolved(p) {
+            format!("profile:{}", p.id)
+        } else {
+            format!("{}\n{}", p.settings_file, controls.installs)
+        };
+        lines.entry(key).or_default().push(p);
+    }
     lines
-        .iter()
-        .map(|line| {
-            let mine = |profiles: &[String]| profiles.iter().any(|p| line.ids.contains(p));
+        .values()
+        .map(|members| {
+            let lead = members[0];
+            let ids: Vec<&str> = members.iter().map(|p| p.id.as_str()).collect();
+            let mine = |profiles: &[String]| profiles.iter().any(|p| ids.contains(&p.as_str()));
             let mut sessions: HashSet<Text> = HashSet::default();
             for r in &scan.requests {
                 if r.harness == Harness::Claude && window(r.time) && mine(&r.profiles) {
                     sessions.insert(root(&mut parents, &r.session));
                 }
             }
-            // Each language's sessions, with the directory each was recorded in.
-            let mut touched: IndexMap<Lsp, IndexMap<Text, &str>> = IndexMap::default();
+            // Each language's sessions, with every directory each touched it in.
+            let mut touched: IndexMap<Lsp, IndexMap<Text, IndexSet<&str>>> = IndexMap::default();
             for e in &scan.events {
                 let Some(lsp) = e.language else { continue };
                 if e.kind != EventKind::ToolStart
@@ -368,29 +423,37 @@ pub fn lsp_use(scan: &Scan, since: Option<Millis>, now: Millis) -> Vec<LspUse> {
                     .entry(lsp)
                     .or_default()
                     .entry(session)
-                    .or_insert(cwd);
+                    .or_default()
+                    .insert(cwd);
             }
             sessions.extend(
                 touched
                     .values()
                     .flat_map(|by_session| by_session.keys().cloned()),
             );
-            let controls = line.lead.lsp.as_ref().expect("filtered on its controls");
+            let controls = lead.lsp.as_ref().expect("filtered on its controls");
             let mut languages: Vec<LanguageUse> = touched
                 .into_iter()
                 .map(|(lsp, by_session)| {
                     let (plugin, binary) = controls.plugins[lsp.0 as usize].clone();
-                    let mut directories: IndexMap<&str, u64> = IndexMap::default();
-                    for cwd in by_session.values().filter(|c| !c.is_empty()) {
-                        *directories.entry(cwd).or_default() += 1;
+                    let mut directories: IndexMap<&str, Vec<Text>> = IndexMap::default();
+                    let mut uncovered = 0;
+                    for (session, cwds) in &by_session {
+                        // A directory not recorded can't be shown to load the plugin.
+                        if cwds.iter().any(|c| !plugin.covers(c)) {
+                            uncovered += 1;
+                        }
+                        for cwd in cwds.iter().filter(|c| !c.is_empty()) {
+                            directories.entry(cwd).or_default().push(session.clone());
+                        }
                     }
                     LanguageUse {
                         lsp,
                         sessions: by_session.len() as u64,
-                        uncovered: by_session.values().filter(|c| !plugin.covers(c)).count() as u64,
+                        uncovered,
                         directories: directories
                             .into_iter()
-                            .map(|(d, n)| (d.to_string(), n))
+                            .map(|(d, s)| (d.to_string(), s))
                             .collect(),
                         plugin,
                         binary,
@@ -399,10 +462,12 @@ pub fn lsp_use(scan: &Scan, since: Option<Millis>, now: Millis) -> Vec<LspUse> {
                 .collect();
             languages.sort_by(|a, b| b.sessions.cmp(&a.sessions).then(a.lsp.0.cmp(&b.lsp.0)));
             LspUse {
-                profiles: line.ids.clone(),
+                profiles: members.iter().map(|p| p.id.clone()).collect(),
                 sessions: sessions.len() as u64,
                 languages,
-                settings_file: line.lead.settings_file.clone(),
+                settings_file: lead.settings_file.clone(),
+                root: lead.root.clone(),
+                unresolved: unresolved(lead),
             }
         })
         .collect()
@@ -455,13 +520,19 @@ pub struct View<'a> {
     pub arrow: &'a str,
 }
 
-/// Each project of `directories`, with its sessions, most first.
-fn projects(directories: &[(String, u64)], home: Option<&str>) -> Vec<(String, u64)> {
-    let mut found: IndexMap<String, u64> = IndexMap::default();
-    for (dir, n) in directories {
-        *found.entry(project(dir, home)).or_default() += n;
+/// Each project of `directories`, with how many sessions touched it, most first.
+fn projects(directories: &[(String, Vec<Text>)], home: Option<&str>) -> Vec<(String, u64)> {
+    let mut found: IndexMap<String, HashSet<&Text>> = IndexMap::default();
+    for (dir, sessions) in directories {
+        found
+            .entry(project(dir, home))
+            .or_default()
+            .extend(sessions);
     }
-    let mut found: Vec<(String, u64)> = found.into_iter().collect();
+    let mut found: Vec<(String, u64)> = found
+        .into_iter()
+        .map(|(p, s)| (p, s.len() as u64))
+        .collect();
     found.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     found
 }
@@ -508,7 +579,18 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
             s.binary
         )
     };
-    let install = format!("run `claude plugin install {id}`, then start a new session");
+    // A bare install goes to the shell's Claude home, so another home is named.
+    let default = view
+        .home
+        .is_some_and(|h| Path::new(&u.root) == Path::new(h).join(".claude"));
+    let install = if default {
+        format!("run `claude plugin install {id}`, then start a new session")
+    } else {
+        format!(
+            "with CLAUDE_CONFIG_DIR set to {}, run `claude plugin install {id}`, then start a new session",
+            home(&u.root)
+        )
+    };
     let server = format!("install {}, as the plugin's README says", s.binary);
     let (how, quiet) = match &l.plugin {
         Plugin::Missing | Plugin::Projects(_) => {
@@ -532,21 +614,36 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
             };
             (Some(how), false)
         }
-        Plugin::Off { id } => {
-            text += &format!(
-                " The {} plugin is installed and turned off in {}.",
-                s.plugin,
-                home(&u.settings_file)
-            );
-            let how = How::Edit(Patch {
-                file: u.settings_file.clone(),
-                harness: Harness::Claude,
-                edits: vec![Edit {
-                    path: vec!["enabledPlugins".into(), id.clone()],
-                    value: Value::Bool(true),
-                    op: Op::Set,
-                }],
-            });
+        Plugin::Off { id, listed } => {
+            let file = home(&u.settings_file);
+            text += &if *listed {
+                format!(
+                    " The {} plugin is installed and turned off in {file}.",
+                    s.plugin
+                )
+            } else {
+                format!(
+                    " The {} plugin is installed, and no enabledPlugins entry in {file} turns it on.",
+                    s.plugin
+                )
+            };
+            let edit = Edit {
+                path: vec!["enabledPlugins".into(), id.clone()],
+                value: Value::Bool(true),
+                op: Op::Set,
+            };
+            let how = if u.unresolved {
+                How::Manual {
+                    step: format!("set {} in {file}", edit.text(Harness::Claude)),
+                    reason: "T3 launches this instance with arguments that can replace the settings it reads".into(),
+                }
+            } else {
+                How::Edit(Patch {
+                    file: u.settings_file.clone(),
+                    harness: Harness::Claude,
+                    edits: vec![edit],
+                })
+            };
             (Some(how), false)
         }
         Plugin::Blocked => {
@@ -715,14 +812,21 @@ mod tests {
                 "gopls-lsp@claude-plugins-official": [{"scope": "user"}],
                 "pyright-lsp@claude-plugins-official": [{"scope": "project", "projectPath": project}],
                 "clangd-lsp@claude-plugins-official": [{"scope": "user"}],
+                "kotlin-lsp@claude-plugins-official": [{"scope": "user"}],
+                "ruby-lsp@claude-plugins-official": [{"scope": "user"}],
             }})
             .to_string(),
         )
         .unwrap();
-        let user = json!({"enabledPlugins": {"gopls-lsp@claude-plugins-official": false}});
+        let user = json!({"enabledPlugins": {
+            "rust-analyzer-lsp@claude-plugins-official": true,
+            "gopls-lsp@claude-plugins-official": false,
+            "ruby-lsp@claude-plugins-official": true,
+        }});
         let managed = json!({"enabledPlugins": {
             "clangd-lsp@claude-plugins-official": false,
             "swift-lsp@corp": true,
+            "ruby-lsp@corp": false,
         }});
         let bin = program(&w, "rust-analyzer");
         let path = std::env::join_paths([w.home.join("empty"), bin]).unwrap();
@@ -743,11 +847,22 @@ mod tests {
             state("gopls-lsp"),
             (
                 Plugin::Off {
-                    id: "gopls-lsp@claude-plugins-official".into()
+                    id: "gopls-lsp@claude-plugins-official".into(),
+                    listed: true,
                 },
                 false
             )
         );
+        // An install that no enabledPlugins entry turns on is offered on.
+        assert_eq!(
+            state("kotlin-lsp").0,
+            Plugin::Off {
+                id: "kotlin-lsp@claude-plugins-official".into(),
+                listed: false,
+            }
+        );
+        // Policy that blocks one marketplace's copy leaves another's on.
+        assert_eq!(state("ruby-lsp").0, Plugin::On);
         assert_eq!(
             state("pyright-lsp").0,
             Plugin::Projects(vec![project.clone()])
@@ -764,8 +879,22 @@ mod tests {
         let moved = text(&w.home.join("cache"));
         let c = controls(&root, Some(&moved), &empty, &empty, None).unwrap();
         assert!(c.plugins.iter().all(|p| *p == (Plugin::Missing, false)));
+        // The first version of the file holds one record per plugin, which is the user's.
+        fs::write(
+            plugins.join("installed_plugins.json"),
+            json!({"version": 1, "plugins": {"gopls-lsp@claude-plugins-official": {"version": "1.0.0"}}}).to_string(),
+        )
+        .unwrap();
+        let on = json!({"enabledPlugins": {"gopls-lsp@claude-plugins-official": true}});
+        let c = controls(&root, None, on.as_object().unwrap(), &empty, None).unwrap();
+        assert_eq!(c.plugins[2].0, Plugin::On);
         // A record Claude Code would not write fails the scan rather than reading as missing.
-        for invalid in ["[]", r#"{"plugins": {"x@y": [{"scope": "project"}]}}"#, "{"] {
+        for invalid in [
+            "[]",
+            r#"{"plugins": {"x@y": [{"scope": "project"}]}}"#,
+            r#"{"plugins": {"x@y": 1}}"#,
+            "{",
+        ] {
             fs::write(plugins.join("installed_plugins.json"), invalid).unwrap();
             assert!(
                 controls(&root, None, &empty, &empty, None).is_err(),
@@ -796,18 +925,22 @@ mod tests {
         let projects = w.claude.join("projects/project");
         write(
             projects.join("a.jsonl"),
-            &[request(
-                "a",
-                &repo_s,
-                1,
-                &[
-                    ("Read", file("main.rs")),
-                    ("Edit", file("tool.py")),
-                    ("Read", file("lib.rs")),
-                    // Only the file tools name a file worth a language.
-                    ("Grep", json!({"path": "/synthetic/x.go"})),
-                ],
-            )],
+            &[
+                request(
+                    "a",
+                    &repo_s,
+                    1,
+                    &[
+                        ("Read", file("main.rs")),
+                        ("Edit", file("tool.py")),
+                        ("Read", file("lib.rs")),
+                        // Only the file tools name a file worth a language.
+                        ("Grep", json!({"path": "/synthetic/x.go"})),
+                    ],
+                ),
+                // The same session later works in another directory.
+                request("a", &other_s, 6, &[("Read", file("z.rs"))]),
+            ],
         );
         write(projects.join("b.jsonl"), &[request("b", &gone_s, 2, &[])]);
         let mut sidechain = request("agent", &gone_s, 3, &[("Write", file("new.rs"))]);
@@ -850,19 +983,25 @@ mod tests {
             .languages
             .iter()
             .map(|l| {
-                (l.lsp.server().language, l.sessions, l.uncovered, {
-                    let mut dirs = l.directories.clone();
-                    dirs.sort();
-                    dirs
-                })
+                let mut dirs: Vec<(String, usize)> = l
+                    .directories
+                    .iter()
+                    .map(|(d, s)| (d.clone(), s.len()))
+                    .collect();
+                dirs.sort();
+                (l.lsp.server().language, l.sessions, l.uncovered, dirs)
             })
             .collect();
         assert_eq!(
             got,
             [
                 ("Rust", 3, 3, {
-                    let mut dirs =
-                        vec![(repo_s.clone(), 1), (gone_s.clone(), 1), (wt_s.clone(), 1)];
+                    let mut dirs = vec![
+                        (repo_s.clone(), 1),
+                        (gone_s.clone(), 1),
+                        (wt_s.clone(), 1),
+                        (other_s.clone(), 1),
+                    ];
                     dirs.sort();
                     dirs
                 }),
@@ -871,7 +1010,7 @@ mod tests {
         );
         // A later window leaves only the sessions after it.
         let later = lsp_use(&data, Some(START + 4_500), START + 3_600_000);
-        assert_eq!((later[0].sessions, later[0].languages[0].sessions), (1, 1));
+        assert_eq!((later[0].sessions, later[0].languages[0].sessions), (2, 2));
 
         let home_s = text(&w.home);
         let home = |p: &str| crate::report::home_path(Some(&home_s), p);
@@ -881,14 +1020,18 @@ mod tests {
         };
         // The worktree and the directory removed since are the repository's.
         let rust = &u.languages[0].directories;
-        assert_eq!(super::projects(rust, Some(&home_s)), [(repo_s.clone(), 3)]);
+        assert_eq!(
+            super::projects(rust, Some(&home_s)),
+            [(repo_s.clone(), 3), (other_s.clone(), 1)]
+        );
         let items = items(u, &view);
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].name, "Rust code intelligence");
         assert_eq!(
             items[0].text,
-            "Rust files were read or edited in 3 of 4 sessions (75%), in ~/repo. The rust-analyzer-lsp plugin is not installed. Its language server, rust-analyzer, is on the PATH token-max runs with. With the plugin, Claude looks up a symbol's definition and references instead of searching text and reading each candidate file, and sees the type errors an edit introduced. Anthropic recommends it for typed languages; what it saves is not measured."
+            "Rust files were read or edited in 3 of 4 sessions (75%), most in ~/repo (3 sessions) and ~/other (1). The rust-analyzer-lsp plugin is not installed. Its language server, rust-analyzer, is on the PATH token-max runs with. With the plugin, Claude looks up a symbol's definition and references instead of searching text and reading each candidate file, and sees the type errors an edit introduced. Anthropic recommends it for typed languages; what it saves is not measured."
                 .replace("~/repo", &home(&repo_s))
+                .replace("~/other", &home(&other_s))
         );
         assert_eq!(
             items[0].how,
@@ -954,14 +1097,17 @@ mod tests {
             sessions: 300,
             languages: vec![l],
             settings_file: text(&settings),
+            root: text(&w.home.join(".claude-work")),
+            unresolved: false,
         };
         // Five projects, the first two with more sessions.
-        let dirs: Vec<(String, u64)> = [("a", 5), ("b", 2), ("c", 1), ("d", 1), ("e", 1)]
+        let dirs: Vec<(String, Vec<Text>)> = [("a", 5), ("b", 2), ("c", 1), ("d", 1), ("e", 1)]
             .into_iter()
             .map(|(name, n)| {
                 let dir = w.home.join(name);
                 fs::create_dir_all(&dir).unwrap();
-                (text(&dir), n)
+                let sessions = (0..n).map(|i| format!("{name}{i}").into()).collect();
+                (text(&dir), sessions)
             })
             .collect();
         let view = View {
@@ -993,18 +1139,54 @@ mod tests {
             "{}",
             on[0].text
         );
-        assert!(
-            card(language(10, 1, 1, Plugin::Missing, true))[0]
-                .text
-                .contains("(under 1%)")
+        // Another Claude home is named, since a bare install goes to the shell's.
+        let missing = card(language(10, 1, 1, Plugin::Missing, true));
+        assert!(missing[0].text.contains("(under 1%)"));
+        let Some(How::Manual { step, .. }) = &missing[0].how else {
+            panic!("{:?}", missing[0].how)
+        };
+        assert_eq!(
+            step,
+            &format!(
+                "with CLAUDE_CONFIG_DIR set to {}, run `claude plugin install rust-analyzer-lsp@claude-plugins-official`, then start a new session",
+                text(&w.home.join(".claude-work"))
+            )
         );
         // Blocked by policy: shown, with nothing to act on.
         let blocked = card(language(10, 10, 10, Plugin::Blocked, true));
         assert!(blocked[0].quiet && blocked[0].how.is_none());
         // Turned off in the user file: one edit there, which the walk writes.
         let id = "rust-analyzer-lsp@claude-plugins-official".to_string();
-        let off = card(language(10, 10, 10, Plugin::Off { id: id.clone() }, true));
+        let off = card(language(
+            10,
+            10,
+            10,
+            Plugin::Off {
+                id: id.clone(),
+                listed: true,
+            },
+            true,
+        ));
         assert_eq!(off[0].value, "off -> on");
+        // T3 launch arguments may replace the settings it reads, so the edit is by hand.
+        let unsettled = LspUse {
+            unresolved: true,
+            ..u(language(
+                10,
+                10,
+                10,
+                Plugin::Off {
+                    id: id.clone(),
+                    listed: false,
+                },
+                true,
+            ))
+        };
+        let by_hand = items(&unsettled, &view);
+        assert!(by_hand[0].text.contains("no enabledPlugins entry in"));
+        assert!(
+            matches!(&by_hand[0].how, Some(How::Manual { reason, .. }) if reason.starts_with("T3 launches"))
+        );
         let owner = crate::vibes::owner(&off, None, 100.0);
         let plan = owner
             .plan(&[crate::doctor::Event::Choose {

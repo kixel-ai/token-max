@@ -2497,11 +2497,10 @@ pub(crate) fn profile(
             cache.and_then(Value::as_str),
             &user,
             &managed,
-            // Windows names it `Path`, and reads variable names in any case.
             options
                 .env
                 .iter()
-                .find(|(k, _)| k == &"PATH" || (cfg!(windows) && k.eq_ignore_ascii_case("PATH")))
+                .find(|(k, _)| crate::lsp::is_path(k))
                 .map(|(_, v)| v.as_str()),
         )?)
     } else {

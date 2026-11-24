@@ -62,6 +62,7 @@ const ENVIRONMENT: &[&str] = &[
     "MAX_MCP_OUTPUT_TOKENS",
     "BASH_MAX_TIMEOUT_MS",
     "BASH_DEFAULT_TIMEOUT_MS",
+    "CLAUDE_CODE_PLUGIN_CACHE_DIR",
 ];
 
 /// The profile id of a T3 instance, which a removed instance keeps for its retained history.
@@ -662,7 +663,8 @@ pub(crate) fn discover(
             let mut env: Env = options
                 .env
                 .iter()
-                .filter(|(k, _)| ENVIRONMENT.contains(&k.as_str()))
+                // The host's PATH is where token-max looks for language servers.
+                .filter(|(k, _)| ENVIRONMENT.contains(&k.as_str()) || crate::lsp::is_path(k))
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
             let mut unresolved_env = false;

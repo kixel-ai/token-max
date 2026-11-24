@@ -5886,13 +5886,18 @@ fn summary(
         }
         row.setting = FABLE_MODEL.into();
         if u.requests > 0 {
+            // One total over every week, so name the span it covers.
+            let start = u.weeks.iter().map(|w| w.start).min().unwrap_or_default();
+            let end = u.weeks.iter().map(|w| w.end).max().unwrap_or_default();
             vibes.push(guidance(
                 row.name.clone(),
                 &row.profile,
                 format!(
-                    "Cost {} at API prices over {}. {FABLE_PARTIAL}{} {}",
+                    "Cost {} at API prices over {} from {} to {}. {FABLE_PARTIAL}{} {}",
                     figure(u.estimate),
                     plural(u.requests, "Fable request"),
+                    date(&iso(start)),
+                    date(&iso(end)),
                     fable_caveats(u),
                     capitalize(FABLE_RULE)
                 ),
@@ -9233,7 +9238,7 @@ mod tests {
         let card = cards.iter().find(|i| i.name == "Fable weekly use").unwrap();
         assert_eq!(
             card.text,
-            "Cost ~$516 ± $40 at API prices over 5 Fable requests. These figures are partial: the cap counts Fable use on every Claude surface, they cover only this profile's recorded sessions, and they may include requests paid with usage credits after the cap was reached. The weekly reset time is not recorded, and the limit is not published in tokens or dollars, so no share of it is shown. 1 of them is also attributed to another Claude profile that signs in to Anthropic and reads the same transcripts, so whose they were is unknown. 2 requests recorded no model and may have run on Fable. On a Claude Max or Ultra plan or a Team or seat-based Enterprise premium seat, Fable models can use up to half the weekly usage limit, and use it faster than other models; on Pro or a Team or seat-based Enterprise standard seat, they run on usage credits; on usage-based Enterprise, they bill at API rates."
+            "Cost ~$516 ± $40 at API prices over 5 Fable requests from 2026-11-21 to 2026-12-01. These figures are partial: the cap counts Fable use on every Claude surface, they cover only this profile's recorded sessions, and they may include requests paid with usage credits after the cap was reached. The weekly reset time is not recorded, and the limit is not published in tokens or dollars, so no share of it is shown. 1 of them is also attributed to another Claude profile that signs in to Anthropic and reads the same transcripts, so whose they were is unknown. 2 requests recorded no model and may have run on Fable. On a Claude Max or Ultra plan or a Team or seat-based Enterprise premium seat, Fable models can use up to half the weekly usage limit, and use it faster than other models; on Pro or a Team or seat-based Enterprise standard seat, they run on usage credits; on usage-based Enterprise, they bill at API rates."
         );
         assert_eq!(card.sources, [FABLE_PLANS]);
         // --details keeps each span's cost with its unknowns, the caveats and the sources.

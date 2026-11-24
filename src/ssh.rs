@@ -48,8 +48,8 @@ pub fn destination(value: &str) -> Result<(), ScanError> {
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Where this version's release archives are published.
-const RELEASES: &str = "https://github.com/kixel-ai/token-max/releases";
+/// Where release archives are published.
+pub(crate) const RELEASES: &str = "https://github.com/kixel-ai/token-max/releases";
 
 /// The command that builds a development build on a destination of another platform.
 const BUILD: &str = "`cargo install --locked --git https://github.com/kixel-ai/token-max --rev <commit>` there, from this build's commit";

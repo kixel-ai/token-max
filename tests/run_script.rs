@@ -11,95 +11,16 @@
     windows
 ))]
 
-use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
+mod support;
+
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 
-use sha2::{Digest, Sha256};
+use support::{Releases, TARGET};
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-const TARGET: &str = "x86_64-unknown-linux-musl";
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-const TARGET: &str = "aarch64-unknown-linux-musl";
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const TARGET: &str = "aarch64-apple-darwin";
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-const TARGET: &str = "x86_64-apple-darwin";
-#[cfg(windows)]
-const TARGET: &str = "x86_64-pc-windows-msvc";
-
-/// A releases directory served over HTTP, with GitHub's `/latest` redirect, and the cache the
-/// script fills. Removed on drop.
-struct Releases {
-    root: PathBuf,
-    url: String,
-    server: Arc<Mutex<Server>>,
-}
-
-struct Server {
-    latest: Option<String>,
-    /// Every requested path, in order.
-    log: Vec<String>,
-}
-
+/// The cache the script fills, under each fixture's root.
 impl Releases {
-    fn new() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
-            "run-script-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(root.join("home")).unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/releases", listener.local_addr().unwrap());
-        let server = Arc::new(Mutex::new(Server {
-            latest: None,
-            log: Vec::new(),
-        }));
-        let (files, state, base) = (root.join("files"), server.clone(), url.clone());
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                serve(stream.unwrap(), &files, &state, &base);
-            }
-        });
-        Self { root, url, server }
-    }
-
-    /// Publish `tag` as the latest release, with a checksum file that lies when `corrupt`.
-    fn publish(&self, tag: &str, corrupt: bool) {
-        let stage = self.root.join("stage").join(tag);
-        let dir = self.root.join("files/releases/download").join(tag);
-        std::fs::create_dir_all(&stage).unwrap();
-        std::fs::create_dir_all(&dir).unwrap();
-        let name = archive(&stage, &dir);
-        let bytes = std::fs::read(dir.join(&name)).unwrap();
-        let mut hash: String = Sha256::digest(&bytes)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        if corrupt {
-            hash.replace_range(..1, if hash.starts_with('0') { "1" } else { "0" });
-        }
-        std::fs::write(
-            dir.join(format!("{name}.sha256")),
-            format!("{hash}  {name}\n"),
-        )
-        .unwrap();
-        self.server.lock().unwrap().latest = Some(tag.into());
-    }
-
-    /// Requests for release assets so far.
-    fn downloads(&self) -> usize {
-        let log = &self.server.lock().unwrap().log;
-        log.iter()
-            .filter(|path| path.contains("/download/"))
-            .count()
-    }
-
     fn cache(&self) -> PathBuf {
         self.root.join("cache/token-max/run")
     }
@@ -159,52 +80,6 @@ impl Releases {
     }
 }
 
-impl Drop for Releases {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
-}
-
-/// Packs a release binary for this target from `stage` into `dir`, as cargo-dist lays it out,
-/// and returns the archive's name.
-#[cfg(unix)]
-fn archive(stage: &Path, dir: &Path) -> String {
-    use std::os::unix::fs::PermissionsExt;
-    // A stand-in that shows what it was run with, so the archive stays small.
-    let folder = format!("token-max-{TARGET}");
-    let bin = stage.join(&folder).join("token-max");
-    std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
-    std::fs::write(&bin, "#!/bin/sh\necho \"ran $*\"\n").unwrap();
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let name = format!("{folder}.tar.xz");
-    let status = Command::new("tar")
-        .arg("-cJf")
-        .arg(dir.join(&name))
-        .arg("-C")
-        .arg(stage)
-        .arg(&folder)
-        .status()
-        .unwrap();
-    assert!(status.success());
-    name
-}
-
-#[cfg(windows)]
-fn archive(stage: &Path, dir: &Path) -> String {
-    // The real binary: a stand-in would need its own executable.
-    std::fs::copy(env!("CARGO_BIN_EXE_token-max"), stage.join("token-max.exe")).unwrap();
-    let name = format!("token-max-{TARGET}.zip");
-    let status = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command"])
-        .arg("Compress-Archive -LiteralPath $env:FROM -DestinationPath $env:TO")
-        .env("FROM", stage.join("token-max.exe"))
-        .env("TO", dir.join(&name))
-        .status()
-        .unwrap();
-    assert!(status.success());
-    name
-}
-
 /// What doctor prints when the script hands it `--help`.
 fn expected() -> String {
     if cfg!(windows) {
@@ -215,50 +90,6 @@ fn expected() -> String {
         String::from_utf8(output.stdout).unwrap()
     } else {
         "ran doctor --help\n".into()
-    }
-}
-
-/// Answers one request: GitHub's `/latest` redirect, a file, or 404.
-fn serve(stream: TcpStream, files: &Path, state: &Mutex<Server>, base: &str) {
-    let mut reader = BufReader::new(&stream);
-    let mut line = String::new();
-    reader.read_line(&mut line).unwrap();
-    let mut header = String::new();
-    while reader.read_line(&mut header).unwrap() > 2 {
-        header.clear();
-    }
-    let mut parts = line.split_whitespace();
-    let (method, path) = (parts.next().unwrap(), parts.next().unwrap().to_string());
-    let latest = {
-        let mut state = state.lock().unwrap();
-        state.log.push(path.clone());
-        state.latest.clone()
-    };
-    let (status, location, body) = if path == "/releases/latest" {
-        // GitHub sends /releases itself when there is no release.
-        let location = match latest {
-            Some(tag) => format!("{base}/tag/{tag}"),
-            None => base.to_string(),
-        };
-        ("302 Found", Some(location), Vec::new())
-    } else {
-        match std::fs::read(files.join(path.trim_start_matches('/'))) {
-            Ok(body) => ("200 OK", None, body),
-            Err(_) => ("404 Not Found", None, Vec::new()),
-        }
-    };
-    let mut out = &stream;
-    let mut head = format!(
-        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n",
-        body.len()
-    );
-    if let Some(location) = location {
-        head.push_str(&format!("Location: {location}\r\n"));
-    }
-    head.push_str("\r\n");
-    out.write_all(head.as_bytes()).unwrap();
-    if method != "HEAD" {
-        out.write_all(&body).unwrap();
     }
 }
 

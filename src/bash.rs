@@ -190,7 +190,10 @@ fn check(
             .or(ttl);
         let began = issuing.map_or(start.time, |r| r.time);
         let Some(lifetime) = lifetime else {
-            unknown += 1;
+            // Under the shortest TTL, a wait fits whichever lifetime its request had.
+            if end.time - began >= ttl_milliseconds(Ttl::FiveMinutes) {
+                unknown += 1;
+            }
             continue;
         };
         if end.time - began < ttl_milliseconds(lifetime) {
@@ -627,6 +630,20 @@ mod tests {
             text.contains(" No foreground Bash wait is known to have outlasted the cache. 1 of 1 foreground Bash wait could not be compared, since no cache lifetime is recorded for the request that started it. Set in "),
             "{text}"
         );
+        // Just under the shortest TTL, a wait fits whichever lifetime its request had.
+        let records = [
+            assistant(0.0, "wait", 0, 0, Some(json!({"command": "ls"}))),
+            result(4.9, "wait", false),
+            assistant(5.0, "after", 0, 0, None),
+        ];
+        let report = report_of("{}", &records);
+        let w = &bash(&report).waits;
+        assert_eq!((w.calls, w.long, w.unknown), (1, 0, 0));
+        assert!(
+            card(&report)
+                .text
+                .contains(" No foreground Bash wait outlasted the cache. Set in ")
+        );
     }
 
     #[test]
@@ -647,6 +664,15 @@ mod tests {
             ),
             "{}",
             item.text
+        );
+        // An unresolved owner's cap is the one read, not the one the sessions ran under.
+        for cap in &mut report.bash {
+            cap.unresolved = Some(crate::t3::UNOWNED.into());
+        }
+        let text = card(&report).text;
+        assert!(
+            text.starts_with("Capped at 10m in the settings read, which these sessions may not have run under. No cap is suggested: T3 instance is disabled"),
+            "{text}"
         );
     }
 }

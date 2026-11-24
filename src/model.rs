@@ -3071,6 +3071,21 @@ pub struct SubagentCost {
     pub model_setting: String,
     /// The settings that change its effort; a lower effort changes output tokens, so its cost is unmeasured.
     pub effort_setting: String,
+    /// What an agent file of its name would take today, for a Claude built-in; empty otherwise.
+    pub replacement: Replacement,
+}
+
+/// An agent file named after a Claude built-in, as today's settings and files see each of its
+/// runs: runs recorded as the built-in can predate the file.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Replacement {
+    /// The user agent directories where a file would replace it, for the runs no agent file
+    /// replaces today and no forced subagent model would override.
+    pub missing: Vec<String>,
+    /// The agent files of its name, a project's included, that replace it for some run today.
+    pub present: Vec<String>,
+    /// Whether CLAUDE_CODE_SUBAGENT_MODEL_FORCE applies to some run, dropping a file's model.
+    pub forced: bool,
 }
 
 // ---------------------------------------------------------------------------

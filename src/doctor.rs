@@ -4237,6 +4237,7 @@ mod tests {
         assert_eq!(ask("/home/dev/.claude", &remote, "p\n"), None);
         questions.finish(&mut printed).unwrap();
         let printed = String::from_utf8(printed).unwrap();
+        // slash ok: the home is abbreviated in the string it was given
         assert_eq!(printed.matches("How is ~/.claude-a paid for?").count(), 4);
         assert!(
             printed.contains("How is devbox:~/.claude paid for?"),
@@ -4306,10 +4307,12 @@ mod tests {
         let text = opening(&found, &[], &style(true, Some(100)));
         assert!(text.contains("  ▀█▀ █▀█"), "{text}");
         assert!(
+            // slash ok: the fake /home/u root is abbreviated as given
             text.contains("\n  ✓ Claude Code  ~/.claude  2 transcripts  1.5 GB\n"),
             "{text}"
         );
         assert!(
+            // slash ok: the fake /home/u root is abbreviated as given
             text.contains("\n  ✓ Codex        ~/.codex   1 transcript      1 B\n"),
             "{text}"
         );
@@ -4326,10 +4329,12 @@ mod tests {
         let text = opening(&found, &devbox, &style(true, Some(40)));
         assert!(text.lines().all(|l| l.chars().count() <= 40), "{text}");
         assert!(
+            // slash ok: the fake /home/u root is abbreviated as given
             text.contains("\n  ✓ Claude Code  ~/.claude\n    2 transcripts  1.5 GB\n"),
             "{text}"
         );
         assert!(
+            // slash ok: the fake /home/u root is abbreviated as given
             text.contains("\n  ✓ Codex        ~/.codex\n    1 transcript      1 B\n"),
             "{text}"
         );
@@ -4784,6 +4789,7 @@ mod tests {
             "n\n",
         );
         assert!(
+            // slash ok: the locations are formatted with / and abbreviated as given
             printed.contains("  Which  review (~/a/SKILL.md), review (~/b/SKILL.md), lint.\n"),
             "{printed}"
         );

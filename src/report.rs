@@ -8934,6 +8934,7 @@ mod tests {
             lines: 200,
         });
         let notes = context_guidance(&c, &[], "~/CLAUDE.md");
+        // slash ok: the name given above is passed through
         assert_eq!(notes, ["~/CLAUDE.md: 200 recorded lines, 401 UTF-8 bytes."]);
         c.harness = Harness::Codex;
         c.instruction_size = Some(crate::model::InstructionSize {
@@ -10612,6 +10613,7 @@ mod tests {
         let edit = format!(r#""skillOverrides": {{"{name}": "user-invocable-only"}} in "#);
         let file = std::path::Path::new(&setting[edit.len().min(setting.len())..]);
         assert!(setting.starts_with(&edit), "{setting}");
+        // slash ok: Path::ends_with compares components
         assert!(file.ends_with(".claude/settings.json"), "{setting}");
         // An offered change's saving scales to 30 days, however short the window, and its
         // evidence keeps the window's total.

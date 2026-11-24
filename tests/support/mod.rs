@@ -22,6 +22,16 @@ pub const TARGET: &str = "x86_64-apple-darwin";
 #[cfg(windows)]
 pub const TARGET: &str = "x86_64-pc-windows-msvc";
 
+/// `command` without this process's environment, except what Windows needs to run one:
+/// without `SystemRoot`, Winsock cannot open a socket.
+pub fn isolated(command: &mut Command) -> &mut Command {
+    command.env_clear();
+    if let Some(root) = std::env::var_os("SystemRoot") {
+        command.env("SystemRoot", root);
+    }
+    command
+}
+
 /// Releases whose latest is this build, which every doctor run checks against unless a test
 /// sets its own.
 pub fn current() -> &'static str {

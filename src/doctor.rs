@@ -1547,7 +1547,7 @@ fn git_keeps(file: &Path) -> bool {
 
 /// Whether this process may write `path`.
 #[cfg(unix)]
-pub(crate) fn writable(path: &Path) -> bool {
+fn writable(path: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
     let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
         return false;
@@ -1559,7 +1559,7 @@ pub(crate) fn writable(path: &Path) -> bool {
 /// Whether this process may write `path`; Windows marks read-only files, and ignores the
 /// mark on directories.
 #[cfg(not(unix))]
-pub(crate) fn writable(path: &Path) -> bool {
+fn writable(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|m| m.is_dir() || !m.permissions().readonly())
 }
 

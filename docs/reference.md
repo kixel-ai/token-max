@@ -45,10 +45,12 @@ archive for this platform, refuses it unless it matches the release's
 `.sha256` file, unpacks the binary with `tar` (Windows' own `tar.exe` there),
 and checks that it runs and reports that version. Only then does it rename
 the new binary over the running one, from the same directory, and run it with
-the same options; a failure at any step leaves the old binary as it was.
-Windows cannot replace a running program, so there the old binary moves aside
-to `token-max.exe.old` first, and a later run deletes it; Ctrl-C cannot
-interrupt the rename. A download that stops answering for 30 seconds fails
+the same options. A failure before the rename leaves the old binary as it
+was, and a rerun that cannot start leaves the new one; either way this run
+goes on with the build already running. Windows cannot replace a running
+program, so there the old binary moves aside to `token-max.exe.old` first,
+and a later run deletes it. Ctrl-C waits for the rename, then ends the run
+without rerunning. A download that stops answering for 30 seconds fails
 the upgrade. With `--defaults`, which changes nothing, doctor only says to run
 it without `--defaults` to upgrade.
 

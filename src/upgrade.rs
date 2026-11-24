@@ -71,8 +71,9 @@ pub fn check(releases: &str) -> Check {
         .timeout_global(Some(CHECK_TIMEOUT))
         .build()
         .into();
-    let Ok(response) = agent.head(format!("{releases}/latest")).call() else {
-        return Check::Failed(format!("could not reach {releases}"));
+    let response = match agent.head(format!("{releases}/latest")).call() {
+        Ok(response) => response,
+        Err(error) => return Check::Failed(format!("could not reach {releases}: {error}")),
     };
     let location = response
         .status()
@@ -169,7 +170,7 @@ impl Paths {
             return Install::Reinstall("no release is built for this platform".into());
         };
         match self.exe.parent() {
-            Some(dir) if crate::doctor::writable(dir) => Install::Replace {
+            Some(dir) if can_write(dir) => Install::Replace {
                 exe: self.exe,
                 target,
             },
@@ -179,6 +180,19 @@ impl Paths {
             }
         }
     }
+}
+
+/// Whether this user can create a file in `dir`, as staging a release there does. Only trying
+/// answers it on Windows, whose read-only mark ignores the access lists that keep most users
+/// out of a directory such as `Program Files`.
+fn can_write(dir: &Path) -> bool {
+    let probe = dir.join(format!(".token-max-{}.probe", unique()));
+    let created = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .is_ok();
+    created && fs::remove_file(&probe).is_ok()
 }
 
 /// A release staged beside the binary it replaces, deleted unless [`Staged::install`] moves it

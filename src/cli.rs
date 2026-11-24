@@ -59,7 +59,7 @@ Usage: token-max doctor [options]
   --details               Show grouped check evidence, assumptions, uncertainty and sources
   --defaults              Report as a user with no settings files would see it, offering nothing
   --plain                 Plain text without color or decorative Unicode
-  --offline               Use cached public prices and check for no newer release, without network access
+  --offline               Use cached public prices and skip the release check, without network access
   --prices-file FILE      Use a local models.dev catalog instead of fetching prices
   --price-cache FILE      Cache path (default: ~/.cache/token-max/models.json)
   -v, --version           Show the package version
@@ -1535,13 +1535,28 @@ fn offer_upgrade(
         say(&mut stdout, &text, false)?;
         return Ok(None);
     }
+    // A Ctrl-C during the swap waited for it to finish, so the upgrade stands but nothing reruns.
+    if ssh::cancelled() {
+        return Err(ScanError::new(format!(
+            "cancelled after upgrading to {latest}; no report produced"
+        )));
+    }
     say(
         &mut stdout,
         &format!("Upgraded to {latest}; rerunning."),
         false,
     )?;
-    drop(stdout);
-    rerun(&exe).map(Some)
+    match rerun(&exe) {
+        Ok(code) => Ok(Some(code)),
+        // The upgraded binary is in place and ran its version check, so only this run falls
+        // back to the build already running.
+        Err(error) => {
+            let version = upgrade::VERSION;
+            let text = format!("Could not rerun {latest}: {error}. Continuing with v{version}.");
+            say(&mut stdout, &text, false)?;
+            Ok(None)
+        }
+    }
 }
 
 /// Stdin read a byte at a time, so the answer takes no more than its own line: the rerun
@@ -1561,33 +1576,24 @@ fn unbuffered_stdin() -> Result<io::BufReader<std::fs::File>, ScanError> {
 
 /// Run the upgraded binary at `exe` with this run's arguments, in this process's place.
 #[cfg(unix)]
-fn rerun(exe: &std::path::Path) -> Result<u8, ScanError> {
+fn rerun(exe: &std::path::Path) -> io::Result<u8> {
     use std::os::unix::process::CommandExt;
-    let error = std::process::Command::new(exe)
+    Err(std::process::Command::new(exe)
         .args(std::env::args_os().skip(1))
-        .exec();
-    Err(ScanError::new(format!(
-        "upgraded, but could not rerun {}: {error}",
-        display(&exe.to_string_lossy())
-    )))
+        .exec())
 }
 
 /// Run the upgraded binary at `exe` with this run's arguments, and wait for its exit code:
 /// Windows cannot replace a running process's program.
 #[cfg(windows)]
-fn rerun(exe: &std::path::Path) -> Result<u8, ScanError> {
+fn rerun(exe: &std::path::Path) -> io::Result<u8> {
     // The rerun owns the console and cancels itself on Ctrl-C, so this process only waits.
     enter(Phase::Writing);
     let status = std::process::Command::new(exe)
         .args(std::env::args_os().skip(1))
-        .status()
-        .map_err(|error| {
-            ScanError::new(format!(
-                "upgraded, but could not rerun {}: {error}",
-                display(&exe.to_string_lossy())
-            ))
-        })?;
-    Ok(status
+        .status();
+    enter(Phase::Running);
+    Ok(status?
         .code()
         .map_or(2, |code| u8::try_from(code).unwrap_or(2)))
 }

@@ -112,9 +112,8 @@ fn command(w: &Workspace, args: &[&str]) -> Command {
 /// The binary at `bin`, as [`command`] runs the built one.
 fn command_at(bin: &Path, w: &Workspace, args: &[&str]) -> Command {
     let mut command = Command::new(bin);
-    command
+    support::isolated(&mut command)
         .args(args)
-        .env_clear()
         .env("HOME", &w.home)
         // Windows resolves the home from USERPROFILE and ignores HOME.
         .env("USERPROFILE", &w.home)
@@ -980,9 +979,9 @@ fn a_relocated_binary_runs_from_any_directory_with_relative_paths() {
     let original = std::fs::read(&transcript).unwrap();
     let invoke = |extra: &[&str]| {
         let mut c = Command::new(&bin);
-        c.args(extra)
+        support::isolated(&mut c)
+            .args(extra)
             .current_dir(&consumer)
-            .env_clear()
             .env("HOME", &w.home)
             // Windows resolves the home from USERPROFILE and ignores HOME.
             .env("USERPROFILE", &w.home)
@@ -1135,14 +1134,13 @@ fn without_a_terminal_a_newer_release_or_a_failed_check_is_one_line_on_stderr() 
     let mut c = command(&w, &doctor);
     let nowhere = "http://127.0.0.1:1/releases";
     c.env("TOKEN_MAX_RELEASES", nowhere);
-    assert_eq!(
-        run(&mut c),
-        (
-            1,
-            report,
-            format!("token-max: could not check for a newer release: could not reach {nowhere}\n")
-        )
-    );
+    let (status, stdout, stderr) = run(&mut c);
+    assert_eq!((status, stdout), (1, report));
+    // The cause is the platform's own wording.
+    let failed =
+        format!("token-max: could not check for a newer release: could not reach {nowhere}: ");
+    assert!(stderr.starts_with(&failed), "{stderr}");
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
 }
 
 // Built CLI warns from current settings alone, remains read-only and skips unreadable lines.

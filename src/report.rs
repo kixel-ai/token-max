@@ -1826,9 +1826,14 @@ fn details(report: &Report, out: &mut Out<'_>) {
 /// Why the subagent lines never recommend a change.
 const SUBAGENT_EVIDENCE: &str = "Subagent lines are evidence, not recommendations: a cheaper model or lower effort trades capability, and the main agent's extra work after a weaker subagent cannot be attributed, so no saving is claimed. A lower effort changes the output tokens, so its cost cannot be measured.";
 
+/// Claude Code's subagent page, which gives the built-in Explore's tools but not its prompt.
+const CLAUDE_SUBAGENT_DOCS: &str = "https://code.claude.com/docs/en/sub-agents#built-in-subagents";
+
 /// Anthropic's tip for Claude's built-in Explore subagent when it ran off Haiku, beside what
-/// it cost and what the same tokens would cost on the cheapest model; None otherwise.
-fn explore_warning(c: &SubagentCost) -> Option<String> {
+/// it cost and what the same tokens would cost on the cheapest model; None otherwise. The
+/// agent file it advises is a step by hand: it replaces the built-in's system prompt, which
+/// Anthropic doesn't publish, so no file token-max writes would explore the same way.
+fn explore_item(c: &SubagentCost, profile: &str, out: &Out<'_>) -> Option<Item> {
     if c.harness != Harness::Claude
         || c.kind != "Explore"
         || !c.built_in
@@ -1837,12 +1842,68 @@ fn explore_warning(c: &SubagentCost) -> Option<String> {
     {
         return None;
     }
-    Some(format!(
+    // Each profile's own agent file, and whether it is there now: runs recorded as the
+    // built-in can predate it.
+    let mut missing: IndexSet<String> = IndexSet::default();
+    let mut present: IndexSet<String> = IndexSet::default();
+    for p in c
+        .profiles
+        .iter()
+        .filter_map(|id| out.profiles.get(id.as_str()))
+    {
+        let own = p
+            .agents
+            .definitions
+            .iter()
+            .find(|d| d.name == "Explore" && d.project.is_none());
+        match own {
+            Some(d) => present.insert(out.home(&d.file)),
+            None => missing.insert(crate::discovery::join(&[&p.root, "agents", "Explore.md"])),
+        };
+    }
+    let list = |files: IndexSet<String>| files.into_iter().collect::<Vec<_>>().join(" and ");
+    let mut text = format!(
         "Ran on {} and cost {}. {} Anthropic's model guide notes that the built-in Explore runs on the session's model, and suggests a user agent named Explore with model: haiku to keep exploration cheap.",
         shares(&c.models, c.requests),
         figure(c.estimate),
         reprice_text(c)
-    ))
+    );
+    let quiet = missing.is_empty();
+    if !present.is_empty() {
+        let (verb, them) = if present.len() == 1 {
+            ("replaces", "it")
+        } else {
+            ("replace", "them")
+        };
+        text += &format!(
+            " {} now {verb} the built-in, so later runs follow {them}.",
+            list(present)
+        );
+    }
+    let how = (!quiet).then(|| How::Manual {
+        // The built-in's documented restriction and its start without CLAUDE.md.
+        step: format!(
+            "create {} with the frontmatter name: Explore; description: when to use it; model: haiku; disallowedTools: Write, Edit; omitClaudeMd: true; and a system prompt of your own below it",
+            list(missing)
+        ),
+        reason: "the file replaces the built-in Explore's system prompt, which Anthropic doesn't publish".into(),
+    });
+    Some(Item {
+        value: if quiet {
+            String::new()
+        } else {
+            format!("inherit {} haiku", out.arrow)
+        },
+        what: "The model Claude Code's built-in Explore subagent, which searches and reads code for the main session, runs on.".into(),
+        how,
+        quiet,
+        ..guidance(
+            subagent_name(c),
+            profile,
+            text,
+            &[CLAUDE_MODEL_GUIDE, CLAUDE_SUBAGENT_DOCS],
+        )
+    })
 }
 
 /// A subagent type by harness: a Claude agent type, a Codex role or other Codex subagent.
@@ -5848,14 +5909,7 @@ fn summary(
         row.profile = tag(&c.profiles, &switch, out);
         row.costs(c.estimate, false, &spend);
         row.evidence = subagent_line(c, out);
-        if let Some(text) = explore_warning(c) {
-            vibes.push(guidance(
-                subagent_name(c),
-                &row.profile,
-                text,
-                &[CLAUDE_MODEL_GUIDE],
-            ));
-        }
+        vibes.extend(explore_item(c, &row.profile, out));
         // The setting, without why it is the one.
         row.setting = out
             .home_in(&c.model_setting)
@@ -9145,8 +9199,18 @@ mod tests {
             card.text,
             "Ran on claude-opus-5-5 (90%), claude-haiku-4-5 (10%) and cost ~$2.20 ± $0.30. On claude-haiku-5-5 the same recorded tokens would cost $0.50, assuming the same turns. Anthropic's model guide notes that the built-in Explore runs on the session's model, and suggests a user agent named Explore with model: haiku to keep exploration cheap."
         );
-        assert_eq!(card.sources, [CLAUDE_MODEL_GUIDE]);
-        assert_eq!((card.how.as_ref(), card.quiet), (None, false));
+        assert_eq!(card.sources, [CLAUDE_MODEL_GUIDE, CLAUDE_SUBAGENT_DOCS]);
+        assert_eq!(card.value, "inherit -> haiku");
+        assert!(!card.quiet);
+        // The file replaces a system prompt Anthropic doesn't publish, so it is never written.
+        let Some(How::Manual { step, reason }) = &card.how else {
+            panic!("{:?}", card.how)
+        };
+        assert_eq!(
+            step,
+            "create /synthetic/home/.claude/agents/Explore.md with the frontmatter name: Explore; description: when to use it; model: haiku; disallowedTools: Write, Edit; omitClaudeMd: true; and a system prompt of your own below it"
+        );
+        assert!(reason.contains("doesn't publish"), "{reason}");
         let details = text(&report, None, true);
         assert!(
             details.contains("Same tokens on claude-haiku-5-5: $0.50"),
@@ -9269,7 +9333,7 @@ mod tests {
     }
 
     #[test]
-    fn only_an_explore_subagent_off_haiku_warns() {
+    fn only_the_built_in_explore_off_haiku_gets_an_agent_file_step_by_hand() {
         let line = |harness, kind: &str, model: &str| SubagentCost {
             harness,
             profiles: vec!["profile".into()],
@@ -9294,29 +9358,92 @@ mod tests {
             model_setting: String::new(),
             effort_setting: String::new(),
         };
+        let cards = |lines: Vec<SubagentCost>| {
+            let mut report = synthetic();
+            report.subagents = lines;
+            advice(&report, ReportOptions::default())
+        };
+        assert_eq!(cards(vec![line(Harness::Codex, "explorer", "gpt-5")]), []);
         assert_eq!(
-            explore_warning(&line(Harness::Codex, "explorer", "gpt-5")),
-            None
+            cards(vec![line(Harness::Claude, "log-reader", "claude-opus-5-5")]),
+            []
         );
         assert_eq!(
-            explore_warning(&line(Harness::Claude, "log-reader", "claude-opus-5-5")),
-            None
-        );
-        let explore =
-            explore_warning(&line(Harness::Claude, "Explore", "claude-opus-5-5")).unwrap();
-        assert!(
-            explore.starts_with("Ran on claude-opus-5-5 and cost an unknown amount."),
-            "{explore}"
-        );
-        assert!(explore.contains("user agent named Explore with model: haiku"));
-        assert_eq!(
-            explore_warning(&line(Harness::Claude, "Explore", "claude-haiku-5-5")),
-            None
+            cards(vec![line(Harness::Claude, "Explore", "claude-haiku-5-5")]),
+            []
         );
         // An agent file named Explore replaces the built-in, which the guide describes.
         let mut custom = line(Harness::Claude, "Explore", "claude-opus-5-5");
         custom.built_in = false;
-        assert_eq!(explore_warning(&custom), None);
+        assert_eq!(cards(vec![custom]), []);
+        let explore = cards(vec![line(Harness::Claude, "Explore", "claude-opus-5-5")]);
+        assert_eq!(explore.len(), 1);
+        assert!(
+            explore[0]
+                .text
+                .starts_with("Ran on claude-opus-5-5 and cost an unknown amount."),
+            "{explore:?}"
+        );
+        assert!(
+            explore[0]
+                .text
+                .contains("user agent named Explore with model: haiku")
+        );
+        // Profiles sharing the history each get their own agent file named.
+        let mut report = synthetic();
+        report
+            .scan
+            .profiles
+            .push(make_profile("work", "/synthetic/home/.claude-work"));
+        let mut shared = line(Harness::Claude, "Explore", "claude-opus-5-5");
+        shared.profiles.push("work".into());
+        report.subagents = vec![shared];
+        let cards = advice(&report, ReportOptions::default());
+        let Some(How::Manual { step, .. }) = &cards[0].how else {
+            panic!("{cards:?}")
+        };
+        assert!(
+            step.starts_with("create /synthetic/home/.claude/agents/Explore.md and /synthetic/home/.claude-work/agents/Explore.md with the frontmatter name: Explore;"),
+            "{step}"
+        );
+        // Runs recorded as the built-in can predate an Explore file: only the profile still
+        // without one is named, and once each has one there is nothing left to do.
+        let file = "/synthetic/home/.claude/agents/Explore.md";
+        report.scan.profiles[0].agents.definitions = vec![AgentDefinition {
+            name: "Explore".into(),
+            file: file.into(),
+            project: None,
+            model: Some("haiku".into()),
+            effort: None,
+            modified: None,
+        }];
+        let cards = advice(&report, ReportOptions::default());
+        let Some(How::Manual { step, .. }) = &cards[0].how else {
+            panic!("{cards:?}")
+        };
+        assert!(
+            step.starts_with(
+                "create /synthetic/home/.claude-work/agents/Explore.md with the frontmatter"
+            ),
+            "{step}"
+        );
+        assert!(
+            cards[0].text.ends_with(&format!(
+                " {file} now replaces the built-in, so later runs follow it."
+            )),
+            "{}",
+            cards[0].text
+        );
+        report.subagents[0].profiles.pop();
+        let cards = advice(&report, ReportOptions::default());
+        assert_eq!(
+            (
+                cards[0].quiet,
+                cards[0].how.as_ref(),
+                cards[0].value.as_str()
+            ),
+            (true, None, "")
+        );
     }
 
     #[test]

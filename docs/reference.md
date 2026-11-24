@@ -1237,7 +1237,7 @@ an exit code.
 | [Bash timeout cap](#bash-timeout-cap) | Every Claude settings file: the cap beside the long waits measured under it. |
 | Main-session effort | The default level is above `high`: Anthropic's [model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/) and [model configuration docs](https://code.claude.com/docs/en/model-config#choose-an-effort-level) for Claude, OpenAI's [reasoning guide](https://developers.openai.com/api/docs/guides/reasoning) for Codex. |
 | An instruction file | A CLAUDE.md of 200 lines or more, past Claude Code's [guidance](https://code.claude.com/docs/en/memory#write-effective-instructions), or an AGENTS.md at or above the byte budget Codex [loads](https://learn.chatgpt.com/docs/agent-configuration/agents-md), with what each 100 lines of it costs. |
-| Explore subagent | Claude's built-in Explore ran off Haiku: what it cost, the same tokens on the cheapest model, and the model guide's tip. |
+| Explore subagent | Claude's built-in Explore ran off Haiku: what it cost, the same tokens on the cheapest model, the model guide's tip, and the agent file that follows it as a step by hand. |
 | Fable weekly use | Any Fable request in the window: what they cost, and Anthropic's [plan rule](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan). |
 
 The effort, instruction-file, subagent and Fable lines stay in `doctor`, where
@@ -1349,7 +1349,18 @@ files do not explain the recorded model, for example after a file changed.
 When Claude's built-in Explore ran off Haiku, a [`vibes`](#vibes) card gives what it cost,
 the same tokens on the cheapest model, and the tip from Anthropic's
 [model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/):
-a user agent named `Explore` with `model: haiku`. A run of an agent file
+a user agent named `Explore` with `model: haiku`. Its `Change` names that
+file in the profile's `agents` directory as a step by hand, with no question:
+the file replaces the built-in's system prompt, which Anthropic doesn't
+publish, so token-max can't write one that explores the same way. The step
+restates what Claude Code's
+[subagent docs](https://code.claude.com/docs/en/sub-agents#built-in-subagents)
+do give: `disallowedTools: Write, Edit` and `omitClaudeMd: true`, since the
+built-in starts without CLAUDE.md. It doesn't suggest
+`CLAUDE_CODE_SUBAGENT_MODEL_FORCE`, which moves every subagent to the model,
+not just Explore. Runs recorded as the built-in can predate an `Explore.md`
+the profile has now: the step names only the profiles still without one, and
+once each has one the card says so and advises nothing. A run of an agent file
 named `Explore`, which replaces the built-in, gets none. Other types get no card:
 the guide splits subagents by whether they search or edit, which the
 transcripts don't record.

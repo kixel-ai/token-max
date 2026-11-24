@@ -2365,20 +2365,8 @@ pub(crate) fn profile(
         }],
         local_env,
     );
-    let enabled =
-        |key: &str| matches!(environment.values.get(key), Some(Value::String(s)) if s == "1");
     let provider = if claude {
-        // A custom ANTHROPIC_BASE_URL (gateway or proxy) still speaks the Anthropic API,
-        // so its requests are priced as public Anthropic API equivalents.
-        if enabled("CLAUDE_CODE_USE_BEDROCK") {
-            Some("amazon-bedrock".into())
-        } else if enabled("CLAUDE_CODE_USE_VERTEX") {
-            Some("google-vertex-anthropic".into())
-        } else if enabled("CLAUDE_CODE_USE_FOUNDRY") {
-            Some("azure".into())
-        } else {
-            None
-        }
+        crate::effort::claude_provider(&environment)
     } else {
         label(config.get("model_provider").unwrap_or(&Value::Null))
     };

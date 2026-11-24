@@ -872,6 +872,7 @@ pub(crate) fn discover(
                         .into(),
                 ),
                 picked: None,
+                provider: None,
             });
             // These terminal-client features do not run in T3's SDK/app-server client.
             profile.background.clear();

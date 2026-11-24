@@ -7558,6 +7558,7 @@ mod tests {
                     default: Some("medium".into()),
                     unresolved: None,
                     picked: None,
+                    provider: None,
                 },
                 enterprise: false,
                 runs: vec![],
@@ -8471,6 +8472,7 @@ mod tests {
             default: None,
             unresolved: None,
             picked: None,
+            provider: None,
         };
         let owner = format!("{file}:env.CLAUDE_CODE_EFFORT_LEVEL");
         let toml = "/synthetic/home/.codex/config.toml";
@@ -8612,6 +8614,29 @@ mod tests {
         );
         // An unresolved default has no card.
         assert!(none && warning.is_none());
+
+        // Two homes sharing a default but not its cap get a line, and a cap to raise, each.
+        let mut report = synthetic();
+        let capped = |id: &str| {
+            let mut p = report.scan.profiles[0].clone();
+            p.id = id.into();
+            p.effort = Some(EffortControl {
+                caps: vec![crate::model::Owned {
+                    value: "low".into(),
+                    owner: format!("/{id}/settings.json:maxEffortLevel"),
+                }],
+                ..control("claude-opus-5-5", "high", &owner)
+            });
+            p
+        };
+        report.scan.profiles = vec![capped("a"), capped("b")];
+        let checks = effort_checks(&EffortInput {
+            scan: &report.scan,
+            catalog: &prices(),
+            since: None,
+            now: NOV1 + DAY_MS,
+        });
+        assert_eq!(checks.len(), 2);
     }
 
     #[test]

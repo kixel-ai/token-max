@@ -1400,8 +1400,8 @@ the edit sets it in the profile's file, and a `[1m]` the current model names
 carries over to the pick. When another file or a shell variable decides
 either setting, or a `maxEffortLevel` below the pick's level would lower it,
 the whole change is a step by hand naming each setting; so is a new model on
-a cloud provider, such as Bedrock, which spells model IDs its own way. A
-Codex level with no model set or recorded has no card.
+a cloud provider, such as Bedrock, which spells model IDs its own way, whether
+the profile's or the project's settings turn it on. A Codex level with no model set or recorded has no card.
 
 ## Main-session effort
 

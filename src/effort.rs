@@ -232,7 +232,9 @@ pub fn claude_effort(
         ),
         _ => match highest(scopes, "model") {
             Some((Value::String(m), file)) => (Some(m.as_str()), format!("{file}:model")),
-            Some((Value::Null, _)) | None => (recorded, RECORDED.to_string()),
+            // A null outranks the files below it, so it owns the model the session falls back to.
+            Some((Value::Null, file)) => (recorded, format!("{file}:model")),
+            None => (recorded, RECORDED.to_string()),
             Some((_, file)) => return Err(invalid("invalid model", file)),
         },
     };
@@ -272,7 +274,23 @@ pub fn claude_effort(
         }
         control.picked = Some(Box::new(picked));
     }
+    control.provider = claude_provider(&environment);
     Ok(control)
+}
+
+/// The cloud provider a Claude Code environment sends requests to; None for Anthropic's
+/// API, which a custom ANTHROPIC_BASE_URL (a gateway or proxy) still speaks.
+pub(crate) fn claude_provider(environment: &ScopedEnvironment) -> Option<String> {
+    let enabled =
+        |key: &str| matches!(environment.values.get(key), Some(Value::String(s)) if s == "1");
+    [
+        ("CLAUDE_CODE_USE_BEDROCK", "amazon-bedrock"),
+        ("CLAUDE_CODE_USE_VERTEX", "google-vertex-anthropic"),
+        ("CLAUDE_CODE_USE_FOUNDRY", "azure"),
+    ]
+    .into_iter()
+    .find(|(key, _)| enabled(key))
+    .map(|(_, provider)| provider.to_string())
 }
 
 /// A Claude profile's default effort on `model`, which `named` names in the settings or
@@ -297,6 +315,7 @@ fn claude_on(
             default: None,
             unresolved: Some(why),
             picked: None,
+            provider: None,
         };
     let variable = "CLAUDE_CODE_EFFORT_LEVEL";
     let pinned = environment.values.get(variable);
@@ -460,6 +479,7 @@ fn claude_on(
         default: Some(support.default.into()),
         unresolved: None,
         picked: None,
+        provider: None,
     })
 }
 
@@ -513,6 +533,10 @@ pub fn codex_effort(
         let picked = codex_on(scopes, user_file, catalog, Some(pick.0.into()), model_owner)?;
         control.picked = Some(Box::new(picked));
     }
+    // Codex's built-in OpenAI provider takes OpenAI's model IDs.
+    control.provider = highest(scopes, "model_provider")
+        .and_then(|(value, _)| crate::safe::label(value))
+        .filter(|p| p != "openai");
     Ok(control)
 }
 
@@ -550,6 +574,7 @@ fn codex_on(
         default,
         unresolved,
         picked: None,
+        provider: None,
     })
 }
 
@@ -573,9 +598,10 @@ pub fn effort_checks(input: &EffortInput<'_>) -> Vec<EffortCheck> {
             .picked
             .as_ref()
             .map(|p| (&p.model, &p.owner, &p.level, &p.effective, &p.caps));
+        // Caps and the provider each change the edit the line's card offers.
         format!(
-            "{}\n{}\n{:?}\n{:?}\n{:?}\n{:?}\n{picked:?}",
-            e.owner, e.model_owner, e.model, e.level, e.effective, e.unresolved
+            "{}\n{}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{picked:?}",
+            e.owner, e.model_owner, e.model, e.level, e.effective, e.unresolved, e.caps, e.provider
         )
     };
     let controlled = input.scan.profiles.iter().filter(|p| p.effort.is_some());

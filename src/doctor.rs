@@ -689,16 +689,13 @@ pub(crate) fn default_how(control: &EffortControl, profile: &Profile) -> Option<
         } else {
             (owner.to_string(), None)
         };
-        let step = format!("set {setting} to {model}");
-        // A cloud provider names its models its own way, which token-max does not write.
-        if let Some(provider) = &profile.provider {
-            return Some(How::Manual {
-                step: format!("{step}, in {provider}'s spelling of that model"),
-                reason: format!(
-                    "the profile runs on {provider}, whose model IDs token-max does not write"
-                ),
-            });
-        }
+        let step = match &control.provider {
+            // A cloud provider names its models its own way, which token-max does not write.
+            Some(provider) => {
+                format!("set {setting} to {model}, in {provider}'s spelling of that model")
+            }
+            None => format!("set {setting} to {model}"),
+        };
         changes.push((owner, edit, step));
     }
     if target.level.as_deref() != Some(effort) {
@@ -727,6 +724,16 @@ pub(crate) fn default_how(control: &EffortControl, profile: &Profile) -> Option<
         .map(|(_, _, step)| step.as_str())
         .collect::<Vec<_>>()
         .join(" and ");
+    if let Some(provider) = &control.provider
+        && control.model.as_deref() != Some(model)
+    {
+        return Some(How::Manual {
+            step,
+            reason: format!(
+                "the profile runs on {provider}, whose model IDs token-max does not write"
+            ),
+        });
+    }
     let mut edits = vec![];
     for (owner, edit, _) in changes {
         match edit {
@@ -5742,19 +5749,49 @@ mod tests {
             panic!("the model is in the user file")
         };
         assert_eq!(patch.edits, [Edit::set("model", "claude-opus-5-5[1m]")]);
-        // A cloud provider spells its models its own way, so the model is changed by hand.
-        let bedrock = Profile {
-            provider: Some("bedrock".into()),
-            ..claude.clone()
-        };
-        let Some(How::Manual { step, reason }) = default_how(&control, &bedrock) else {
+        // A cloud provider spells its models its own way, so the model is changed by hand,
+        // and the step names the level too.
+        std::fs::write(
+            &file,
+            r#"{"model": "claude-fable-5-2", "env": {"CLAUDE_CODE_EFFORT_LEVEL": "max"}}"#,
+        )
+        .unwrap();
+        let control = default_in(&file, Harness::Claude, &[("CLAUDE_CODE_USE_BEDROCK", "1")]);
+        let Some(How::Manual { step, reason }) = default_how(&control, &claude) else {
             panic!("a provider's model is set by hand")
         };
         assert!(
-            step.ends_with("in bedrock's spelling of that model"),
+            step.contains("in amazon-bedrock's spelling of that model")
+                && step.ends_with("to medium"),
             "{step}"
         );
-        assert!(reason.contains("bedrock"), "{reason}");
+        assert!(reason.contains("amazon-bedrock"), "{reason}");
+        // A null model in a file above the user file outranks the edit, so it is by hand.
+        std::fs::write(&file, r#"{"model": "claude-fable-5-2"}"#).unwrap();
+        let user = crate::discovery::settings(&file, Harness::Claude).unwrap();
+        let project: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"model": null}"#).unwrap();
+        let scopes = [
+            crate::controls::SettingsScope {
+                config: &user,
+                file: &file,
+            },
+            crate::controls::SettingsScope {
+                config: &project,
+                file: "/repo/.claude/settings.json",
+            },
+        ];
+        let control = crate::effort::claude_effort(
+            &scopes,
+            &file,
+            &Default::default(),
+            Some("claude-fable-5-2"),
+        )
+        .unwrap();
+        let Some(How::Manual { step, .. }) = default_how(&control, &claude) else {
+            panic!("a null model above the user file is changed by hand")
+        };
+        assert!(step.contains("/repo/.claude/settings.json:model"), "{step}");
         // A home whose path holds " (" still takes the edit.
         let odd = w.home.join("a (b)");
         std::fs::create_dir_all(&odd).unwrap();
@@ -5783,5 +5820,16 @@ mod tests {
             (Some("gpt-6.2-sol"), Some("high"))
         );
         assert_eq!(default_how(&after, &codex), None);
+        // Codex's built-in OpenAI provider, named, still takes the edit; another is by hand.
+        for (provider, edited) in [("openai", true), ("azure", false)] {
+            std::fs::write(
+                &file,
+                format!("model_provider = \"{provider}\"\nmodel = \"gpt-6.1-sol\"\n"),
+            )
+            .unwrap();
+            let control = default_in(&file, Harness::Codex, &[]);
+            let how = default_how(&control, &codex).expect("off the pick");
+            assert_eq!(matches!(how, How::Edit(_)), edited, "{provider}");
+        }
     }
 }

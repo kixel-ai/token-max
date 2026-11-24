@@ -124,6 +124,8 @@ fn frontmatter(text: &str) -> Option<(String, Option<String>, Option<String>)> {
         return None;
     }
     let (mut name, mut model, mut effort, mut described) = (None, None, None, false);
+    // A description whose value starts on the next line, indented or as a `|` or `>` block.
+    let mut continued = false;
     for line in lines {
         let line = line.trim_end();
         if line == "---" {
@@ -131,8 +133,10 @@ fn frontmatter(text: &str) -> Option<(String, Option<String>, Option<String>)> {
             return name.filter(|_| described).map(|name| (name, model, effort));
         }
         if line.starts_with(char::is_whitespace) {
+            described |= continued && !line.trim().is_empty();
             continue;
         }
+        continued = false;
         let Some((key, value)) = line.split_once(':') else {
             continue;
         };
@@ -148,7 +152,10 @@ fn frontmatter(text: &str) -> Option<(String, Option<String>, Option<String>)> {
                 }
             }
             "effort" => effort = labelled,
-            "description" => described = !value.is_empty(),
+            "description" => {
+                continued = value.is_empty() || value.starts_with(['|', '>']);
+                described = !continued;
+            }
             _ => {}
         }
     }
@@ -1706,6 +1713,21 @@ mod tests {
         // doesn't replace it.
         let skipped = "---\nname: Explore\nmodel: haiku\n---\n";
         assert_eq!(frontmatter(skipped), None);
+        assert_eq!(frontmatter("---\nname: x\ndescription:\n---\n"), None);
+        assert_eq!(
+            frontmatter("---\nname: x\ndescription: |\nmodel: y\n---\n"),
+            None
+        );
+        for described in [
+            "description:\n  Search code",
+            "description: >-\n  Search\n  code",
+        ] {
+            let text = format!("---\nname: x\n{described}\nmodel: haiku\n---\n");
+            assert_eq!(
+                frontmatter(&text),
+                Some(("x".into(), Some("haiku".into()), None))
+            );
+        }
         let mut occupied = defined("reviewer", None, None);
         occupied.file = "/home/.claude/agents/Explore.md".into();
         plain.profiles[0].agents.definitions = vec![occupied];

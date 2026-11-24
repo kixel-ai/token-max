@@ -3859,6 +3859,26 @@ mod tests {
                 reason: "no edit is known to hold it".into(),
             }
         );
+        // A plan that can't pin a trigger, such as an unrecorded model's, says so beside it.
+        let mut unpinned = capped.clone();
+        let unrecorded =
+            "requests with no recorded model ran on this line, and their trigger cannot be pinned";
+        unpinned.unkept.push(unrecorded.into());
+        let crate::doctor::How::Manual { reason, .. } = crate::doctor::window_by_hand(
+            &check,
+            Some(&unpinned),
+            400_000,
+            &scan.profiles[0],
+            "no edit is known to hold it",
+        ) else {
+            panic!("an edit for a window no edit holds")
+        };
+        assert_eq!(
+            reason,
+            format!(
+                "no edit is known to hold it; changing this window removes {key}, and {unrecorded}"
+            )
+        );
         // A trigger already at or under the cap needs no plan for it.
         scan.profiles[0].compaction = controls(
             Harness::Claude,

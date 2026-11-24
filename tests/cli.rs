@@ -397,7 +397,7 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     let w = Workspace::new();
     w.fixture();
     // A TTL doctor recommends raising, and a cap past the margin under the one set now.
-    const SETTINGS: &str = r#"{"promptCacheTtl":"5m","env":{"BASH_MAX_TIMEOUT_MS":"7200000"}}"#;
+    const SETTINGS: &str = r#"{"promptCacheTtl":"5m","cleanupPeriodDays":365,"env":{"BASH_MAX_TIMEOUT_MS":"7200000"}}"#;
     w.settings(SETTINGS);
     let base = prices_args(&w);
     let invoke = |name: &str, extra: &[&str]| {
@@ -437,7 +437,7 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     let (_, report, _) = invoke("doctor", &["--defaults"]);
     assert!(!report.contains("token-max vibes"), "{report}");
     // A cap already at the margin keeps its card, and doctor has nothing to name.
-    w.settings(r#"{"promptCacheTtl":"1h","env":{"BASH_MAX_TIMEOUT_MS":"3300000"}}"#);
+    w.settings(r#"{"promptCacheTtl":"1h","cleanupPeriodDays":365,"env":{"BASH_MAX_TIMEOUT_MS":"3300000"}}"#);
     let (status, report, _) = invoke("doctor", &[]);
     assert_eq!(status, 0, "{report}");
     assert!(!report.contains("token-max vibes"), "{report}");
@@ -482,6 +482,60 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     std::fs::write(w.transcript(), "{\"type\":\"assistant\",\"timestamp\":\"2020-01-01T00:00:00Z\",\"message\":{\"usage\":{\"input_tokens\":\"bad\"}}}\n").unwrap();
     let (status, stdout, stderr) = invoke("vibes", &[]);
     assert_eq!((status, stdout.as_str()), (2, ""), "{stderr}");
+}
+
+#[test]
+fn vibes_suggests_a_year_of_transcripts_unless_claude_already_keeps_one() {
+    let w = Workspace::new();
+    w.fixture();
+    // The transcript's size, as the card rounds it.
+    assert_eq!(std::fs::metadata(w.transcript()).unwrap().len(), 2252);
+    let base = prices_args(&w);
+    let cards = |settings: &str| {
+        w.settings(settings);
+        let mut all = vec!["vibes"];
+        all.extend(base.iter().map(String::as_str));
+        let (status, stdout, stderr) = run(&mut command(&w, &all));
+        assert_eq!((status, stderr.as_str()), (0, ""), "{stdout}");
+        stdout
+    };
+    let file = format!("~{0}.claude{0}settings.json", std::path::MAIN_SEPARATOR);
+    // Unset is Claude Code's 30 days; the card counts the disk the transcripts read take.
+    let unset = cards("{}");
+    assert!(
+        unset.contains("  [2/2] Transcript retention  not measured\n        30 days -> 365 days\n        What    How long Claude Code keeps session transcripts before its startup sweep deletes them.\n        Advice  Claude Code deletes transcripts after 30 days, so token-max can replay no more history than that. The transcripts token-max read take "),
+        "{unset}"
+    );
+    assert!(
+        unset.contains(&format!("The setting only stops future deletion: history already deleted is gone. Not set; it would go in {file}:cleanupPeriodDays.")),
+        "{unset}"
+    );
+    assert!(
+        unset.contains(&format!(
+            "        Change  \"cleanupPeriodDays\": 365 in {file}\n"
+        )),
+        "{unset}"
+    );
+    assert!(unset.contains("take 2.3 kB today."), "{unset}");
+    // A shorter period set in the file is edited where it is.
+    let short = cards(r#"{"cleanupPeriodDays":90}"#);
+    assert!(short.contains("        90 days -> 365 days\n"), "{short}");
+    assert!(
+        short.contains(&format!("Set in {file}:cleanupPeriodDays.")),
+        "{short}"
+    );
+    // A year or more, or a value Claude Code rejects, advises nothing.
+    for settings in [
+        r#"{"cleanupPeriodDays":365}"#,
+        r#"{"cleanupPeriodDays":3650}"#,
+        r#"{"cleanupPeriodDays":0}"#,
+        r#"{"cleanupPeriodDays":"90"}"#,
+    ] {
+        assert!(
+            !cards(settings).contains("Transcript retention"),
+            "{settings}"
+        );
+    }
 }
 
 #[test]
@@ -1490,7 +1544,7 @@ mod unix {
     #[test]
     fn doctor_on_a_terminal_writes_only_the_changes_answered_yes() {
         // A 5m TTL to raise, and a Bash cap that outlasts even 1h, which is `vibes`' to lower.
-        const SETTINGS: &str = "{\n  \"promptCacheTtl\": \"5m\",\n  \"env\": {\n    \"BASH_MAX_TIMEOUT_MS\": \"7200000\"\n  }\n}\n";
+        const SETTINGS: &str = "{\n  \"promptCacheTtl\": \"5m\",\n  \"env\": {\n    \"BASH_MAX_TIMEOUT_MS\": \"7200000\"\n  },\n  \"cleanupPeriodDays\": 365\n}\n";
         let w = Workspace::new();
         // A fixed window keeps the walk's dollar figures the same on any day.
         w.recent_fixture(15);

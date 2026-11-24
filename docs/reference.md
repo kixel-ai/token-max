@@ -1235,6 +1235,7 @@ an exit code.
 | Card | When |
 | --- | --- |
 | [Bash timeout cap](#bash-timeout-cap) | Every Claude settings file: the cap beside the long waits measured under it. |
+| [Transcript retention](#transcript-retention) | A Claude profile whose `cleanupPeriodDays` is under 365, the default of 30 included: the disk its transcripts take, and the change to 365. |
 | Main-session effort | The default level is above `high`: Anthropic's [model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/) and [model configuration docs](https://code.claude.com/docs/en/model-config#choose-an-effort-level) for Claude, OpenAI's [reasoning guide](https://developers.openai.com/api/docs/guides/reasoning) for Codex. |
 | An instruction file | A CLAUDE.md of 200 lines or more, past Claude Code's [guidance](https://code.claude.com/docs/en/memory#write-effective-instructions), or an AGENTS.md at or above the byte budget Codex [loads](https://learn.chatgpt.com/docs/agent-configuration/agents-md), with what each 100 lines of it costs. |
 | Explore subagent | Claude's built-in Explore ran off Haiku: what it cost, the same tokens on the cheapest model, and the model guide's tip. |
@@ -1300,6 +1301,24 @@ says so.
 Background commands and the user's own processes are unaffected by the cap.
 Codex's `background_terminal_max_timeout` bounds one poll of a background
 terminal, and each poll reads the cache, so it has no card.
+
+### Transcript retention
+
+Claude Code deletes a transcript, with its subagent transcripts and spilled tool
+results, once it is older than `cleanupPeriodDays`, 30 days unless set. token-max
+replays those transcripts, so a shorter period leaves it less history to measure
+and to compare, and a deleted transcript is gone: the setting stops only future
+deletion. When a profile's value is under 365, the card advises 365 and says how
+much disk the transcripts the scan read take today, from their sizes. A year is
+the maintainer's pick: a longer period grows disk without bound for a heavy
+user, and 90 days loses longer comparisons. The card names whose file sets the
+value; the edit goes in the user's settings file, and a managed file's value,
+which outranks it, is a step by hand. Project and local settings are not read.
+A period of a year or more, or a value Claude Code rejects (not a whole number of
+days of at least 1), has no card.
+
+Codex has no card: its [configuration reference](https://developers.openai.com/codex/config-reference)
+lists no setting that deletes old `sessions/`.
 
 ## Main-session effort
 

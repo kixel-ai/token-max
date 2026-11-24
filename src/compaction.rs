@@ -2337,6 +2337,7 @@ mod tests {
             idle: None,
             speed: None,
             bash: None,
+            retention: None,
             effort: None,
             speed_directories: None,
             idle_directories: None,

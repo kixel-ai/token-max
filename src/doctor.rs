@@ -17,7 +17,7 @@ use crate::context::{json_value, setting_text, typed_only};
 use crate::mcp::{Definition, Entry, Lock};
 use crate::model::{
     BackgroundFeature, BashCap, Billing, Bucket, CheckResult, CompactionCheck, ContextKind,
-    Control, Harness, Margin, Profile, Reowned, Report, Setting, Verdict,
+    Control, Harness, Margin, Profile, Reowned, Report, RetentionControl, Setting, Verdict,
 };
 use crate::report::{
     AT_LEAST, Choice, Listing, Origin, Recommendation, Source, UP_TO, about, approx, capitalize,
@@ -661,6 +661,19 @@ pub(crate) fn bash_how(cap: &BashCap, profile: &Profile) -> Option<How> {
         patch.edits.push(env(default, &to));
     }
     Some(how)
+}
+
+/// How to raise a Claude profile's `cleanupPeriodDays` to `days`, in its settings file.
+pub(crate) fn retention_how(control: &RetentionControl, days: u64, profile: &Profile) -> How {
+    owned(
+        &control.owner,
+        profile,
+        vec![(
+            "cleanupPeriodDays".into(),
+            vec![Edit::set("cleanupPeriodDays", days)],
+        )],
+        format!("set cleanupPeriodDays to {days}"),
+    )
 }
 
 fn check_how(result: &CheckResult, profile: &Profile) -> How {
@@ -3836,6 +3849,36 @@ mod tests {
             value: value.into(),
             op,
         }
+    }
+
+    #[test]
+    fn retention_is_edited_in_the_settings_file_that_owns_it_and_else_left_by_hand() {
+        let profile = crate::test_support::make_profile("native", "/synthetic/.claude");
+        let file = profile.settings_file.clone();
+        let control = |owner: String| RetentionControl {
+            days: Some(30),
+            owner,
+        };
+        for owner in [
+            format!("{file}:cleanupPeriodDays"),
+            format!("{file}:cleanupPeriodDays (default)"),
+        ] {
+            let How::Edit(patch) = retention_how(&control(owner), 365, &profile) else {
+                panic!("the file owns the setting");
+            };
+            assert_eq!(patch.file, file);
+            assert_eq!(patch.edits, [Edit::set("cleanupPeriodDays", 365)]);
+        }
+        // A managed file outranks the user's, so editing the user's changes nothing.
+        let How::Manual { step, reason } = retention_how(
+            &control("/etc/claude-code/managed-settings.json:cleanupPeriodDays".into()),
+            365,
+            &profile,
+        ) else {
+            panic!("another file owns the setting");
+        };
+        assert_eq!(step, "set cleanupPeriodDays to 365");
+        assert!(reason.contains("sets it; token-max edits only"), "{reason}");
     }
 
     #[test]

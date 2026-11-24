@@ -17,8 +17,8 @@ use crate::model::{
     CheckResult, ContextCost, ContextKind, ControlValue, Cost, Coverage, EffortCheck, EffortRun,
     Estimate, EstimateEvidence, Evidence, FableUse, FableWeek, Harness, InboundControl, InboundUse,
     KeepaliveCheck, Margin, MemoryCheck, Millis, ModelSource, PeriodStatus, Profile, Report,
-    RequestEvidence, ReturnTiming, Scalar, Share, SubagentCost, T3IdleCheck, T3TextGeneration, Ttl,
-    UsageEstimate, Verdict,
+    RequestEvidence, RetentionControl, ReturnTiming, Scalar, Share, SubagentCost, T3IdleCheck,
+    T3TextGeneration, Ttl, UsageEstimate, Verdict,
 };
 use crate::prices::{TIER_SENSITIVITY, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
@@ -4445,6 +4445,55 @@ fn bash_item(cap: &BashCap, profile: &str, how: Option<How>, out: &Out<'_>) -> I
     }
 }
 
+/// What the maintainer picked for how long Claude Code keeps transcripts, before the pages
+/// on the setting and on what the sweep deletes.
+const RETENTION_PICK: &str = "The maintainer's pick of 365 days, which keeps a year of history without growing disk without bound. Claude Code's docs:";
+
+/// The days of transcripts Claude Code is advised to keep, a year.
+const RETENTION_DAYS: u64 = 365;
+
+/// How long Claude Code keeps transcripts, as `vibes` shows it when it is under a year, with
+/// the disk the transcripts token-max read take today and `how` to raise it.
+fn retention_item(
+    control: &RetentionControl,
+    days: u64,
+    profile: &str,
+    disk: u64,
+    how: How,
+    out: &Out<'_>,
+) -> Item {
+    let (to, kept) = (plural(RETENTION_DAYS, "day"), plural(days, "day"));
+    // Where the sweep reads the days from: a file's key, or the key the default would go in.
+    let set_in = match control.owner.strip_suffix(" (default)") {
+        Some(owner) => format!("Not set; it would go in {}.", out.home(owner)),
+        None => format!("Set in {}.", out.home(&control.owner)),
+    };
+    let held = if disk > 0 {
+        format!(" The transcripts token-max read take {} today.", size(disk))
+    } else {
+        String::new()
+    };
+    Item {
+        name: tagged("Transcript retention".into(), profile),
+        value: format!("{kept} {} {to}", out.arrow),
+        what:
+            "How long Claude Code keeps session transcripts before its startup sweep deletes them."
+                .into(),
+        text: format!(
+            "Claude Code deletes transcripts after {kept}, so token-max can replay no more history than that.{held} Keeping {to} costs disk that grows with use. The setting only stops future deletion: history already deleted is gone. {set_in} Project and local settings, which override it, are not read."
+        ),
+        sources: [
+            RETENTION_PICK,
+            "https://code.claude.com/docs/en/settings-reference#cleanupperioddays",
+            "https://code.claude.com/docs/en/claude-directory#cleaned-up-automatically",
+        ]
+        .map(String::from)
+        .into(),
+        how: Some(how),
+        quiet: false,
+    }
+}
+
 /// A check's verdict before its line is drawn.
 ///
 /// A comparison with no requests is not a verdict, whatever the tie-break said. Window
@@ -5410,6 +5459,36 @@ fn summary(
             .and_then(|profile| crate::doctor::bash_how(cap, profile));
         let profile = tag(&cap.profiles, &|_| cap.owner.clone(), out);
         vibes.push(bash_item(cap, &profile, how, out));
+    }
+    let owned = |p: &Profile| {
+        p.retention
+            .as_ref()
+            .map_or_else(String::new, |r| r.owner.clone())
+    };
+    let retained = report
+        .scan
+        .profiles
+        .iter()
+        .filter(|p| p.retention.is_some());
+    for line in crate::rows::groups(retained, owned) {
+        let control = line
+            .lead
+            .retention
+            .as_ref()
+            .expect("filtered on a retention control");
+        let Some(days) = control.days.filter(|days| *days < RETENTION_DAYS) else {
+            continue;
+        };
+        let disk = report
+            .scan
+            .snapshots
+            .iter()
+            .filter(|s| s.harness == Harness::Claude && line.covers(&s.profiles))
+            .map(|s| s.bytes)
+            .sum();
+        let how = crate::doctor::retention_how(control, RETENTION_DAYS, line.lead);
+        let profile = tag(&line.ids, &owned, out);
+        vibes.push(retention_item(control, days, &profile, disk, how, out));
     }
     for (_, result, r) in &checks {
         if let CheckResult::Effort(e) = result

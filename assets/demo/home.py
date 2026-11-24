@@ -22,6 +22,8 @@ project.mkdir(parents=True, exist_ok=True)
             "model": "opus",
             "promptCacheTtl": "5m",
             "fastMode": True,
+            # A year already, so the recording asks only about the Bash cap.
+            "cleanupPeriodDays": 365,
             "env": {"BASH_MAX_TIMEOUT_MS": "7200000"},
         },
         indent=2,

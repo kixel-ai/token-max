@@ -15,15 +15,9 @@ geometry), so neither 400K nor 240K is usually among them. Adding the cap to
 the candidates of a line whose window is above it costs one more replay
 stream per summary scenario, and only on those lines.
 
-Recommendation: add it as a candidate the line prices but never recommends,
-so the maintainer's pick changes no verdict: the winner stays the best of the
-evidence-derived candidates, and the cap's scenario is kept for the card and
-`--details`.
-
-## Waiting
-
-- Maintainer: whether `doctor`'s replay may carry a candidate that exists only
-  because of the maintainer's pick. Options: price it without letting it win
-  (recommended, keeps every verdict evidence-derived); price it as a full
-  candidate that may win on measured cost; leave the card's cost unmeasured
-  and delete this quest.
+Decided 2026-11-24 (maintainer, /quest-run): ✅ keep this quest (rejected:
+drop it). ✅ Price the cap but never let it win, so no verdict changes
+(rejected: price it as a normal candidate; don't price it). Add it as a
+candidate the line prices but never recommends: the winner stays the best of
+the evidence-derived candidates, and the cap's scenario is kept for the card
+and `--details`.

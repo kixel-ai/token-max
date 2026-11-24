@@ -1879,7 +1879,7 @@ fn explore_item(c: &SubagentCost, profile: &str, out: &Out<'_>) -> Option<Item> 
     let how = (!r.missing.is_empty()).then(|| How::Manual {
         // The built-in's documented restriction and its start without CLAUDE.md.
         step: format!(
-            "add a new agent file to {} with the frontmatter name: Explore; description: when to use it; model: haiku; disallowedTools: Write, Edit; omitClaudeMd: true; and a system prompt of your own below it",
+            "add a new .md agent file to {} with the frontmatter name: Explore; description: when to use it; model: haiku; disallowedTools: Write, Edit; omitClaudeMd: true; and a system prompt of your own below it",
             list(&r.missing)
         ),
         reason: "the file replaces the built-in Explore's system prompt, which Anthropic doesn't publish".into(),
@@ -9210,7 +9210,7 @@ mod tests {
         };
         assert_eq!(
             step,
-            "add a new agent file to /synthetic/home/.claude/agents with the frontmatter name: Explore; description: when to use it; model: haiku; disallowedTools: Write, Edit; omitClaudeMd: true; and a system prompt of your own below it"
+            "add a new .md agent file to /synthetic/home/.claude/agents with the frontmatter name: Explore; description: when to use it; model: haiku; disallowedTools: Write, Edit; omitClaudeMd: true; and a system prompt of your own below it"
         );
         assert!(reason.contains("doesn't publish"), "{reason}");
         let details = text(&report, None, true);
@@ -9412,7 +9412,7 @@ mod tests {
         };
         assert!(
             step.starts_with(&format!(
-                "add a new agent file to {ROOT_AGENTS} and {missing} with the frontmatter name: Explore;"
+                "add a new .md agent file to {ROOT_AGENTS} and {missing} with the frontmatter name: Explore;"
             )),
             "{step}"
         );

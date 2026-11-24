@@ -144,6 +144,8 @@ fn frontmatter(text: &str) -> Option<(String, Option<String>, Option<String>)> {
         let Some((key, value)) = line.split_once(':') else {
             continue;
         };
+        // A block indicator is read before unquoting: `"> text"` is a quoted string.
+        let block = value.trim_start().starts_with(['|', '>']);
         let value = scalar(value);
         let labelled = label(&Value::from(value));
         match key.trim() {
@@ -157,7 +159,7 @@ fn frontmatter(text: &str) -> Option<(String, Option<String>, Option<String>)> {
             }
             "effort" => effort = labelled,
             "description" => {
-                continued = value.is_empty() || value.starts_with(['|', '>']);
+                continued = value.is_empty() || block;
                 described = !continued;
             }
             _ => {}
@@ -1205,7 +1207,7 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
                     present.insert(d.file.clone());
                 } else if !controls.force {
                     // Where the subagent model is forced, a new file's model would be dropped.
-                    // Claude Code names an agent by its frontmatter, so any unused file name works.
+                    // Claude Code names an agent by its frontmatter, so any unused `.md` file name works.
                     missing.insert(join(&[&profile.root, "agents"]));
                 }
             }
@@ -1726,6 +1728,8 @@ mod tests {
             "description:\n  Search code",
             "description: >-\n  Search\n  code",
             "description: |\n\n  Search code",
+            "description: \"> Search code\"",
+            "description: '| Search code'",
         ] {
             let text = format!("---\nname: x\n{described}\nmodel: haiku\n---\n");
             assert_eq!(

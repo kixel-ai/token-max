@@ -1351,7 +1351,8 @@ the same tokens on the cheapest model, and the tip from Anthropic's
 [model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/):
 a user agent named `Explore` with `model: haiku`. Its `Change` asks for a new
 file in the profile's `agents` directory as a step by hand, with no question
-(Claude Code names an agent by its frontmatter, so any unused file name works):
+(Claude Code names an agent by its frontmatter, so any unused `.md` file name
+works):
 the file replaces the built-in's system prompt, which Anthropic doesn't
 publish, so token-max can't write one that explores the same way. The step
 restates what Claude Code's

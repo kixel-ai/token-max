@@ -2816,7 +2816,7 @@ pub fn discover(options: &DiscoveryOptions) -> Result<Discovery, ScanError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{Workspace, make_request};
+    use crate::test_support::{Workspace, make_request, native_path};
     use std::path::Path;
 
     #[test]
@@ -2867,18 +2867,8 @@ mod tests {
         );
     }
 
-    fn text(path: &Path) -> String {
-        // Windows paths joined from "a/b" keep the slash; the code under test normalizes it.
-        let path: std::path::PathBuf = if cfg!(windows) {
-            path.components().collect()
-        } else {
-            path.to_path_buf()
-        };
-        path.to_string_lossy().into_owned()
-    }
-
     fn canonical(path: &Path) -> String {
-        realpath(&text(path)).unwrap()
+        realpath(&native_path(path)).unwrap()
     }
 
     fn write(path: impl AsRef<Path>, contents: &str) {
@@ -2889,14 +2879,14 @@ mod tests {
 
     fn options(w: &Workspace) -> DiscoveryOptions {
         DiscoveryOptions {
-            home: text(&w.home),
+            home: native_path(&w.home),
             env: Env::default(),
             claude_dirs: vec![],
             codex_dirs: vec![],
             t3_dirs: vec![],
-            managed_settings_file: text(&w.managed_settings_file()),
-            codex_system_config_file: text(&w.home.join("system.toml")),
-            codex_requirements_file: text(&w.home.join("requirements.toml")),
+            managed_settings_file: native_path(w.managed_settings_file()),
+            codex_system_config_file: native_path(w.home.join("system.toml")),
+            codex_requirements_file: native_path(w.home.join("requirements.toml")),
             defaults: false,
             billing: IndexMap::default(),
         }
@@ -2921,7 +2911,7 @@ mod tests {
         {
             let mut built = Request { ..make_request() };
             built.profiles = vec![profile.id.clone()].into();
-            built.cwd = cwd.map(|c| text(c).into());
+            built.cwd = cwd.map(|c| native_path(c).into());
             built
         }
     }
@@ -2939,10 +2929,11 @@ mod tests {
             )
             .unwrap();
         }
-        let file = |dir: &Path| text(&dir.join(".codex/config.toml"));
+        let file = |dir: &Path| native_path(dir.join(".codex/config.toml"));
         let o = options(&w);
         let found = |stop: &Path| {
-            ancestors_setting_codex_memory(&o, &text(&cwd), &file(&home), &text(stop)).unwrap()
+            ancestors_setting_codex_memory(&o, &native_path(&cwd), &file(&home), &native_path(stop))
+                .unwrap()
         };
         // The home's own is the user layer, and above the home is no one's project.
         assert_eq!(found(&home), [file(&cwd), file(&home.join("repo"))]);
@@ -2961,9 +2952,13 @@ mod tests {
             .unwrap();
             let link = outside.join("link");
             std::os::unix::fs::symlink(&cwd, &link).unwrap();
-            let linked =
-                ancestors_setting_codex_memory(&o, &text(&link), &file(&home), &text(&home))
-                    .unwrap();
+            let linked = ancestors_setting_codex_memory(
+                &o,
+                &native_path(&link),
+                &file(&home),
+                &native_path(&home),
+            )
+            .unwrap();
             assert_eq!(linked, [file(&cwd), file(&home.join("repo"))]);
         }
     }
@@ -3036,26 +3031,26 @@ mod tests {
             &file,
             "a = 1979-05-27\nb = nan\nc = 2.0\n[d]\ne = [1, 'x']\n",
         );
-        let config = settings(&text(&file), Harness::Codex).unwrap();
+        let config = settings(&native_path(&file), Harness::Codex).unwrap();
         assert_eq!(config["a"], serde_json::json!({}));
         assert_eq!(config["b"], Value::Null);
         assert_eq!(config["c"], serde_json::json!(2.0));
         assert_eq!(config["d"], serde_json::json!({ "e": [1, "x"] }));
         write(&file, "a = 9007199254740993\n");
-        let error = settings(&text(&file), Harness::Codex).unwrap_err();
+        let error = settings(&native_path(&file), Harness::Codex).unwrap_err();
         assert_eq!(error.message, "invalid settings file");
         write(&file, "a = [");
-        assert!(settings(&text(&file), Harness::Codex).is_err());
+        assert!(settings(&native_path(&file), Harness::Codex).is_err());
         assert!(
-            settings(&text(&w.home.join("absent.toml")), Harness::Codex)
+            settings(&native_path(w.home.join("absent.toml")), Harness::Codex)
                 .unwrap()
                 .is_empty()
         );
-        let error = settings(&text(&w.claude), Harness::Claude).unwrap_err();
+        let error = settings(&native_path(&w.claude), Harness::Claude).unwrap_err();
         assert_eq!(error.message, "cannot read settings");
         let json = w.home.join("settings.json");
         write(&json, "[]");
-        let error = settings(&text(&json), Harness::Claude).unwrap_err();
+        let error = settings(&native_path(&json), Harness::Claude).unwrap_err();
         assert_eq!(error.message, "invalid settings file");
         assert_eq!(error.location.unwrap().line, 1);
     }
@@ -3080,15 +3075,15 @@ mod tests {
     #[test]
     fn claude_state_lives_beside_the_default_root_unless_the_shell_selects_it() {
         let w = Workspace::new();
-        let home = text(&w.home);
+        let home = native_path(&w.home);
         let state = |env: Env| {
             let data = discover(&DiscoveryOptions { env, ..options(&w) }).unwrap();
             claude(&data).claude_config.clone().unwrap()
         };
         assert_eq!(state(Env::default()), join(&[&home, ".claude.json"]));
-        let root = realpath(&text(&w.claude)).unwrap();
+        let root = realpath(&native_path(&w.claude)).unwrap();
         assert_eq!(
-            state(env(&[("CLAUDE_CONFIG_DIR", &text(&w.claude))])),
+            state(env(&[("CLAUDE_CONFIG_DIR", &native_path(&w.claude))])),
             join(&[&root, ".claude.json"])
         );
     }
@@ -3105,7 +3100,7 @@ mod tests {
         );
         let data = discover(&DiscoveryOptions {
             env: env(&[
-                ("CLAUDE_CONFIG_DIR", &text(&w.claude)),
+                ("CLAUDE_CONFIG_DIR", &native_path(&w.claude)),
                 ("FORCE_PROMPT_CACHING_5M", "1"),
                 ("CLAUDE_CODE_PROMPT_CACHE_TTL", "1h"),
             ]),
@@ -3146,7 +3141,7 @@ mod tests {
         );
         let mut o = options(&w);
         o.env = env(&[
-            ("CLAUDE_CONFIG_DIR", &text(&w.claude)),
+            ("CLAUDE_CONFIG_DIR", &native_path(&w.claude)),
             ("CLAUDE_CODE_PROMPT_CACHE_TTL", "5m"),
         ]);
         o.pretend_defaults();
@@ -3215,7 +3210,7 @@ mod tests {
         ] {
             write(w.claude.join("settings.json"), file);
             let mut o = options(&w);
-            o.env = env(&[("CLAUDE_CONFIG_DIR", &text(&w.claude))]);
+            o.env = env(&[("CLAUDE_CONFIG_DIR", &native_path(&w.claude))]);
             if let Some(variable) = shell {
                 o.env.insert(variable.into(), "1".into());
             }
@@ -3256,7 +3251,7 @@ mod tests {
         // /mcp turned two servers off in the repo; policy denies one's tools by wildcard.
         write(
             &state,
-            &serde_json::json!({"projects": {text(&repo): {"disabledMcpServers": ["notes", "blocked"]}}})
+            &serde_json::json!({"projects": {native_path(&repo): {"disabledMcpServers": ["notes", "blocked"]}}})
                 .to_string(),
         );
         write(
@@ -3317,7 +3312,7 @@ mod tests {
     #[test]
     fn managed_ttl_controls_keep_the_managed_owner() {
         let w = Workspace::new();
-        let managed = text(&w.managed_settings_file());
+        let managed = native_path(w.managed_settings_file());
         write(w.claude.join("settings.json"), r#"{"promptCacheTtl":"5m"}"#);
         write(&managed, r#"{"promptCacheTtl":"1h"}"#);
         let profile = claude(&discover(&options(&w)).unwrap()).clone();
@@ -3351,7 +3346,7 @@ mod tests {
         std::os::unix::fs::symlink(&file, w.home.join(".claude.json")).unwrap();
         assert_eq!(discover(&options(&w)).unwrap().profiles.len(), 2);
         let error = discover(&DiscoveryOptions {
-            claude_dirs: vec![text(&file)],
+            claude_dirs: vec![native_path(&file)],
             ..options(&w)
         })
         .unwrap_err();
@@ -3396,14 +3391,19 @@ mod tests {
         assert_eq!(data.snapshots.len(), 2);
         assert!(data.snapshots.iter().all(|s| s.profiles.len() == 2));
         let selected = discover(&DiscoveryOptions {
-            claude_dirs: vec![text(&alternate)],
+            claude_dirs: vec![native_path(&alternate)],
             ..options(&w)
         })
         .unwrap();
         assert_eq!(selected.profiles.len(), 1);
-        assert!(selected.roots.iter().any(|r| r.path == text(&w.claude)
-            && r.status == RootState::Excluded
-            && r.origin == RootOrigin::Default));
+        assert!(
+            selected
+                .roots
+                .iter()
+                .any(|r| r.path == native_path(&w.claude)
+                    && r.status == RootState::Excluded
+                    && r.origin == RootOrigin::Default)
+        );
         assert_eq!(selected.profiles[0].ttl.main.value, Some(Ttl::OneHour));
     }
 
@@ -3426,12 +3426,12 @@ mod tests {
         assert_eq!(snapshot.bytes, size);
         let absent = w.home.join("absent");
         let error = discover(&DiscoveryOptions {
-            claude_dirs: vec![text(&absent)],
+            claude_dirs: vec![native_path(&absent)],
             ..options(&w)
         })
         .unwrap_err();
         assert_eq!(error.message, "selected root is missing or inaccessible");
-        assert_eq!(&*error.location.unwrap().file, text(&absent));
+        assert_eq!(&*error.location.unwrap().file, native_path(&absent));
     }
 
     #[cfg(unix)]
@@ -3583,14 +3583,14 @@ mod tests {
     #[test]
     fn environment_managed_policy_and_project_ownership_suppress_fast_preferences() {
         let w = Workspace::new();
-        let managed = text(&w.managed_settings_file());
+        let managed = native_path(w.managed_settings_file());
         write(
             w.claude.join("settings.json"),
             r#"{"model":"opus","fastMode":true}"#,
         );
         let shell = discover(&DiscoveryOptions {
             env: env(&[
-                ("CLAUDE_CONFIG_DIR", &text(&w.claude)),
+                ("CLAUDE_CONFIG_DIR", &native_path(&w.claude)),
                 ("CLAUDE_CODE_DISABLE_FAST_MODE", "1"),
             ]),
             ..options(&w)
@@ -3620,9 +3620,9 @@ mod tests {
         );
         let requests = [request(&profile, Some(&cwd))];
         discover_claude_controls(&options(&w), &mut data.profiles, &requests).unwrap();
-        let directory = &claude(&data).speed_directories.as_ref().unwrap()[&text(&cwd)];
+        let directory = &claude(&data).speed_directories.as_ref().unwrap()[&native_path(&cwd)];
         assert_eq!(directory.value.as_deref(), Some("standard"));
-        assert_eq!(directory.owner, format!("{}:fastMode", text(&local)));
+        assert_eq!(directory.owner, format!("{}:fastMode", native_path(&local)));
     }
 
     // Codex legacy/named profiles and project selection stay advisory; local requirements can block premium.
@@ -3632,7 +3632,7 @@ mod tests {
         let config = w.codex.join("config.toml");
         let requirements = w.home.join("requirements.toml");
         let options = DiscoveryOptions {
-            codex_dirs: vec![text(&w.codex)],
+            codex_dirs: vec![native_path(&w.codex)],
             ..options(&w)
         };
         let speed = || {
@@ -3663,7 +3663,10 @@ mod tests {
         write(&requirements, "[features]\nfast_mode=false");
         let blocked = speed();
         assert_eq!(blocked.value.as_deref(), Some("standard"));
-        assert_eq!(blocked.owner, format!("{}:features", text(&requirements)));
+        assert_eq!(
+            blocked.owner,
+            format!("{}:features", native_path(&requirements))
+        );
         write(&config, "model=\"gpt-6.1-sol\"\nservice_tier=\"ultrafast\"");
         write(&requirements, "[features]\nultrafast_mode=false");
         assert_eq!(speed().value.as_deref(), Some("standard"));
@@ -3683,7 +3686,7 @@ mod tests {
         let nearest = nested.join(".codex/config.toml");
         write(&nearest, "service_tier=\"default\"");
         let options = DiscoveryOptions {
-            codex_dirs: vec![text(&w.codex)],
+            codex_dirs: vec![native_path(&w.codex)],
             ..options(&w)
         };
         let mut data = discover(&options).unwrap();
@@ -3701,8 +3704,8 @@ mod tests {
         discover_codex_controls(&options, &mut data.profiles, &requests).unwrap();
         let directories = data.profiles[0].speed_directories.as_ref().unwrap();
         assert_eq!(directories.len(), 1);
-        let directory = &directories[&text(&nested)];
-        assert_eq!(directory.owner, text(&nearest));
+        let directory = &directories[&native_path(&nested)];
+        assert_eq!(directory.owner, native_path(&nearest));
         assert_eq!(directory.value, None);
         assert_eq!(directory.replacement, profile.speed.unwrap().replacement);
     }
@@ -3831,14 +3834,17 @@ mod tests {
         )
         .unwrap();
         let p = claude(&d);
-        let c = &p.background_directories[&text(&nested)];
+        let c = &p.background_directories[&native_path(&nested)];
         assert_eq!(c[0].value, Some(true));
         assert_eq!(
             c[0].owner,
-            format!("{}:promptSuggestionEnabled", text(&project))
+            format!("{}:promptSuggestionEnabled", native_path(&project))
         );
         assert_eq!(c[1].value, Some(true));
-        assert_eq!(c[1].off_file.as_deref(), Some(text(&project).as_str()));
+        assert_eq!(
+            c[1].off_file.as_deref(),
+            Some(native_path(&project).as_str())
+        );
         assert_eq!(
             c[1].off,
             "\"env\": {\"CLAUDE_CODE_ENABLE_AWAY_SUMMARY\": \"0\"}"
@@ -3846,7 +3852,7 @@ mod tests {
         #[cfg(unix)]
         assert_eq!(
             (c[2].value, c[2].off_file.as_deref()),
-            (Some(true), Some(text(&local).as_str()))
+            (Some(true), Some(native_path(&local).as_str()))
         );
         #[cfg(windows)]
         assert_eq!(c[2].value, Some(true));
@@ -3861,11 +3867,11 @@ mod tests {
             r#"{"env":{"CLAUDE_CODE_ENABLE_AWAY_SUMMARY":"0","CLAUDE_CODE_GOAL_CHECKIN_MINUTES":"0"}}"#,
         );
         discover_claude_controls(&o, &mut d.profiles, std::slice::from_ref(&r)).unwrap();
-        let c = &claude(&d).background_directories[&text(&nested)];
+        let c = &claude(&d).background_directories[&native_path(&nested)];
         assert_eq!((c[1].value, c[2].value), (Some(false), Some(false)));
         assert_eq!(
             c[2].off_file.as_deref(),
-            Some(text(&w.managed_settings_file()).as_str())
+            Some(native_path(w.managed_settings_file()).as_str())
         );
         let hosted = {
             let mut built = Request { ..r.clone() };
@@ -3919,7 +3925,10 @@ mod tests {
         .collect();
         discover_claude_controls(&o, &mut d.profiles, &requests).unwrap();
         let p = claude(&d);
-        assert_eq!(p.background_directories[&text(&b)][1].value, Some(false));
+        assert_eq!(
+            p.background_directories[&native_path(&b)][1].value,
+            Some(false)
+        );
         assert!(!p.background_requests.contains_key("r0"));
         assert!(!p.background_requests.contains_key("r1"));
         for i in 2..7 {
@@ -3934,7 +3943,7 @@ mod tests {
             Some("working directory changed")
         );
         // A resolved control has no scope to name.
-        assert_eq!(p.background_directories[&text(&b)][1].scope, None);
+        assert_eq!(p.background_directories[&native_path(&b)][1].scope, None);
         assert!(
             p.background_requests["r5"][1]
                 .reason
@@ -3961,9 +3970,9 @@ mod tests {
         let mut d = discover(&o).unwrap();
         let r = request(claude(&d), Some(&nested));
         discover_claude_controls(&o, &mut d.profiles, &[r]).unwrap();
-        let c = &claude(&d).background_directories[&text(&nested)][1];
+        let c = &claude(&d).background_directories[&native_path(&nested)][1];
         assert_eq!(c.value, Some(true));
-        assert_eq!(c.off_file.as_deref(), Some(text(&local).as_str()));
+        assert_eq!(c.off_file.as_deref(), Some(native_path(&local).as_str()));
     }
 
     #[cfg(unix)]
@@ -3997,7 +4006,10 @@ mod tests {
         fs::create_dir_all(&work).unwrap();
         write(
             work.join(".git"),
-            &format!("gitdir: {}\n", text(&main.join(".git/worktrees/branch"))),
+            &format!(
+                "gitdir: {}\n",
+                native_path(main.join(".git/worktrees/branch"))
+            ),
         );
         write(main.join(".git/worktrees/branch/commondir"), "../..\n");
         let local = main.join(".claude/settings.local.json");
@@ -4009,9 +4021,9 @@ mod tests {
         let mut d = discover(&options(&w)).unwrap();
         let r = request(claude(&d), Some(&work));
         discover_claude_controls(&options(&w), &mut d.profiles, &[r]).unwrap();
-        let c = &claude(&d).background_directories[&text(&work)][1];
+        let c = &claude(&d).background_directories[&native_path(&work)][1];
         assert_eq!(c.value, Some(false));
-        assert_eq!(c.off_file.as_deref(), Some(text(&local).as_str()));
+        assert_eq!(c.off_file.as_deref(), Some(native_path(&local).as_str()));
         assert_eq!(
             fs::read_to_string(&local).unwrap(),
             r#"{"awaySummaryEnabled":false}"#
@@ -4028,7 +4040,7 @@ mod tests {
         fs::create_dir_all(&work).unwrap();
         write(
             work.join(".git"),
-            &format!("gitdir: {}\n", text(&module.join("worktrees/branch"))),
+            &format!("gitdir: {}\n", native_path(module.join("worktrees/branch"))),
         );
         write(module.join("worktrees/branch/commondir"), "../..\n");
         write(
@@ -4038,10 +4050,10 @@ mod tests {
         let mut d = discover(&options(&w)).unwrap();
         let r = request(claude(&d), Some(&work));
         discover_claude_controls(&options(&w), &mut d.profiles, &[r]).unwrap();
-        let c = &claude(&d).background_directories[&text(&work)][1];
+        let c = &claude(&d).background_directories[&native_path(&work)][1];
         assert_eq!(c.value, Some(false));
         let local = work.join(".claude/settings.local.json");
-        assert_eq!(c.off_file.as_deref(), Some(text(&local).as_str()));
+        assert_eq!(c.off_file.as_deref(), Some(native_path(&local).as_str()));
     }
 
     #[test]
@@ -4063,7 +4075,7 @@ mod tests {
             w.codex.join("config.toml"),
             &format!(
                 "project_root_markers = ['.boundary']\n[projects.{}]\ntrust_level = 'trusted'\n",
-                serde_json::to_string(&text(&root)).unwrap()
+                serde_json::to_string(&native_path(&root)).unwrap()
             ),
         );
         let mut d = discover(&options(&w)).unwrap();
@@ -4086,11 +4098,11 @@ mod tests {
             .find(|p| p.harness == Harness::Codex)
             .unwrap();
         // Trusted project overrides rank above every unobserved named profile's recap value.
-        let c = &p.background_directories[&text(&cwd)][0];
+        let c = &p.background_directories[&native_path(&cwd)][0];
         assert_eq!(c.value, Some(true));
         assert_eq!(
             c.off_file.as_deref(),
-            Some(text(&cwd.join(".codex/config.toml")).as_str())
+            Some(native_path(cwd.join(".codex/config.toml")).as_str())
         );
         write(
             w.codex.join("quiet.config.toml"),
@@ -4102,30 +4114,14 @@ mod tests {
             .iter()
             .find(|p| p.harness == Harness::Codex)
             .unwrap();
-        assert_eq!(p.background_directories[&text(&cwd)][0].value, None);
+        assert_eq!(p.background_directories[&native_path(&cwd)][0].value, None);
         fs::remove_file(w.codex.join("quiet.config.toml")).unwrap();
         // Empty root markers stop at cwd, including trust selection.
         write(
             w.codex.join("config.toml"),
             &format!(
                 "project_root_markers = []\n[projects.{}]\ntrust_level = 'trusted'\n",
-                serde_json::to_string(&text(&cwd)).unwrap()
-            ),
-        );
-        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&r)).unwrap();
-        let p = d
-            .profiles
-            .iter()
-            .find(|p| p.harness == Harness::Codex)
-            .unwrap();
-        assert_eq!(p.background_directories[&text(&cwd)][0].value, Some(true));
-        // A worktree's .git file is a boundary, even inside a different trusted checkout.
-        write(cwd.join(".git"), "gitdir: ../elsewhere\n");
-        write(
-            w.codex.join("config.toml"),
-            &format!(
-                "[projects.{}]\ntrust_level = 'trusted'\n",
-                serde_json::to_string(&text(&root)).unwrap()
+                serde_json::to_string(&native_path(&cwd)).unwrap()
             ),
         );
         discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&r)).unwrap();
@@ -4135,7 +4131,26 @@ mod tests {
             .find(|p| p.harness == Harness::Codex)
             .unwrap();
         assert_eq!(
-            p.background_directories[&text(&cwd)][0].value,
+            p.background_directories[&native_path(&cwd)][0].value,
+            Some(true)
+        );
+        // A worktree's .git file is a boundary, even inside a different trusted checkout.
+        write(cwd.join(".git"), "gitdir: ../elsewhere\n");
+        write(
+            w.codex.join("config.toml"),
+            &format!(
+                "[projects.{}]\ntrust_level = 'trusted'\n",
+                serde_json::to_string(&native_path(&root)).unwrap()
+            ),
+        );
+        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&r)).unwrap();
+        let p = d
+            .profiles
+            .iter()
+            .find(|p| p.harness == Harness::Codex)
+            .unwrap();
+        assert_eq!(
+            p.background_directories[&native_path(&cwd)][0].value,
             None,
             "parent checkout trust is not worktree trust"
         );
@@ -4170,7 +4185,7 @@ mod tests {
         let trust = |level: &str| {
             format!(
                 "[projects.{}]\ntrust_level = '{level}'\n",
-                serde_json::to_string(&text(&repo)).unwrap()
+                serde_json::to_string(&native_path(&repo)).unwrap()
             )
         };
         write(w.codex.join("config.toml"), &trust("untrusted"));
@@ -4193,7 +4208,7 @@ mod tests {
         // A session in the home reads the user's own file, which never outranks itself.
         assert_eq!(
             outranking(Harness::Claude),
-            [text(&repo.join(".claude/settings.json"))]
+            [native_path(repo.join(".claude/settings.json"))]
         );
         // An untrusted project's layer is not read.
         assert!(outranking(Harness::Codex).is_empty());
@@ -4202,8 +4217,8 @@ mod tests {
         assert_eq!(
             outranking(Harness::Codex),
             [
-                text(&w.codex.join("work.config.toml")),
-                text(&repo.join(".codex/config.toml")),
+                native_path(w.codex.join("work.config.toml")),
+                native_path(repo.join(".codex/config.toml")),
             ]
         );
     }
@@ -4236,7 +4251,7 @@ mod tests {
         };
         let mut d = discover(&options(&w)).unwrap();
         assert_eq!(budget(&d).0, Some(Scalar::Number(8192.0)));
-        assert_eq!(file(&d), Some(text(&w.home.join("system.toml"))));
+        assert_eq!(file(&d), Some(native_path(w.home.join("system.toml"))));
         // The user's own value replaces the system's.
         write(
             w.codex.join("config.toml"),
@@ -4244,7 +4259,7 @@ mod tests {
         );
         d = discover(&options(&w)).unwrap();
         assert_eq!(budget(&d).0, Some(Scalar::Number(65536.0)));
-        assert_eq!(file(&d), Some(text(&w.codex.join("config.toml"))));
+        assert_eq!(file(&d), Some(native_path(w.codex.join("config.toml"))));
         let id = d
             .profiles
             .iter()
@@ -4256,7 +4271,7 @@ mod tests {
             let mut built = Request { ..make_request() };
             built.harness = Harness::Codex;
             built.profiles = vec![id].into();
-            built.cwd = Some(text(&root).into());
+            built.cwd = Some(native_path(&root).into());
             built
         };
         discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
@@ -4266,7 +4281,7 @@ mod tests {
         write(&project, "project_doc_max_bytes = 4096\n");
         discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
         let reason = budget(&d).1.unwrap();
-        assert!(reason.starts_with(&text(&project)), "{reason}");
+        assert!(reason.starts_with(&native_path(&project)), "{reason}");
         // So can a named profile, whose selection no record names.
         fs::remove_file(&project).unwrap();
         write(
@@ -4297,7 +4312,7 @@ mod tests {
             w.codex.join("config.toml"),
             &format!(
                 "[tui]\nauto_recap = false\n[projects.{}]\ntrust_level = 'trusted'\n",
-                serde_json::to_string(&text(&root)).unwrap()
+                serde_json::to_string(&native_path(&root)).unwrap()
             ),
         );
         let mut d = discover(&options(&w)).unwrap();
@@ -4312,7 +4327,7 @@ mod tests {
             let mut built = Request { ..make_request() };
             built.harness = Harness::Codex;
             built.profiles = vec![id.clone()].into();
-            built.cwd = Some(text(&cwd).into());
+            built.cwd = Some(native_path(&cwd).into());
             built
         };
         let recap = |d: &Discovery| {
@@ -4320,12 +4335,15 @@ mod tests {
                 .iter()
                 .find(|p| p.id == id)
                 .unwrap()
-                .background_directories[&text(&cwd)][0]
+                .background_directories[&native_path(&cwd)][0]
                 .clone()
         };
         discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
         assert_eq!(recap(&d).value, Some(true));
-        assert_eq!(recap(&d).off_file.as_deref(), Some(text(&nearest).as_str()));
+        assert_eq!(
+            recap(&d).off_file.as_deref(),
+            Some(native_path(&nearest).as_str())
+        );
         assert!(!format!("{:?}", d.profiles).contains("SYNTHETIC_PRIVATE"));
         write(w.codex.join("config.toml"), "[tui]\nauto_recap = false\n");
         discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
@@ -4335,7 +4353,7 @@ mod tests {
             w.codex.join("config.toml"),
             &format!(
                 "[tui]\nauto_recap = false\n[projects.{}]\ntrust_level = 'untrusted'\n",
-                serde_json::to_string(&text(&root)).unwrap()
+                serde_json::to_string(&native_path(&root)).unwrap()
             ),
         );
         discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
@@ -4350,7 +4368,7 @@ mod tests {
         assert!(recap(&d).reason.contains("--profile"));
         let gone = {
             let mut built = Request { ..req.clone() };
-            built.cwd = Some(text(&w.home.join("gone")).into());
+            built.cwd = Some(native_path(w.home.join("gone")).into());
             built
         };
         let absent = {
@@ -4407,7 +4425,14 @@ mod tests {
         assert_eq!((p.billing, p.ttl.main.value), (None, None));
         assert_eq!(p.ttl.main.reason, TTL_BILLING_UNKNOWN);
         let directories = p.idle_directories.as_ref().unwrap();
-        let main = |d: &Path| directories[&text(d)].ttl.as_ref().unwrap().main.clone();
+        let main = |d: &Path| {
+            directories[&native_path(d)]
+                .ttl
+                .as_ref()
+                .unwrap()
+                .main
+                .clone()
+        };
         assert_eq!(main(&plain).value, None);
         assert_eq!(main(&plain).reason, TTL_BILLING_UNKNOWN);
         assert_eq!(main(&bedrock).value, Some(Ttl::FiveMinutes));
@@ -4443,7 +4468,7 @@ mod tests {
         // Once T3 attributes the requests, only the profile's own directories settle it.
         let settled = |projects: &[&Path]| {
             let mut p = claude(&data).clone();
-            let texts: Vec<String> = projects.iter().map(|d| text(d)).collect();
+            let texts: Vec<String> = projects.iter().map(native_path).collect();
             settle_ttls(&mut p, texts.iter().map(String::as_str));
             p
         };
@@ -4466,7 +4491,14 @@ mod tests {
                 Some(TTL_PROJECTS_DIFFER)
             );
             let directories = p.idle_directories.as_ref().unwrap();
-            let main = |d: &Path| directories[&text(d)].ttl.as_ref().unwrap().main.value;
+            let main = |d: &Path| {
+                directories[&native_path(d)]
+                    .ttl
+                    .as_ref()
+                    .unwrap()
+                    .main
+                    .value
+            };
             assert_eq!(main(&pinned), Some(Ttl::OneHour));
         }
         // An unset main TTL with unknown billing stays pinnable across another default, such
@@ -4491,7 +4523,7 @@ mod tests {
         discover_claude_controls(&o, &mut data.profiles, &requests).unwrap();
         let settled = |projects: &[&Path]| {
             let mut p = claude(&data).clone();
-            let texts: Vec<String> = projects.iter().map(|d| text(d)).collect();
+            let texts: Vec<String> = projects.iter().map(native_path).collect();
             settle_ttls(&mut p, texts.iter().map(String::as_str));
             p
         };
@@ -4542,26 +4574,29 @@ mod tests {
             "subagent cwd is not consulted"
         );
         let directories = profile.idle_directories.as_ref().unwrap();
-        let owner = &directories[&text(&project.join("nested"))];
+        let owner = &directories[&native_path(project.join("nested"))];
         assert_eq!(owner.value, Some(false));
         assert_eq!(owner.threshold, Some(100_000));
-        assert_eq!(owner.owner, format!("{}:idleCompaction", text(&local)));
+        assert_eq!(
+            owner.owner,
+            format!("{}:idleCompaction", native_path(&local))
+        );
         assert_eq!(
             owner.ttl.as_ref().unwrap().main.value,
             Some(Ttl::FiveMinutes)
         );
         assert_eq!(
             owner.ttl.as_ref().unwrap().main.owner,
-            format!("{}:promptCacheTtl", text(&local))
+            format!("{}:promptCacheTtl", native_path(&local))
         );
         assert!(owner.resolved, "the nested directory exists");
-        let missing = &directories[&text(&gone)];
+        let missing = &directories[&native_path(&gone)];
         assert!(!missing.resolved);
         assert_eq!(
             missing.reason,
             "recorded working directory no longer exists; current project/local ownership is unresolved"
         );
-        let speed = &profile.speed_directories.as_ref().unwrap()[&text(&gone)];
+        let speed = &profile.speed_directories.as_ref().unwrap()[&native_path(&gone)];
         assert_eq!(speed.value, None);
 
         let absent = [request(claude(&data), None)];

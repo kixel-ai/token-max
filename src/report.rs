@@ -2939,11 +2939,17 @@ fn card(result: &CheckResult, action: Option<Action>, out: &mut Out<'_>) {
         CheckResult::Compaction(c) => {
             out.cost("Current-window baseline", &c.baseline_cost);
             out.cost("Existing summaries", &c.observed_summary_cost);
-            for scenario in &c.scenarios {
+            for scenario in c.scenarios.iter().chain(&c.cap) {
+                // `vibes`' cap is listed for its card's figure, never weighed for the verdict.
+                let cap = if c.cap.as_ref().is_some_and(|k| k.window == scenario.window) {
+                    "; vibes' cap, priced for its card and never recommended"
+                } else {
+                    ""
+                };
                 out.field(
                     "Candidate window",
                     &format!(
-                        "{} tokens; {} affected requests; {} added compactions",
+                        "{} tokens; {} affected requests; {} added compactions{cap}",
                         scenario.window,
                         scenario.affected_requests,
                         scenario.added.len()
@@ -4817,19 +4823,28 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
     let priced = c
         .scenarios
         .iter()
+        .chain(&c.cap)
         .find(|s| s.window == cap)
         .filter(|s| {
             !crate::prices::tier_sensitive(&s.comparison_cost)
                 && !crate::prices::tier_sensitive(&s.baseline_comparison_cost)
         })
-        .and_then(|s| Some((s.savings_usd?, s.margin)));
+        .and_then(|s| {
+            let changes = s.affected_requests > 0 || !s.added.is_empty();
+            Some((s.savings_usd?, s.margin, changes))
+        });
     let against = match (doctor, c.base.current) {
         (Doctor::Wrote(_), Some(w)) => format!("the {} window before that change", tokens(w)),
         (_, Some(w)) => format!("the {} window", tokens(w)),
         (_, None) => "the recorded requests".into(),
     };
     let cost = match priced {
-        Some((usd, margin)) => {
+        // Every recorded context stayed under the cap, so its replay is the window's own.
+        Some((_, _, false)) => format!(
+            "Against {against}, its replay of a {} window changes no recorded request, so it costs the same at API prices.",
+            tokens(cap)
+        ),
+        Some((usd, margin, true)) => {
             let scale = monthly(1.0, c.base.since, c.base.until);
             let margin = margin.map(|m| m.scale(scale));
             let usd = usd * scale;
@@ -7294,6 +7309,7 @@ mod tests {
                     reread_break_even_usd: Some(1.005),
                 },
             }],
+            cap: None,
             usage_estimates: vec![],
             cache_evidence: vec![],
             reowned: None,

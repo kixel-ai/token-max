@@ -1478,11 +1478,12 @@ so does one token-max can't resolve, such as an unset Codex limit: setting the
 cap there could raise a smaller default.
 
 The card names the line's verdict, which weighs cost alone, and stays apart
-from it. When the line's replay priced a window at the cap, the card gives
-what it saves or costs every 30 days against the current window; otherwise,
-or when the replay's service tier is unsettled, it says what the cap costs is
-not measured. The replay's candidates come from
-the evidence, not from this cap, so it is usually unpriced.
+from it. Where the window is above the cap, the line's replay prices the cap
+beside its own candidates but never recommends it: the verdict stays the best
+of the windows the evidence names, and `--details` lists the cap's replay
+apart from them. The card gives what the cap saves or costs every 30 days
+against the current window; when the replay could not price it, or its service
+tier is unsettled, it says what the cap costs is not measured.
 
 The cap goes through the same edit the line's own change makes: where the
 owner holds it, as a model's `modelSettings` row, or, under

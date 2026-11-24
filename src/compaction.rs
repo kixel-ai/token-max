@@ -2085,6 +2085,15 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                     n >= minimum && n <= ceiling && (!claude || n <= CLAUDE_WINDOW_MAXIMUM)
                 })
                 .collect();
+            // `vibes`' cap is priced for its card where the window is above it, but it is no
+            // candidate here: the line's verdict stays the best of the evidence's windows.
+            let cap = crate::vibes::window_cap(profile.harness);
+            let priced_cap = !windows.contains(&cap) && control.value.is_some_and(|v| v > cap);
+            let values: Vec<i64> = windows
+                .iter()
+                .copied()
+                .chain(priced_cap.then_some(cap))
+                .collect();
             let skipped = skipped_lines(scan, &group.ids);
             let lockstep = Lockstep {
                 requests: &requests,
@@ -2096,7 +2105,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             };
             let (runs, current_cost) = lockstep.runs(
                 control.value,
-                &windows,
+                &values,
                 |window, scenario| {
                     Stream::new(
                         Simulator::new(
@@ -2115,8 +2124,10 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 || PartReplay::new([&index.cache], &replayer.options(options.estimates)),
             );
             let baseline_cost = current_cost.unwrap_or_else(|| recorded_cost.clone());
-            let signs: Vec<Signs> = runs[0].iter().map(|r| r.signs).collect();
-            let scenarios = scenarios(&windows, runs);
+            let mut signs: Vec<Signs> = runs[0].iter().map(|r| r.signs).collect();
+            let mut scenarios = scenarios(&values, runs);
+            signs.truncate(windows.len());
+            let capped_scenario = scenarios.split_off(windows.len()).pop();
             let priced: Vec<&WindowScenario> = scenarios
                 .iter()
                 .filter(|s| s.savings_usd.is_some())
@@ -2193,7 +2204,6 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 ))
             };
             let reowned = plan(recommended);
-            let cap = crate::vibes::window_cap(profile.harness);
             let capped = plan(control.value.is_none_or(|v| v > cap).then_some(cap));
             let unpinned = reowned.as_ref().filter(|r| !r.unkept.is_empty()).map(|r| {
                 format!(
@@ -2335,6 +2345,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 observed_summary_cost: observed_summary_cost.clone(),
                 ttls: ttls.clone(),
                 scenarios,
+                cap: capped_scenario,
                 usage_estimates: requests
                     .iter()
                     .filter(|r| r.time >= since || predecessors.contains(&*r.id))
@@ -2374,6 +2385,7 @@ fn unmeasured(group: &crate::rows::Group<'_>, since: Option<Millis>) -> Option<C
             subagent: None,
         },
         scenarios: vec![],
+        cap: None,
         usage_estimates: vec![],
         cache_evidence: vec![],
         reowned: None,
@@ -5488,6 +5500,33 @@ mod tests {
         }
 
         #[test]
+        fn the_cap_is_priced_but_never_wins_even_where_it_saves_most() {
+            // Compacting the cached 150-180k requests at 100k costs more than the cap, which
+            // compacts only the uncached 450k ones.
+            let mut scan = data(6);
+            let sizes = [150_000, 160_000, 170_000, 180_000, 450_000, 460_000];
+            for (r, size) in scan.requests.iter_mut().skip(1).zip(sizes) {
+                r.parts[0].usage = if size < 400_000 {
+                    usage(1000, size - 1000, 10, Ttl::FiveMinutes, 0)
+                } else {
+                    writes(size)
+                };
+            }
+            scan.profiles[0].compaction = controls(
+                Harness::Claude,
+                json!({"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 600000}}}),
+                &Env::default(),
+                "synthetic/settings.json",
+            );
+            let c = check(&scan);
+            let cap = c.cap.as_ref().unwrap();
+            let best = window(&c, 100_000);
+            assert!(cap.savings_usd.unwrap() > best.savings_usd.unwrap());
+            assert_eq!(c.base.recommended, Some(100_000));
+            assert_eq!(c.base.savings_usd, best.savings_usd);
+        }
+
+        #[test]
         fn vibes_caps_a_window_past_the_maintainers_pick_apart_from_the_lines_verdict() {
             use crate::doctor::{Edit, How, Op, Patch};
             use crate::report::Origin;
@@ -5513,6 +5552,14 @@ mod tests {
                 ),
                 (Some(600_000), Some(100_000), Action::Change)
             );
+            // The replay prices the cap apart from the candidates, which it never joins.
+            assert_eq!(check.cap.as_ref().map(|s| s.window), Some(400_000));
+            assert!(check.scenarios.iter().all(|s| s.window != 400_000));
+            assert!(
+                text(&report, None, true).contains(
+                    "400000 tokens; 0 affected requests; 0 added compactions; vibes' cap, priced for its card and never recommended"
+                )
+            );
             let card = |report: &Report| {
                 crate::report::advice(report, ReportOptions::default())
                     .into_iter()
@@ -5524,7 +5571,7 @@ mod tests {
             assert_eq!(item.value, "600k -> 400k");
             assert_eq!(
                 item.text,
-                "Set to 600k. The maintainer would cap it at 400k for better output, not a smaller bill: a smaller window compacts sooner, so the model works from a shorter context. Anthropic's docs say accuracy and recall degrade as a context grows. doctor's auto-compact window line recommends 100k on cost. Its replay did not price a 400k window, so what the cap costs is not measured. The cap is advice beside that line, not its verdict."
+                "Set to 600k. The maintainer would cap it at 400k for better output, not a smaller bill: a smaller window compacts sooner, so the model works from a shorter context. Anthropic's docs say accuracy and recall degrade as a context grows. doctor's auto-compact window line recommends 100k on cost. Against the 600k window, its replay of a 400k window changes no recorded request, so it costs the same at API prices. The cap is advice beside that line, not its verdict."
             );
             assert_eq!(
                 item.sources,
@@ -5571,11 +5618,10 @@ mod tests {
             let CheckResult::Compaction(c) = &mut report.checks[index] else {
                 unreachable!()
             };
-            let mut priced = c.scenarios[0].clone();
-            priced.window = 400_000;
+            let priced = c.cap.as_mut().unwrap();
             priced.savings_usd = Some(-0.5);
             priced.margin = None;
-            c.scenarios.push(priced);
+            priced.affected_requests = 1;
             let scale = crate::report::monthly(1.0, c.base.since, c.base.until);
             let text = card(&report).text;
             assert!(
@@ -5590,7 +5636,7 @@ mod tests {
             let CheckResult::Compaction(c) = &mut report.checks[index] else {
                 unreachable!()
             };
-            let cap = c.scenarios.last_mut().unwrap();
+            let cap = c.cap.as_mut().unwrap();
             cap.comparison_cost
                 .assumptions
                 .push(crate::prices::TIER_SENSITIVITY.into());

@@ -885,12 +885,15 @@ struct Walked {
     /// This host's spend every 30 days.
     monthly: f64,
     since: Option<Millis>,
+    /// The report lines whose changes the walk wrote here, which can move what `vibes` advises.
+    written: Vec<crate::report::Origin>,
 }
 
 impl Walked {
-    /// `vibes`' advice and the changes it offers, checked against the files as they are
-    /// now, which the walk goes on with.
+    /// `vibes`' advice as it reads after whatever the walk wrote here, and the changes it
+    /// offers, checked against the files as they are now, which the walk goes on with.
     fn advise(&mut self) -> Outcome {
+        self.vibes = crate::vibes::settled(std::mem::take(&mut self.vibes), &self.written);
         self.owner = crate::vibes::owner(&self.vibes, self.home.clone(), self.monthly);
         self.listing = None;
         self.advice()
@@ -1058,6 +1061,7 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
             home: home.clone(),
             monthly: totals.monthly,
             since,
+            written: vec![],
         });
         let outcome = match (advice, &walked) {
             (true, Some(walked)) => walked.advice(),
@@ -1126,7 +1130,10 @@ fn walk_here(
                 Ok(Some(Outcome::Reviewed { report, preview }))
             }
             Answer::Write => match plan.take() {
-                Some(plan) => write_plan(&plan).map(|written| Some(Outcome::Wrote { written })),
+                Some(plan) => write_plan(&plan).map(|written| {
+                    walked.written.extend(plan.accepted());
+                    Some(Outcome::Wrote { written })
+                }),
                 None => Err(ScanError::new(
                     "the walk confirmed changes it had not reviewed; no settings were changed",
                 )),

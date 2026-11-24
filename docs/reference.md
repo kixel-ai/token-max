@@ -311,16 +311,18 @@ them.
 
 ### How a profile pays
 
-On a terminal, before the report, `doctor` asks how each of this host's Claude
-profiles on the Anthropic API pays: a Claude plan, or an API key or usage
-credits. It asks once per profile root that has transcripts, including one T3
-Code shares, and skips profiles under Bedrock, Vertex or Foundry, whose
-default is 5m. Answer `p`, `a` or `s` to skip. A plan answer prices the
-main-agent TTL against 1h and an API answer against 5m, in its line, the
-comparison with the defaults and `--defaults`. A skip, end of input, a run
-without a terminal, or an SSH destination's profiles keep naming both
-defaults. Nothing is stored: the next run asks again, so a profile that
-changes how it pays is never priced from a stale answer.
+On a terminal, before the report, `doctor` asks how each Claude profile on the
+Anthropic API pays, on this host and then on each `--ssh` destination in the
+order given: a Claude plan, or an API key or usage credits. It asks once per
+profile root that has transcripts, including one T3 Code shares, and skips
+profiles under Bedrock, Vertex or Foundry, whose default is 5m. A
+destination's profile is named after its host, as in `devbox:~/.claude`.
+Answer `p`, `a` or `s` to skip. A plan answer prices the main-agent TTL
+against 1h and an API answer against 5m, in its line, the comparison with the
+defaults and `--defaults`. A skip, end of input, which skips every later
+question, or a run without a terminal keeps naming both defaults. Nothing is
+stored: the next run asks again, so a profile that changes how it pays is
+never priced from a stale answer.
 
 An answer holds only where every recorded project of the profile resolves the
 same default. A project whose settings send its requests to Bedrock, Vertex or
@@ -1014,7 +1016,10 @@ token-max doctor --ssh devbox --ssh user@laptop
 
 The destination discovers that host's own profiles from its home and
 environment and reads its transcripts and settings, priced from the one catalog
-this host loads and sends it. For a report it runs `token-max doctor --ssh-scan`,
+this host loads and sends it. Destinations connect while this host's profiles
+are asked about; for a report, each sends back the root of each Claude profile
+it asks about, waits for the answers [How a profile pays](#how-a-profile-pays)
+describes, and scans once they arrive, while later hosts are asked. For a report it runs `token-max doctor --ssh-scan`,
 which runs every check there and sends back only its finished report. For
 session lines it runs `token-max sessions --ssh-scan`, which sends back only
 the priced session lines of that host's transcripts. Either way its transcripts

@@ -12,13 +12,12 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde_json::ser::Formatter;
 
-use crate::collections::IndexSet;
 use crate::discovery::{DiscoveryOptions, discover};
 use crate::doctor::{
-    Confirm, Fix, Found, Offers, Owner, Style, Walking, ask, ask_billing, confirm, finish, opening,
-    preview, write, wrote,
+    BillingQuestions, Confirm, Fix, Found, Offers, Owner, Style, Walking, ask, confirm, finish,
+    opening, preview, write, wrote,
 };
-use crate::model::{Harness, Location, Millis, Scan, Verdict};
+use crate::model::{Location, Millis, Scan, Verdict};
 use crate::prices::{Catalog, PriceOptions, cancel_downloads, load_prices};
 use crate::reader::{Reading, ScanOptions, scan};
 use crate::replay::{AnalyzeOptions, analyze};
@@ -28,7 +27,7 @@ use crate::sessions::{Session, export};
 use crate::ssh::{self, Reply, Scope};
 use crate::terminal::{WrapOptions, wrap_text};
 use crate::totals::Totals;
-use crate::wire::{Format, Job, Request};
+use crate::wire::{Format, Job, Paid, Request};
 
 const HELP: &str =
     "token-max: agent settings that use less of a Claude or ChatGPT plan, measured at API prices
@@ -814,6 +813,8 @@ enum Scanned {
 /// What reaches the coordinator while hosts scan, in whatever order it finishes.
 enum Arrival {
     Prices(Result<Catalog, ScanError>),
+    /// A report destination's profiles, which it scans once their answers are sent.
+    Profiles(usize, ssh::Profiles),
     Host(usize, Result<Scanned, ScanError>),
 }
 
@@ -973,6 +974,7 @@ fn sessions(args: &[String]) -> Result<(Output, u8), ScanError> {
         job: Job::Sessions,
         home: None,
         progress: None,
+        ask: None,
     })?;
     let mut sessions: Vec<(jiff::Timestamp, Session)> = vec![];
     for (host, reply) in replies {
@@ -1064,30 +1066,38 @@ struct Gather {
     home: Option<String>,
     /// Show each phase, and a bar while this host's transcripts are read, on stderr.
     progress: Option<Look>,
+    /// Ask on this terminal how each host's Claude profiles pay, before that host scans.
+    ask: Option<Ask>,
+}
+
+/// The billing questions: how each Claude profile on the Anthropic API with transcripts pays,
+/// which picks its main TTL's default.
+struct Ask {
+    /// This host's profiles to ask about, by root.
+    roots: Vec<String>,
+    /// How the questions print, with this host's paths from its home.
+    style: Style,
 }
 
 /// Scan every selected host and load prices at once, then run the job on each, failing on the
 /// first error. Returns each host's reply in selection order, this host first, as None.
 ///
-/// Destinations run the job on their own scans, so this host only ever holds its own.
+/// Destinations connect first, so their profiles arrive while this host's are asked about;
+/// each host scans once its own are answered. Destinations run the job on their own scans, so
+/// this host only ever holds its own.
 fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
     let Gather {
         since,
         defaults,
-        discovery,
+        mut discovery,
         destinations,
         prices,
         job,
         home,
         progress,
+        ask,
     } = run;
     let reading = Arc::new(Reading::default());
-    let meter = progress.map(|look| Meter::start(look, reading.clone()));
-    let phase = |message: &'static str| {
-        if let Some(meter) = &meter {
-            meter.phase(message);
-        }
-    };
     let scope = match job {
         Job::Report { .. } => Scope::Report { defaults },
         Job::Sessions => Scope::Sessions,
@@ -1110,19 +1120,77 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
         Job::Sessions => Job::Sessions,
     };
     let (sender, results) = mpsc::channel();
-    let mut hosts: Vec<Option<String>> = vec![];
+    {
+        // Prices load beside the scans and questions, so whichever fails first stops the run.
+        let sender = sender.clone();
+        thread::spawn(move || {
+            let catalog = panic::catch_unwind(|| load_prices(&prices))
+                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));
+            let _ = sender.send(Arrival::Prices(catalog));
+        });
+    }
+    let mut hosts: Vec<Option<String>> = vec![None];
     let mut requests = vec![];
+    // Each destination's answers, sent once given; at once when nobody is asked.
+    let mut payments = vec![];
+    for destination in destinations {
+        let sender = sender.clone();
+        let index = hosts.len();
+        let (request, receiver) = mpsc::channel();
+        let (pay, payment) = mpsc::channel();
+        requests.push((request, labeled(Some(&destination))));
+        if ask.is_none() {
+            let _ = pay.send(Paid::default());
+        }
+        payments.push(pay);
+        hosts.push(Some(destination.clone()));
+        thread::spawn(move || {
+            let audit = || {
+                let connected = ssh::connect(&destination, since, scope)?;
+                let paid = match connected.profiles() {
+                    Some(profiles) => {
+                        let _ = sender.send(Arrival::Profiles(index, profiles.clone()));
+                        // Dropped unanswered when this host fails first.
+                        payment
+                            .recv()
+                            .map_err(|_| ScanError::new("cancelled; no report produced"))?
+                    }
+                    None => Paid::default(),
+                };
+                connected.audit(paid, receiver)
+            };
+            let result = panic::catch_unwind(AssertUnwindSafe(audit))
+                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))
+                .map(Scanned::Remote);
+            let _ = sender.send(Arrival::Host(index, result));
+        });
+    }
+    let terminal = |_| ScanError::new("cannot use the terminal; no report produced");
+    let mut questions = BillingQuestions::default();
+    if let Some(ask) = &ask {
+        enter(Phase::Asking);
+        discovery.billing = questions
+            .ask(
+                &ask.roots,
+                &ask.style,
+                &mut io::stdin().lock(),
+                &mut io::stdout().lock(),
+            )
+            .map_err(terminal)
+            .inspect_err(|_| {
+                cancel_downloads();
+                ssh::cancel();
+            })?;
+    }
     // A lone local scan runs on this thread, so the analysis reuses the memory the scan
     // frees rather than leaving it to another thread's allocator arena.
     let mut inline = None;
     {
-        let index = hosts.len();
-        hosts.push(None);
         let options = ScanOptions {
             discovery,
             since,
             reach: scope.reach(),
-            reading: Some(reading),
+            reading: Some(reading.clone()),
         };
         let job = move || {
             panic::catch_unwind(|| scan(&options))
@@ -1130,27 +1198,73 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
                 .map(|scan| Scanned::Local(Box::new(scan)))
         };
         if remote {
-            let sender = sender.clone();
             thread::spawn(move || {
-                let _ = sender.send(Arrival::Host(index, job()));
+                let _ = sender.send(Arrival::Host(0, job()));
             });
         } else {
-            inline = Some((index, job));
+            drop(sender);
+            inline = Some((0, job));
         }
     }
-    for destination in destinations {
-        let sender = sender.clone();
-        let index = hosts.len();
-        let (request, receiver) = mpsc::channel();
-        requests.push((request, labeled(Some(&destination))));
-        hosts.push(Some(destination.clone()));
-        thread::spawn(move || {
-            let result = panic::catch_unwind(|| ssh::audit(&destination, since, scope, receiver))
-                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))
-                .map(Scanned::Remote);
-            let _ = sender.send(Arrival::Host(index, result));
-        });
+    // What arrives while destinations' profiles are asked about, for the loop below.
+    let mut early = vec![];
+    if let Some(ask) = &ask {
+        let asked = (|| {
+            let mut found: Vec<Option<ssh::Profiles>> = hosts.iter().map(|_| None).collect();
+            for (index, pay) in (1..).zip(&payments) {
+                // Shown while a destination still connects, or this host still reads.
+                let waiting = (found[index].is_none())
+                    .then_some(progress)
+                    .flatten()
+                    .map(|look| {
+                        let meter = Meter::start(look, reading.clone());
+                        meter.phase("Connecting to SSH hosts");
+                        meter
+                    });
+                let profiles = loop {
+                    if let Some(profiles) = found[index].take() {
+                        break profiles;
+                    }
+                    match results.recv() {
+                        Ok(Arrival::Profiles(at, profiles)) => found[at] = Some(profiles),
+                        Ok(Arrival::Host(_, Err(error)) | Arrival::Prices(Err(error))) => {
+                            return Err(error);
+                        }
+                        Ok(arrival) => early.push(arrival),
+                        Err(_) => return Err(ScanError::new("cancelled; no report produced")),
+                    }
+                };
+                drop(waiting);
+                let style = Style {
+                    home: profiles.home,
+                    host: hosts[index].clone(),
+                    ..ask.style.clone()
+                };
+                let profiles = questions
+                    .ask(
+                        &profiles.roots,
+                        &style,
+                        &mut io::stdin().lock(),
+                        &mut io::stdout().lock(),
+                    )
+                    .map_err(terminal)?;
+                let _ = pay.send(Paid { profiles });
+            }
+            questions.finish(&mut io::stdout().lock()).map_err(terminal)
+        })();
+        asked.inspect_err(|_| {
+            cancel_downloads();
+            ssh::cancel();
+        })?;
+        enter(Phase::Running);
     }
+    drop(payments);
+    let meter = progress.map(|look| Meter::start(look, reading.clone()));
+    let phase = |message: &'static str| {
+        if let Some(meter) = &meter {
+            meter.phase(message);
+        }
+    };
     phase(if remote {
         "Scanning local histories and SSH hosts"
     } else {
@@ -1163,17 +1277,13 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
             .map(|(index, job)| job().map(|scan| (index, scan)))
             .transpose()?;
         phase("Loading public prices");
-        // Prices load beside the scans, so whichever fails first stops the run at once.
-        thread::spawn(move || {
-            let catalog = panic::catch_unwind(|| load_prices(&prices))
-                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));
-            let _ = sender.send(Arrival::Prices(catalog));
-        });
         let mut catalog = None;
         // Hosts that finished before the prices arrived.
         let mut scanned: Vec<_> = inline.into_iter().collect();
-        for arrival in results {
+        for arrival in early.into_iter().chain(results) {
             match arrival {
+                // Asked about already, or nobody is asked.
+                Arrival::Profiles(..) => {}
                 Arrival::Host(index, result) => scanned.push((index, result?)),
                 Arrival::Prices(loaded) => {
                     let loaded = loaded?;
@@ -1291,10 +1401,10 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
     };
     let home = std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned());
     let style = format.style(home.clone());
-    // On a terminal, open with what the run is about to read, then ask how each of this
-    // host's Claude profiles on the Anthropic API pays, which picks its main TTL's default;
-    // without a terminal the report names both defaults.
-    if terminal {
+    // On a terminal, open with what the run is about to read, then ask how each host's Claude
+    // profiles on the Anthropic API pay, which picks each one's main TTL default; without a
+    // terminal the report names both defaults.
+    let ask = if terminal {
         let found = discover(&discovery)?;
         let failed = |_| ScanError::new("cannot use the terminal; no report produced");
         let opening = opening(&Found::list(&found), &destinations, &style);
@@ -1302,27 +1412,13 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
             .lock()
             .write_all(opening.as_bytes())
             .map_err(failed)?;
-        // T3 Code's instances share a native root, and so its account and answer.
-        let roots: Vec<String> = found
-            .profiles
-            .into_iter()
-            .filter(|p| {
-                p.harness == Harness::Claude && p.provider.is_none() && !p.histories.is_empty()
-            })
-            .map(|p| p.root)
-            .collect::<IndexSet<_>>()
-            .into_iter()
-            .collect();
-        enter(Phase::Asking);
-        discovery.billing = ask_billing(
-            &roots,
-            &style,
-            &mut io::stdin().lock(),
-            &mut io::stdout().lock(),
-        )
-        .map_err(failed)?;
-        enter(Phase::Running);
-    }
+        Some(Ask {
+            roots: found.billing_roots(),
+            style: style.clone(),
+        })
+    } else {
+        None
+    };
     let replies = gather(Gather {
         since,
         defaults: values.defaults,
@@ -1337,6 +1433,7 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
         home: home.clone(),
         progress: (stdout && io::stderr().is_terminal() && !term_dumb)
             .then_some(Look { color, unicode }),
+        ask,
     })?;
     let sections = replies.len();
     let mut code = 0;

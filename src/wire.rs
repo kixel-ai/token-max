@@ -1,10 +1,13 @@
 //! The private SSH audit stream between this host and a destination's
 //! `token-max doctor --ssh-scan` or `token-max sessions --ssh-scan`.
 //!
-//! The destination writes a [`Header`] and starts scanning. This host answers with one
-//! [`Request`] on the destination's stdin, carrying the price catalog and the [`Job`], and the
-//! destination analyzes its own scan and writes one [`Outcome`]: its finished report, its
-//! priced session lines, or a diagnostic, never the scan. Each value is one JSON line.
+//! The destination writes a [`Header`]. For a report it then lists the Claude profiles whose
+//! billing picks their main TTL's default, in [`Outcome::Profiles`], and waits for this host's
+//! [`Paid`] answers, which arrive once the person has answered; a session export skips both.
+//! It then starts scanning. This host answers with one [`Request`] on the destination's stdin,
+//! carrying the price catalog and the [`Job`], and the destination analyzes its own scan and
+//! writes one [`Outcome`]: its finished report, its priced session lines, or a diagnostic,
+//! never the scan. Each value is one JSON line.
 //!
 //! A report for a walk also carries the destination's offers and leaves the stream open: this
 //! host walks through them, sends the [`Answer`]s, and the destination replies to each with
@@ -15,8 +18,9 @@ use std::io::{Read, Write};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::collections::IndexMap;
 use crate::doctor::{Event, Offers, Style, Written};
-use crate::model::Millis;
+use crate::model::{Billing, Millis};
 use crate::prices::Catalog;
 use crate::report::{Host, ReportOptions};
 use crate::safe::ScanError;
@@ -60,6 +64,14 @@ pub fn build() -> String {
 pub struct Header {
     /// The sender's [`build`]; this host reads streams only from its own build.
     pub token_max_scan: String,
+}
+
+/// How each Claude profile a destination listed pays, by its root as listed, as the person
+/// answered; a profile left out was skipped or never asked about.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Paid {
+    pub profiles: IndexMap<String, Billing>,
 }
 
 /// What a destination analyzes its scan with, so every host is priced from one catalog.
@@ -122,10 +134,19 @@ impl Format {
     }
 }
 
-/// How the destination's audit ended: what its job made, or a diagnostic as safe as a local one.
+/// What the destination writes after its header: what its job made, or a diagnostic as safe as
+/// a local one, and for a report first the profiles it asks about.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Outcome {
+    /// A report's Claude profiles whose billing picks their main TTL's default; the
+    /// destination waits for [`Paid`] before it scans.
+    #[serde(rename_all = "camelCase")]
+    Profiles {
+        /// The destination's home directory, which its roots are shown from as `~`.
+        home: Option<String>,
+        roots: Vec<String>,
+    },
     #[serde(rename_all = "camelCase")]
     Report {
         /// The window the destination scanned, which must be the one requested.

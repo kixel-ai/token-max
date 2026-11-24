@@ -259,6 +259,23 @@ pub struct Discovery {
     pub t3: Vec<crate::model::T3State>,
 }
 
+impl Discovery {
+    /// The Claude profile roots on the Anthropic API that have transcripts, whose unset main
+    /// TTL defaults by how each pays, so doctor asks; T3 Code's instances share a native root,
+    /// and so its account and answer.
+    pub fn billing_roots(&self) -> Vec<String> {
+        let roots: IndexSet<&str> = self
+            .profiles
+            .iter()
+            .filter(|p| {
+                p.harness == Harness::Claude && p.provider.is_none() && !p.histories.is_empty()
+            })
+            .map(|p| p.root.as_str())
+            .collect();
+        roots.into_iter().map(str::to_string).collect()
+    }
+}
+
 /// A safe error naming a path without its contents.
 pub(crate) fn error(message: &str, file: &str, line: u64) -> ScanError {
     ScanError::at(

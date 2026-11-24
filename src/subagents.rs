@@ -1179,15 +1179,18 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
                 let (model, effort) = settings_text(profile, controls, kind, fork, native);
                 model_settings.insert(model);
                 effort_settings.insert(effort);
-                if replaces {
-                    forced |= controls.force;
-                    match definition(controls, kind) {
-                        Some(d) => present.insert(d.file.clone()),
-                        None => {
-                            missing.insert(join(&[&profile.root, "agents", &format!("{kind}.md")]))
-                        }
-                    };
-                }
+            }
+            // Profiles sharing the history each record the run, and each needs its own file.
+            let sharing = owners
+                .iter()
+                .filter(|p| all.iter().any(|r| r.profiles.contains(&p.id)));
+            for profile in sharing.filter(|_| replaces) {
+                let controls = scoped(&profile.agents, run.cwd);
+                forced |= controls.force;
+                match definition(controls, kind) {
+                    Some(d) => present.insert(d.file.clone()),
+                    None => missing.insert(join(&[&profile.root, "agents", &format!("{kind}.md")])),
+                };
             }
         }
         let mut sources: Vec<SourceShare> = sources
@@ -1695,6 +1698,22 @@ mod tests {
         );
         plain.profiles[0].agents.force = true;
         assert!(replacement(&plain).forced);
+        // Profiles sharing the history each record the run: each is checked, not the first.
+        let mut shared = run();
+        shared[0].profiles = vec!["profile".into(), "work".into()].into();
+        let mut shared = scan(shared, vec![recorded.clone()]);
+        shared.profiles[0].agents.definitions = vec![defined("Explore", Some("haiku"), None)];
+        let mut work = make_profile("work", "/home/.claude-work");
+        work.agents.force = true;
+        shared.profiles.push(work);
+        assert_eq!(
+            replacement(&shared),
+            Replacement {
+                missing: vec!["/home/.claude-work/agents/Explore.md".into()],
+                present: vec!["/home/.claude/agents/Explore.md".into()],
+                forced: true,
+            }
+        );
         let project = "/synthetic/project";
         let mut in_project = run();
         in_project[0].cwd = Some(project.into());

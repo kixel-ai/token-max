@@ -29,7 +29,7 @@ Decision prompts, chosen options marked ✅:
   warning).
 - Its first items: ✅ the Bash cap and the old Warnings, which the `vibes`
   command shipped with; ✅
-  [a default main-session model and effort](/quest/m1/vibes/default-model.md);
+  a default main-session model and effort;
   ✅ [Explore on Haiku](/quest/m1/vibes/explore-haiku.md) (rejected for now:
   cache habits from the 2026-11-17 study, which can return as their own quest
   here).
@@ -49,7 +49,7 @@ codex-cli 0.167.1 settings worth turning on):
   [a year of transcripts](/quest/m1/vibes/retention.md) (rejected: telemetry
   opt-outs, which are about privacy rather than cost or capability, and turn
   off Claude Code's updater). Max effort is already outside
-  [the default-model card](/quest/m1/vibes/default-model.md)'s picks, and fast
+  the `Main-session default` card's picks, and fast
   mode, unused skills and MCP servers and the Artifact tool are measured
   `doctor` lines.
 - Settings worth turning on: ✅

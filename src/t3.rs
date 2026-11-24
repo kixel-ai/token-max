@@ -871,6 +871,7 @@ pub(crate) fn discover(
                     "T3 picks the model and effort for each thread, and its current selection is unavailable"
                         .into(),
                 ),
+                picked: None,
             });
             // These terminal-client features do not run in T3's SDK/app-server client.
             profile.background.clear();

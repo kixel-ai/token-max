@@ -17,7 +17,7 @@ use crate::context::{json_value, setting_text, typed_only};
 use crate::mcp::{Definition, Entry, Lock};
 use crate::model::{
     BackgroundFeature, BashCap, Billing, Bucket, CheckResult, CompactionCheck, ContextKind,
-    Control, Harness, Margin, Profile, Reowned, Report, Setting, Verdict,
+    Control, EffortControl, Harness, Margin, Profile, Reowned, Report, Setting, Verdict,
 };
 use crate::report::{
     AT_LEAST, Choice, Listing, Origin, Recommendation, Source, UP_TO, about, approx, capitalize,
@@ -661,6 +661,99 @@ pub(crate) fn bash_how(cap: &BashCap, profile: &Profile) -> Option<How> {
         patch.edits.push(env(default, &to));
     }
     Some(how)
+}
+
+/// How to move a main-session default to the maintainer's pick in `profile`'s settings,
+/// the model and the effort in one edit; None when the default is the pick or one they accept.
+pub(crate) fn default_how(control: &EffortControl, profile: &Profile) -> Option<How> {
+    if crate::effort::accepted(control, profile.harness) {
+        return None;
+    }
+    let ((model, effort), _) = crate::effort::pick(profile.harness);
+    let file = profile.settings_file.as_str();
+    // Each change: the setting that decides it, its edit when it is in `file`, and its step.
+    let mut changes: Vec<(&str, Option<Edit>, String)> = vec![];
+    if control.model.as_deref() != Some(model) {
+        let owner = control.model_owner.as_str();
+        let (setting, edit) = if owner == crate::effort::RECORDED {
+            (format!("{file}:model"), Some(Edit::set("model", model)))
+        } else if names(owner, file, "model") {
+            (owner.to_string(), Some(Edit::set("model", model)))
+        } else if profile.harness == Harness::Claude && names(owner, file, "env.ANTHROPIC_MODEL") {
+            (owner.to_string(), Some(env("ANTHROPIC_MODEL", model)))
+        } else {
+            (owner.to_string(), None)
+        };
+        changes.push((owner, edit, format!("set {setting} to {model}")));
+    }
+    // The pick's model may take its level from another setting than the current model's.
+    let target = control.picked.as_deref().unwrap_or(control);
+    if target.level.as_deref() != Some(effort) {
+        let owner = target.owner.as_str();
+        let setting = owner.split(" (").next().unwrap_or(owner);
+        let edit = setting
+            .strip_prefix(file)
+            .and_then(|rest| rest.strip_prefix(':'))
+            .and_then(|key| effort_edit(profile.harness, key, effort));
+        changes.push((owner, edit, format!("set {setting} to {effort}")));
+    }
+    // A cap below the pick's level would lower it again, and caps are raised by hand.
+    for cap in &target.caps {
+        if crate::effort::below(&cap.value, effort) {
+            changes.push((
+                cap.owner.as_str(),
+                None,
+                format!("raise {} to {effort}", cap.owner),
+            ));
+        }
+    }
+    let step = changes
+        .iter()
+        .map(|(_, _, step)| step.as_str())
+        .collect::<Vec<_>>()
+        .join(" and ");
+    let mut edits = vec![];
+    for (owner, edit, _) in changes {
+        match edit {
+            Some(edit) => edits.push(edit),
+            None => return Some(manual(owner, profile, step)),
+        }
+    }
+    Some(How::Edit(Patch {
+        file: file.into(),
+        harness: profile.harness,
+        edits,
+    }))
+}
+
+/// The edit that sets a main-session default level at `key` in the profile's own file, or
+/// None for a key token-max does not write.
+fn effort_edit(harness: Harness, key: &str, level: &str) -> Option<Edit> {
+    let set = |path: Vec<String>| Edit {
+        path,
+        value: level.into(),
+        op: Op::Set,
+    };
+    match harness {
+        Harness::Claude => {
+            if key == "effortLevel" {
+                return Some(set(vec![key.into()]));
+            }
+            if key == "env.CLAUDE_CODE_EFFORT_LEVEL" {
+                return Some(env("CLAUDE_CODE_EFFORT_LEVEL", level));
+            }
+            // A model's key can hold dots, such as a Bedrock ID, so it is not split.
+            let model = key
+                .strip_prefix("modelSettings.")?
+                .strip_suffix(".effortLevel")?;
+            Some(set(vec![
+                "modelSettings".into(),
+                model.into(),
+                "effortLevel".into(),
+            ]))
+        }
+        Harness::Codex => (key == "model_reasoning_effort").then(|| set(vec![key.into()])),
+    }
 }
 
 fn check_how(result: &CheckResult, profile: &Profile) -> How {
@@ -5485,5 +5578,153 @@ mod tests {
         );
         // A value over several lines keeps them, so the diff's line numbers match the file.
         assert_eq!(masked.lines().count(), text.lines().count());
+    }
+
+    /// The main-session default `file` gives on `harness`, resolved as discovery does.
+    fn default_in(file: &str, harness: Harness, env: &[(&str, &str)]) -> EffortControl {
+        let config = crate::discovery::settings(file, harness).unwrap();
+        let scopes = [crate::controls::SettingsScope {
+            config: &config,
+            file,
+        }];
+        let env = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let catalog: IndexMap<String, crate::effort::CodexModel> = [(
+            "gpt-6.2-sol".to_string(),
+            crate::effort::CodexModel {
+                default: "low".into(),
+            },
+        )]
+        .into_iter()
+        .collect();
+        match harness {
+            Harness::Claude => crate::effort::claude_effort(&scopes, file, &env, None),
+            Harness::Codex => crate::effort::codex_effort(&scopes, file, Some(&catalog), None),
+        }
+        .unwrap()
+    }
+
+    /// Accept `how` as a `vibes` card's one edit and write it.
+    fn accept(how: How) {
+        let item = crate::vibes::Item {
+            name: "Main-session default".into(),
+            value: String::new(),
+            what: String::new(),
+            text: String::new(),
+            sources: vec![],
+            how: Some(how),
+            quiet: false,
+        };
+        let owner = crate::vibes::owner(&[item], None, 100.0);
+        let plan = owner
+            .plan(&[Event::Choose {
+                offer: 0,
+                yes: true,
+            }])
+            .unwrap();
+        assert_eq!(write(&plan).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_default_moves_to_the_pick_in_one_edit_and_resolves_to_it_after() {
+        use crate::test_support::make_profile;
+        let w = Workspace::new();
+        let claude = make_profile("claude", &w.claude.to_string_lossy());
+        let file = claude.settings_file.clone();
+        // The model and the level its variable sets, both in the user file: one edit of two keys.
+        std::fs::write(
+            &file,
+            r#"{"model": "claude-fable-5-2", "env": {"CLAUDE_CODE_EFFORT_LEVEL": "xhigh"}}"#,
+        )
+        .unwrap();
+        let control = default_in(&file, Harness::Claude, &[]);
+        let Some(How::Edit(patch)) = default_how(&control, &claude) else {
+            panic!("both settings are in the user file")
+        };
+        assert_eq!(
+            patch.edits,
+            [
+                Edit::set("model", "claude-opus-5-5"),
+                env("CLAUDE_CODE_EFFORT_LEVEL", "medium")
+            ]
+        );
+        accept(How::Edit(patch));
+        // Read again, the settings give the pick, which has nothing more to change.
+        let after = default_in(&file, Harness::Claude, &[]);
+        assert_eq!(
+            (after.model.as_deref(), after.effective.as_deref()),
+            (Some("claude-opus-5-5"), Some("medium"))
+        );
+        assert!(crate::effort::accepted(&after, Harness::Claude));
+        assert_eq!(default_how(&after, &claude), None);
+        // Only the level: the pick's model's own entry, keyed as the file spells it.
+        std::fs::write(
+            &file,
+            r#"{"model": "claude-opus-5-5", "modelSettings": {"claude-opus-5-5[1m]": {"effortLevel": "low"}}}"#,
+        )
+        .unwrap();
+        let control = default_in(&file, Harness::Claude, &[]);
+        let Some(How::Edit(patch)) = default_how(&control, &claude) else {
+            panic!("the level is in the user file")
+        };
+        let path: Vec<&str> = patch.edits[0].path.iter().map(String::as_str).collect();
+        assert_eq!(
+            path,
+            ["modelSettings", "claude-opus-5-5[1m]", "effortLevel"]
+        );
+        assert_eq!(patch.edits.len(), 1);
+        // A shell variable outranks the file, so the whole change is by hand, naming each step.
+        std::fs::write(&file, r#"{"model": "claude-fable-5-2"}"#).unwrap();
+        let control = default_in(
+            &file,
+            Harness::Claude,
+            &[("CLAUDE_CODE_EFFORT_LEVEL", "max")],
+        );
+        let Some(How::Manual { step, reason }) = default_how(&control, &claude) else {
+            panic!("a shell variable is set by hand")
+        };
+        assert_eq!(
+            step,
+            format!(
+                "set {file}:model to claude-opus-5-5 and set CLAUDE_CODE_EFFORT_LEVEL to medium"
+            )
+        );
+        assert!(
+            reason.contains("CLAUDE_CODE_EFFORT_LEVEL environment variable"),
+            "{reason}"
+        );
+        // A cap below the pick's level is raised by hand too.
+        std::fs::write(&file, r#"{"maxEffortLevel": "low"}"#).unwrap();
+        let control = default_in(
+            &file,
+            Harness::Claude,
+            &[("ANTHROPIC_MODEL", "claude-opus-5-5")],
+        );
+        let Some(How::Manual { step, .. }) = default_how(&control, &claude) else {
+            panic!("a cap is raised by hand")
+        };
+        assert!(
+            step.ends_with(&format!("raise {file}:maxEffortLevel to medium")),
+            "{step}"
+        );
+
+        // Codex: no model set, so the user file takes both, and the pick's level is not its default.
+        let mut codex = make_profile("codex", &w.codex.to_string_lossy());
+        codex.harness = Harness::Codex;
+        codex.settings_file = format!("{}/config.toml", w.codex.to_string_lossy());
+        let file = codex.settings_file.clone();
+        std::fs::write(&file, "model_reasoning_effort = \"ultra\"\n").unwrap();
+        let control = default_in(&file, Harness::Codex, &[]);
+        assert_eq!(control.model_owner, crate::effort::RECORDED);
+        let how = default_how(&control, &codex).expect("ultra is off the pick");
+        accept(how);
+        let after = default_in(&file, Harness::Codex, &[]);
+        assert_eq!(
+            (after.model.as_deref(), after.effective.as_deref()),
+            (Some("gpt-6.2-sol"), Some("high"))
+        );
+        assert_eq!(default_how(&after, &codex), None);
     }
 }

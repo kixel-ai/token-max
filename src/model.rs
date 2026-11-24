@@ -936,6 +936,9 @@ pub struct EffortControl {
     pub default: Option<String>,
     /// Why the default cannot be resolved, such as an unrecorded `--profile` selection.
     pub unresolved: Option<String>,
+    /// The default as these settings resolve it on the model the maintainer picks, whose
+    /// own level setting may differ; None when the model is already that one or unknown.
+    pub picked: Option<Box<EffortControl>>,
 }
 
 /// Claude's effective foreground Bash timeout ceiling and the variables that set it.

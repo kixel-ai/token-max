@@ -416,36 +416,129 @@ const CLAUDE_EFFORT_DOCS: &str =
 const OPENAI_REASONING: &str = "https://developers.openai.com/api/docs/guides/reasoning";
 
 /// The provider's own guidance on a default effort above `high`, which no transcript can
-/// price, and the pages it comes from.
-fn effort_warning(e: &EffortCheck) -> Option<(String, Vec<&'static str>)> {
+/// price; None at or below `high`.
+fn past_high(level: &str, harness: Harness) -> Option<String> {
+    Some(match (level, harness) {
+        ("max", Harness::Claude) => format!(
+            "{PAST_HIGH}, and Claude Code's docs call max prone to overthinking and say to test it before adopting it broadly."
+        ),
+        ("xhigh", Harness::Claude) => format!(
+            "{PAST_HIGH}; on SWE-bench Pro, Opus 5.5 at xhigh scored about 1.4 points above high for 2.5 times the cost."
+        ),
+        ("max", Harness::Codex) => "OpenAI's reasoning guide keeps max for your most complex tasks, evaluated against xhigh.".into(),
+        ("xhigh", Harness::Codex) => "OpenAI's reasoning guide says to use xhigh only when your evals show a clear benefit that justifies the extra latency and cost.".into(),
+        _ => return None,
+    })
+}
+
+/// A default as a card names it, such as `claude-opus-5-5 at high`.
+fn default_pair(model: Option<&str>, level: Option<&str>) -> String {
+    let model = model.unwrap_or("an unnamed model");
+    match level {
+        Some("auto") => format!("{model} with no level sent"),
+        Some(level) => format!("{model} at {level}"),
+        None => format!("{model}, which takes no effort level"),
+    }
+}
+
+/// The main-session default as `vibes` shows it: the maintainer's pick beside the default
+/// the settings give, the provider's guidance past `high`, and what each recorded model and
+/// effort pair cost. None when the default is unresolved.
+fn default_item(e: &EffortCheck, profile: &str, how: Option<How>, out: &Out<'_>) -> Option<Item> {
     if e.base.action != Action::Keep {
         return None;
     }
-    let level = e.base.current.as_deref()?;
-    let (text, sources) = match (level, e.harness) {
-        ("max", Harness::Claude) => (
-            format!(
-                "{PAST_HIGH}, and Claude Code's docs call max prone to overthinking and say to test it before adopting it broadly."
-            ),
-            vec![CLAUDE_MODEL_GUIDE, CLAUDE_EFFORT_DOCS],
-        ),
-        ("xhigh", Harness::Claude) => (
-            format!(
-                "{PAST_HIGH}; on SWE-bench Pro, Opus 5.5 at xhigh scored about 1.4 points above high for 2.5 times the cost."
-            ),
-            vec![CLAUDE_MODEL_GUIDE],
-        ),
-        ("max", Harness::Codex) => (
-            "OpenAI's reasoning guide keeps max for your most complex tasks, evaluated against xhigh.".into(),
-            vec![OPENAI_REASONING],
-        ),
-        ("xhigh", Harness::Codex) => (
-            "OpenAI's reasoning guide says to use xhigh only when your evals show a clear benefit that justifies the extra latency and cost.".into(),
-            vec![OPENAI_REASONING],
-        ),
-        _ => return None,
+    let c = &e.control;
+    let ((model, effort), others) = crate::effort::pick(e.harness);
+    let pick = default_pair(Some(model), Some(effort));
+    let fine: Vec<String> = others
+        .iter()
+        .map(|(m, l)| default_pair(Some(m), Some(l)))
+        .collect();
+    let current = default_pair(c.model.as_deref(), c.effective.as_deref());
+    let quiet = crate::effort::accepted(c, e.harness);
+    let mut text = if current == pick {
+        format!("Defaults to {current}, the maintainer's pick.")
+    } else if quiet {
+        format!("Defaults to {current}, which the maintainer accepts beside their pick, {pick}.")
+    } else if fine.is_empty() {
+        format!("Defaults to {current}. The maintainer's pick is {pick}.")
+    } else {
+        format!(
+            "Defaults to {current}. The maintainer's pick is {pick}, and {} is fine too.",
+            fine.join(" or ")
+        )
     };
-    Some((format!("Defaults to {level}. {text}"), sources))
+    // An accepted default is fine as it is, so no caution is raised against it.
+    if let Some(guidance) = c
+        .effective
+        .as_deref()
+        .filter(|_| !quiet)
+        .and_then(|l| past_high(l, e.harness))
+    {
+        let _ = write!(text, " {guidance}");
+    }
+    let _ = write!(text, " {}", effort_runs(e));
+    if !quiet {
+        text += " A different model or effort changes the output tokens, so what the pick would cost is not measured.";
+    }
+    let (lead, guides): (&str, &[&str]) = match e.harness {
+        Harness::Claude => (
+            "The maintainer's pick of a default. Anthropic's guidance:",
+            &[CLAUDE_MODEL_GUIDE, CLAUDE_EFFORT_DOCS],
+        ),
+        Harness::Codex => (
+            "The maintainer's pick of a default. OpenAI's guidance:",
+            &[OPENAI_REASONING],
+        ),
+    };
+    Some(Item {
+        name: tagged("Main-session default".into(), profile),
+        value: if quiet {
+            String::new()
+        } else {
+            format!("{current} {} {pick}", out.arrow)
+        },
+        what: "The model and reasoning effort a main session starts with.".into(),
+        text,
+        sources: std::iter::once(lead)
+            .chain(guides.iter().copied())
+            .map(String::from)
+            .collect(),
+        how,
+        quiet,
+    })
+}
+
+/// What each recorded main-session model and effort pair cost, the most-run first.
+fn effort_runs(e: &EffortCheck) -> String {
+    if e.runs.is_empty() {
+        return "No main-session requests in the window.".into();
+    }
+    let mut runs: Vec<String> = e
+        .runs
+        .iter()
+        .take(EFFORT_PAIRS)
+        .map(|run| {
+            let cost = match run.estimate {
+                Some(e) => approx(e.usd, e.margin, ""),
+                None => "unpriced".into(),
+            };
+            format!(
+                "{} {}, {cost}",
+                effort_pair(run),
+                plural(run.requests, "time")
+            )
+        })
+        .collect();
+    if e.runs.len() > EFFORT_PAIRS {
+        let more = e.runs.len() - EFFORT_PAIRS;
+        runs.push(format!(
+            "{more} more pair{}",
+            if more == 1 { "" } else { "s" }
+        ));
+    }
+    format!("Ran {}.", runs.join("; "))
 }
 
 /// A model and effort pair as a line names it, such as `claude-opus-5-5 at high`.
@@ -479,7 +572,7 @@ fn effort_evidence(e: &EffortCheck, mark: Mark, out: &Out<'_>) -> String {
         } else {
             format!("The default is set to {level} on {model}")
         };
-        if c.model_owner == "the latest recorded main-session model" {
+        if c.model_owner == crate::effort::RECORDED {
             text += ", the model the latest session ran";
         }
         if let Some(why) = &c.lowered {
@@ -488,34 +581,7 @@ fn effort_evidence(e: &EffortCheck, mark: Mark, out: &Out<'_>) -> String {
         }
         parts.push(text + ".");
     }
-    if e.runs.is_empty() {
-        parts.push("No main-session requests in the window.".into());
-    } else {
-        let mut runs: Vec<String> = e
-            .runs
-            .iter()
-            .take(EFFORT_PAIRS)
-            .map(|run| {
-                let cost = match run.estimate {
-                    Some(e) => approx(e.usd, e.margin, ""),
-                    None => "unpriced".into(),
-                };
-                format!(
-                    "{} {}, {cost}",
-                    effort_pair(run),
-                    plural(run.requests, "time")
-                )
-            })
-            .collect();
-        if e.runs.len() > EFFORT_PAIRS {
-            let more = e.runs.len() - EFFORT_PAIRS;
-            runs.push(format!(
-                "{more} more pair{}",
-                if more == 1 { "" } else { "s" }
-            ));
-        }
-        parts.push(format!("Ran {}.", runs.join("; ")));
-    }
+    parts.push(effort_runs(e));
     parts.push(EFFORT_UNPRICED.into());
     if e.enterprise && c.level.is_some() {
         parts.push(
@@ -5412,15 +5478,15 @@ fn summary(
         vibes.push(bash_item(cap, &profile, how, out));
     }
     for (_, result, r) in &checks {
-        if let CheckResult::Effort(e) = result
-            && let Some((text, sources)) = effort_warning(e)
-        {
-            vibes.push(guidance(
-                setting_name(result),
-                &tag(r.profiles, &|_| r.owner.to_string(), out),
-                text,
-                &sources,
-            ));
+        if let CheckResult::Effort(e) = result {
+            let how = report
+                .scan
+                .profiles
+                .iter()
+                .find(|p| p.id == e.base.profile)
+                .and_then(|profile| crate::doctor::default_how(&e.control, profile));
+            let profile = tag(r.profiles, &|_| r.owner.to_string(), out);
+            vibes.extend(default_item(e, &profile, how, out));
         }
     }
     // Lines of one setting that split only because the controls they replay differ name the
@@ -7265,6 +7331,7 @@ mod tests {
                     caps: vec![],
                     default: Some("medium".into()),
                     unresolved: None,
+                    picked: None,
                 },
                 enterprise: false,
                 runs: vec![],
@@ -8133,12 +8200,13 @@ mod tests {
     }
 
     #[test]
-    fn effort_lines_are_costs_with_the_providers_guidance_past_high_as_warnings() {
-        use crate::doctor::fixes;
+    fn effort_lines_are_costs_and_vibes_suggests_the_maintainers_pick_with_the_guidance() {
+        use crate::doctor::{Edit, Op, fixes};
         use crate::effort::{EffortInput, effort_checks};
+        use serde_json::json;
         let file = format!("{ROOT}/settings.json");
-        // One profile's line for a control beside the recorded pairs, its warning if any, and
-        // whether `doctor` offers anything.
+        // One profile's line for a control beside the recorded pairs, its `vibes` card if any,
+        // and whether `doctor` offers anything.
         let line = |harness: Harness, control: EffortControl| {
             let mut report = synthetic();
             report.checks.clear();
@@ -8160,12 +8228,11 @@ mod tests {
             );
             // The provider's guidance is `vibes`' card, and no part of the measured report.
             assert!(!text.contains("model guide") && !text.contains("reasoning guide"));
-            let warning = advice(&report, ReportOptions::default())
+            let card = advice(&report, ReportOptions::default())
                 .into_iter()
-                .find(|i| i.name == "Main-session effort")
-                .map(|i| format!("{} {}", i.text, i.sources.join(" ")));
+                .find(|i| i.name == "Main-session default");
             let line = report_line(&text, "Main-session effort");
-            (line, warning, fixes(&report, false).is_empty())
+            (line, card, fixes(&report, false).is_empty())
         };
         let control = |model: &str, level: &str, owner: &str| EffortControl {
             model: Some(model.into()),
@@ -8177,6 +8244,7 @@ mod tests {
             caps: vec![],
             default: None,
             unresolved: None,
+            picked: None,
         };
         let owner = format!("{file}:env.CLAUDE_CODE_EFFORT_LEVEL");
         let toml = "/synthetic/home/.codex/config.toml";
@@ -8207,35 +8275,68 @@ mod tests {
             row.evidence
         );
         assert!(row.evidence.contains("Enterprise per-role cap"));
-        // Past high, each provider's own guidance is a cited `vibes` card.
-        let warning = warning.expect("max warns");
+        // Off the pick, `vibes` suggests it, with each provider's own guidance past high.
+        let said = |card: &Item| format!("{} {}", card.text, card.sources.join(" "));
+        let card = warning.expect("max is off the pick");
+        assert_eq!(
+            card.value,
+            "claude-opus-5-5 at max -> claude-opus-5-5 at medium"
+        );
+        assert!(!card.quiet);
+        let warning = said(&card);
         assert!(
-            warning.contains("Defaults to max. Anthropic's model guide says"),
+            warning.starts_with("Defaults to claude-opus-5-5 at max. The maintainer's pick is claude-opus-5-5 at medium, and claude-opus-5-5 at high is fine too. Anthropic's model guide says"),
             "{warning}"
         );
         assert!(warning.contains("prone to overthinking"));
-        assert!(warning.contains(CLAUDE_EFFORT_DOCS));
+        assert!(warning.contains("Ran claude-opus-5-5 at an unrecorded effort 4 times"));
+        assert!(warning.contains("what the pick would cost is not measured"));
+        assert!(warning.contains(&format!(
+            "The maintainer's pick of a default. Anthropic's guidance: {CLAUDE_MODEL_GUIDE} {CLAUDE_EFFORT_DOCS}"
+        )));
+        // The edit sets the variable that decides the level, in the file that sets it.
+        match card.how {
+            Some(How::Edit(patch)) => assert_eq!(
+                patch.edits,
+                [Edit {
+                    path: vec!["env".into(), "CLAUDE_CODE_EFFORT_LEVEL".into()],
+                    value: json!("medium"),
+                    op: Op::Set,
+                }]
+            ),
+            other => panic!("{other:?}"),
+        }
         let (_, warning, _) = line(Harness::Claude, control("claude-opus-5-5", "xhigh", &owner));
-        assert!(
-            warning
-                .expect("xhigh warns")
-                .contains("test the next model up")
-        );
+        assert!(said(&warning.expect("xhigh is off the pick")).contains("test the next model up"));
+        // An accepted default has a quiet card naming the pick, with no change and no warning.
         let (_, warning, _) = line(Harness::Claude, control("claude-opus-5-5", "high", &owner));
-        assert_eq!(warning, None);
+        let card = warning.expect("an accepted default has a card");
+        assert!(card.quiet && card.value.is_empty() && card.how.is_none());
+        assert!(!said(&card).contains("model guide says"), "{}", said(&card));
+        // Below high there is no provider guidance, but the pick is still suggested.
         let (_, warning, _) = line(Harness::Claude, control("claude-opus-5", "low", &owner));
-        assert_eq!(warning, None);
+        let card = warning.expect("low is off the pick");
+        assert!(!card.quiet && !said(&card).contains("model guide says"));
+        assert_eq!(
+            card.value,
+            "claude-opus-5 at low -> claude-opus-5-5 at medium"
+        );
         // Codex cites OpenAI's guide, never Anthropic's.
         let (row, warning, _) = line(Harness::Codex, control("gpt-6.1-sol", "max", toml));
-        let warning = warning.expect("Codex max warns");
+        let warning = said(&warning.expect("Codex max is off the pick"));
         assert!(
             warning.contains("OpenAI's reasoning guide keeps max"),
             "{warning}"
         );
-        assert!(!warning.contains("Anthropic"));
+        assert!(warning.contains(OPENAI_REASONING) && !warning.contains("Anthropic"));
         assert!(!row.evidence.contains("Enterprise"));
         let (_, warning, _) = line(Harness::Codex, control("gpt-6.1-sol", "ultra", toml));
-        assert_eq!(warning, None);
+        let card = warning.expect("ultra is off the pick");
+        assert_eq!(card.value, "gpt-6.1-sol at ultra -> gpt-6.2-sol at high");
+        // Sol 6.2 at xhigh is accepted, so OpenAI's xhigh caution is not shown against it.
+        let (_, warning, _) = line(Harness::Codex, control("gpt-6.2-sol", "xhigh", toml));
+        let card = warning.expect("an accepted default has a card");
+        assert!(card.quiet && !said(&card).contains("only when your evals"));
 
         // A level a cap lowered names the cap's owner when the cap owns it.
         let (row, _, _) = line(
@@ -8274,6 +8375,7 @@ mod tests {
             "{}",
             row.evidence
         );
+        // An unresolved default has no card.
         assert!(none && warning.is_none());
     }
 

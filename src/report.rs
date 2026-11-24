@@ -4482,7 +4482,7 @@ fn guidance(name: String, profile: &str, text: String, sources: &[&str]) -> Item
         sources: sources.iter().map(|s| s.to_string()).collect(),
         how: None,
         quiet: false,
-        after: None,
+        after: vec![],
     }
 }
 
@@ -4576,7 +4576,7 @@ fn bash_item(cap: &BashCap, profile: &str, how: Option<How>, out: &Out<'_>) -> I
             .collect(),
         how,
         quiet: value_is_empty,
-        after: None,
+        after: vec![],
     }
 }
 
@@ -4588,8 +4588,12 @@ const CONTEXT_ROT: &str = "https://platform.claude.com/docs/en/build-with-claude
 /// Where a window card's line stands in `doctor`.
 #[derive(Clone, Copy)]
 enum Doctor {
-    /// As the line read before the walk, its change not written.
-    Line,
+    /// The line keeps the window on cost.
+    Keeps,
+    /// The line recommends this window on cost, a change the walk did not write.
+    Recommends(i64),
+    /// The line gives no verdict.
+    Unknown,
     /// The walk wrote the line's change, which moved the window here.
     Wrote(i64),
 }
@@ -4601,61 +4605,64 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
     let cap = crate::vibes::window_cap(profile.harness);
     let codex = profile.harness == Harness::Codex;
     let line = "doctor's auto-compact window line";
+    let mut item = Item {
+        name: String::new(),
+        value: String::new(),
+        what: String::new(),
+        text: String::new(),
+        sources: if codex {
+            vec![WINDOW_PICK.to_string()]
+        } else {
+            vec![
+                format!("{WINDOW_PICK} Anthropic's docs on context rot:"),
+                CONTEXT_ROT.into(),
+            ]
+        },
+        how: None,
+        quiet: true,
+        after: vec![],
+    };
     let (window, now) = match (doctor, c.base.current) {
         (Doctor::Wrote(to), _) => (
-            Some(to),
+            to,
             format!(
                 "{line} recommended {} on cost, and the walk wrote it.",
                 tokens(to)
             ),
         ),
-        (Doctor::Line, Some(w)) if c.unset => (
-            Some(w),
+        (_, Some(w)) if c.unset => (
+            w,
             format!(
                 "No setting names it, so Claude Code compacts this model near {}, its window for the model.",
                 tokens(w)
             ),
         ),
-        (Doctor::Line, Some(w)) => match c.setting {
+        (_, Some(w)) => match c.setting {
             Some(set) => (
-                Some(w),
+                w,
                 format!(
                     "Set to {}, which the model's {} context caps.",
                     tokens(set),
                     tokens(w)
                 ),
             ),
-            None => (Some(w), format!("Set to {}.", tokens(w))),
+            None => (w, format!("Set to {}.", tokens(w))),
         },
-        (Doctor::Line, None) => (
-            None,
-            "No setting names it, and token-max does not read the default for the model.".into(),
-        ),
+        // A smaller default would rise to the cap, so an unknown window is not advised down.
+        (_, None) => {
+            item.text = format!(
+                "token-max could not resolve this window, so it cannot tell whether it is above the {} window the maintainer caps it at. Set by {}.",
+                tokens(cap),
+                out.home(&c.base.owner)
+            );
+            return item;
+        }
     };
-    let sources = if codex {
-        vec![WINDOW_PICK.to_string()]
-    } else {
-        vec![
-            format!("{WINDOW_PICK} Anthropic's docs on context rot:"),
-            CONTEXT_ROT.into(),
-        ]
-    };
-    let mut item = Item {
-        name: String::new(),
-        value: String::new(),
-        what: String::new(),
-        text: String::new(),
-        sources,
-        how: None,
-        quiet: false,
-        after: None,
-    };
-    if window.is_some_and(|w| w <= cap) {
+    if window <= cap {
         item.text = format!(
             "{now} That is at or under the {} window the maintainer caps it at, so there is nothing to change.",
             tokens(cap)
         );
-        item.quiet = true;
         return item;
     }
     let why = if codex {
@@ -4663,16 +4670,24 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
     } else {
         "Anthropic's docs say accuracy and recall degrade as a context grows."
     };
-    // The line's own replay of the cap, against the window it compared every candidate with.
+    // The line's own replay of the cap, against the window it compared every candidate with;
+    // a replay whose service tier is unsettled prices nothing, as on the line.
+    let conditional = c
+        .base
+        .uncertainty
+        .iter()
+        .any(|u| u == crate::prices::TIER_SENSITIVITY);
     let priced = c
         .scenarios
         .iter()
         .find(|s| s.window == cap)
+        .filter(|_| !conditional)
         .and_then(|s| Some((s.savings_usd?, s.margin)));
-    let against = c.base.current.map_or_else(
-        || "the recorded requests".into(),
-        |w| format!("the {} window", tokens(w)),
-    );
+    let against = match (doctor, c.base.current) {
+        (Doctor::Wrote(_), Some(w)) => format!("the {} window before that change", tokens(w)),
+        (_, Some(w)) => format!("the {} window", tokens(w)),
+        (_, None) => "the recorded requests".into(),
+    };
     let cost = match priced {
         Some((usd, margin)) => {
             let scale = monthly(1.0, c.base.since, c.base.until);
@@ -4694,31 +4709,42 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
         ),
     };
     // How this card stands beside the line's measured verdict, which it does not change.
-    let verdict = match (doctor, c.base.recommended) {
-        (Doctor::Wrote(_), _) => String::new(),
-        (Doctor::Line, Some(r)) if Some(r) == c.base.current => {
-            format!(" {line} keeps it on cost.")
-        }
-        (Doctor::Line, Some(r)) => format!(" {line} recommends {} on cost.", tokens(r)),
-        (Doctor::Line, None) => format!(" {line} gives no verdict on cost."),
+    let verdict = match doctor {
+        Doctor::Wrote(_) => String::new(),
+        Doctor::Keeps => format!(" {line} keeps it on cost."),
+        Doctor::Recommends(r) => format!(" {line} recommends {} on cost.", tokens(r)),
+        Doctor::Unknown => format!(" {line} gives no verdict on cost."),
     };
     item.text = format!(
         "{now} The maintainer would cap it at {} for better output, not a smaller bill: a smaller window compacts sooner, so the model works from a shorter context. {why}{verdict} {cost} The cap is advice beside that line, not its verdict.",
         tokens(cap)
     );
-    item.value = format!(
-        "{} {} {}",
-        window.map_or_else(|| "default".into(), tokens),
-        out.arrow,
-        tokens(cap)
-    );
-    item.how = Some(crate::doctor::window_change(
-        c,
-        c.capped.as_ref(),
-        cap,
-        profile,
-    ));
+    item.value = format!("{} {} {}", tokens(window), out.arrow, tokens(cap));
+    item.quiet = false;
+    item.how = Some(match &c.unsettable {
+        // As the line would, the change goes by hand where no edit is known to hold.
+        Some(reason) => How::Manual {
+            step: format!("set {} to {cap}", c.base.owner),
+            reason: reason.clone(),
+        },
+        None => crate::doctor::window_change(c, c.capped.as_ref(), cap, profile),
+    });
     item
+}
+
+/// A window card once `doctor`'s walk wrote a compaction window change that can move this
+/// window in a way the scan cannot replay, such as a plan that pins other models' triggers.
+fn window_rescan(c: &CompactionCheck, profile: &Profile, out: &Out<'_>) -> Item {
+    Item {
+        value: String::new(),
+        text: format!(
+            "doctor's walk just wrote a compaction window change that can move this window. Run token-max vibes again to compare the {} cap with the settings as they are now.",
+            tokens(crate::vibes::window_cap(profile.harness))
+        ),
+        how: None,
+        quiet: true,
+        ..window_item(c, profile, Doctor::Unknown, out)
+    }
 }
 
 /// A check's verdict before its line is drawn.
@@ -5730,15 +5756,21 @@ fn summary(
         if let CheckResult::Compaction(c) = result
             && let Some(profile) = out.profiles.get(r.profile).copied()
         {
-            // The window `doctor`'s change moves it to, when the walk can write that change.
-            let written = fixes
-                .iter()
-                .find(|f| f.origins.contains(&Origin::Check(*index)))
-                .filter(|f| matches!(f.how, How::Edit(_)))
-                .and(c.base.recommended)
-                .filter(|r| Some(*r) != c.base.current);
-            let card = |doctor: Doctor| {
-                let mut item = window_item(c, profile, doctor, out);
+            // The lines whose change the walk can write, by the window it moves to.
+            let writable = |i: usize| {
+                fixes
+                    .iter()
+                    .any(|f| f.origins.contains(&Origin::Check(i)) && matches!(f.how, How::Edit(_)))
+            };
+            let doctor = match check_mark(result, r) {
+                Mark::Change => c
+                    .base
+                    .recommended
+                    .map_or(Doctor::Unknown, Doctor::Recommends),
+                Mark::Keep => Doctor::Keeps,
+                _ => Doctor::Unknown,
+            };
+            let named = |mut item: Item| {
                 item.name = tagged(
                     setting_name(result),
                     &tag(r.profiles, &|_| r.owner.to_string(), out),
@@ -5746,11 +5778,39 @@ fn summary(
                 item.what = crate::descriptions::check(result).into();
                 item
             };
-            let mut item = card(Doctor::Line);
-            item.after = written.map(|window| crate::vibes::After {
-                origin: Origin::Check(*index),
-                item: Box::new(card(Doctor::Wrote(window))),
-            });
+            let mut item = named(window_item(c, profile, doctor, out));
+            // Another window line's change on this harness can move this window, as can this
+            // line's own change when it pins other models' triggers: the scan can't replay
+            // either, so the card asks for a fresh one.
+            let others: Vec<Origin> = report
+                .checks
+                .iter()
+                .enumerate()
+                .filter(|(i, other)| {
+                    *i != *index
+                        && writable(*i)
+                        && matches!(other, CheckResult::Compaction(o)
+                            if out.profiles.get(o.base.profile.as_str())
+                                .is_some_and(|p| p.harness == profile.harness))
+                })
+                .map(|(i, _)| Origin::Check(i))
+                .collect();
+            if !others.is_empty() {
+                item.after.push(crate::vibes::After {
+                    origins: others,
+                    item: Box::new(named(window_rescan(c, profile, out))),
+                });
+            }
+            if let (true, Doctor::Recommends(to)) = (writable(*index), doctor) {
+                let written = match c.reowned {
+                    Some(_) => window_rescan(c, profile, out),
+                    None => window_item(c, profile, Doctor::Wrote(to), out),
+                };
+                item.after.push(crate::vibes::After {
+                    origins: vec![Origin::Check(*index)],
+                    item: Box::new(named(written)),
+                });
+            }
             vibes.push(item);
         }
         if let CheckResult::Effort(e) = result
@@ -6821,6 +6881,7 @@ mod tests {
             cache_evidence: vec![],
             reowned: None,
             capped: None,
+            unsettable: None,
         })
     }
 

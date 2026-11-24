@@ -2172,6 +2172,17 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 && per_model_supported
                 && (!claude || !models.contains(&None))
                 && unpinned.is_none();
+            let unsettable = if !control.applicable {
+                Some(control.reason.clone())
+            } else if !per_model_supported {
+                Some(format!(
+                    "the recorded Claude Code is older than v2.1.{patch}, which this window control needs"
+                ))
+            } else if claude && models.contains(&None) {
+                Some("requests with no recorded model ran on this line, and no setting is known to hold their window".into())
+            } else {
+                None
+            };
             let profiles: IndexSet<&String> =
                 selected.iter().flat_map(|r| r.profiles.iter()).collect();
             let savings = winning
@@ -2296,6 +2307,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 cache_evidence: baseline_evidence.clone(),
                 reowned,
                 capped,
+                unsettable,
             });
         }
     }
@@ -5354,17 +5366,20 @@ mod tests {
                 }))
             );
             // Once the walk writes the line's 100k, the window is under the cap.
-            let after = item.after.clone().unwrap();
-            assert_eq!(after.origin, Origin::Check(index));
+            // The only window line, so only its own change moves it.
+            let [after] = &item.after[..] else {
+                panic!("{:?}", item.after)
+            };
+            assert_eq!(after.origins, [Origin::Check(index)]);
             assert_eq!(
                 after.item.text,
                 "doctor's auto-compact window line recommended 100k on cost, and the walk wrote it. That is at or under the 400k window the maintainer caps it at, so there is nothing to change."
             );
             assert!(after.item.quiet && after.item.how.is_none());
-            let wrote = crate::vibes::settled(vec![item.clone()], &[after.origin]);
-            assert_eq!(wrote, [*after.item]);
+            let wrote = crate::vibes::settled(vec![item.clone()], &after.origins);
+            assert_eq!(wrote, [*after.item.clone()]);
             let declined = crate::vibes::settled(vec![item.clone()], &[Origin::Check(index + 1)]);
-            assert_eq!(declined[0].after, None);
+            assert_eq!(declined[0].after, []);
             assert_eq!(declined[0].text, item.text);
             // A cap the replay priced says what it costs against the current window.
             let CheckResult::Compaction(c) = &mut report.checks[index] else {
@@ -5415,6 +5430,74 @@ mod tests {
                 item.text
             );
             assert!(matches!(item.how, Some(How::Edit(_))), "{:?}", item.how);
+        }
+
+        #[test]
+        fn a_written_window_change_that_pins_other_models_asks_for_a_fresh_vibes() {
+            use crate::doctor::How;
+            use crate::report::Origin;
+            let key = crate::controls::PERCENT_KEY;
+            let mut scan = data(4);
+            let mut haiku = at("haiku", "haiku", HOUR);
+            haiku.model = Some("claude-haiku-5-5".into());
+            haiku.parts[0].model = Some("claude-haiku-5-5".into());
+            scan.requests.push(haiku);
+            scan.profiles[0].compaction = controls(
+                Harness::Claude,
+                json!({
+                    "env": {key: "50"},
+                    "modelSettings": {
+                        "claude-opus-5-5": {"autoCompactWindow": 900000},
+                        "claude-haiku-5-5": {"autoCompactWindow": 300000},
+                    },
+                }),
+                &Env::default(),
+                "synthetic/settings.json",
+            );
+            crate::controls::tune_windows(&mut scan);
+            let report = report(&scan);
+            let line = |model: &str| {
+                report
+                    .checks
+                    .iter()
+                    .position(|c| matches!(c, CheckResult::Compaction(c) if c.model.as_deref() == Some(model)))
+                    .unwrap()
+            };
+            let (opus, haiku) = (line("claude-opus-5-5"), line("claude-haiku-5-5"));
+            let CheckResult::Compaction(c) = &report.checks[opus] else {
+                unreachable!()
+            };
+            assert_eq!(
+                (c.base.current, c.base.action, c.reowned.is_some()),
+                (Some(450_000), Action::Change, true)
+            );
+            let cards = crate::report::advice(&report, ReportOptions::default());
+            let card = |name: &str| cards.iter().find(|i| i.name.contains(name)).unwrap();
+            // Opus's cap goes through its own plan: the override out, Haiku's trigger pinned.
+            let first = card("claude-opus-5-5");
+            assert_eq!(first.value, "450k -> 400k");
+            let Some(How::Edit(patch)) = &first.how else {
+                panic!("{:?}", first.how)
+            };
+            assert_eq!(patch.edits.len(), 3, "{patch:?}");
+            assert!(card("claude-haiku-5-5").quiet);
+            // Once the walk writes Opus's planned change, neither card's edits fit the files.
+            let rescan = "doctor's walk just wrote a compaction window change that can move this window. Run token-max vibes again to compare the 400k cap with the settings as they are now.";
+            for item in crate::vibes::settled(cards.clone(), &[Origin::Check(opus)])
+                .iter()
+                .filter(|i| i.name.starts_with("Auto-compact window"))
+            {
+                assert_eq!(
+                    (item.text.as_str(), item.quiet, &item.how),
+                    (rescan, true, &None)
+                );
+            }
+            // A change to another line elsewhere moves neither.
+            let kept = crate::vibes::settled(cards.clone(), &[Origin::Check(haiku + opus + 1)]);
+            assert_eq!(
+                kept.iter().map(|i| &i.text).collect::<Vec<_>>(),
+                cards.iter().map(|i| &i.text).collect::<Vec<_>>()
+            );
         }
 
         // Window presentation keeps conditional baselines, every scenario and geometry evidence reachable.
@@ -5660,21 +5743,36 @@ mod tests {
                     }],
                 }))
             );
-            assert!(item.after.unwrap().item.quiet);
-            // With no limit set, the default is unread, so the card still advises the cap.
+            assert!(item.after[0].item.quiet);
+            // A limit under a named profile may not be the one its sessions read, so the cap is
+            // set by hand, as the line would leave it.
+            let mut named = owned.clone();
+            named.profiles[0].compaction = controls(
+                Harness::Codex,
+                json!({"model_auto_compact_token_limit": 400000, "profiles": {"work": {}}}),
+                &Env::default(),
+                "config.toml",
+            );
+            let item = card(&named);
+            assert_eq!(item.value, "400k -> 240k");
+            assert_eq!(
+                item.how,
+                Some(crate::doctor::How::Manual {
+                    step: "set config.toml:model_auto_compact_token_limit to 240000".into(),
+                    reason: "named Codex profiles exist; the active profile/CLI override is not established".into(),
+                })
+            );
+            // With no limit set, the default is unread: a smaller one would rise to the cap, so
+            // nothing is advised.
             owned.profiles[0].settings.clear();
             owned.profiles[0].compaction =
                 controls(Harness::Codex, json!({}), &Env::default(), "config.toml");
             let item = card(&owned);
-            assert_eq!(item.value, "default -> 240k");
-            assert!(
-                item.text.starts_with(
-                    "No setting names it, and token-max does not read the default for the model. "
-                ),
-                "{}",
-                item.text
+            assert!(item.quiet && item.how.is_none() && item.value.is_empty());
+            assert_eq!(
+                item.text,
+                "token-max could not resolve this window, so it cannot tell whether it is above the 240k window the maintainer caps it at. Set by config.toml:model_auto_compact_token_limit."
             );
-            assert!(matches!(item.how, Some(crate::doctor::How::Edit(_))));
             let mut unpriced = s.clone();
             let unsupported = &mut unpriced.profiles[0];
             unsupported.settings.insert(

@@ -1381,27 +1381,35 @@ page, which says accuracy and recall degrade as a context grows. No OpenAI page
 says how Codex's output changes with the window, so its card rests on the
 maintainer's pick alone and says so.
 
-The card advises the cap when the window is above it. That includes an unset
-window on a native-1M Claude model, which compacts near 967K, and an unset
-Codex limit, whose default token-max does not read. A window at or under the
-cap, such as a 200K model's, gets a card that advises nothing.
+The card advises the cap when the window is above it, including an unset
+window on a native-1M Claude model, which compacts near 967K. A window at or
+under the cap, such as a 200K model's, gets a card that advises nothing, and
+so does one token-max can't resolve, such as an unset Codex limit: setting the
+cap there could raise a smaller default.
 
 The card names the line's verdict, which weighs cost alone, and stays apart
 from it. When the line's replay priced a window at the cap, the card gives
-what it saves or costs every 30 days against the current window; otherwise
-it says what the cap costs is not measured. The replay's candidates come from
+what it saves or costs every 30 days against the current window; otherwise,
+or when the replay's service tier is unsettled, it says what the cap costs is
+not measured. The replay's candidates come from
 the evidence, not from this cap, so it is usually unpriced.
 
 The cap goes through the same edit the line's own change makes: where the
 owner holds it, as a model's `modelSettings` row, or, under
 `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, by removing the override and pinning every
 other model's trigger. A change the line would leave by hand is left by hand
-here too, and so is one that would move another model's trigger.
+here too, and so is one that would move another model's trigger. So is a
+window the line can't rely on its owner to set, such as a Codex limit under
+named profiles or a `body_after_prefix` scope.
 
 When `doctor`'s walk writes the line's change, the card reads as it does after
 it. A recommended window at or under the cap leaves nothing to advise, and one
-above it is the window the card caps. A change declined, or never confirmed,
-leaves the card as the scan read it.
+above it is the window the card caps. A written change that moved other
+settings too, such as one that removed `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, or
+a written change on another window line of the same harness, leaves edits the
+scan can't check, so the card advises nothing and asks for a fresh
+`token-max vibes`. A change declined, or never confirmed, leaves the card as
+the scan read it.
 
 ## Main-session effort
 

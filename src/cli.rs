@@ -2000,7 +2000,7 @@ fn walk(walk: Walk) -> Result<(), ScanError> {
             drop(walking);
             settle(&mut hosts, &selections, &style, &mut stdin, &mut stdout)?;
             let wrote = hosts.iter().any(|h| h.wrote);
-            // What a host wrote can change its advice, which it then reads again below.
+            // What a host wrote can change its advice, so its count is read again below.
             if !wrote && hosts.iter().all(|h| h.pending == 0) {
                 return Ok(());
             }
@@ -2014,10 +2014,17 @@ fn walk(walk: Walk) -> Result<(), ScanError> {
             if ssh::cancelled() {
                 return Ok(());
             }
-            for host in &mut hosts {
+            // A host that wrote reads its advice again for the count; the rest only on a yes.
+            for host in hosts.iter_mut().filter(|h| h.wrote) {
                 host.advise()?;
             }
-            let pending: usize = hosts.iter().map(|h| vibes::pending(&h.items)).sum();
+            let pending: usize = hosts
+                .iter()
+                .map(|h| match h.wrote {
+                    true => vibes::pending(&h.items),
+                    false => h.pending,
+                })
+                .sum();
             if pending == 0 {
                 return Ok(());
             }
@@ -2026,6 +2033,9 @@ fn walk(walk: Walk) -> Result<(), ScanError> {
                 return Ok(());
             }
             writeln!(stdout).map_err(failed)?;
+            for host in hosts.iter_mut().filter(|h| !h.wrote) {
+                host.advise()?;
+            }
         }
         let wrote = hosts.iter().any(|h| h.wrote);
         let asking: Vec<vibes::Host> = hosts

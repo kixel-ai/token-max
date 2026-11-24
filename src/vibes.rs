@@ -36,17 +36,17 @@ pub struct Item {
     /// Nothing to act on, such as a setting already as advised: `vibes` shows it, and
     /// `doctor` does not offer `vibes` for it.
     pub quiet: bool,
-    /// The card to show instead once `doctor`'s walk writes the change it offers for a line.
-    pub after: Option<After>,
+    /// The cards to show instead once `doctor`'s walk writes changes that move the setting
+    /// this one advises on; the first whose lines were written applies.
+    pub after: Vec<After>,
 }
 
-/// What a card becomes once `doctor` writes one of its lines' changes, since that change
-/// moves the setting the card advises on.
+/// What a card becomes once `doctor` writes the change for any of some lines.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct After {
-    /// The `doctor` line whose change moves the setting.
-    pub origin: Origin,
+    /// The `doctor` lines whose changes move the setting.
+    pub origins: Vec<Origin>,
     pub item: Box<Item>,
 }
 
@@ -63,12 +63,11 @@ pub fn window_cap(harness: Harness) -> i64 {
 pub fn settled(items: Vec<Item>, written: &[Origin]) -> Vec<Item> {
     items
         .into_iter()
-        .map(|item| match item.after {
-            Some(after) if written.contains(&after.origin) => *after.item,
-            _ => Item {
-                after: None,
-                ..item
-            },
+        .map(|mut item| {
+            let after = std::mem::take(&mut item.after)
+                .into_iter()
+                .find(|a| a.origins.iter().any(|o| written.contains(o)));
+            after.map_or(item, |a| *a.item)
         })
         .collect()
 }
@@ -336,7 +335,7 @@ mod tests {
             sources: vec!["https://example.com/guide".into()],
             how: None,
             quiet: false,
-            after: None,
+            after: vec![],
         }
     }
 

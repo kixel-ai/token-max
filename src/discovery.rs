@@ -1205,12 +1205,10 @@ pub fn discover_latest_claude_controls(
             file: managed_file,
         }))
         .collect();
-        if let Some(cwd) = directory {
-            profile.memory = Some(MemoryControl {
-                directory: Some(cwd.into()),
-                ..claude_memory(&scopes, local_env)?
-            });
-        }
+        profile.memory = Some(MemoryControl {
+            directory: directory.map(Into::into),
+            ..claude_memory(&scopes, local_env)?
+        });
         profile.effort = Some(claude_effort(
             &scopes,
             &profile.settings_file,
@@ -4707,6 +4705,7 @@ mod tests {
         assert_eq!(directory(&data, &claude(&data).id.clone()), None);
         assert_eq!(directory(&data, "t3"), None);
         let profile = claude(&data);
+        assert_eq!(profile.memory.as_ref().unwrap().directory, None);
         let advisor = profile.advisor.as_ref().unwrap();
         assert_eq!(advisor.model, None);
         assert_eq!(

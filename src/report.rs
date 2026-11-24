@@ -2587,6 +2587,9 @@ fn card(result: &CheckResult, action: Option<Action>, out: &mut Out<'_>) {
                 "Recorded cache categories held constant; Claude cache-switch effects excluded. API-price premium, which a plan can count differently (see Plan). Work held constant; latency value excluded.",
             );
         }
+        // A set value with no selected request has no replay to show.
+        CheckResult::TurnEnd(c) if c.scenarios.is_empty() => {}
+        CheckResult::Compaction(c) if c.scenarios.is_empty() => {}
         CheckResult::TurnEnd(c) => {
             for u in &c.usable {
                 out.field(
@@ -2896,6 +2899,8 @@ fn card(result: &CheckResult, action: Option<Action>, out: &mut Out<'_>) {
                 &s.current_estimate.premium,
             );
         }
+        CheckResult::TurnEnd(c) if c.scenarios.is_empty() => {}
+        CheckResult::Compaction(c) if c.scenarios.is_empty() => {}
         CheckResult::TurnEnd(c) => {
             out.cost("Current-threshold baseline", &c.baseline_cost);
             for scenario in &c.scenarios {

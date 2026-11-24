@@ -937,7 +937,10 @@ model's latest observed automatic-compaction trigger, else Claude Code's
 documented default. A window larger than the model's context window replays
 at that context window, as Claude Code caps it. Unresolved defaults, disabled
 compaction, unsupported versions/scopes, and ambiguous named Codex profiles stay
-advisory.
+advisory. A Codex limit that is set still gets its line when no selected request
+exists, such as under a `--since` that excludes every one: the value and its
+setting, with no verdict and no edit, since nothing replays it. An unset limit
+gets none.
 
 `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` resolves into the replayed trigger from every
 environment the window reads, a T3 instance's included. An explicit window
@@ -1041,7 +1044,9 @@ enough evidence. Neither is any threshold beside an auto-compact limit the
 replay cannot model, such as one scoped to the body after the prefix. A named profile, a `profiles` table or a project's
 `.codex/config.toml` that sets the threshold keeps the line advisory, since
 which applied is not recorded, as does a latest recorded Codex before v0.156.0,
-which added the setting. Lost detail and changed work remain unmeasured risks.
+which added the setting. A threshold that is set, zero included, still gets its
+line with no verdict when no selected request exists. Lost detail and changed
+work remain unmeasured risks.
 
 Native Codex transcripts record no billed service tier, so their requests are
 priced at an assumed one and, as for the compaction window, the line gives a

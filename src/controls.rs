@@ -7,7 +7,8 @@ use serde_json::{Map, Value};
 use crate::model::{
     BackgroundControl, BackgroundFeature, BashCapControl, Change, CompactionControls, EventKind,
     Harness, IdleAttribution, IdleControl, Inbound, InboundControl, Location, MemoryControl,
-    Millis, PercentOverride, Scan, Setting, Source, SpeedControl, TunedWindow, WindowControl,
+    Millis, PercentOverride, RetentionControl, Scan, Setting, Source, SpeedControl, TunedWindow,
+    WindowControl,
 };
 use crate::safe::{MAX_SAFE_INTEGER, ScanError, object};
 
@@ -492,6 +493,24 @@ pub fn bash_cap_control(scopes: &[SettingsScope], env: &Env) -> BashCapControl {
         default_timeout,
         default_owner,
         unresolved: None,
+    }
+}
+
+/// Claude's `cleanupPeriodDays`: managed settings outrank the user's, and unset keeps 30 days.
+pub fn retention_control(user: SettingsScope, managed: SettingsScope) -> RetentionControl {
+    for scope in [managed, user] {
+        if let Some(value) = scope.config.get("cleanupPeriodDays") {
+            return RetentionControl {
+                days: safe_integer(value)
+                    .filter(|days| *days >= 1)
+                    .map(|days| days as u64),
+                owner: format!("{}:cleanupPeriodDays", scope.file),
+            };
+        }
+    }
+    RetentionControl {
+        days: Some(30),
+        owner: format!("{}:cleanupPeriodDays (default)", user.file),
     }
 }
 
@@ -2914,6 +2933,55 @@ mod tests {
             ("claude-opus-4-6-v1", None),
         ] {
             assert_eq!(native_million(model), million, "{model}");
+        }
+    }
+
+    #[test]
+    fn retention_is_the_managed_value_else_the_users_else_thirty_days() {
+        let resolve = |user: Value, managed: Value| {
+            let (user, managed) = (map(user), map(managed));
+            let c = retention_control(
+                SettingsScope {
+                    config: &user,
+                    file: "user",
+                },
+                SettingsScope {
+                    config: &managed,
+                    file: "managed",
+                },
+            );
+            (c.days, c.owner)
+        };
+        let at = |days: Option<u64>, owner: &str| (days, owner.to_string());
+        assert_eq!(
+            resolve(json!({}), json!({})),
+            at(Some(30), "user:cleanupPeriodDays (default)")
+        );
+        assert_eq!(
+            resolve(json!({"cleanupPeriodDays": 90}), json!({})),
+            at(Some(90), "user:cleanupPeriodDays")
+        );
+        assert_eq!(
+            resolve(
+                json!({"cleanupPeriodDays": 90}),
+                json!({"cleanupPeriodDays": 7})
+            ),
+            at(Some(7), "managed:cleanupPeriodDays")
+        );
+        // JSON writes a whole number more than one way.
+        for whole in [json!(30.0), json!(3e1)] {
+            assert_eq!(
+                resolve(json!({"cleanupPeriodDays": whole}), json!({})).0,
+                Some(30)
+            );
+        }
+        // A value Claude Code rejects still owns the setting, with no days to compare.
+        for bad in [json!(0), json!(1.5), json!(-3), json!("90"), json!(null)] {
+            assert_eq!(
+                resolve(json!({"cleanupPeriodDays": bad}), json!({})),
+                at(None, "user:cleanupPeriodDays"),
+                "{bad}"
+            );
         }
     }
 

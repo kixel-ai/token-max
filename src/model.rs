@@ -976,6 +976,17 @@ pub struct BashCapControl {
     pub unresolved: Option<String>,
 }
 
+/// Claude's `cleanupPeriodDays`: how long it keeps transcripts before its startup sweep
+/// deletes them, and the file that decides it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RetentionControl {
+    /// The days in effect (30 when unset); None when the setting is not a whole number of
+    /// days of at least 1, which Claude Code rejects.
+    pub days: Option<u64>,
+    /// Where `cleanupPeriodDays` is set, or the user's settings file that would set it.
+    pub owner: String,
+}
+
 /// A selected profile's current settings and their owning controls.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Profile {
@@ -996,6 +1007,8 @@ pub struct Profile {
     pub idle: Option<IdleControl>,
     pub speed: Option<SpeedControl>,
     pub bash: Option<BashCapControl>,
+    /// How long Claude keeps transcripts; None for Codex, which keeps them until deleted.
+    pub retention: Option<RetentionControl>,
     /// Codex's turn-end compaction threshold; None for Claude.
     pub turn_end: Option<TurnEndControl>,
     /// The main session's default reasoning effort.

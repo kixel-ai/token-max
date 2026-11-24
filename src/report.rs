@@ -17,8 +17,8 @@ use crate::model::{
     CheckResult, CompactionCheck, ContextCost, ContextKind, ControlValue, Cost, Coverage,
     EffortCheck, EffortRun, Estimate, EstimateEvidence, Evidence, FableUse, FableWeek, Harness,
     InboundControl, InboundUse, KeepaliveCheck, Margin, MemoryCheck, Millis, ModelSource,
-    PeriodStatus, Profile, Report, RequestEvidence, ReturnTiming, Scalar, Share, SubagentCost,
-    T3IdleCheck, T3TextGeneration, Ttl, UsageEstimate, Verdict,
+    PeriodStatus, Profile, Report, RequestEvidence, RetentionControl, ReturnTiming, Scalar, Share,
+    SubagentCost, T3IdleCheck, T3TextGeneration, Ttl, UsageEstimate, Verdict,
 };
 use crate::prices::{TIER_SENSITIVITY, TIER_SIGNS, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
@@ -5017,6 +5017,67 @@ fn memory_item(line: MemoryLine<'_>, out: &Out<'_>) -> Item {
     }
 }
 
+/// What the maintainer picked for how long Claude Code keeps transcripts, before the pages
+/// on the setting and on what the sweep deletes.
+const RETENTION_PICK: &str = "The maintainer's pick of 365 days, which keeps a year of history without growing disk without bound. Claude Code's docs:";
+
+/// The days of transcripts Claude Code is advised to keep, a year.
+const RETENTION_DAYS: u64 = 365;
+
+/// Whether the retention a profile's settings give is the one in force: a T3 instance that is
+/// disabled, or whose launch arguments may replace the native settings, may keep other
+/// transcripts than that file says, so no edit to it is offered.
+fn retention_settled(profile: &Profile) -> bool {
+    profile.retention.is_some()
+        && profile
+            .t3
+            .as_ref()
+            .is_none_or(|t| t.enabled && !t.settings_unresolved)
+}
+
+/// How long Claude Code keeps transcripts, as `vibes` shows it when it is under a year, with
+/// the disk the transcripts token-max read take today and `how` to raise it.
+fn retention_item(
+    control: &RetentionControl,
+    days: u64,
+    profile: &str,
+    disk: u64,
+    how: How,
+    out: &Out<'_>,
+) -> Item {
+    let (to, kept) = (plural(RETENTION_DAYS, "day"), plural(days, "day"));
+    // Where the sweep reads the days from: a file's key, or the key the default would go in.
+    let set_in = match control.owner.strip_suffix(" (default)") {
+        Some(owner) => format!("Not set; it would go in {}.", out.home(owner)),
+        None => format!("Set in {}.", out.home(&control.owner)),
+    };
+    let held = if disk > 0 {
+        format!(" The transcripts token-max read take {} today.", size(disk))
+    } else {
+        String::new()
+    };
+    Item {
+        name: tagged("Transcript retention".into(), profile),
+        value: format!("{kept} {} {to}", out.arrow),
+        what:
+            "How long Claude Code keeps session transcripts before its startup sweep deletes them."
+                .into(),
+        text: format!(
+            "Claude Code deletes eligible transcripts after {kept}, so token-max has less history to replay.{held} Keeping {to} costs disk that grows with use. The setting only stops future deletion: history already deleted is gone. {set_in} Project and local settings, which override it, are not read."
+        ),
+        sources: [
+            RETENTION_PICK,
+            "https://code.claude.com/docs/en/settings-reference#cleanupperioddays",
+            "https://code.claude.com/docs/en/claude-directory#cleaned-up-automatically",
+        ]
+        .map(String::from)
+        .into(),
+        how: Some(how),
+        quiet: false,
+        after: vec![],
+    }
+}
+
 /// A check's verdict before its line is drawn.
 ///
 /// A comparison with no requests is not a verdict, whatever the tie-break said. Window
@@ -6026,6 +6087,32 @@ fn summary(
         let profile = tag(&cap.profiles, &|_| cap.owner.clone(), out);
         vibes.push(bash_item(cap, &profile, how, out));
     }
+    let owned = |p: &Profile| {
+        p.retention
+            .as_ref()
+            .map_or_else(String::new, |r| r.owner.clone())
+    };
+    let retained = report.scan.profiles.iter().filter(|p| retention_settled(p));
+    for line in crate::rows::groups(retained, owned) {
+        let control = line
+            .lead
+            .retention
+            .as_ref()
+            .expect("filtered on a retention control");
+        let Some(days) = control.days.filter(|days| *days < RETENTION_DAYS) else {
+            continue;
+        };
+        let disk = report
+            .scan
+            .snapshots
+            .iter()
+            .filter(|s| s.harness == Harness::Claude && line.covers(&s.profiles))
+            .map(|s| s.bytes)
+            .sum();
+        let how = crate::doctor::retention_how(control, RETENTION_DAYS, line.lead);
+        let profile = tag(&line.ids, &owned, out);
+        vibes.push(retention_item(control, days, &profile, disk, how, out));
+    }
     for (index, result, r) in &checks {
         if !matches!(result, CheckResult::Memory(_)) {
             continue;
@@ -7017,6 +7104,26 @@ mod tests {
     use crate::test_support::{
         Workspace, make_profile, make_request, prices, report_line, report_lines,
     };
+
+    #[test]
+    fn retention_is_advised_only_where_its_settings_are_the_ones_in_force() {
+        let mut native = make_profile("native", ROOT);
+        assert!(!retention_settled(&native));
+        native.retention = Some(RetentionControl {
+            days: Some(30),
+            owner: format!("{ROOT}/settings.json:cleanupPeriodDays (default)"),
+        });
+        assert!(retention_settled(&native));
+        let mut t3 = crate::test_support::make_t3_profile("t3", ROOT);
+        t3.retention = native.retention.clone();
+        assert!(retention_settled(&t3));
+        // Launch arguments may replace the settings file, so the days it names may not apply.
+        t3.t3.as_mut().unwrap().settings_unresolved = true;
+        assert!(!retention_settled(&t3));
+        t3.t3.as_mut().unwrap().settings_unresolved = false;
+        t3.t3.as_mut().unwrap().enabled = false;
+        assert!(!retention_settled(&t3));
+    }
 
     const NOV1: Millis = 1_793_491_200_000;
     const DAY_MS: Millis = 86_400_000;

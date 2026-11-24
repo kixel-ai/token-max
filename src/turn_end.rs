@@ -268,28 +268,14 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
         },
         replay,
     );
+    // A threshold whose turn ends compact where the current one's do replays as it does, so
+    // it decides nothing. One that could not decide or price a turn end still acts.
+    let acts: Vec<bool> = runs[0].iter().map(|r| r.acts).collect();
     let scenarios = scenarios(&percents, runs);
-
-    // A threshold that adds the summaries the current one does replays as it does, so it
-    // decides nothing. One whose replay fails where the current one's does not is
-    // unresolved, not untouched.
-    let summaries = |s: &WindowScenario| -> Vec<(Text, i64, i64)> {
-        s.added
-            .iter()
-            .map(|a| (a.request.clone(), a.input_tokens, a.prefix_tokens))
-            .collect()
-    };
-    let unchanged = scenarios
-        .iter()
-        .find(|s| s.window == current)
-        .map(summaries);
     let acting: Vec<&WindowScenario> = scenarios
         .iter()
-        .filter(|s| {
-            s.window != current
-                && (Some(summaries(s)) != unchanged
-                    || s.comparison_cost.unknown != s.baseline_comparison_cost.unknown)
-        })
+        .zip(acts)
+        .filter_map(|(s, acts)| acts.then_some(s))
         .collect();
     let conditional = scenarios
         .iter()
@@ -812,6 +798,21 @@ mod tests {
         assert_eq!(on.added[0].input_tokens, 181_000);
         near(on.savings_usd, 0.446 - 0.4492);
         assert_eq!((c.base.action, c.base.recommended), (Action::Keep, Some(0)));
+
+        // A warm turn's end and the limit can summarize the same 181k tokens to the same
+        // prefix before the same request, and still differ: the limit's summary reads them
+        // cold, $0.382, and the turn's end reads 170k from the cache, $0.059.
+        s.requests[2].parts[0].usage = usage(179_000, 170_000, 2000);
+        s.requests[3].parts[0].usage = usage(181_000, 0, 1000);
+        for r in &mut s.requests[4..] {
+            r.parts[0].usage = usage(181_000, 181_000, 1000);
+        }
+        let c = check(&s);
+        near(at_percent(&c, 90).savings_usd, 0.382 - 0.059);
+        assert_eq!(
+            (c.base.action, c.base.recommended),
+            (Action::Change, Some(90))
+        );
     }
 
     #[test]

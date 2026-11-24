@@ -577,6 +577,9 @@ pub struct Simulation<'r> {
     /// Modeled compaction boundaries, to replay after the given events.
     pub events: Vec<StructuralEvent>,
     pub estimated_parts: HashSet<(Text, usize)>,
+    /// Each turn end a turn-end pass found due or could not decide, by session and the
+    /// time of the request that met it. Two passes with the same ones replay alike.
+    pub(crate) turn_ends: Vec<(Text, Millis)>,
 }
 
 impl Simulation<'_> {
@@ -871,6 +874,9 @@ impl<'r, 'o> Simulator<'r, 'o> {
                 }
                 _ => Some(false),
             };
+            if ended_due != Some(false) {
+                self.result.turn_ends.push((req.session.clone(), req.time));
+            }
             let old_prefix = prefix(req.harness, &u);
             // Unknown usage could cross any window; it is not an unaffected zero-cost request.
             if selected
@@ -1120,7 +1126,14 @@ impl<'r, 'o> Simulator<'r, 'o> {
                 (Some(only), None) => Some(only),
                 _ => None,
             };
-            match turns.due(percent, st.active, &st.cohort.model) {
+            let due = turns.due(percent, st.active, &st.cohort.model);
+            if due != Some(false) {
+                // A final turn's end is apart from one the same request met before it.
+                self.result
+                    .turn_ends
+                    .push((req.session.clone(), req.time + 1));
+            }
+            match due {
                 Some(false) => {}
                 None => self.result.fail(&req.session, req.time, TURN_END_UNKNOWN),
                 Some(true) => {
@@ -1436,6 +1449,8 @@ pub(crate) struct Run {
     pub(crate) added: Vec<AddedCompaction>,
     pub(crate) affected: usize,
     pub(crate) cache_evidence: Vec<CacheReplayEvidence>,
+    /// Whether its turn ends compact, or stay undecided, where the current value's do not.
+    pub(crate) acts: bool,
 }
 
 /// Each value's point run with its larger-summary and cold-summary sensitivities.
@@ -1672,6 +1687,10 @@ impl<'r> Lockstep<'_, 'r> {
                     added: if detail { added.to_vec() } else { vec![] },
                     affected: own.map_or(0, |s| s.affected),
                     cache_evidence: c.cache_evidence,
+                    acts: c.stream.as_ref().is_some_and(|s| {
+                        let before = current.as_ref().map(|c| &c.simulator.result.turn_ends);
+                        Some(&s.simulator.result.turn_ends) != before
+                    }),
                 });
             }
         }

@@ -1,4 +1,4 @@
-# [S] Open the walk with what the settings already save
+# [M] Open the walk with what the settings already save
 
 ## Goal
 

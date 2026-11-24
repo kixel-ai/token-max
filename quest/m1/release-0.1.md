@@ -25,10 +25,8 @@ checks.
 
 ## Required
 
-- [Codex tier verdicts](/quest/m1/codex-tier-verdicts.md) - settles the Codex lines a service tier could reverse
-- [Windows test paths](/quest/m1/windows-test-paths.md) - keeps the Windows release target's tests honest
+- [Codex unmeasured lines](/quest/m1/codex-unmeasured-lines.md) - shows the Codex compaction settings a host set when no request is selected
 - [Advisor card](/quest/m1/vibes/advisor.md) - a vibes card shipped in 0.1.0
-- [Default model card](/quest/m1/vibes/default-model.md) - a vibes card shipped in 0.1.0
 - [Language servers card](/quest/m1/vibes/language-servers.md) - a vibes card shipped in 0.1.0
 - [Memory card](/quest/m1/vibes/memory.md) - a vibes card shipped in 0.1.0
 - [Retention card](/quest/m1/vibes/retention.md) - a vibes card shipped in 0.1.0

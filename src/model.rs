@@ -938,6 +938,13 @@ pub struct EffortControl {
     pub default: Option<String>,
     /// Why the default cannot be resolved, such as an unrecorded `--profile` selection.
     pub unresolved: Option<String>,
+    /// The default as these settings resolve it on the model the maintainer picks, whose
+    /// own level setting may differ, with its model as the settings would name it, such as
+    /// with a `[1m]`; None when the model is already that one or unknown.
+    pub picked: Option<Box<EffortControl>>,
+    /// The cloud provider the settings it was resolved from send requests to, which spells
+    /// models its own way; None for the harness's own API.
+    pub provider: Option<String>,
 }
 
 /// Codex's `model_post_turn_compact_threshold_percent`: the share of the usable context

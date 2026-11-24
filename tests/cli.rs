@@ -415,7 +415,7 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     assert_eq!(
         stdout,
         format!(
-            "token-max vibes: 1 piece of advice the transcripts can't price.\n  None of it is measured, so none of it is a verdict. Each card names whose advice it is.\n\n  [1/1] Bash timeout cap  not measured\n        2h -> 4m\n        What    The longest Claude waits on a foreground Bash command before Claude Code moves it to the background.\n        Advice  A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess. A command past the cap is not killed: it keeps running in the background, where Claude checks on it in later turns. Some commands need longer in the foreground; keep the cap if yours do. Project and local settings, which override it, are not read.\n        Source  The maintainer's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching\n        Change  \"env\": {{\"BASH_MAX_TIMEOUT_MS\": \"240000\"}} in ~{}.claude{}settings.json\n",
+            "token-max vibes: 1 piece of advice the transcripts can't price.\n  None of it is measured, so none of it is a verdict. Each card names whose advice it is.\n\n  [1/2] Bash timeout cap  not measured\n        2h -> 4m\n        What    The longest Claude waits on a foreground Bash command before Claude Code moves it to the background.\n        Advice  A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess. A command past the cap is not killed: it keeps running in the background, where Claude checks on it in later turns. Some commands need longer in the foreground; keep the cap if yours do. Project and local settings, which override it, are not read.\n        Source  The maintainer's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching\n        Change  \"env\": {{\"BASH_MAX_TIMEOUT_MS\": \"240000\"}} in ~{}.claude{}settings.json\n\n  [2/2] Main-session default  not measured\n        What    The model and reasoning effort a main session starts with.\n        Advice  Defaults to claude-opus-5-5 at medium, the maintainer's pick. Ran claude-opus-5-5 at an unrecorded effort 2 times, $0.01.\n        Source  The maintainer's pick of a default. Anthropic's guidance: https://claude.dev/blog/which-claude-model-should-you-build-with/ https://code.claude.com/docs/en/model-config#choose-an-effort-level\n",
             std::path::MAIN_SEPARATOR,
             std::path::MAIN_SEPARATOR
         )
@@ -436,11 +436,11 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     assert_eq!(status, 0);
     // The heading counts advice as doctor does, so the card that advises nothing is not in it.
     assert!(
-        stdout.starts_with("token-max vibes: no advice for these settings.\n\n  [1/1] "),
+        stdout.starts_with("token-max vibes: no advice for these settings.\n\n  [1/2] "),
         "{stdout}"
     );
     assert!(
-        stdout.contains("\n  [1/1] Bash timeout cap  not measured\n        What    ")
+        stdout.contains("\n  [1/2] Bash timeout cap  not measured\n        What    ")
             && stdout.contains("Capped at 55m, the margin suggested under the 1h cache, the current main-agent cache TTL setting.")
             && !stdout.contains("Change"),
         "{stdout}"
@@ -1609,7 +1609,7 @@ mod unix {
             "\n  token-max vibes has 1 piece of advice the transcripts can't price. Show it?\n  [y]es, [n]o: ",
         );
         let advice = at("\ntoken-max vibes: 1 piece of advice the transcripts can't price.\n");
-        let card = at("\n  [1/1] Bash timeout cap ");
+        let card = at("\n  [1/2] Bash timeout cap ");
         assert_eq!(
             words(&stdout[advice..card]),
             "token-max vibes: 1 piece of advice the transcripts can't price. None of it is measured, so none of it is a verdict. Each card names whose advice it is. Nothing is written until you confirm the list at the end."
@@ -1622,9 +1622,12 @@ mod unix {
             .find("\n  ~/.claude/settings.json\n  @@")
             .map(|at| card + at)
             .unwrap_or_else(|| panic!("{stdout}"));
-        let entry = words(&stdout[card..again]);
+        // The card on the default advises nothing, so it asks nothing before the diff.
+        let next = at("\n  [2/2] Main-session default ");
+        assert!(next < again, "{stdout}");
+        let entry = words(&stdout[card..next]);
         assert!(
-            entry.starts_with("[1/1] Bash timeout cap not measured 2h -> 4m What The longest Claude waits on a foreground Bash command before Claude Code moves it to the background. Advice A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess."),
+            entry.starts_with("[1/2] Bash timeout cap not measured 2h -> 4m What The longest Claude waits on a foreground Bash command before Claude Code moves it to the background. Advice A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess."),
             "{entry}"
         );
         assert!(

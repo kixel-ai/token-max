@@ -1,6 +1,8 @@
 //! `--ssh` audits through a fake `ssh` that runs each destination's command locally.
 #![cfg(unix)]
 
+mod support;
+
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
@@ -156,6 +158,7 @@ HOME="$TEST_ROOT/homes/$host" PATH="$TEST_ROOT/remote/$host:$TEST_PATH" exec sh 
             )
             .env("TEST_ROOT", &self.root)
             .env("TEST_PATH", self.root.join("tools"))
+            .env("TOKEN_MAX_RELEASES", support::current())
             .stdin(Stdio::null());
         command
     }

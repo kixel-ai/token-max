@@ -1973,6 +1973,53 @@ pub fn opening(found: &[Found], destinations: &[String], style: &Style) -> Strin
     out
 }
 
+/// Say that release `latest` is out, then ask whether to upgrade to it and rerun; end of input
+/// is a no. Nothing is stored: the next run asks again.
+pub fn ask_upgrade(
+    latest: &str,
+    style: &Style,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> io::Result<bool> {
+    write!(
+        output,
+        "\n{}",
+        style.line(&format!("token-max {}", stale(latest)))
+    )?;
+    let prompt = style.ask(&format!("Upgrade to {latest} and rerun?"), "[y]es, [n]o");
+    loop {
+        write!(output, "{prompt}")?;
+        output.flush()?;
+        let mut line = String::new();
+        if input.read_line(&mut line)? == 0 {
+            writeln!(output)?;
+            return Ok(false);
+        }
+        match line.trim().to_ascii_lowercase().as_str() {
+            "y" | "yes" => return Ok(true),
+            "n" | "no" => return Ok(false),
+            _ => {}
+        }
+    }
+}
+
+/// That release `latest` is newer than this build, whose advice may have gone stale.
+pub fn stale(latest: &str) -> String {
+    format!(
+        "{latest} is out; this is v{}, and its advice may be out of date.",
+        crate::upgrade::VERSION
+    )
+}
+
+/// A line about the release check or the upgrade, dim when it is only a `note`.
+pub fn upgrade_line(text: &str, note: bool, style: &Style) -> String {
+    if note {
+        style.dim(text)
+    } else {
+        style.line(text)
+    }
+}
+
 /// Asks how each Claude profile pays, one at a time across hosts, before the report, so its
 /// main conversation's cache TTL is priced against the one default that applies. A skip
 /// leaves a profile naming both defaults, and end of input skips the rest, on every host.

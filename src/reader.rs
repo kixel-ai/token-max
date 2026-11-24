@@ -327,8 +327,11 @@ fn claude_parts(raw: &Value, model: Option<Text>) -> Result<Vec<BillingPart>, Sc
                 Some("message") => PartKind::Message,
                 _ => PartKind::Unknown,
             };
-            let mut p = part(iteration, model.clone(), kind)?;
             let advisor = kind == PartKind::Advisor;
+            // An advisor runs on its own model, never the executor's, so one it doesn't
+            // record stays unknown.
+            let fallback = if advisor { None } else { model.clone() };
+            let mut p = part(iteration, fallback, kind)?;
             if p.tier.is_none() && !advisor {
                 p.tier = text(member(u, "service_tier"));
             }
@@ -3138,6 +3141,30 @@ mod tests {
         let result = scan(&options(&w)).unwrap();
         assert_eq!(result.requests.len(), 1);
         assert_eq!(result.requests[0].locations.len(), 2);
+    }
+
+    #[test]
+    fn an_advisor_iteration_keeps_only_its_own_model() {
+        let usage = |model: Option<&str>| {
+            let mut advisor = serde_json::json!({"type": "advisor_message", "input_tokens": 9, "output_tokens": 1});
+            if let Some(m) = model {
+                advisor["model"] = m.into();
+            }
+            serde_json::json!({
+                "input_tokens": 5,
+                "output_tokens": 1,
+                "service_tier": "standard",
+                "iterations": [{"type": "message", "input_tokens": 5, "output_tokens": 1}, advisor],
+            })
+        };
+        let executor = Some(Text::from("claude-sonnet-5-5"));
+        let parts = claude_parts(&usage(Some("claude-opus-5-5")), executor.clone()).unwrap();
+        assert_eq!(parts[0].model.as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(parts[1].model.as_deref(), Some("claude-opus-5-5"));
+        // Nor the executor's tier: Priority Tier is committed per model.
+        assert_eq!(parts[1].tier, None);
+        let parts = claude_parts(&usage(None), executor).unwrap();
+        assert_eq!(parts[1].model, None);
     }
 
     #[test]

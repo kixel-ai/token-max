@@ -1426,8 +1426,8 @@ models, and what the advisor iterations alone cost at API prices over the
 window. Like the subagent lines it is evidence with no verdict, since the
 advisor's alternative is a stronger main model, which a replay can't price
 the work of. T3 Code picks each thread's main model, so T3 instances get no
-card or line; their sessions' advisor calls count on the native profile's
-line when they share its history.
+card or line of their own; their threads' advisor calls count on the line of
+the settings file they share.
 
 ## Messages from other sessions
 

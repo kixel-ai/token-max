@@ -19,15 +19,20 @@ agent's default TTL that the credit is priced against.
 With several hosts it is one line for all of them, as the header's total is.
 SSH replies carry `Totals` (`src/totals.rs`), which has the offered savings
 but not the credit, so add the credit there as structured figures that sum
-across hosts before rounding. A destination is the same token-max version,
+across hosts before rounding. Its percent is of the combined spend every 30
+days (`Totals::monthly`), as `Total::set_share` already does for the offered
+savings, not any one host's. A destination is the same token-max version,
 so this wire change needs no compatibility path.
 
 Under `--defaults` every setting is its default, so the opening skips the
 line rather than say nothing differs.
 
 Rerun `assets/demo/walk.tape` and `assets/demo/site.py`, since doctor's
-opening changes. The README's `walk.gif` shows the credit, since
-`assets/demo/home.py` sets non-default values; the site's demo runs
+opening changes. The README's `walk.gif` should show a saving: today
+`assets/demo/home.py`'s settings only cost more than the defaults (fast mode
+on, and the recording answers "API key", which makes its 5m TTL the
+default), so give the fixture a setting the replay measures as saving
+against its default, keeping the walk's existing questions. The site's demo runs
 `doctor --defaults` on purpose, to show what a default user would save, so
 it shows no credit.
 

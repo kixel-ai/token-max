@@ -21,10 +21,10 @@ of it is unavoidable, give it its own phase name on the progress line so
 the wait says what it is doing.
 
 The PR's `## Validation` gives the before and after timings and shows the
-report is unchanged. The analysis clock is read after the scan, so a
-straight byte comparison would differ on dates and monthly figures: run both
-builds back to back on a frozen copy of the transcripts (`--claude-dir` and
-`--codex-dir`), with the same `--prices-file` and a fixed `--since`, and
-compare `--details` reports with the run-time fields (generation and
-snapshot times, and the monthly figures they scale) normalized, or pin the
-clock the way the unit tests do.
+report is unchanged. Compare both builds on the same inputs: a frozen copy
+of the transcripts and, since `--claude-dir` and `--codex-dir` turn off T3
+discovery, of the T3 state too (`--t3-dir`), with the same `--prices-file`
+and `--since`, and the analysis clock pinned, since it is read after the
+scan and scales every monthly figure. No option pins it today; add the
+smallest way to, or compare through a harness that calls `render` with a
+fixed `now`, rather than mask the monthly figures.

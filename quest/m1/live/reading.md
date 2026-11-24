@@ -5,8 +5,8 @@
 While a terminal run reads transcripts, the progress line counts up the
 sessions, requests, tokens and API-price spend read so far beside the
 reading bar, and keeps the counts on the line through the phases that follow
-reading. The counts the line shows when it clears are exactly the report
-header's.
+reading. In `doctor`, the counts the line shows when it clears are exactly
+the report header's.
 
 ## Plan
 
@@ -38,6 +38,8 @@ Recommendations:
 - `vibes` shares the line but its SSH replies (`Outcome::Vibes` in
   `src/wire.rs`) carry no usage, so under `--ssh` it shows this host's
   counts, labelled as this host's, rather than add usage to its wire.
+  `vibes` prints no usage header, so its last counts are checked against the
+  local scan's settled totals instead.
 - `Reading` in `src/reader.rs` already carries the byte counters to the
   `Meter` thread in `src/cli.rs`; the counts can travel the same way. The
   line must still fit one row: drop the least useful fields first on a narrow

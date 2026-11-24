@@ -45,7 +45,7 @@ token-max transcripts and dotfiles, and a survey of Claude Code 2.1.322 and
 codex-cli 0.167.1 settings worth turning on):
 
 - The maintainer's opinions: ✅ [auto memory off](/quest/m1/vibes/memory.md),
-  ✅ [a smaller compaction window](/quest/m1/vibes/window.md), ✅
+  ✅ a smaller compaction window, ✅
   a year of transcripts (rejected: telemetry
   opt-outs, which are about privacy rather than cost or capability, and turn
   off Claude Code's updater). Max effort is already outside

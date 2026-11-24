@@ -2171,28 +2171,29 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                     && (e.model.is_none()
                         || models.iter().any(|m| m.as_deref() == e.model.as_deref()))
             });
-            let reowned = profile
-                .compaction
-                .percent
-                .as_ref()
-                .filter(|_| claude)
-                .zip(recommended.filter(|r| Some(*r) != control.value))
-                .map(|(percent, target)| {
-                    let outside: Vec<&Profile> = scan
-                        .profiles
-                        .iter()
-                        .filter(|p| !group.ids.contains(&p.id))
-                        .collect();
-                    reowned(
-                        &group.members,
-                        &outside,
-                        &ran,
-                        percent,
-                        target,
-                        models,
-                        inventory.iter(),
-                    )
-                });
+            // What moving the window to `target` must also change, when the percentage
+            // override lowers it: for the recommendation, and for `vibes`' cap.
+            let plan = |target: Option<i64>| {
+                let percent = profile.compaction.percent.as_ref().filter(|_| claude)?;
+                let target = target.filter(|t| Some(*t) != control.value)?;
+                let outside: Vec<&Profile> = scan
+                    .profiles
+                    .iter()
+                    .filter(|p| !group.ids.contains(&p.id))
+                    .collect();
+                Some(reowned(
+                    &group.members,
+                    &outside,
+                    &ran,
+                    percent,
+                    target,
+                    models,
+                    inventory.iter(),
+                ))
+            };
+            let reowned = plan(recommended);
+            let cap = crate::vibes::window_cap(profile.harness);
+            let capped = plan(control.value.is_none_or(|v| v > cap).then_some(cap));
             let unpinned = reowned.as_ref().filter(|r| !r.unkept.is_empty()).map(|r| {
                 format!(
                     "changing this window removes {PERCENT_KEY}, and {}",
@@ -2203,6 +2204,17 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 && per_model_supported
                 && (!claude || !models.contains(&None))
                 && unpinned.is_none();
+            let unsettable = if !control.applicable {
+                Some(control.reason.clone())
+            } else if !per_model_supported {
+                Some(format!(
+                    "the recorded Claude Code is older than v2.1.{patch}, which this window control needs"
+                ))
+            } else if claude && models.contains(&None) {
+                Some("requests with no recorded model ran on this line, and no setting is known to hold their window".into())
+            } else {
+                None
+            };
             let profiles: IndexSet<&String> =
                 selected.iter().flat_map(|r| r.profiles.iter()).collect();
             let savings = winning
@@ -2329,6 +2341,8 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                     .collect(),
                 cache_evidence: baseline_evidence.clone(),
                 reowned,
+                capped,
+                unsettable,
             });
         }
     }
@@ -3777,6 +3791,104 @@ mod tests {
             .iter()
             .map(|c| (c.owner(), c.value))
             .collect()
+    }
+
+    #[test]
+    fn the_vibes_cap_under_the_percent_override_gets_its_own_plan() {
+        let key = crate::controls::PERCENT_KEY;
+        let mut scan = data(4);
+        scan.profiles[0].settings_file = "settings.json".into();
+        let mut haiku = at("haiku", "haiku", HOUR);
+        haiku.model = Some("claude-haiku-5-5".into());
+        haiku.parts[0].model = Some("claude-haiku-5-5".into());
+        scan.requests.push(haiku);
+        let percent = |opus: i64| {
+            json!({
+                "env": {key: "50"},
+                "modelSettings": {
+                    "claude-opus-5-5": {"autoCompactWindow": opus},
+                    "claude-haiku-5-5": {"autoCompactWindow": 300000},
+                },
+            })
+        };
+        scan.profiles[0].compaction = controls(
+            Harness::Claude,
+            percent(900_000),
+            &Env::default(),
+            "settings.json",
+        );
+        crate::controls::tune_windows(&mut scan);
+        let opus = |scan: &Scan| {
+            checks(scan)
+                .into_iter()
+                .find(|c| c.model.as_deref() == Some("claude-opus-5-5"))
+                .unwrap()
+        };
+        let check = opus(&scan);
+        assert_eq!(check.base.current, Some(450_000));
+        // The cap moves the override out as the recommendation would, keeping Haiku's trigger.
+        let capped = check.capped.as_ref().unwrap();
+        assert_eq!(
+            planned(capped),
+            [
+                (
+                    "settings.json:modelSettings.claude-opus-5-5.autoCompactWindow".into(),
+                    Some(400_000)
+                ),
+                (
+                    "settings.json:modelSettings.claude-haiku-5-5.autoCompactWindow".into(),
+                    Some(150_000)
+                ),
+                (format!("settings.json:env.{key}"), None),
+            ]
+        );
+        assert!(capped.unkept.is_empty(), "{:?}", capped.unkept);
+        // By hand, the step still takes the whole plan, or the override would halve the cap.
+        let how = crate::doctor::window_by_hand(
+            &check,
+            Some(capped),
+            400_000,
+            &scan.profiles[0],
+            "no edit is known to hold it",
+        );
+        assert_eq!(
+            how,
+            crate::doctor::How::Manual {
+                step: format!(
+                    r#"in settings.json, set "modelSettings": {{"claude-opus-5-5": {{"autoCompactWindow": 400000}}}} and "modelSettings": {{"claude-haiku-5-5": {{"autoCompactWindow": 150000}}}}, and remove env.{key}"#
+                ),
+                reason: "no edit is known to hold it".into(),
+            }
+        );
+        // A plan that can't pin a trigger, such as an unrecorded model's, says so beside it.
+        let mut unpinned = capped.clone();
+        let unrecorded =
+            "requests with no recorded model ran on this line, and their trigger cannot be pinned";
+        unpinned.unkept.push(unrecorded.into());
+        let crate::doctor::How::Manual { reason, .. } = crate::doctor::window_by_hand(
+            &check,
+            Some(&unpinned),
+            400_000,
+            &scan.profiles[0],
+            "no edit is known to hold it",
+        ) else {
+            panic!("an edit for a window no edit holds")
+        };
+        assert_eq!(
+            reason,
+            format!(
+                "no edit is known to hold it; changing this window removes {key}, and {unrecorded}"
+            )
+        );
+        // A trigger already at or under the cap needs no plan for it.
+        scan.profiles[0].compaction = controls(
+            Harness::Claude,
+            percent(800_000),
+            &Env::default(),
+            "settings.json",
+        );
+        crate::controls::tune_windows(&mut scan);
+        assert_eq!(opus(&scan).capped, None);
     }
 
     #[test]
@@ -5341,6 +5453,227 @@ mod tests {
             assert_eq!(check.ttls.main, Some(Ttl::FiveMinutes));
         }
 
+        #[test]
+        fn vibes_caps_a_window_past_the_maintainers_pick_apart_from_the_lines_verdict() {
+            use crate::doctor::{Edit, How, Op, Patch};
+            use crate::report::Origin;
+            let mut scan = data(4);
+            scan.profiles[0].compaction = controls(
+                Harness::Claude,
+                json!({"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 600000}}}),
+                &Env::default(),
+                "synthetic/settings.json",
+            );
+            let mut report = report(&scan);
+            let index = report
+                .checks
+                .iter()
+                .position(|c| matches!(c, CheckResult::Compaction(_)))
+                .unwrap();
+            let check = compaction(&report);
+            assert_eq!(
+                (
+                    check.base.current,
+                    check.base.recommended,
+                    check.base.action
+                ),
+                (Some(600_000), Some(100_000), Action::Change)
+            );
+            let card = |report: &Report| {
+                crate::report::advice(report, ReportOptions::default())
+                    .into_iter()
+                    .find(|i| i.name.starts_with("Auto-compact window"))
+                    .unwrap()
+            };
+            let item = card(&report);
+            assert_eq!(item.name, "Auto-compact window (claude-opus-5-5)");
+            assert_eq!(item.value, "600k -> 400k");
+            assert_eq!(
+                item.text,
+                "Set to 600k. The maintainer would cap it at 400k for better output, not a smaller bill: a smaller window compacts sooner, so the model works from a shorter context. Anthropic's docs say accuracy and recall degrade as a context grows. doctor's auto-compact window line recommends 100k on cost. Its replay did not price a 400k window, so what the cap costs is not measured. The cap is advice beside that line, not its verdict."
+            );
+            assert_eq!(
+                item.sources,
+                [
+                    "The maintainer's pick, for output quality rather than cost. Anthropic's docs on context rot:",
+                    "https://platform.claude.com/docs/en/build-with-claude/context-windows",
+                ]
+            );
+            assert!(!item.quiet);
+            // The edit `doctor`'s line would make, at the cap.
+            assert_eq!(
+                item.how,
+                Some(How::Edit(Patch {
+                    file: "synthetic/settings.json".into(),
+                    harness: Harness::Claude,
+                    edits: vec![Edit {
+                        path: vec![
+                            "modelSettings".into(),
+                            "claude-opus-5-5".into(),
+                            "autoCompactWindow".into()
+                        ],
+                        value: json!(400_000),
+                        op: Op::Set,
+                    }],
+                }))
+            );
+            // Once the walk writes the line's 100k, the window is under the cap.
+            // The only window line, so only its own change moves it.
+            let [after] = &item.after[..] else {
+                panic!("{:?}", item.after)
+            };
+            assert_eq!(after.origins, [Origin::Check(index)]);
+            assert_eq!(
+                after.item.text,
+                "doctor's auto-compact window line recommended 100k on cost, and the walk wrote it. That is at or under the 400k window the maintainer caps it at, so there is nothing to change."
+            );
+            assert!(after.item.quiet && after.item.how.is_none());
+            let wrote = crate::vibes::settled(vec![item.clone()], &after.origins);
+            assert_eq!(wrote, [*after.item.clone()]);
+            let declined = crate::vibes::settled(vec![item.clone()], &[Origin::Check(index + 1)]);
+            assert_eq!(declined[0].after, []);
+            assert_eq!(declined[0].text, item.text);
+            // A cap the replay priced says what it costs against the current window.
+            let CheckResult::Compaction(c) = &mut report.checks[index] else {
+                unreachable!()
+            };
+            let mut priced = c.scenarios[0].clone();
+            priced.window = 400_000;
+            priced.savings_usd = Some(-0.5);
+            priced.margin = None;
+            c.scenarios.push(priced);
+            let scale = crate::report::monthly(1.0, c.base.since, c.base.until);
+            let text = card(&report).text;
+            assert!(
+                text.contains(&format!(
+                    " Against the 600k window, its replay of a 400k window costs {} more at API prices. ",
+                    crate::report::approx(0.5 * scale, None, "/mo")
+                )),
+                "{text}"
+            );
+            // A cap priced at an assumed service tier stays unmeasured, whatever the line's
+            // winner settled.
+            let CheckResult::Compaction(c) = &mut report.checks[index] else {
+                unreachable!()
+            };
+            let cap = c.scenarios.last_mut().unwrap();
+            cap.comparison_cost
+                .assumptions
+                .push(crate::prices::TIER_SENSITIVITY.into());
+            assert!(
+                !c.base
+                    .uncertainty
+                    .iter()
+                    .any(|u| u == crate::prices::TIER_SENSITIVITY)
+            );
+            let text = card(&report).text;
+            assert!(
+                text.contains(
+                    " Its replay did not price a 400k window, so what the cap costs is not measured. "
+                ),
+                "{text}"
+            );
+            // A window already under the cap advises nothing, and `doctor` does not offer it.
+            scan.profiles[0].compaction = controls(
+                Harness::Claude,
+                json!({"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 300000}}}),
+                &Env::default(),
+                "synthetic/settings.json",
+            );
+            let item = card(&self::report(&scan));
+            assert!(item.quiet && item.how.is_none() && item.value.is_empty());
+            assert_eq!(
+                item.text,
+                "Set to 300k. That is at or under the 400k window the maintainer caps it at, so there is nothing to change."
+            );
+            // Unset on a native-1M model, Claude Code compacts near 967k, past the cap.
+            scan.profiles[0].compaction = controls(
+                Harness::Claude,
+                json!({}),
+                &Env::default(),
+                "synthetic/settings.json",
+            );
+            scan.events[0].trigger = Some("manual".into());
+            scan.profiles[0].compaction.tuned.clear();
+            crate::controls::tune_windows(&mut scan);
+            let item = card(&self::report(&scan));
+            assert_eq!(item.value, "967k -> 400k");
+            assert!(
+                item.text.starts_with("No setting names it, so Claude Code compacts this model near 967k, its window for the model. The maintainer would cap it at 400k"),
+                "{}",
+                item.text
+            );
+            assert!(matches!(item.how, Some(How::Edit(_))), "{:?}", item.how);
+        }
+
+        #[test]
+        fn a_written_window_change_that_pins_other_models_asks_for_a_fresh_vibes() {
+            use crate::doctor::How;
+            use crate::report::Origin;
+            let key = crate::controls::PERCENT_KEY;
+            let mut scan = data(4);
+            let mut haiku = at("haiku", "haiku", HOUR);
+            haiku.model = Some("claude-haiku-5-5".into());
+            haiku.parts[0].model = Some("claude-haiku-5-5".into());
+            scan.requests.push(haiku);
+            scan.profiles[0].compaction = controls(
+                Harness::Claude,
+                json!({
+                    "env": {key: "50"},
+                    "modelSettings": {
+                        "claude-opus-5-5": {"autoCompactWindow": 900000},
+                        "claude-haiku-5-5": {"autoCompactWindow": 300000},
+                    },
+                }),
+                &Env::default(),
+                "synthetic/settings.json",
+            );
+            crate::controls::tune_windows(&mut scan);
+            let report = report(&scan);
+            let line = |model: &str| {
+                report
+                    .checks
+                    .iter()
+                    .position(|c| matches!(c, CheckResult::Compaction(c) if c.model.as_deref() == Some(model)))
+                    .unwrap()
+            };
+            let (opus, haiku) = (line("claude-opus-5-5"), line("claude-haiku-5-5"));
+            let CheckResult::Compaction(c) = &report.checks[opus] else {
+                unreachable!()
+            };
+            assert_eq!(
+                (c.base.current, c.base.action, c.reowned.is_some()),
+                (Some(450_000), Action::Change, true)
+            );
+            let cards = crate::report::advice(&report, ReportOptions::default());
+            let card = |name: &str| cards.iter().find(|i| i.name.contains(name)).unwrap();
+            // Opus's cap goes through its own plan: the override out, Haiku's trigger pinned.
+            let first = card("claude-opus-5-5");
+            assert_eq!(first.value, "450k -> 400k");
+            let Some(How::Edit(patch)) = &first.how else {
+                panic!("{:?}", first.how)
+            };
+            assert_eq!(patch.edits.len(), 3, "{patch:?}");
+            assert!(card("claude-haiku-5-5").quiet);
+            // Once the walk writes Opus's planned change, neither card's edits fit the files.
+            let rescan = "doctor's walk just wrote a compaction window change that can move this window. Run token-max vibes again to compare the 400k cap with the settings as they are now.";
+            for item in crate::vibes::settled(cards.clone(), &[Origin::Check(opus)])
+                .iter()
+                .filter(|i| i.name.starts_with("Auto-compact window"))
+            {
+                assert_eq!(
+                    (item.text.as_str(), item.quiet, &item.how),
+                    (rescan, true, &None)
+                );
+            }
+            // A change to another line elsewhere moves neither.
+            let kept = crate::vibes::settled(cards.clone(), &[Origin::Check(haiku + opus + 1)]);
+            assert_eq!(
+                kept.iter().map(|i| &i.text).collect::<Vec<_>>(),
+                cards.iter().map(|i| &i.text).collect::<Vec<_>>()
+            );
+        }
+
         // Window presentation keeps conditional baselines, every scenario and geometry evidence reachable.
         #[test]
         fn window_presentation_keeps_conditional_baselines_every_scenario_and_geometry_evidence() {
@@ -5555,6 +5888,65 @@ mod tests {
             near(first.summary_cost.total_usd.map(Usd::to_f64), 1.23);
             near(first.prefix_cost.total_usd.map(Usd::to_f64), 0.05);
             near(window(&first_check, 20000).savings_usd, 4.5702);
+            // `vibes` caps Codex at 240k, with the maintainer's pick as its only source, and
+            // writes the key the line names.
+            let card = |s: &Scan| {
+                crate::report::advice(&report(s), ReportOptions::default())
+                    .into_iter()
+                    .find(|i| i.name.starts_with("Auto-compact window"))
+                    .unwrap()
+            };
+            let mut owned = s.clone();
+            owned.profiles[0].settings_file = "config.toml".into();
+            let item = card(&owned);
+            assert_eq!(item.value, "400k -> 240k");
+            assert_eq!(
+                item.sources,
+                ["The maintainer's pick, for output quality rather than cost."]
+            );
+            assert!(item.text.contains("No OpenAI page says how output changes with the window, so this rests on the maintainer's pick alone."), "{}", item.text);
+            assert_eq!(
+                item.how,
+                Some(crate::doctor::How::Edit(crate::doctor::Patch {
+                    file: "config.toml".into(),
+                    harness: Harness::Codex,
+                    edits: vec![crate::doctor::Edit {
+                        path: vec!["model_auto_compact_token_limit".into()],
+                        value: json!(240_000),
+                        op: crate::doctor::Op::Set,
+                    }],
+                }))
+            );
+            assert!(item.after[0].item.quiet);
+            // A limit under a named profile may not be the one its sessions read, so the cap is
+            // set by hand, as the line would leave it.
+            let mut named = owned.clone();
+            named.profiles[0].compaction = controls(
+                Harness::Codex,
+                json!({"model_auto_compact_token_limit": 400000, "profiles": {"work": {}}}),
+                &Env::default(),
+                "config.toml",
+            );
+            let item = card(&named);
+            assert_eq!(item.value, "400k -> 240k");
+            assert_eq!(
+                item.how,
+                Some(crate::doctor::How::Manual {
+                    step: "set config.toml:model_auto_compact_token_limit to 240000".into(),
+                    reason: "named Codex profiles exist; the active profile/CLI override is not established".into(),
+                })
+            );
+            // With no limit set, the default is unread: a smaller one would rise to the cap, so
+            // nothing is advised.
+            owned.profiles[0].settings.clear();
+            owned.profiles[0].compaction =
+                controls(Harness::Codex, json!({}), &Env::default(), "config.toml");
+            let item = card(&owned);
+            assert!(item.quiet && item.how.is_none() && item.value.is_empty());
+            assert_eq!(
+                item.text,
+                "token-max could not resolve this window, so it cannot tell whether it is above the 240k window the maintainer caps it at. Set by config.toml:model_auto_compact_token_limit."
+            );
             let mut unpriced = s.clone();
             let unsupported = &mut unpriced.profiles[0];
             unsupported.settings.insert(

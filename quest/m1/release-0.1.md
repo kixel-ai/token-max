@@ -25,7 +25,6 @@ checks.
 
 ## Required
 
-- [Codex unmeasured lines](/quest/m1/codex-unmeasured-lines.md) - shows the Codex compaction settings a host set when no request is selected
 - [Advisor card](/quest/m1/vibes/advisor.md) - a vibes card shipped in 0.1.0
 - [Language servers card](/quest/m1/vibes/language-servers.md) - a vibes card shipped in 0.1.0
 - [Memory card](/quest/m1/vibes/memory.md) - a vibes card shipped in 0.1.0

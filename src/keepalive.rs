@@ -20,7 +20,8 @@ use crate::model::{
     Scan, ScenarioWindow, StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate, Usd,
 };
 use crate::prices::{
-    Catalog, PRICE_SOURCES, Sample, TIER_SENSITIVITY, price_part, tier_sensitive, write_billing,
+    Catalog, PRICE_SOURCES, Sample, Signs, TIER_SENSITIVITY, TIER_SIGNS, TierSavings, TierScale,
+    price_part, tier_scale, tier_sensitive, write_billing,
 };
 
 const MINUTE: Millis = 60_000;
@@ -199,6 +200,8 @@ struct Run {
     pings: Vec<Usd>,
     finals: Vec<Usd>,
     reads: HashMap<Text, i64>,
+    /// Every charge above by what scales it with the billed tier, None at a recorded tier.
+    tiers: HashMap<Option<TierScale>, Usd>,
 }
 
 struct Session<'a> {
@@ -577,6 +580,7 @@ impl Replayer<'_> {
                     let priced = price_part(self.options.catalog, r, &billed);
                     run.conditional |= tier_sensitive(&priced);
                     cost += priced.total_usd?;
+                    *run.tiers.entry(tier_scale(r, &billed)).or_default() += priced.total_usd?;
                 }
             }
             if r.time < self.since {
@@ -597,6 +601,7 @@ impl Replayer<'_> {
         for added in simulation.added {
             run.conditional |= tier_sensitive(&added.summary_cost);
             let cost = added.summary_cost.total_usd?;
+            *run.tiers.entry(added.summary_scale.clone()).or_default() += cost;
             match positions.get(&*added.request) {
                 Some(&(true, i)) => run.finals[i] += cost,
                 Some(&(false, i)) => run.pings[i] += cost,
@@ -807,6 +812,7 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
     let mut final_costs: Vec<Vec<Usd>> = vec![vec![]; caps.len()];
     // Each cap's savings per priced session, weighted by its periods, to extrapolate from.
     let mut extrapolations = vec![[Sample::default(); 4]; caps.len()];
+    let mut savings = vec![TierSavings::default(); caps.len()];
     let mut sessions = 0;
     let mut uncertainty = vec![
         "current ping state is unknown: scheduled-task metadata does not establish a task's purpose; recorded turns remain activity, with hypothetical pings added on top".into(),
@@ -910,6 +916,13 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
                 ping_sample.add_weighted(session_ping, weight);
                 avoided_sample.add_weighted(session_avoided, weight);
                 savings_sample.add_weighted(session_avoided - session_ping, weight);
+                let session = Text::from(session);
+                for (scale, &usd) in &baseline.tiers {
+                    savings[i].add(&session, scale.as_ref(), usd);
+                }
+                for (scale, &usd) in &run.tiers {
+                    savings[i].add(&session, scale.as_ref(), -usd);
+                }
                 closed_sample.add_weighted(session_closed, weight);
                 *avoided += session_avoided;
                 *ping += session_ping;
@@ -924,6 +937,7 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
     } else {
         unpriced = returns + finals;
     }
+    let signs: Vec<Signs> = savings.iter().map(TierSavings::signs).collect();
     // Unpriced periods are extrapolated over from the priced ones, as their share of all.
     let scale = if priced > 0 {
         (priced + unpriced) as f64 / priced as f64
@@ -997,9 +1011,19 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
         .iter()
         .enumerate()
         .max_by(|(_, a), (_, b)| a.savings_usd.total_cmp(&b.savings_usd));
+    // Priced at an assumed tier, a verdict holds only when no tier could reverse it. Only
+    // Codex prices at an assumed tier, and it has no idle-compaction alternative.
+    let settled = !conditional
+        || best.is_some_and(|(i, s)| {
+            if s.savings_usd - alternative > 0.0 {
+                signs[i].never_loses()
+            } else {
+                signs.iter().all(Signs::never_saves)
+            }
+        });
     let comparable =
-        !conditional && priced > 0 && (profile.harness == Harness::Codex || idle_savings.is_some());
-    if conditional {
+        settled && priced > 0 && (profile.harness == Harness::Codex || idle_savings.is_some());
+    if !settled {
         uncertainty.push(TIER_SENSITIVITY.into());
     }
     if profile.harness == Harness::Claude && split {
@@ -1021,6 +1045,7 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
             "off".into()
         }
     });
+    let tier_signs = conditional && recommended.is_some();
     let break_even = scenarios.iter().enumerate()
         .filter(|(_, s)| comparable && margin.is_none_or(|m| m <= 0.0) && s.closed_savings_usd > alternative && s.savings_usd <= alternative)
         .max_by(|(_, a), (_, b)| a.closed_savings_usd.total_cmp(&b.closed_savings_usd))
@@ -1059,7 +1084,7 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
                 "compactions replace prior ping context; pings after a boundary use its recorded post-context and survive into the return; missing geometry leaves the session unpriced".into(),
                 "pinging competes with idle compaction rather than adding its savings; compaction after the cap is not combined with pings".into(),
                 "caps include one ping and the counts needed to rescue recorded returns, up to the seven-day scheduled-task lifetime".into(),
-            ], uncertainty, sources: SOURCES.into_iter().map(String::from).chain(PRICE_SOURCES.into_iter().map(String::from)).collect(),
+            ].into_iter().chain(tier_signs.then(|| TIER_SIGNS.into())).collect(), uncertainty, sources: SOURCES.into_iter().map(String::from).chain(PRICE_SOURCES.into_iter().map(String::from)).collect(),
         }, bucket: "main", lifetime_ms: lifetime.as_ref().map(|l| l.ms), interval_ms: interval,
         ping_input_tokens: new_tokens, ping_output_tokens: output_tokens,
         returns, finals, unpriced, idle_compaction_savings: idle_savings.map(|(usd, margin)| Estimate { usd, margin }), margin_usd: margin, scenarios,
@@ -1289,6 +1314,17 @@ mod tests {
                 .uncertainty
                 .iter()
                 .any(|s| s == crate::prices::TIER_SENSITIVITY)
+        );
+        // A session that never comes back only pays for its pings, at any tier.
+        let mut lone = codex("gpt-6.1-sol", "c", 0);
+        lone.parts[0].tier = None;
+        let lone = run(&scan(profile.clone(), vec![lone]), 2 * HOUR);
+        assert_eq!(lone.base.recommended.as_deref(), Some("off"));
+        assert!(
+            lone.base
+                .assumptions
+                .iter()
+                .any(|s| s == crate::prices::TIER_SIGNS)
         );
         let check = run(&scan(profile, requests), 2 * HOUR);
         assert_eq!(check.lifetime_ms, Some(30 * MINUTE));

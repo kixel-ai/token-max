@@ -27,6 +27,36 @@ in PowerShell,
 `& ([scriptblock]::Create((irm https://max.kixel.me/run.ps1))) --since 2026-11-01`.
 `install.sh` and `install.ps1` redirect to the release's own installers.
 
+### Newer releases
+
+Claude Code and Codex change fast enough that an older build's advice can be
+out of date, so `doctor` first asks
+`https://github.com/kixel-ai/token-max/releases/latest` for the latest
+release, as `run.sh` does, while it finds this host's transcripts. Only
+`doctor` checks, and `--offline` skips it. No answer is remembered, so a
+declined release is offered again on the next run. The check gives up after 5
+seconds; when it cannot run, doctor says so on one line and goes on with this
+build.
+
+When the latest release is newer than this build, a terminal run asks before
+its opening: `Upgrade to v0.0.2 and rerun?`. A yes downloads that release's
+archive for this platform, refuses it unless it matches the release's
+`.sha256` file, unpacks the binary with `tar` (Windows' own `tar.exe` there),
+and checks that it runs and reports that version. Only then does it rename
+the new binary over the running one, from the same directory, and run it with
+the same options; a failure at any step leaves the old binary as it was.
+Windows cannot replace a running program, so there the old binary moves aside
+to `token-max.exe.old` first, and a later run deletes it.
+
+A binary under `/nix/store`, or in Cargo's `bin` directory (`$CARGO_HOME/bin`
+or `~/.cargo/bin`), belongs to that tool, so doctor prints the command that
+upgrades it instead of asking. A binary in a directory this user cannot
+write, such as a root-owned `/usr/local/bin`, or on a platform with no
+prebuilt release, gets a link to the install methods instead. Without a
+terminal, the same news is one line on stderr. A declined or failed upgrade
+changes neither the report nor the exit code. `run.sh` and `run.ps1` always
+run the latest release, so they never see the offer.
+
 ## Applying changes
 
 On a terminal, `doctor` opens with one header line naming what it read: the
@@ -264,8 +294,8 @@ files used.
 The first online run fetches only `https://models.dev/api.json`, caching validated
 prices at `~/.cache/token-max/models.json` (or under `XDG_CACHE_HOME`).
 Use `--offline` for that cache, `--price-cache FILE` to choose its location, or
-`--prices-file FILE` for a local models.dev catalog with no network access.
-Network failures fail the run; offline use is explicit. Cached prices include
+`--prices-file FILE` for a local models.dev catalog instead of fetching one.
+A failed price fetch fails the run; offline use is explicit. Cached prices include
 their file timestamp, so an old catalog remains visible.
 
 ## Plans and API prices

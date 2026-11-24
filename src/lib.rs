@@ -40,6 +40,7 @@ mod t3;
 mod terminal;
 mod totals;
 mod unreadable;
+mod upgrade;
 mod version;
 mod window;
 mod wire;

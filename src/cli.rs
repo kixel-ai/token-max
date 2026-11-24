@@ -15,8 +15,8 @@ use serde_json::ser::Formatter;
 use crate::collections::IndexSet;
 use crate::discovery::{DiscoveryOptions, discover};
 use crate::doctor::{
-    Confirm, Fix, Found, Offers, Owner, Style, Walking, ask, ask_billing, confirm, finish, opening,
-    preview, write, wrote,
+    Confirm, Fix, Found, Offers, Owner, Style, Walking, ask, ask_billing, ask_upgrade, confirm,
+    finish, opening, preview, stale, upgrade_line, write, wrote,
 };
 use crate::model::{Harness, Location, Millis, Scan, Verdict};
 use crate::prices::{Catalog, PriceOptions, cancel_downloads, load_prices};
@@ -28,6 +28,7 @@ use crate::sessions::{Session, export};
 use crate::ssh::{self, Reply, Scope};
 use crate::terminal::{WrapOptions, wrap_text};
 use crate::totals::Totals;
+use crate::upgrade::{self, Check, Install};
 use crate::wire::{Format, Job, Request};
 
 const HELP: &str =
@@ -58,11 +59,17 @@ Usage: token-max doctor [options]
   --details               Show grouped check evidence, assumptions, uncertainty and sources
   --defaults              Report as a user with no settings files would see it, offering nothing
   --plain                 Plain text without color or decorative Unicode
-  --offline               Use cached public prices without network access
-  --prices-file FILE      Use a local models.dev catalog without network access
+  --offline               Use cached public prices and check for no newer release, without network access
+  --prices-file FILE      Use a local models.dev catalog instead of fetching prices
   --price-cache FILE      Cache path (default: ~/.cache/token-max/models.json)
   -v, --version           Show the package version
   -h, --help              Show this help
+
+Unless --offline, it first asks GitHub for the latest token-max release. When that is
+newer, a terminal run offers to put it in place of this binary, checked against its
+published checksum, and rerun with the same options; a binary Cargo or Nix installed
+gets that tool's command instead. Without a terminal, or if the check cannot run, it
+says so on stderr and goes on with this build.
 
 Prints which settings to change, with the evidence for each. When stdin and stdout are
 both a terminal, it then offers the changes it can make, grouping tools, skills and MCP
@@ -1291,11 +1298,36 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
     };
     let home = std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned());
     let style = format.style(home.clone());
-    // On a terminal, open with what the run is about to read, then ask how each of this
-    // host's Claude profiles on the Anthropic API pays, which picks its main TTL's default;
-    // without a terminal the report names both defaults.
+    // Every run but an offline one asks for the latest release, while discovery reads the disk.
+    let check = (!values.offline).then(|| {
+        thread::spawn(|| {
+            if let Ok(paths) = upgrade::Paths::here() {
+                upgrade::tidy(&paths.exe);
+            }
+            let releases = upgrade::releases();
+            let check = upgrade::check(&releases);
+            (releases, check)
+        })
+    });
+    let check = move || {
+        check.map(|handle| {
+            handle.join().unwrap_or_else(|_| {
+                let failed = Check::Failed("the check failed".into());
+                (upgrade::releases(), failed)
+            })
+        })
+    };
+    // On a terminal, offer a newer release before anything else, then open with what the run
+    // is about to read, then ask how each of this host's Claude profiles on the Anthropic API
+    // pays, which picks its main TTL's default; without a terminal the report names both
+    // defaults.
     if terminal {
         let found = discover(&discovery)?;
+        if let Some((releases, check)) = check()
+            && let Some(code) = offer_upgrade(&releases, check, &style)?
+        {
+            return Ok((Output::Written, code));
+        }
         let failed = |_| ScanError::new("cannot use the terminal; no report produced");
         let opening = opening(&Found::list(&found), &destinations, &style);
         io::stdout()
@@ -1322,6 +1354,8 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
         )
         .map_err(failed)?;
         enter(Phase::Running);
+    } else if let Some((_, check)) = check() {
+        warn_upgrade(check);
     }
     let replies = gather(Gather {
         since,
@@ -1425,6 +1459,126 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
         return Ok((Output::Walk(Walk { hosts, head, style }), 0));
     }
     Ok((Output::Text(format!("{head}{text}")), code))
+}
+
+/// Say on a terminal what the release check found, offering to upgrade and rerun when a newer
+/// release can replace this binary. Returns the rerun's exit code once it has run in this
+/// process's place; otherwise this run goes on with this build.
+fn offer_upgrade(releases: &str, check: Check, style: &Style) -> Result<Option<u8>, ScanError> {
+    let failed = |_| ScanError::new("cannot use the terminal; no report produced");
+    let mut stdout = io::stdout().lock();
+    let say = |stdout: &mut io::StdoutLock, text: &str, note: bool| {
+        let line = upgrade_line(text, note, style);
+        stdout
+            .write_all(line.as_bytes())
+            .and_then(|()| stdout.flush())
+            .map_err(failed)
+    };
+    let latest = match check {
+        Check::Current => return Ok(None),
+        Check::Failed(why) => {
+            let text = format!("\nCould not check for a newer release: {why}.");
+            say(&mut stdout, &text, true)?;
+            return Ok(None);
+        }
+        Check::Newer(latest) => latest,
+    };
+    let (exe, target) = match upgrade::install() {
+        Install::Replace { exe, target } => (exe, target),
+        Install::Manager(command) => {
+            let text = format!("\ntoken-max {} Upgrade with {command}.", stale(&latest));
+            say(&mut stdout, &text, false)?;
+            return Ok(None);
+        }
+        Install::Reinstall(why) => {
+            let text = format!("\ntoken-max {} {}", stale(&latest), reinstall(&why));
+            say(&mut stdout, &text, false)?;
+            return Ok(None);
+        }
+    };
+    enter(Phase::Asking);
+    let yes = ask_upgrade(&latest, style, &mut io::stdin().lock(), &mut stdout).map_err(failed)?;
+    enter(Phase::Running);
+    if !yes {
+        return Ok(None);
+    }
+    say(&mut stdout, &format!("Downloading {latest}..."), true)?;
+    if let Err(why) = upgrade::replace(releases, &latest, &exe, target) {
+        let version = upgrade::VERSION;
+        let text = format!("Could not upgrade: {why}. Continuing with v{version}.");
+        say(&mut stdout, &text, false)?;
+        return Ok(None);
+    }
+    say(
+        &mut stdout,
+        &format!("Upgraded to {latest}; rerunning."),
+        false,
+    )?;
+    drop(stdout);
+    rerun(&exe).map(Some)
+}
+
+/// Run the upgraded binary at `exe` with this run's arguments, in this process's place.
+#[cfg(unix)]
+fn rerun(exe: &std::path::Path) -> Result<u8, ScanError> {
+    use std::os::unix::process::CommandExt;
+    let error = std::process::Command::new(exe)
+        .args(std::env::args_os().skip(1))
+        .exec();
+    Err(ScanError::new(format!(
+        "upgraded, but could not rerun {}: {error}",
+        display(&exe.to_string_lossy())
+    )))
+}
+
+/// Run the upgraded binary at `exe` with this run's arguments, and wait for its exit code:
+/// Windows cannot replace a running process's program.
+#[cfg(windows)]
+fn rerun(exe: &std::path::Path) -> Result<u8, ScanError> {
+    // The rerun owns the console and cancels itself on Ctrl-C, so this process only waits.
+    enter(Phase::Writing);
+    let status = std::process::Command::new(exe)
+        .args(std::env::args_os().skip(1))
+        .status()
+        .map_err(|error| {
+            ScanError::new(format!(
+                "upgraded, but could not rerun {}: {error}",
+                display(&exe.to_string_lossy())
+            ))
+        })?;
+    Ok(status
+        .code()
+        .map_or(2, |code| u8::try_from(code).unwrap_or(2)))
+}
+
+/// How to upgrade a binary this run cannot replace, for the reason `why`, and no package
+/// manager owns.
+fn reinstall(why: &str) -> String {
+    let mut why = why.to_string();
+    if let Some(first) = why.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    format!(
+        "{why}, so install it again as {} describes.",
+        upgrade::INSTALL
+    )
+}
+
+/// Say on stderr what the release check found when there is no terminal to offer an upgrade on.
+fn warn_upgrade(check: Check) {
+    let line = match check {
+        Check::Current => return,
+        Check::Failed(why) => format!("could not check for a newer release: {why}"),
+        Check::Newer(latest) => {
+            let how = match upgrade::install() {
+                Install::Replace { .. } => "Run token-max doctor on a terminal to upgrade.".into(),
+                Install::Manager(command) => format!("Upgrade with {command}."),
+                Install::Reinstall(why) => reinstall(&why),
+            };
+            format!("{} {how}", stale(&latest))
+        }
+    };
+    eprintln!("token-max: {}", crate::safe::terminal_text(&line));
 }
 
 /// Walk through every host's changes, print each host's report with the accepted ones first,

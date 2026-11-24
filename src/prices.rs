@@ -469,7 +469,8 @@ fn downloads() -> MutexGuard<'static, Downloads> {
     DOWNLOADS.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Delete every partial price download and refuse new ones, before a cancelled process exits.
+/// Delete every partial download, of prices or a release, and refuse new ones, before a
+/// cancelled process exits.
 pub fn cancel_downloads() {
     let mut downloads = downloads();
     downloads.cancelled = true;
@@ -479,7 +480,7 @@ pub fn cancel_downloads() {
 }
 
 /// Create a partial download, registered so cancellation can delete it.
-fn create_temporary(temporary: &Path) -> io::Result<File> {
+pub(crate) fn create_temporary(temporary: &Path) -> io::Result<File> {
     let mut downloads = downloads();
     if downloads.cancelled {
         return Err(io::ErrorKind::Interrupted.into());
@@ -498,7 +499,7 @@ fn create_temporary(temporary: &Path) -> io::Result<File> {
 }
 
 /// Removes this operation's partial download however it ends; other downloads own other names.
-struct Discard<'a>(&'a Path);
+pub(crate) struct Discard<'a>(pub(crate) &'a Path);
 
 impl Drop for Discard<'_> {
     fn drop(&mut self) {
@@ -513,7 +514,7 @@ fn millis(time: SystemTime) -> Option<i64> {
 }
 
 /// A name no concurrent download in this or another process will pick.
-fn unique() -> String {
+pub(crate) fn unique() -> String {
     use std::hash::{BuildHasher, RandomState};
     let state = RandomState::new();
     format!(

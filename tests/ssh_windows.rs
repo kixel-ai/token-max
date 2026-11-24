@@ -5,6 +5,8 @@
 //! installed there: a copy of this build. Built without libtest, since as `ssh.exe` this binary
 //! takes OpenSSH's arguments, which libtest would reject.
 
+mod support;
+
 #[cfg(not(windows))]
 fn main() {}
 
@@ -258,6 +260,7 @@ mod windows {
                 .env("PATH", self.root.join("bin"))
                 .env("TEST_ROOT", &self.root)
                 .env("TEST_TOOLS", &self.tools)
+                .env("TOKEN_MAX_RELEASES", crate::support::current())
                 .stdin(Stdio::null());
             command
         }

@@ -1547,7 +1547,7 @@ fn git_keeps(file: &Path) -> bool {
 
 /// Whether this process may write `path`.
 #[cfg(unix)]
-fn writable(path: &Path) -> bool {
+pub(crate) fn writable(path: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
     let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
         return false;
@@ -1559,7 +1559,7 @@ fn writable(path: &Path) -> bool {
 /// Whether this process may write `path`; Windows marks read-only files, and ignores the
 /// mark on directories.
 #[cfg(not(unix))]
-fn writable(path: &Path) -> bool {
+pub(crate) fn writable(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|m| m.is_dir() || !m.permissions().readonly())
 }
 
@@ -1971,6 +1971,53 @@ pub fn opening(found: &[Found], destinations: &[String], style: &Style) -> Strin
     }
     out.push('\n');
     out
+}
+
+/// Say that release `latest` is out, then ask whether to upgrade to it and rerun; end of input
+/// is a no. Nothing is stored: the next run asks again.
+pub fn ask_upgrade(
+    latest: &str,
+    style: &Style,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> io::Result<bool> {
+    write!(
+        output,
+        "\n{}",
+        style.line(&format!("token-max {}", stale(latest)))
+    )?;
+    let prompt = style.ask(&format!("Upgrade to {latest} and rerun?"), "[y]es, [n]o");
+    loop {
+        write!(output, "{prompt}")?;
+        output.flush()?;
+        let mut line = String::new();
+        if input.read_line(&mut line)? == 0 {
+            writeln!(output)?;
+            return Ok(false);
+        }
+        match line.trim().to_ascii_lowercase().as_str() {
+            "y" | "yes" => return Ok(true),
+            "n" | "no" => return Ok(false),
+            _ => {}
+        }
+    }
+}
+
+/// That release `latest` is newer than this build, whose advice may have gone stale.
+pub fn stale(latest: &str) -> String {
+    format!(
+        "{latest} is out; this is v{}, and its advice may be out of date.",
+        crate::upgrade::VERSION
+    )
+}
+
+/// A line about the release check or the upgrade, dim when it is only a `note`.
+pub fn upgrade_line(text: &str, note: bool, style: &Style) -> String {
+    if note {
+        style.dim(text)
+    } else {
+        style.line(text)
+    }
 }
 
 /// Ask how each Claude profile at `roots` pays, before the report, so its main conversation's

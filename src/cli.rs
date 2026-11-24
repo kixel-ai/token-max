@@ -1298,13 +1298,11 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
     };
     let home = std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned());
     let style = format.style(home.clone());
+    upgrade::tidy();
     // Every run but an offline one asks for the latest release, alongside discovery on a
     // terminal and alongside the whole scan otherwise.
     let mut check = (!values.offline).then(|| {
         thread::spawn(|| {
-            if let Ok(paths) = upgrade::Paths::here() {
-                upgrade::tidy(&paths.exe);
-            }
             let releases = upgrade::releases();
             let check = upgrade::check(&releases);
             (releases, check)

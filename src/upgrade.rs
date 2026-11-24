@@ -393,9 +393,11 @@ fn aside(exe: &Path) -> PathBuf {
 
 /// Delete the binary an earlier upgrade moved aside on Windows. It may still be running, as
 /// the process that upgraded and waits on this one is, so a failure waits for a later run.
-pub fn tidy(exe: &Path) {
-    if cfg!(windows) {
-        let _ = fs::remove_file(aside(exe));
+pub fn tidy() {
+    if cfg!(windows)
+        && let Ok(paths) = Paths::here()
+    {
+        let _ = fs::remove_file(aside(&paths.exe));
     }
 }
 

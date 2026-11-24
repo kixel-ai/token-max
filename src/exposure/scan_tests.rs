@@ -3174,6 +3174,7 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
     assert_eq!(check.base.action, crate::model::Action::Advisory);
     assert_eq!(
         check.unresolved.as_deref(),
+        // slash ok: prose naming a kind of file
         Some("a project .codex/config.toml sets memories, but the project's trust is not recorded")
     );
     assert!(shows(
@@ -3227,6 +3228,7 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
         check
             .unresolved
             .unwrap()
+            // slash ok: prose naming a kind of file
             .starts_with("a .codex/config.toml above the latest session's directory sets memories")
     );
     std::fs::remove_file(&project_config).unwrap();

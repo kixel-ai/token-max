@@ -23,7 +23,7 @@ Decided 2026-11-23 (maintainer, /quest-plan after a survey of Claude Code
 Recommendations:
 
 - Rank against the default the profile's settings resolve, after any
-  [default-model](/quest/m1/vibes/default-model.md) change the user accepted
+  `Main-session default` change the user accepted
   in the same walk.
 - Say on the card what stops it working: the advisor is experimental, not on
   Bedrock, Agent Platform or Foundry, and needs a feature flag that
@@ -32,7 +32,3 @@ Recommendations:
   offer the edit. A Fable advisor bills to usage credits on some plans.
 - `src/fable.rs` already parses advisor parts, so `doctor` can price advisor
   use once it is on; extend that line if it doesn't show advisor cost yet.
-
-## Related
-
-- [Default model](/quest/m1/vibes/default-model.md) - the main default this card ranks against

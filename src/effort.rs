@@ -7,7 +7,7 @@ use std::cmp::Reverse;
 use serde_json::{Map, Value};
 
 use crate::collections::IndexMap;
-use crate::controls::{Env, SettingsScope, members, scoped_environment};
+use crate::controls::{Env, ScopedEnvironment, SettingsScope, members, scoped_environment};
 use crate::model::{
     Action, Agent, CheckBase, EffortCheck, EffortControl, EffortRun, Evidence, Harness, Location,
     Millis, Owned, Profile, Request, Scan,
@@ -22,6 +22,48 @@ const SOURCES: [&str; 5] = [
     "https://developers.openai.com/api/docs/guides/reasoning (2026-11-14)",
     "https://learn.chatgpt.com/docs/config-file/config-reference (2026-11-14)",
 ];
+
+/// A main-session model and effort.
+pub type Pair = (&'static str, &'static str);
+
+/// The maintainer's pick of a main-session default for each harness, then the other
+/// defaults they accept as fine.
+const PICKS: [(Harness, Pair, &[Pair]); 2] = [
+    (
+        Harness::Claude,
+        ("claude-opus-5-5", "medium"),
+        &[("claude-opus-5-5", "high")],
+    ),
+    (
+        Harness::Codex,
+        ("gpt-6.2-sol", "high"),
+        &[("gpt-6.2-sol", "xhigh")],
+    ),
+];
+
+/// The maintainer's pick of a main-session default for `harness`, and the other defaults
+/// they accept.
+pub fn pick(harness: Harness) -> (Pair, &'static [Pair]) {
+    let (_, pick, accepted) = PICKS
+        .iter()
+        .find(|(h, _, _)| *h == harness)
+        .expect("every harness has a pick");
+    (*pick, accepted)
+}
+
+/// Whether a resolved default is the maintainer's pick for `harness` or one they accept.
+pub fn accepted(control: &EffortControl, harness: Harness) -> bool {
+    let (pick, others) = pick(harness);
+    let current = (control.model.as_deref(), control.effective.as_deref());
+    std::iter::once(&pick)
+        .chain(others)
+        .any(|(model, effort)| current == (Some(*model), Some(*effort)))
+}
+
+/// Whether Claude level `level` is below `than`; false when either is not a Claude level.
+pub(crate) fn below(level: &str, than: &str) -> bool {
+    rank(level).zip(rank(than)).is_some_and(|(l, t)| l < t)
+}
 
 /// Claude Code's effort levels, lowest first.
 const LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
@@ -134,7 +176,11 @@ pub(crate) fn latest_model<'a>(requests: &[&'a Request]) -> Option<&'a str> {
         .map(|(model, _)| *model)
 }
 
-const RECORDED: &str = "the latest recorded main-session model";
+/// What a level owner ends with when no setting names a level.
+pub(crate) const MODEL_DEFAULT: &str = " (the model's default)";
+
+/// The model owner when no setting names the model.
+pub(crate) const RECORDED: &str = "the latest recorded main-session model";
 
 /// The setting's value at `key` in the highest scope that sets it, with that scope.
 fn highest<'a>(scopes: &[SettingsScope<'a>], key: &str) -> Option<(&'a Value, &'a str)> {
@@ -178,25 +224,6 @@ pub fn claude_effort(
     recorded: Option<&str>,
 ) -> Result<EffortControl, ScanError> {
     let environment = scoped_environment(scopes, env);
-    let unknown =
-        |model: Option<String>, model_owner: String, owner: String, why: String| EffortControl {
-            model,
-            model_owner,
-            level: None,
-            owner,
-            effective: None,
-            lowered: None,
-            caps: vec![],
-            default: None,
-            unresolved: Some(why),
-        };
-    let variable = "CLAUDE_CODE_EFFORT_LEVEL";
-    let pinned = environment.values.get(variable);
-    let pinned_owner = environment
-        .owners
-        .get(variable)
-        .cloned()
-        .unwrap_or_default();
     // The model: ANTHROPIC_MODEL, then the highest settings file's `model`, then the session.
     let (named, model_owner) = match environment.values.get("ANTHROPIC_MODEL") {
         Some(Value::String(m)) => (
@@ -205,7 +232,9 @@ pub fn claude_effort(
         ),
         _ => match highest(scopes, "model") {
             Some((Value::String(m), file)) => (Some(m.as_str()), format!("{file}:model")),
-            Some((Value::Null, _)) | None => (recorded, RECORDED.to_string()),
+            // A null outranks the files below it, so it owns the model the session falls back to.
+            Some((Value::Null, file)) => (recorded, format!("{file}:model")),
+            None => (recorded, RECORDED.to_string()),
             Some((_, file)) => return Err(invalid("invalid model", file)),
         },
     };
@@ -221,9 +250,107 @@ pub fn claude_effort(
             None => claude_canonical(m),
         },
     };
-    let default_owner = |model: &str| {
-        format!("{user_file}:modelSettings.{model}.effortLevel (the model's default)")
-    };
+    let mut control = claude_on(
+        scopes,
+        user_file,
+        &environment,
+        model,
+        named,
+        model_owner.clone(),
+    )?;
+    let (pick, _) = pick(Harness::Claude);
+    if control.unresolved.is_none() && control.model.as_deref() != Some(pick.0) {
+        // A setting only the pick reads, such as an invalid level in its own `modelSettings`
+        // row, leaves the pick unresolved: the current default reads none of it.
+        let mut picked = match claude_on(
+            scopes,
+            user_file,
+            &environment,
+            Some(pick.0.into()),
+            Some(pick.0),
+            model_owner.clone(),
+        ) {
+            Ok(picked) => picked,
+            Err(error) => {
+                let file = error
+                    .location
+                    .map_or_else(|| user_file.to_string(), |l| l.file.to_string());
+                EffortControl {
+                    model: Some(pick.0.into()),
+                    model_owner,
+                    level: None,
+                    unresolved: Some(format!(
+                        "{} in {file}, which only {} reads",
+                        error.message, pick.0
+                    )),
+                    owner: file,
+                    effective: None,
+                    lowered: None,
+                    caps: vec![],
+                    default: None,
+                    picked: None,
+                    provider: None,
+                }
+            }
+        };
+        // A `[1m]` context window carries over to the pick, as the edit names it.
+        if named.is_some_and(|m| m.trim().to_ascii_lowercase().ends_with("[1m]")) {
+            picked.model = Some(format!("{}[1m]", pick.0));
+        }
+        control.picked = Some(Box::new(picked));
+    }
+    control.provider = claude_provider(&environment);
+    Ok(control)
+}
+
+/// The cloud provider a Claude Code environment sends requests to; None for Anthropic's
+/// API, which a custom ANTHROPIC_BASE_URL (a gateway or proxy) still speaks.
+pub(crate) fn claude_provider(environment: &ScopedEnvironment) -> Option<String> {
+    let enabled =
+        |key: &str| matches!(environment.values.get(key), Some(Value::String(s)) if s == "1");
+    [
+        ("CLAUDE_CODE_USE_BEDROCK", "amazon-bedrock"),
+        ("CLAUDE_CODE_USE_VERTEX", "google-vertex-anthropic"),
+        ("CLAUDE_CODE_USE_FOUNDRY", "azure"),
+    ]
+    .into_iter()
+    .find(|(key, _)| enabled(key))
+    .map(|(_, provider)| provider.to_string())
+}
+
+/// A Claude profile's default effort on `model`, which `named` names in the settings or
+/// `model_owner` records; `unresolved` says why when it cannot be resolved.
+fn claude_on(
+    scopes: &[SettingsScope],
+    user_file: &str,
+    environment: &ScopedEnvironment,
+    model: Option<String>,
+    named: Option<&str>,
+    model_owner: String,
+) -> Result<EffortControl, ScanError> {
+    let unknown =
+        |model: Option<String>, model_owner: String, owner: String, why: String| EffortControl {
+            model,
+            model_owner,
+            level: None,
+            owner,
+            effective: None,
+            lowered: None,
+            caps: vec![],
+            default: None,
+            unresolved: Some(why),
+            picked: None,
+            provider: None,
+        };
+    let variable = "CLAUDE_CODE_EFFORT_LEVEL";
+    let pinned = environment.values.get(variable);
+    let pinned_owner = environment
+        .owners
+        .get(variable)
+        .cloned()
+        .unwrap_or_default();
+    let default_owner =
+        |model: &str| format!("{user_file}:modelSettings.{model}.effortLevel{MODEL_DEFAULT}");
     let Some(model) = model else {
         let why = match named {
             None => {
@@ -376,6 +503,8 @@ pub fn claude_effort(
         caps,
         default: Some(support.default.into()),
         unresolved: None,
+        picked: None,
+        provider: None,
     })
 }
 
@@ -423,6 +552,27 @@ pub fn codex_effort(
         Some((_, file)) => return Err(invalid("invalid model", file)),
         None => (recorded.map(String::from), RECORDED.to_string()),
     };
+    let mut control = codex_on(scopes, user_file, catalog, model, model_owner.clone())?;
+    let (pick, _) = pick(Harness::Codex);
+    if control.unresolved.is_none() && control.model.as_deref() != Some(pick.0) {
+        let picked = codex_on(scopes, user_file, catalog, Some(pick.0.into()), model_owner)?;
+        control.picked = Some(Box::new(picked));
+    }
+    // Codex's built-in OpenAI provider takes OpenAI's model IDs.
+    control.provider = highest(scopes, "model_provider")
+        .and_then(|(value, _)| crate::safe::label(value))
+        .filter(|p| p != "openai");
+    Ok(control)
+}
+
+/// A Codex profile's default effort on `model`, which `model_owner` names.
+fn codex_on(
+    scopes: &[SettingsScope],
+    user_file: &str,
+    catalog: Option<&IndexMap<String, CodexModel>>,
+    model: Option<String>,
+    model_owner: String,
+) -> Result<EffortControl, ScanError> {
     let key = "model_reasoning_effort";
     let default = model
         .as_deref()
@@ -431,10 +581,7 @@ pub fn codex_effort(
     let (level, owner) = match highest(scopes, key) {
         Some((Value::String(level), file)) => (Some(level.clone()), format!("{file}:{key}")),
         Some((_, file)) => return Err(invalid(format!("invalid {key}"), file)),
-        None => (
-            default.clone(),
-            format!("{user_file}:{key} (the model's default)"),
-        ),
+        None => (default.clone(), format!("{user_file}:{key}{MODEL_DEFAULT}")),
     };
     let unresolved = level.is_none().then(|| match (&model, catalog) {
         (None, _) => "no setting names the model and no main-session request recorded one".to_string(),
@@ -451,6 +598,8 @@ pub fn codex_effort(
         caps: vec![],
         default,
         unresolved,
+        picked: None,
+        provider: None,
     })
 }
 
@@ -469,9 +618,15 @@ pub fn effort_checks(input: &EffortInput<'_>) -> Vec<EffortCheck> {
     let owner = |p: &Profile| {
         let e = p.effort.as_ref().expect("filtered on an effort control");
         // One owner can resolve to different levels on different recorded models.
+        // The pick's own level can come from a file one profile reads and another does not.
+        let picked = e
+            .picked
+            .as_ref()
+            .map(|p| (&p.model, &p.owner, &p.level, &p.effective, &p.caps));
+        // Caps and the provider each change the edit the line's card offers.
         format!(
-            "{}\n{}\n{:?}\n{:?}\n{:?}\n{:?}",
-            e.owner, e.model_owner, e.model, e.level, e.effective, e.unresolved
+            "{}\n{}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{:?}\n{picked:?}",
+            e.owner, e.model_owner, e.model, e.level, e.effective, e.unresolved, e.caps, e.provider
         )
     };
     let controlled = input.scan.profiles.iter().filter(|p| p.effort.is_some());
@@ -946,6 +1101,119 @@ mod tests {
                 Some("max"),
                 Some("max"),
                 "/home/u/.codex/config.toml:model_reasoning_effort"
+            )
+        );
+    }
+
+    #[test]
+    fn the_pick_takes_its_own_models_level_from_whichever_setting_decides_it() {
+        // On the pick's model already, nothing more is resolved.
+        let opus = Some("claude-opus-5-5");
+        let c = resolve(json!({}), json!({}), json!({}), &[], opus).unwrap();
+        assert_eq!(c.picked, None);
+        // Off it, the pick's model takes its own entry's level, from another file, under its cap.
+        let user = json!({
+            "model": "claude-fable-5-2",
+            "modelSettings": {"claude-fable-5-2": {"effortLevel": "xhigh"}},
+        });
+        let project = json!({
+            "modelSettings": {"claude-opus-5-5": {"effortLevel": "high", "maxEffortLevel": "low"}},
+        });
+        let c = resolve(user.clone(), project, json!({}), &[], None).unwrap();
+        assert_eq!(
+            level(&c).2,
+            format!("{USER}:modelSettings.claude-fable-5-2.effortLevel")
+        );
+        let picked = c.picked.expect("the pick is resolved off its model");
+        assert_eq!(
+            (picked.model.as_deref(), picked.model_owner.as_str()),
+            (opus, format!("{USER}:model").as_str())
+        );
+        let owner = format!("{PROJECT}:modelSettings.claude-opus-5-5.effortLevel");
+        assert_eq!(level(&picked), (Some("high"), Some("low"), owner.as_str()));
+        assert_eq!(picked.caps.len(), 1);
+        // With no setting for it, it takes its own default, which differs from Fable's level.
+        let c = resolve(user, json!({}), json!({}), &[], None).unwrap();
+        let default =
+            format!("{USER}:modelSettings.claude-opus-5-5.effortLevel (the model's default)");
+        assert_eq!(
+            level(&c.picked.unwrap()),
+            (Some("medium"), Some("medium"), default.as_str())
+        );
+        // The variable decides every model's level.
+        let c = resolve(
+            json!({}),
+            json!({}),
+            json!({}),
+            &[("CLAUDE_CODE_EFFORT_LEVEL", "max")],
+            Some("claude-sonnet-5-5"),
+        )
+        .unwrap();
+        assert_eq!(
+            level(&c.picked.unwrap()),
+            (Some("max"), Some("max"), "CLAUDE_CODE_EFFORT_LEVEL")
+        );
+        // An unresolved default has no pick to resolve.
+        let c = resolve(json!({}), json!({}), json!({}), &[], None).unwrap();
+        assert!(c.unresolved.is_some() && c.picked.is_none());
+        // An invalid level only the pick's own row holds leaves the pick unresolved, not the scan;
+        // the same level on the current model still fails it.
+        let dormant = json!({
+            "model": "claude-fable-5-2",
+            "modelSettings": {"claude-opus-5-5": {"effortLevel": "max"}},
+        });
+        let c = resolve(dormant, json!({}), json!({}), &[], None).unwrap();
+        assert_eq!(c.unresolved, None);
+        let picked = c.picked.expect("the pick is kept, unresolved");
+        assert_eq!(
+            (picked.level, picked.unresolved.as_deref()),
+            (
+                None,
+                Some(
+                    format!("invalid modelSettings effortLevel in {USER}, which only claude-opus-5-5 reads")
+                        .as_str()
+                )
+            )
+        );
+        let live = json!({
+            "model": "claude-opus-5-5",
+            "modelSettings": {"claude-opus-5-5": {"effortLevel": "max"}},
+        });
+        assert!(resolve(live, json!({}), json!({}), &[], None).is_err());
+
+        // Codex's level is the model's only when no layer sets one.
+        let user_file = "/home/u/.codex/config.toml";
+        let catalog: IndexMap<String, CodexModel> =
+            [("gpt-6.1-sol", "low"), ("gpt-6.2-sol", "medium")]
+                .into_iter()
+                .map(|(m, d)| (m.to_string(), CodexModel { default: d.into() }))
+                .collect();
+        let unset = config(json!({"model": "gpt-6.1-sol"}));
+        let set = config(json!({"model": "gpt-6.1-sol", "model_reasoning_effort": "xhigh"}));
+        let picked = |user: &Map<String, Value>| {
+            let scopes = [SettingsScope {
+                config: user,
+                file: user_file,
+            }];
+            let c = codex_effort(&scopes, user_file, Some(&catalog), None).unwrap();
+            assert_eq!(c.model_owner, format!("{user_file}:model"));
+            let picked = *c.picked.expect("the pick is resolved off its model");
+            assert_eq!(picked.model.as_deref(), Some("gpt-6.2-sol"));
+            assert_eq!(picked.model_owner, c.model_owner);
+            (picked.level, picked.owner)
+        };
+        assert_eq!(
+            picked(&unset),
+            (
+                Some("medium".into()),
+                format!("{user_file}:model_reasoning_effort (the model's default)")
+            )
+        );
+        assert_eq!(
+            picked(&set),
+            (
+                Some("xhigh".into()),
+                format!("{user_file}:model_reasoning_effort")
             )
         );
     }

@@ -1108,6 +1108,7 @@ mod tests {
         assert_eq!(items[0].name, "Rust code intelligence");
         assert_eq!(
             items[0].text,
+            // slash ok: ~/repo and ~/other are placeholders replaced by the built paths below
             "Rust files were read or edited in 3 of 4 sessions (75%), most in ~/repo (3 sessions) and ~/other (1). The rust-analyzer-lsp plugin is not installed. Its language server, rust-analyzer, is on the PATH token-max runs with. With the plugin, Claude looks up a symbol's definition and references instead of searching text and reading each candidate file, and sees the type errors an edit introduced. Anthropic recommends it for typed languages; what it saves is not measured."
                 .replace("~/repo", &home(&repo_s))
                 .replace("~/other", &home(&other_s))

@@ -20,7 +20,7 @@ use crate::model::{
     RequestEvidence, ReturnTiming, Scalar, Share, SubagentCost, T3IdleCheck, T3TextGeneration, Ttl,
     UsageEstimate, Verdict,
 };
-use crate::prices::{TIER_SENSITIVITY, add_costs};
+use crate::prices::{TIER_SENSITIVITY, TIER_SIGNS, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
 use crate::terminal::{BOLD, DIM, GREEN, RED, WrapOptions, YELLOW, cells, wrap_spans};
 use crate::vibes::Item;
@@ -425,36 +425,129 @@ const CLAUDE_EFFORT_DOCS: &str =
 const OPENAI_REASONING: &str = "https://developers.openai.com/api/docs/guides/reasoning";
 
 /// The provider's own guidance on a default effort above `high`, which no transcript can
-/// price, and the pages it comes from.
-fn effort_warning(e: &EffortCheck) -> Option<(String, Vec<&'static str>)> {
-    if e.base.action != Action::Keep {
+/// price; None at or below `high`.
+fn past_high(level: &str, harness: Harness) -> Option<String> {
+    Some(match (level, harness) {
+        ("max", Harness::Claude) => format!(
+            "{PAST_HIGH}, and Claude Code's docs call max prone to overthinking and say to test it before adopting it broadly."
+        ),
+        ("xhigh", Harness::Claude) => format!(
+            "{PAST_HIGH}; on SWE-bench Pro, Opus 5.5 at xhigh scored about 1.4 points above high for 2.5 times the cost."
+        ),
+        ("max", Harness::Codex) => "OpenAI's reasoning guide keeps max for your most complex tasks, evaluated against xhigh.".into(),
+        ("xhigh", Harness::Codex) => "OpenAI's reasoning guide says to use xhigh only when your evals show a clear benefit that justifies the extra latency and cost.".into(),
+        _ => return None,
+    })
+}
+
+/// A default as a card names it, such as `claude-opus-5-5 at high`.
+fn default_pair(model: Option<&str>, level: Option<&str>) -> String {
+    let model = model.unwrap_or("an unnamed model");
+    match level {
+        Some("auto") => format!("{model} with no level sent"),
+        Some(level) => format!("{model} at {level}"),
+        None => format!("{model}, which takes no effort level"),
+    }
+}
+
+/// The main-session default as `vibes` shows it: the maintainer's pick beside the default
+/// the settings give, the provider's guidance past `high`, and what each recorded model and
+/// effort pair cost. None when the default is unresolved.
+fn default_item(e: &EffortCheck, profile: &str, how: Option<How>, out: &Out<'_>) -> Option<Item> {
+    let c = &e.control;
+    // A Codex level with no model to weigh it on names no default either.
+    if e.base.action != Action::Keep || c.model.is_none() {
         return None;
     }
-    let level = e.base.current.as_deref()?;
-    let (text, sources) = match (level, e.harness) {
-        ("max", Harness::Claude) => (
-            format!(
-                "{PAST_HIGH}, and Claude Code's docs call max prone to overthinking and say to test it before adopting it broadly."
-            ),
-            vec![CLAUDE_MODEL_GUIDE, CLAUDE_EFFORT_DOCS],
-        ),
-        ("xhigh", Harness::Claude) => (
-            format!(
-                "{PAST_HIGH}; on SWE-bench Pro, Opus 5.5 at xhigh scored about 1.4 points above high for 2.5 times the cost."
-            ),
-            vec![CLAUDE_MODEL_GUIDE],
-        ),
-        ("max", Harness::Codex) => (
-            "OpenAI's reasoning guide keeps max for your most complex tasks, evaluated against xhigh.".into(),
-            vec![OPENAI_REASONING],
-        ),
-        ("xhigh", Harness::Codex) => (
-            "OpenAI's reasoning guide says to use xhigh only when your evals show a clear benefit that justifies the extra latency and cost.".into(),
-            vec![OPENAI_REASONING],
-        ),
-        _ => return None,
+    let ((model, effort), others) = crate::effort::pick(e.harness);
+    let pick = default_pair(Some(model), Some(effort));
+    let fine: Vec<String> = others
+        .iter()
+        .map(|(m, l)| default_pair(Some(m), Some(l)))
+        .collect();
+    let current = default_pair(c.model.as_deref(), c.effective.as_deref());
+    let quiet = crate::effort::accepted(c, e.harness);
+    let mut text = if current == pick {
+        format!("Defaults to {current}, the maintainer's pick.")
+    } else if quiet {
+        format!("Defaults to {current}, which the maintainer accepts beside their pick, {pick}.")
+    } else {
+        let mut text = format!("Defaults to {current}. The maintainer's pick is {pick}");
+        if !fine.is_empty() {
+            let _ = write!(text, ", and {} is fine too", fine.join(" or "));
+        }
+        text + "."
     };
-    Some((format!("Defaults to {level}. {text}"), sources))
+    // An accepted default is fine as it is, so no caution is raised against it.
+    if let Some(guidance) = c
+        .effective
+        .as_deref()
+        .filter(|_| !quiet)
+        .and_then(|l| past_high(l, e.harness))
+    {
+        let _ = write!(text, " {guidance}");
+    }
+    let _ = write!(text, " {}", effort_runs(e));
+    if !quiet {
+        text += " A different model or effort changes the output tokens, so what the pick would cost is not measured.";
+    }
+    let (lead, guides): (&str, &[&str]) = match e.harness {
+        Harness::Claude => (
+            "The maintainer's pick of a default. Anthropic's guidance:",
+            &[CLAUDE_MODEL_GUIDE, CLAUDE_EFFORT_DOCS],
+        ),
+        Harness::Codex => (
+            "The maintainer's pick of a default. OpenAI's guidance:",
+            &[OPENAI_REASONING],
+        ),
+    };
+    Some(Item {
+        name: tagged("Main-session default".into(), profile),
+        value: if quiet {
+            String::new()
+        } else {
+            format!("{current} {} {pick}", out.arrow)
+        },
+        what: "The model and reasoning effort a main session starts with.".into(),
+        text,
+        sources: std::iter::once(lead)
+            .chain(guides.iter().copied())
+            .map(String::from)
+            .collect(),
+        how,
+        quiet,
+    })
+}
+
+/// What each recorded main-session model and effort pair cost, the most-run first.
+fn effort_runs(e: &EffortCheck) -> String {
+    if e.runs.is_empty() {
+        return "No main-session requests in the window.".into();
+    }
+    let mut runs: Vec<String> = e
+        .runs
+        .iter()
+        .take(EFFORT_PAIRS)
+        .map(|run| {
+            let cost = match run.estimate {
+                Some(e) => approx(e.usd, e.margin, ""),
+                None => "unpriced".into(),
+            };
+            format!(
+                "{} {}, {cost}",
+                effort_pair(run),
+                plural(run.requests, "time")
+            )
+        })
+        .collect();
+    if e.runs.len() > EFFORT_PAIRS {
+        let more = e.runs.len() - EFFORT_PAIRS;
+        runs.push(format!(
+            "{more} more pair{}",
+            if more == 1 { "" } else { "s" }
+        ));
+    }
+    format!("Ran {}.", runs.join("; "))
 }
 
 /// A model and effort pair as a line names it, such as `claude-opus-5-5 at high`.
@@ -483,12 +576,12 @@ fn effort_evidence(e: &EffortCheck, mark: Mark, out: &Out<'_>) -> String {
     if let (Some(model), Some(level)) = (&c.model, &c.level) {
         let mut text = if level == "auto" {
             format!("No level is sent to {model}")
-        } else if c.owner.ends_with("(the model's default)") {
+        } else if c.owner.ends_with(crate::effort::MODEL_DEFAULT) {
             format!("{model} defaults to {level}")
         } else {
             format!("The default is set to {level} on {model}")
         };
-        if c.model_owner == "the latest recorded main-session model" {
+        if c.model_owner == crate::effort::RECORDED {
             text += ", the model the latest session ran";
         }
         if let Some(why) = &c.lowered {
@@ -497,34 +590,7 @@ fn effort_evidence(e: &EffortCheck, mark: Mark, out: &Out<'_>) -> String {
         }
         parts.push(text + ".");
     }
-    if e.runs.is_empty() {
-        parts.push("No main-session requests in the window.".into());
-    } else {
-        let mut runs: Vec<String> = e
-            .runs
-            .iter()
-            .take(EFFORT_PAIRS)
-            .map(|run| {
-                let cost = match run.estimate {
-                    Some(e) => approx(e.usd, e.margin, ""),
-                    None => "unpriced".into(),
-                };
-                format!(
-                    "{} {}, {cost}",
-                    effort_pair(run),
-                    plural(run.requests, "time")
-                )
-            })
-            .collect();
-        if e.runs.len() > EFFORT_PAIRS {
-            let more = e.runs.len() - EFFORT_PAIRS;
-            runs.push(format!(
-                "{more} more pair{}",
-                if more == 1 { "" } else { "s" }
-            ));
-        }
-        parts.push(format!("Ran {}.", runs.join("; ")));
-    }
+    parts.push(effort_runs(e));
     parts.push(EFFORT_UNPRICED.into());
     if e.enterprise && c.level.is_some() {
         parts.push(
@@ -3144,13 +3210,14 @@ fn keepalive_keep(k: &KeepaliveCheck, r: &Common<'_>) -> String {
     };
     match k.margin_usd {
         Some(m) => format!(
-            "Pinging idle sessions every {interval} would cost {} more than {}.",
+            "Pinging idle sessions every {interval} would cost {} more than {}.{}",
             figure(-m),
             if k.idle_compaction_savings.is_some_and(|s| s.usd > 0.0) {
                 "idle compaction"
             } else {
                 "leaving them idle"
-            }
+            },
+            assumed_tier(r)
         ),
         None => format!(
             "No session sat idle past its {} cache and came back, so pings would only add cost.",
@@ -3167,7 +3234,7 @@ fn keepalive_unresolved(k: &KeepaliveCheck, r: &Common<'_>) -> String {
     let margin = r.margin.map(|m| m.scale(monthly(1.0, r.since, r.until)));
     if let Some(Setting::Keepalive(policy)) = r.recommended {
         return format!(
-            "Pinging idle sessions {policy} would save {}, but {}.",
+            "Pinging idle sessions {policy} would save {}, but {}.{}",
             approx(
                 r.monthly_savings_usd.unwrap_or_else(|| monthly(
                     r.savings_usd.unwrap_or(0.0),
@@ -3177,7 +3244,8 @@ fn keepalive_unresolved(k: &KeepaliveCheck, r: &Common<'_>) -> String {
                 margin,
                 "/mo"
             ),
-            r.owner.strip_prefix("no setting: ").unwrap_or(r.owner)
+            r.owner.strip_prefix("no setting: ").unwrap_or(r.owner),
+            assumed_tier(r)
         );
     }
     if r.uncertainty
@@ -3973,6 +4041,15 @@ fn coverage_note(r: &Common<'_>, items: &str) -> String {
         );
     }
     note
+}
+
+/// The sentence a verdict priced at an assumed service tier adds, or nothing.
+fn assumed_tier(r: &Common<'_>) -> &'static str {
+    if r.assumptions.iter().any(|s| s == TIER_SIGNS) {
+        " Its dollars are at an assumed service tier, since none was recorded, but every session moved the same way, so no tier could reverse this unless one changed within a session."
+    } else {
+        ""
+    }
 }
 
 /// What most replays extrapolate from.
@@ -5265,8 +5342,9 @@ fn summary(
                             (Some(Setting::Window(a)), Some(Setting::Window(b))) if b < a
                         );
                         format!(
-                            "Replayed assuming the same sessions{}{net}. {}{} {set_in}",
+                            "Replayed assuming the same sessions{}{net}.{} {}{} {set_in}",
                             coverage_note(r, MEASURED),
+                            assumed_tier(r),
                             if smaller {
                                 "Detail lost to summaries is not measured."
                             } else {
@@ -5276,7 +5354,8 @@ fn summary(
                         )
                     }
                     Mark::Keep => format!(
-                        "No other window was cheaper, replayed assuming the same sessions.{} {set_in}",
+                        "No other window was cheaper, replayed assuming the same sessions.{}{} {set_in}",
+                        assumed_tier(r),
                         context_rot(report, result)
                     ),
                     _ => unknown(),
@@ -5306,14 +5385,16 @@ fn summary(
                             .find(|s| r.recommended == Some(Setting::Percent(s.window)))
                             .map_or(0, |s| s.added.len());
                         format!(
-                            "Replayed{after}, assuming the same sessions{}, net of {} added summar{}.{assumes} Detail lost to summaries is not measured. {set_in}",
+                            "Replayed{after}, assuming the same sessions{}, net of {} added summar{}.{}{assumes} Detail lost to summaries is not measured. {set_in}",
                             coverage_note(r, MEASURED),
                             count(added as u64),
-                            if added == 1 { "y" } else { "ies" }
+                            if added == 1 { "y" } else { "ies" },
+                            assumed_tier(r)
                         )
                     }
                     Mark::Keep => format!(
-                        "No other threshold was cheaper, replayed{after} assuming the same sessions. {set_in}"
+                        "No other threshold was cheaper, replayed{after} assuming the same sessions.{} {set_in}",
+                        assumed_tier(r)
                     ),
                     _ => unknown(),
                 }
@@ -5642,14 +5723,16 @@ fn summary(
     }
     for (_, result, r) in &checks {
         if let CheckResult::Effort(e) = result
-            && let Some((text, sources)) = effort_warning(e)
+            && e.base.action == Action::Keep
         {
-            vibes.push(guidance(
-                setting_name(result),
-                &tag(r.profiles, &|_| r.owner.to_string(), out),
-                text,
-                &sources,
-            ));
+            let how = report
+                .scan
+                .profiles
+                .iter()
+                .find(|p| p.id == e.base.profile)
+                .and_then(|profile| crate::doctor::default_how(&e.control, profile));
+            let profile = tag(r.profiles, &|_| r.owner.to_string(), out);
+            vibes.extend(default_item(e, &profile, how, out));
         }
     }
     // Lines of one setting that split only because the controls they replay differ name the
@@ -6694,6 +6777,7 @@ mod tests {
                         request: "synthetic-resumed".into(),
                     }],
                     summary_cost: cost(Some(0.625), 0.625),
+                    summary_scale: None,
                     prefix_cost: cost(None, 0.0),
                 }],
                 affected_requests: 12,
@@ -7502,6 +7586,8 @@ mod tests {
                     caps: vec![],
                     default: Some("medium".into()),
                     unresolved: None,
+                    picked: None,
+                    provider: None,
                 },
                 enterprise: false,
                 runs: vec![],
@@ -8370,12 +8456,13 @@ mod tests {
     }
 
     #[test]
-    fn effort_lines_are_costs_with_the_providers_guidance_past_high_as_warnings() {
-        use crate::doctor::fixes;
+    fn effort_lines_are_costs_and_vibes_suggests_the_maintainers_pick_with_the_guidance() {
+        use crate::doctor::{Edit, Op, fixes};
         use crate::effort::{EffortInput, effort_checks};
+        use serde_json::json;
         let file = format!("{ROOT}/settings.json");
-        // One profile's line for a control beside the recorded pairs, its warning if any, and
-        // whether `doctor` offers anything.
+        // One profile's line for a control beside the recorded pairs, its `vibes` card if any,
+        // and whether `doctor` offers anything.
         let line = |harness: Harness, control: EffortControl| {
             let mut report = synthetic();
             report.checks.clear();
@@ -8397,12 +8484,11 @@ mod tests {
             );
             // The provider's guidance is `vibes`' card, and no part of the measured report.
             assert!(!text.contains("model guide") && !text.contains("reasoning guide"));
-            let warning = advice(&report, ReportOptions::default())
+            let card = advice(&report, ReportOptions::default())
                 .into_iter()
-                .find(|i| i.name == "Main-session effort")
-                .map(|i| format!("{} {}", i.text, i.sources.join(" ")));
+                .find(|i| i.name == "Main-session default");
             let line = report_line(&text, "Main-session effort");
-            (line, warning, fixes(&report, false).is_empty())
+            (line, card, fixes(&report, false).is_empty())
         };
         let control = |model: &str, level: &str, owner: &str| EffortControl {
             model: Some(model.into()),
@@ -8414,6 +8500,8 @@ mod tests {
             caps: vec![],
             default: None,
             unresolved: None,
+            picked: None,
+            provider: None,
         };
         let owner = format!("{file}:env.CLAUDE_CODE_EFFORT_LEVEL");
         let toml = "/synthetic/home/.codex/config.toml";
@@ -8444,35 +8532,77 @@ mod tests {
             row.evidence
         );
         assert!(row.evidence.contains("Enterprise per-role cap"));
-        // Past high, each provider's own guidance is a cited `vibes` card.
-        let warning = warning.expect("max warns");
+        // Off the pick, `vibes` suggests it, with each provider's own guidance past high.
+        let said = |card: &Item| format!("{} {}", card.text, card.sources.join(" "));
+        let card = warning.expect("max is off the pick");
+        assert_eq!(
+            card.value,
+            "claude-opus-5-5 at max -> claude-opus-5-5 at medium"
+        );
+        assert!(!card.quiet);
+        let warning = said(&card);
         assert!(
-            warning.contains("Defaults to max. Anthropic's model guide says"),
+            warning.starts_with("Defaults to claude-opus-5-5 at max. The maintainer's pick is claude-opus-5-5 at medium, and claude-opus-5-5 at high is fine too. Anthropic's model guide says"),
             "{warning}"
         );
         assert!(warning.contains("prone to overthinking"));
-        assert!(warning.contains(CLAUDE_EFFORT_DOCS));
+        assert!(warning.contains("Ran claude-opus-5-5 at an unrecorded effort 4 times"));
+        assert!(warning.contains("what the pick would cost is not measured"));
+        assert!(warning.contains(&format!(
+            "The maintainer's pick of a default. Anthropic's guidance: {CLAUDE_MODEL_GUIDE} {CLAUDE_EFFORT_DOCS}"
+        )));
+        // The edit sets the variable that decides the level, in the file that sets it.
+        match card.how {
+            Some(How::Edit(patch)) => assert_eq!(
+                patch.edits,
+                [Edit {
+                    path: vec!["env".into(), "CLAUDE_CODE_EFFORT_LEVEL".into()],
+                    value: json!("medium"),
+                    op: Op::Set,
+                }]
+            ),
+            other => panic!("{other:?}"),
+        }
         let (_, warning, _) = line(Harness::Claude, control("claude-opus-5-5", "xhigh", &owner));
-        assert!(
-            warning
-                .expect("xhigh warns")
-                .contains("test the next model up")
-        );
+        assert!(said(&warning.expect("xhigh is off the pick")).contains("test the next model up"));
+        // An accepted default has a quiet card naming the pick, with no change and no warning.
         let (_, warning, _) = line(Harness::Claude, control("claude-opus-5-5", "high", &owner));
-        assert_eq!(warning, None);
+        let card = warning.expect("an accepted default has a card");
+        assert!(card.quiet && card.value.is_empty() && card.how.is_none());
+        assert!(!said(&card).contains("model guide says"), "{}", said(&card));
+        // Below high there is no provider guidance, but the pick is still suggested.
         let (_, warning, _) = line(Harness::Claude, control("claude-opus-5", "low", &owner));
-        assert_eq!(warning, None);
+        let card = warning.expect("low is off the pick");
+        assert!(!card.quiet && !said(&card).contains("model guide says"));
+        assert_eq!(
+            card.value,
+            "claude-opus-5 at low -> claude-opus-5-5 at medium"
+        );
         // Codex cites OpenAI's guide, never Anthropic's.
         let (row, warning, _) = line(Harness::Codex, control("gpt-6.1-sol", "max", toml));
-        let warning = warning.expect("Codex max warns");
+        let warning = said(&warning.expect("Codex max is off the pick"));
         assert!(
             warning.contains("OpenAI's reasoning guide keeps max"),
             "{warning}"
         );
-        assert!(!warning.contains("Anthropic"));
+        assert!(warning.contains(OPENAI_REASONING) && !warning.contains("Anthropic"));
         assert!(!row.evidence.contains("Enterprise"));
         let (_, warning, _) = line(Harness::Codex, control("gpt-6.1-sol", "ultra", toml));
-        assert_eq!(warning, None);
+        let card = warning.expect("ultra is off the pick");
+        assert_eq!(card.value, "gpt-6.1-sol at ultra -> gpt-6.2-sol at high");
+        // A Codex level with no model named or recorded is no default to weigh.
+        let (_, warning, _) = line(
+            Harness::Codex,
+            EffortControl {
+                model: None,
+                ..control("gpt-6.1-sol", "xhigh", toml)
+            },
+        );
+        assert!(warning.is_none());
+        // Sol 6.2 at xhigh is accepted, so OpenAI's xhigh caution is not shown against it.
+        let (_, warning, _) = line(Harness::Codex, control("gpt-6.2-sol", "xhigh", toml));
+        let card = warning.expect("an accepted default has a card");
+        assert!(card.quiet && !said(&card).contains("only when your evals"));
 
         // A level a cap lowered names the cap's owner when the cap owns it.
         let (row, _, _) = line(
@@ -8511,7 +8641,31 @@ mod tests {
             "{}",
             row.evidence
         );
+        // An unresolved default has no card.
         assert!(none && warning.is_none());
+
+        // Two homes sharing a default but not its cap get a line, and a cap to raise, each.
+        let mut report = synthetic();
+        let capped = |id: &str| {
+            let mut p = report.scan.profiles[0].clone();
+            p.id = id.into();
+            p.effort = Some(EffortControl {
+                caps: vec![crate::model::Owned {
+                    value: "low".into(),
+                    owner: format!("/{id}/settings.json:maxEffortLevel"),
+                }],
+                ..control("claude-opus-5-5", "high", &owner)
+            });
+            p
+        };
+        report.scan.profiles = vec![capped("a"), capped("b")];
+        let checks = effort_checks(&EffortInput {
+            scan: &report.scan,
+            catalog: &prices(),
+            since: None,
+            now: NOV1 + DAY_MS,
+        });
+        assert_eq!(checks.len(), 2);
     }
 
     #[test]
@@ -8947,6 +9101,7 @@ mod tests {
             lines: 200,
         });
         let notes = context_guidance(&c, &[], "~/CLAUDE.md");
+        // slash ok: the name given above is passed through
         assert_eq!(notes, ["~/CLAUDE.md: 200 recorded lines, 401 UTF-8 bytes."]);
         c.harness = Harness::Codex;
         c.instruction_size = Some(crate::model::InstructionSize {
@@ -10625,6 +10780,7 @@ mod tests {
         let edit = format!(r#""skillOverrides": {{"{name}": "user-invocable-only"}} in "#);
         let file = std::path::Path::new(&setting[edit.len().min(setting.len())..]);
         assert!(setting.starts_with(&edit), "{setting}");
+        // slash ok: Path::ends_with compares components
         assert!(file.ends_with(".claude/settings.json"), "{setting}");
         // An offered change's saving scales to 30 days, however short the window, and its
         // evidence keeps the window's total.

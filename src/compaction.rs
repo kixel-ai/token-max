@@ -18,8 +18,9 @@ use crate::model::{
     Usage, UsageEstimate, Usd, WindowBasisKind, WindowControl, WindowScenario, WindowSensitivity,
 };
 use crate::prices::{
-    Catalog, PRICE_SOURCES, Pairs, Sum, TIER_SENSITIVITY, add_costs, price_components, price_part,
-    server_cost, tier_sensitive, unknown_cost, write_billing, zero_cost,
+    Catalog, PRICE_SOURCES, Pairs, Signs, Sum, TIER_SENSITIVITY, TIER_SIGNS, TierSavings,
+    add_costs, price_components, price_part, server_cost, tier_scale, tier_sensitive, unknown_cost,
+    write_billing, zero_cost,
 };
 use crate::scenarios::{PartReplay, ReplayOptions, ReplayTtls, ReplayedPart, replay_parts};
 use crate::version::claude_at_least;
@@ -835,6 +836,7 @@ impl<'r, 'o> Simulator<'r, 'o> {
             matches.median.output
         };
         let (input, read) = summary;
+        let part = summary_part(template, input, read, output, cold);
         self.result.added.push(AddedCompaction {
             request: req.id.clone(),
             input_tokens: input,
@@ -850,14 +852,11 @@ impl<'r, 'o> Simulator<'r, 'o> {
                 .collect(),
             // No one sample's rate stands for samples that disagree.
             summary_cost: if matches.uniform {
-                price_part(
-                    self.options.catalog,
-                    template.summary_request,
-                    &summary_part(template, input, read, output, cold),
-                )
+                price_part(self.options.catalog, template.summary_request, &part)
             } else {
                 unknown_cost(DISAGREE)
             },
+            summary_scale: tier_scale(template.summary_request, &part),
             prefix_cost: zero_cost(),
         });
         self.result.added.len() - 1
@@ -1463,6 +1462,8 @@ struct Candidate<'r, 'o, 'b> {
     baseline: Sum,
     alternative: Sum,
     pairs: Pairs,
+    /// The priced pairs' savings, for the signs of the comparison.
+    savings: TierSavings,
     cache_evidence: Vec<CacheReplayEvidence>,
 }
 
@@ -1483,6 +1484,12 @@ impl Candidate<'_, '_, '_> {
             self.baseline.add(b);
             self.alternative.add(a);
             self.pairs.add(b, a);
+            if let (Some(b), Some(a)) = (b.total_usd, a.total_usd) {
+                let session = &item.request.session;
+                let scale = |r: &ReplayedPart| tier_scale(r.request, &r.p);
+                self.savings.add(session, scale(original).as_ref(), b);
+                self.savings.add(session, scale(item).as_ref(), -a);
+            }
         };
         if uncertain {
             let reason = "session replay is unknown after a request it cannot model";
@@ -1527,6 +1534,8 @@ pub(crate) struct Run {
     pub(crate) comparison_cost: Cost,
     pub(crate) savings_usd: Option<f64>,
     pub(crate) margin: Option<Margin>,
+    /// Which ways its priced sessions went.
+    pub(crate) signs: Signs,
     pub(crate) coverage: Coverage,
     pub(crate) added: Vec<AddedCompaction>,
     pub(crate) affected: usize,
@@ -1601,6 +1610,9 @@ impl<'r> Lockstep<'_, 'r> {
             skipped,
         } = *self;
         let mut baseline_cost = None;
+        // The session of each request a summary can be added to.
+        let sessions: HashMap<&str, &Text> =
+            requests.iter().map(|r| (&*r.id, &r.session)).collect();
         let mut runs: [Vec<Run>; 3] = Default::default();
         for (scenario, runs) in runs.iter_mut().enumerate() {
             let detail = scenario == 0;
@@ -1615,6 +1627,7 @@ impl<'r> Lockstep<'_, 'r> {
                     baseline: Sum::new(),
                     alternative: Sum::new(),
                     pairs: Pairs::default(),
+                    savings: TierSavings::default(),
                     cache_evidence: vec![],
                 })
                 .collect();
@@ -1701,34 +1714,42 @@ impl<'r> Lockstep<'_, 'r> {
             for c in candidates {
                 // One pair per request that gains or loses a summary, so the unpriced
                 // bound compares against single differences rather than their total.
-                let mut summaries: IndexMap<&str, (Vec<&Cost>, Vec<&Cost>)> = IndexMap::default();
+                let mut summaries: IndexMap<&str, (Vec<&AddedCompaction>, Vec<&AddedCompaction>)> =
+                    IndexMap::default();
                 for a in before.iter().flat_map(|(_, added)| added.iter()) {
-                    summaries
-                        .entry(&*a.request)
-                        .or_default()
-                        .0
-                        .push(&a.summary_cost);
+                    summaries.entry(&*a.request).or_default().0.push(a);
                 }
                 let own = c.stream.as_ref().or(current.as_ref());
                 let added = own.map_or(&[][..], |s| s.simulator.result.added.as_slice());
                 for a in added {
-                    summaries
-                        .entry(&*a.request)
-                        .or_default()
-                        .1
-                        .push(&a.summary_cost);
+                    summaries.entry(&*a.request).or_default().1.push(a);
                 }
                 // Summary pairs come first, then the parts, then each replay's errors,
                 // which keeps the first-seen order of every unknown reason.
                 let mut pairs = c.pairs;
+                let mut savings = c.savings;
                 let mut baseline_sum = Sum::new();
                 let mut alternative_sum = Sum::new();
-                for (b, a) in summaries.into_values() {
-                    let (b, a) = (add_costs(b), add_costs(a));
+                for (request, (before, after)) in summaries {
+                    let total = |added: &[&AddedCompaction]| {
+                        add_costs(added.iter().map(|a| &a.summary_cost))
+                    };
+                    let (b, a) = (total(&before), total(&after));
                     baseline_sum.add(&b);
                     alternative_sum.add(&a);
                     pairs.add(&b, &a);
+                    if b.total_usd.is_some() && a.total_usd.is_some() {
+                        let session = sessions[request];
+                        for (added, baseline) in [(&before, true), (&after, false)] {
+                            for s in added.iter() {
+                                let usd = s.summary_cost.total_usd.unwrap_or(Usd::ZERO);
+                                let usd = if baseline { usd } else { -usd };
+                                savings.add(session, s.summary_scale.as_ref(), usd);
+                            }
+                        }
+                    }
                 }
+                let signs = savings.signs();
                 baseline_sum.add(&c.baseline.cost());
                 alternative_sum.add(&c.alternative.cost());
                 let owned_total;
@@ -1760,6 +1781,7 @@ impl<'r> Lockstep<'_, 'r> {
                     comparison_cost,
                     savings_usd,
                     margin,
+                    signs,
                     coverage: Coverage {
                         priced: paired.priced,
                         total: paired.total,
@@ -2092,6 +2114,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 || PartReplay::new([&index.cache], &replayer.options(options.estimates)),
             );
             let baseline_cost = current_cost.unwrap_or_else(|| recorded_cost.clone());
+            let signs: Vec<Signs> = runs[0].iter().map(|r| r.signs).collect();
             let scenarios = scenarios(&windows, runs);
             let priced: Vec<&WindowScenario> = scenarios
                 .iter()
@@ -2115,6 +2138,15 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             let conditional = scenarios.iter().any(|s| {
                 tier_sensitive(&s.baseline_comparison_cost) || tier_sensitive(&s.comparison_cost)
             });
+            // Priced at an assumed tier, a verdict holds only when no tier could reverse it.
+            let settled = !conditional
+                || match winning {
+                    Some(w) => scenarios
+                        .iter()
+                        .zip(&signs)
+                        .any(|(s, signs)| s.window == w.window && signs.never_loses()),
+                    None => signs.iter().all(Signs::never_saves),
+                };
             let recommended = winning
                 .map(|w| w.window)
                 .or(if priced.len() == scenarios.len() {
@@ -2122,7 +2154,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 } else {
                     None
                 })
-                .filter(|_| !conditional);
+                .filter(|_| settled);
             let patch = control.minimum_claude_patch.unwrap_or(288);
             let per_model_supported =
                 !claude || claude_at_least(recent.version.as_deref(), 1, patch);
@@ -2176,8 +2208,8 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             let savings = winning
                 .and_then(|w| w.savings_usd)
                 .or(recommended.map(|_| 0.0))
-                .filter(|_| !conditional);
-            let margin = winning.and_then(|w| w.margin).filter(|_| !conditional);
+                .filter(|_| settled);
+            let margin = winning.and_then(|w| w.margin).filter(|_| settled);
             let mut uncertainty: IndexSet<String> = [
                 "compaction loses detail; re-reading files, repeated tool calls or changed reasoning may erase savings; that work is unmeasured, not priced at zero",
                 "observed boundary timestamps, precomputed flags and durations do not prove summary generation time or idle attribution; unlogged/discarded summaries remain unknown",
@@ -2186,7 +2218,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             .map(String::from)
             .into_iter()
             .collect();
-            if conditional {
+            if !settled {
                 uncertainty.insert(TIER_SENSITIVITY.into());
             }
             if !control.applicable {
@@ -2274,7 +2306,10 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                         "changed prefixes are fully reused only within the chosen Claude lifetime or the documented default 30m billed Codex lifetime, with stable prefix identity assumed; expiry makes the new prefix cold and cannot inherit external warming of the old transcript".into(),
                         "cold-summary sensitivity charges 1h Claude writes or 12h billed Codex writes; larger-summary sensitivity uses observed cohort maxima; neither sensitivity vetoes the aggregate estimate".into(),
                         "shared history is conditional for this current profile; model/check scenarios overlap and their savings must not be added".into(),
-                    ],
+                    ]
+                    .into_iter()
+                    .chain((conditional && recommended.is_some()).then(|| TIER_SIGNS.into()))
+                    .collect(),
                     uncertainty: uncertainty.into_iter().collect(),
                     sources: SOURCES.iter().chain(&PRICE_SOURCES).map(|s| s.to_string()).collect(),
                 },
@@ -2560,6 +2595,7 @@ mod tests {
                 baseline: Sum::new(),
                 alternative: Sum::new(),
                 pairs: Pairs::default(),
+                savings: TierSavings::default(),
                 cache_evidence: vec![],
             };
             candidate.compare(&catalog, original, item, false, false);
@@ -4526,15 +4562,92 @@ mod tests {
     }
 
     #[test]
-    fn missing_codex_tiers_price_scenarios_without_selecting_a_winner() {
-        let mut scan = scenario("codex");
-        for r in &mut scan.requests {
-            for p in &mut r.parts {
+    fn an_assumed_tier_decides_only_when_every_session_goes_one_way() {
+        let untiered = |mut scan: Scan| {
+            for p in scan.requests.iter_mut().flat_map(|r| &mut r.parts) {
                 p.tier = None;
                 p.speed = None;
             }
+            scan
+        };
+        let tiered = scenario("codex");
+        let recorded = &checks(&tiered)[0];
+        assert!(recorded.base.recommended.is_some());
+        // Every changed request is in one session, which saves at any tier.
+        let result = &checks(&untiered(tiered.clone()))[0];
+        assert_eq!(result.base.recommended, recorded.base.recommended);
+        assert_eq!(result.base.savings_usd, recorded.base.savings_usd);
+        assert!(result.base.assumptions.iter().any(|s| s == TIER_SIGNS));
+        assert!(
+            !result
+                .base
+                .uncertainty
+                .iter()
+                .any(|s| s == TIER_SENSITIVITY)
+        );
+
+        // A session whose only request reads its 300k context from the cache pays for a
+        // summary under the smaller window and saves nothing.
+        let mut mixed = tiered;
+        let mut warm = mixed.requests.last().unwrap().clone();
+        warm.id = "warm".into();
+        warm.session = "warm".into();
+        warm.parts[0].usage = Usage {
+            read: Some(300000),
+            write: Some(0),
+            ..warm.parts[0].usage
+        };
+        mixed.requests.push(warm);
+        // The 20k window's saving with each session's requests billed at a recorded tier.
+        let at_tiers = |scan: &Scan, tiers: &[(&str, &str)]| {
+            let mut scan = scan.clone();
+            for r in &mut scan.requests {
+                let tier = tiers
+                    .iter()
+                    .find(|(session, _)| *session == &*r.session)
+                    .map_or("default", |(_, tier)| *tier);
+                for p in &mut r.parts {
+                    p.tier = Some(tier.into());
+                    p.speed = None;
+                }
+            }
+            let check = &checks(&scan)[0];
+            let window = check.scenarios.iter().find(|s| s.window == 20000);
+            window.and_then(|s| s.savings_usd).unwrap()
+        };
+        // Repriced through the real pipeline, no tier on the saving session reverses it.
+        for tier in ["default", "fast", "ultrafast"] {
+            let tiers = [("sample", tier), ("session", tier)];
+            assert!(at_tiers(&mixed, &tiers) > 0.0, "{tier}");
         }
-        let result = &checks(&scan)[0];
+        // It loses less than the other saves, so with recorded tiers the window still wins.
+        let recorded = &checks(&mixed)[0];
+        assert_eq!(recorded.base.recommended, Some(20000));
+        assert!(recorded.base.savings_usd < result.base.savings_usd);
+        // At an assumed tier, a dearer tier on the warm session could reverse it, and does.
+        // A summary takes its price from a sample on its session's tier, so give one an
+        // ultrafast sample to bill the warm session's summary with its requests.
+        let mut fast = mixed.clone();
+        for id in ["summary", "sample-resume"] {
+            let mut r = fast.requests.iter().find(|r| &*r.id == id).unwrap().clone();
+            r.id = format!("{id}-fast").into();
+            r.session = "sample-fast".into();
+            fast.requests.push(r);
+        }
+        let mut sample = fast.events[0].clone();
+        sample.id = "sample-boundary-fast".into();
+        sample.request = Some("summary-fast".into());
+        sample.origins = vec![Origin {
+            session: "sample-fast".into(),
+            location: sample.location.clone(),
+        }]
+        .into();
+        sample.session = "sample-fast".into();
+        fast.events.push(sample);
+        assert!(at_tiers(&fast, &[("sample-fast", "ultrafast")]) > 0.0);
+        let dear = [("sample-fast", "ultrafast"), ("warm", "ultrafast")];
+        assert!(at_tiers(&fast, &dear) < 0.0);
+        let result = &checks(&untiered(mixed))[0];
         assert_eq!(result.base.action, Action::Advisory);
         assert_eq!(result.base.recommended, None);
         assert_eq!(result.base.savings_usd, None);
@@ -4547,6 +4660,7 @@ mod tests {
                 .iter()
                 .any(|s| s == TIER_SENSITIVITY)
         );
+        assert!(!result.base.assumptions.iter().any(|s| s == TIER_SIGNS));
         assert!(
             result
                 .scenarios

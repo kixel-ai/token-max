@@ -538,7 +538,7 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     );
     // Each host's card names its host, its own waits and the edit to make there, in its home.
     let here = flat(cards[1]);
-    assert!(here.starts_with("[1/2] Bash timeout cap not measured 10m -> 55m Host this host"));
+    assert!(here.starts_with("[1/4] Bash timeout cap not measured 10m -> 55m Host this host"));
     assert!(
         here.contains("No foreground Bash wait outlasted the cache."),
         "{here}"
@@ -549,8 +549,10 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
         ),
         "{here}"
     );
-    let there = flat(cards[2]);
-    assert!(there.starts_with("[2/2] Bash timeout cap not measured 2h -> 55m Host devbox"));
+    // Each host's default has its own card, which advises nothing on the pick.
+    assert!(flat(cards[2]).starts_with("[2/4] Main-session default not measured Host this host"));
+    let there = flat(cards[3]);
+    assert!(there.starts_with("[3/4] Bash timeout cap not measured 2h -> 55m Host devbox"));
     assert!(
         there.contains(
             "1 foreground Bash wait outlasted the cache (1 hit the timeout, 1 polled in a loop)"
@@ -569,7 +571,7 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     let alone = flat(alone.split("\n\n").nth(1).unwrap());
     assert_eq!(
         there
-            .replace("[2/2]", "[1/1]")
+            .replace("[3/4]", "[1/2]")
             .replace(" Host devbox", "")
             .replace("devbox:~", "~"),
         alone

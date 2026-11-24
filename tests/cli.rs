@@ -494,7 +494,7 @@ fn vibes_suggests_a_year_of_transcripts_unless_claude_already_keeps_one() {
     // Unset is Claude Code's 30 days; the card counts the disk the transcripts read take.
     let unset = cards("{}");
     assert!(
-        unset.contains("  [2/2] Transcript retention  not measured\n        30 days -> 365 days\n        What    How long Claude Code keeps session transcripts before its startup sweep deletes them.\n        Advice  Claude Code deletes transcripts after 30 days, so token-max can replay no more history than that. The transcripts token-max read take "),
+        unset.contains("  [2/3] Transcript retention  not measured\n        30 days -> 365 days\n        What    How long Claude Code keeps session transcripts before its startup sweep deletes them.\n        Advice  Claude Code deletes transcripts after 30 days, so token-max can replay no more history than that. The transcripts token-max read take "),
         "{unset}"
     );
     assert!(

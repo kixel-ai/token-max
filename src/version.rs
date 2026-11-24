@@ -1,7 +1,7 @@
-//! The one comparison every client version gate shares.
+//! Plain `major.minor.patch` versions, as Claude Code's and Codex's gates and token-max's releases compare them.
 
-/// A client version's numbers, when it is plain `major.minor.patch` digits.
-pub(crate) fn claude_version(version: &str) -> Option<(u64, u64, u64)> {
+/// A version's numbers, when it is plain `major.minor.patch` digits.
+pub(crate) fn plain(version: &str) -> Option<(u64, u64, u64)> {
     let mut parts = version.split('.').map(|part| {
         if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
             return None;
@@ -19,7 +19,7 @@ pub(crate) fn claude_version(version: &str) -> Option<(u64, u64, u64)> {
 /// Whether `version` is a plain version at least v2.`minor`.`patch`; a missing or malformed one is not.
 pub(crate) fn claude_at_least(version: Option<&str>, minor: u64, patch: u64) -> bool {
     version
-        .and_then(claude_version)
+        .and_then(plain)
         .is_some_and(|v| v >= (2, minor, patch))
 }
 
@@ -27,7 +27,7 @@ pub(crate) fn claude_at_least(version: Option<&str>, minor: u64, patch: u64) -> 
 /// malformed one is not.
 pub(crate) fn codex_at_least(version: Option<&str>, minor: u64, patch: u64) -> bool {
     version
-        .and_then(claude_version)
+        .and_then(plain)
         .is_some_and(|v| v >= (0, minor, patch))
 }
 

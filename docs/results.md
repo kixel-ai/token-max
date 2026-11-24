@@ -11,9 +11,8 @@ or reply text is published.
 
 ## Totals
 
-Each machine ran doctor on its own, since doctor asks how a profile pays only
-on its own host, so these totals are its four reports added by hand, as
-`doctor --ssh` adds hosts:
+Each machine ran doctor on its own, so these totals are its four reports added
+by hand, as `doctor --ssh` adds hosts:
 
 | Machine | Requests | Sessions | API cost | Potential savings |
 | --- | --- | --- | --- | --- |

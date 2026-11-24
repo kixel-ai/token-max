@@ -5,6 +5,8 @@
 //! installed there: a copy of this build. Built without libtest, since as `ssh.exe` this binary
 //! takes OpenSSH's arguments, which libtest would reject.
 
+mod support;
+
 #[cfg(not(windows))]
 fn main() {}
 
@@ -245,19 +247,18 @@ mod windows {
             let mut command = Command::new(BIN);
             let local = self.root.join("homes/local");
             std::fs::create_dir_all(&local).unwrap();
-            command
+            crate::support::isolated(&mut command)
                 .args([
                     name,
                     "--prices-file",
                     fixture("prices.json").to_str().unwrap(),
                 ])
                 .args(args)
-                .env_clear()
                 .env("USERPROFILE", &local)
-                .env("SystemRoot", std::env::var_os("SystemRoot").unwrap())
                 .env("PATH", self.root.join("bin"))
                 .env("TEST_ROOT", &self.root)
                 .env("TEST_TOOLS", &self.tools)
+                .env("TOKEN_MAX_RELEASES", crate::support::current())
                 .stdin(Stdio::null());
             command
         }
@@ -265,9 +266,8 @@ mod windows {
         /// The first line `doctor --ssh-scan` prints: the header naming this build.
         fn header(&self) -> String {
             // Held open: a destination stops when its stdin closes.
-            let mut child = Command::new(BIN)
+            let mut child = crate::support::isolated(&mut Command::new(BIN))
                 .args(["doctor", "--ssh-scan"])
-                .env_clear()
                 .env("USERPROFILE", self.root.join("homes/empty"))
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())

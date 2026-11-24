@@ -12,13 +12,13 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde_json::ser::Formatter;
 
-use crate::collections::IndexSet;
+use crate::collections::IndexMap;
 use crate::discovery::{DiscoveryOptions, discover};
 use crate::doctor::{
-    Confirm, Fix, Found, Offers, Owner, Style, Walking, ask, ask_billing, confirm, finish, opening,
-    preview, write, wrote,
+    BillingQuestions, Confirm, Fix, Found, Offers, Owner, Style, Walking, ask, ask_upgrade,
+    confirm, finish, opening, preview, stale, upgrade_line, write, wrote,
 };
-use crate::model::{Harness, Location, Millis, Scan, Verdict};
+use crate::model::{Billing, Location, Millis, Scan, Verdict};
 use crate::prices::{Catalog, PriceOptions, cancel_downloads, load_prices};
 use crate::reader::{Reading, ScanOptions, scan};
 use crate::replay::{AnalyzeOptions, analyze};
@@ -28,7 +28,8 @@ use crate::sessions::{Session, export};
 use crate::ssh::{self, Reply, Scope};
 use crate::terminal::{WrapOptions, wrap_text};
 use crate::totals::Totals;
-use crate::wire::{Format, Job, Request};
+use crate::upgrade::{self, Check, Install};
+use crate::wire::{Format, Job, Paid, Request};
 
 const HELP: &str =
     "token-max: agent settings that use less of a Claude or ChatGPT plan, measured at API prices
@@ -58,11 +59,17 @@ Usage: token-max doctor [options]
   --details               Show grouped check evidence, assumptions, uncertainty and sources
   --defaults              Report as a user with no settings files would see it, offering nothing
   --plain                 Plain text without color or decorative Unicode
-  --offline               Use cached public prices without network access
-  --prices-file FILE      Use a local models.dev catalog without network access
+  --offline               Use cached public prices and skip the release check, without network access
+  --prices-file FILE      Use a local models.dev catalog instead of fetching prices
   --price-cache FILE      Cache path (default: ~/.cache/token-max/models.json)
   -v, --version           Show the package version
   -h, --help              Show this help
+
+Unless --offline, it first asks GitHub for the latest token-max release. When that is
+newer, a terminal run offers to put it in place of this binary, checked against its
+published checksum, and rerun with the same options; a binary Cargo or Nix installed
+gets that tool's command instead. Without a terminal, or if the check cannot run, it
+says so on stderr and goes on with this build.
 
 Prints which settings to change, with the evidence for each. When stdin and stdout are
 both a terminal, it then offers the changes it can make, grouping tools, skills and MCP
@@ -814,6 +821,8 @@ enum Scanned {
 /// What reaches the coordinator while hosts scan, in whatever order it finishes.
 enum Arrival {
     Prices(Result<Catalog, ScanError>),
+    /// A report destination's profiles, which it scans once their answers are sent.
+    Profiles(usize, ssh::Profiles),
     Host(usize, Result<Scanned, ScanError>),
 }
 
@@ -973,6 +982,7 @@ fn sessions(args: &[String]) -> Result<(Output, u8), ScanError> {
         job: Job::Sessions,
         home: None,
         progress: None,
+        ask: None,
     })?;
     let mut sessions: Vec<(jiff::Timestamp, Session)> = vec![];
     for (host, reply) in replies {
@@ -1064,30 +1074,107 @@ struct Gather {
     home: Option<String>,
     /// Show each phase, and a bar while this host's transcripts are read, on stderr.
     progress: Option<Look>,
+    /// Ask on this terminal how each host's Claude profiles pay, before that host scans.
+    ask: Option<Ask>,
+}
+
+/// The billing questions: how each Claude profile on the Anthropic API with transcripts pays,
+/// which picks its main TTL's default.
+struct Ask {
+    /// This host's profiles to ask about, by root.
+    roots: Vec<String>,
+    /// How the questions print, with this host's paths from its home.
+    style: Style,
+}
+
+/// The terminal failed, as when it closed.
+fn terminal_failed() -> ScanError {
+    ScanError::new("cannot use the terminal; no report produced")
+}
+
+/// The billing questions in progress, and what arrives from the hosts meanwhile.
+struct Asking<'a> {
+    questions: BillingQuestions,
+    results: &'a mpsc::Receiver<Arrival>,
+    /// Each destination's profiles, by host index, once they arrive and until asked about.
+    profiles: Vec<Option<ssh::Profiles>>,
+    /// Everything else, for the loop that renders.
+    early: Vec<Arrival>,
+}
+
+impl Asking<'_> {
+    /// Keep `arrival`, failing on a host's or the prices' error.
+    fn keep(&mut self, arrival: Arrival) -> Result<(), ScanError> {
+        match arrival {
+            Arrival::Profiles(at, profiles) => self.profiles[at] = Some(profiles),
+            Arrival::Host(_, Err(error)) | Arrival::Prices(Err(error)) => return Err(error),
+            arrival => self.early.push(arrival),
+        }
+        Ok(())
+    }
+
+    /// Ask how each profile at `roots` pays, first failing on any error that has arrived, so
+    /// a failed host stops the run at the next question rather than after the last.
+    fn ask(
+        &mut self,
+        roots: &[String],
+        style: &Style,
+    ) -> Result<IndexMap<String, Billing>, ScanError> {
+        let mut answers = IndexMap::default();
+        for root in roots {
+            while let Ok(arrival) = self.results.try_recv() {
+                self.keep(arrival)?;
+            }
+            let answer = self
+                .questions
+                .ask(
+                    root,
+                    style,
+                    &mut io::stdin().lock(),
+                    &mut io::stdout().lock(),
+                )
+                .map_err(|_| terminal_failed())?;
+            if let Some(billing) = answer {
+                answers.insert(root.clone(), billing);
+            }
+        }
+        Ok(answers)
+    }
+
+    /// Destination `index`'s profiles, waiting for them to arrive.
+    fn wait(&mut self, index: usize) -> Result<ssh::Profiles, ScanError> {
+        loop {
+            if let Some(profiles) = self.profiles[index].take() {
+                return Ok(profiles);
+            }
+            let arrival = self
+                .results
+                .recv()
+                .map_err(|_| ScanError::new("cancelled; no report produced"))?;
+            self.keep(arrival)?;
+        }
+    }
 }
 
 /// Scan every selected host and load prices at once, then run the job on each, failing on the
 /// first error. Returns each host's reply in selection order, this host first, as None.
 ///
-/// Destinations run the job on their own scans, so this host only ever holds its own.
+/// Destinations connect first, so their profiles arrive while this host's are asked about;
+/// each host scans once its own are answered. Destinations run the job on their own scans, so
+/// this host only ever holds its own.
 fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
     let Gather {
         since,
         defaults,
-        discovery,
+        mut discovery,
         destinations,
         prices,
         job,
         home,
         progress,
+        ask,
     } = run;
     let reading = Arc::new(Reading::default());
-    let meter = progress.map(|look| Meter::start(look, reading.clone()));
-    let phase = |message: &'static str| {
-        if let Some(meter) = &meter {
-            meter.phase(message);
-        }
-    };
     let scope = match job {
         Job::Report { .. } => Scope::Report { defaults },
         Job::Sessions => Scope::Sessions,
@@ -1110,19 +1197,75 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
         Job::Sessions => Job::Sessions,
     };
     let (sender, results) = mpsc::channel();
-    let mut hosts: Vec<Option<String>> = vec![];
+    {
+        // Prices load beside the scans and questions, so whichever fails first stops the run.
+        let sender = sender.clone();
+        thread::spawn(move || {
+            let catalog = panic::catch_unwind(|| load_prices(&prices))
+                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));
+            let _ = sender.send(Arrival::Prices(catalog));
+        });
+    }
+    let mut hosts: Vec<Option<String>> = vec![None];
     let mut requests = vec![];
+    // Each destination's answers, sent once given; at once when nobody is asked.
+    let mut payments = vec![];
+    for destination in destinations {
+        let sender = sender.clone();
+        let index = hosts.len();
+        let (request, receiver) = mpsc::channel();
+        let (pay, payment) = mpsc::channel();
+        requests.push((request, labeled(Some(&destination))));
+        if ask.is_none() {
+            let _ = pay.send(Paid::default());
+        }
+        payments.push(pay);
+        hosts.push(Some(destination.clone()));
+        thread::spawn(move || {
+            let audit = || {
+                let connected = ssh::connect(&destination, since, scope)?;
+                let paid = match connected.profiles() {
+                    Some(profiles) => {
+                        let _ = sender.send(Arrival::Profiles(index, profiles.clone()));
+                        // Dropped unanswered when this host fails first.
+                        payment
+                            .recv()
+                            .map_err(|_| ScanError::new("cancelled; no report produced"))?
+                    }
+                    None => Paid::default(),
+                };
+                connected.audit(paid, receiver)
+            };
+            let result = panic::catch_unwind(AssertUnwindSafe(audit))
+                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))
+                .map(Scanned::Remote);
+            let _ = sender.send(Arrival::Host(index, result));
+        });
+    }
+    let stop = |error: ScanError| {
+        cancel_downloads();
+        ssh::cancel();
+        error
+    };
+    let mut asking = Asking {
+        questions: BillingQuestions::default(),
+        results: &results,
+        profiles: hosts.iter().map(|_| None).collect(),
+        early: vec![],
+    };
+    if let Some(ask) = &ask {
+        enter(Phase::Asking);
+        discovery.billing = asking.ask(&ask.roots, &ask.style).map_err(stop)?;
+    }
     // A lone local scan runs on this thread, so the analysis reuses the memory the scan
     // frees rather than leaving it to another thread's allocator arena.
     let mut inline = None;
     {
-        let index = hosts.len();
-        hosts.push(None);
         let options = ScanOptions {
             discovery,
             since,
             reach: scope.reach(),
-            reading: Some(reading),
+            reading: Some(reading.clone()),
         };
         let job = move || {
             panic::catch_unwind(|| scan(&options))
@@ -1130,27 +1273,56 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
                 .map(|scan| Scanned::Local(Box::new(scan)))
         };
         if remote {
-            let sender = sender.clone();
             thread::spawn(move || {
-                let _ = sender.send(Arrival::Host(index, job()));
+                let _ = sender.send(Arrival::Host(0, job()));
             });
         } else {
-            inline = Some((index, job));
+            drop(sender);
+            inline = Some((0, job));
         }
     }
-    for destination in destinations {
-        let sender = sender.clone();
-        let index = hosts.len();
-        let (request, receiver) = mpsc::channel();
-        requests.push((request, labeled(Some(&destination))));
-        hosts.push(Some(destination.clone()));
-        thread::spawn(move || {
-            let result = panic::catch_unwind(|| ssh::audit(&destination, since, scope, receiver))
-                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))
-                .map(Scanned::Remote);
-            let _ = sender.send(Arrival::Host(index, result));
-        });
+    if let Some(ask) = &ask {
+        let asked = (|| {
+            for (index, pay) in (1..).zip(&payments) {
+                // Shown while a destination still connects, or this host still reads.
+                let waiting = (asking.profiles[index].is_none())
+                    .then_some(progress)
+                    .flatten()
+                    .map(|look| {
+                        let meter = Meter::start(look, reading.clone());
+                        meter.phase("Connecting to SSH hosts");
+                        meter
+                    });
+                let profiles = asking.wait(index)?;
+                drop(waiting);
+                let style = Style {
+                    home: profiles.home,
+                    host: hosts[index].clone(),
+                    ..ask.style.clone()
+                };
+                let profiles = asking.ask(&profiles.roots, &style)?;
+                let _ = pay.send(Paid { profiles });
+            }
+            Ok(())
+        })();
+        asked.map_err(stop)?;
+        enter(Phase::Running);
     }
+    let Asking {
+        questions, early, ..
+    } = asking;
+    if ask.is_some() {
+        questions
+            .finish(&mut io::stdout().lock())
+            .map_err(|_| stop(terminal_failed()))?;
+    }
+    drop(payments);
+    let meter = progress.map(|look| Meter::start(look, reading.clone()));
+    let phase = |message: &'static str| {
+        if let Some(meter) = &meter {
+            meter.phase(message);
+        }
+    };
     phase(if remote {
         "Scanning local histories and SSH hosts"
     } else {
@@ -1163,17 +1335,13 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
             .map(|(index, job)| job().map(|scan| (index, scan)))
             .transpose()?;
         phase("Loading public prices");
-        // Prices load beside the scans, so whichever fails first stops the run at once.
-        thread::spawn(move || {
-            let catalog = panic::catch_unwind(|| load_prices(&prices))
-                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));
-            let _ = sender.send(Arrival::Prices(catalog));
-        });
         let mut catalog = None;
         // Hosts that finished before the prices arrived.
         let mut scanned: Vec<_> = inline.into_iter().collect();
-        for arrival in results {
+        for arrival in early.into_iter().chain(results) {
             match arrival {
+                // Asked about already, or nobody is asked.
+                Arrival::Profiles(..) => {}
                 Arrival::Host(index, result) => scanned.push((index, result?)),
                 Arrival::Prices(loaded) => {
                     let loaded = loaded?;
@@ -1291,38 +1459,41 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
     };
     let home = std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned());
     let style = format.style(home.clone());
-    // On a terminal, open with what the run is about to read, then ask how each of this
-    // host's Claude profiles on the Anthropic API pays, which picks its main TTL's default;
-    // without a terminal the report names both defaults.
-    if terminal {
+    upgrade::tidy();
+    // Every run but an offline one asks for the latest release, alongside discovery on a
+    // terminal and alongside the whole scan otherwise.
+    let mut check = (!values.offline).then(|| {
+        thread::spawn(|| {
+            let releases = upgrade::releases();
+            let check = upgrade::check(&releases);
+            (releases, check)
+        })
+    });
+    // On a terminal, offer a newer release before anything else, then open with what the run
+    // is about to read, then ask how each host's Claude profiles on the Anthropic API pay,
+    // which picks each one's main TTL default; without a terminal the report names both
+    // defaults.
+    let ask = if terminal {
         let found = discover(&discovery)?;
+        // A run reporting as a default user would changes nothing, so it only says how.
+        if let Some((releases, check)) = check.take().map(joined)
+            && let Some(code) = offer_upgrade(&releases, check, !values.defaults, &style)?
+        {
+            return Ok((Output::Written, code));
+        }
         let failed = |_| ScanError::new("cannot use the terminal; no report produced");
         let opening = opening(&Found::list(&found), &destinations, &style);
         io::stdout()
             .lock()
             .write_all(opening.as_bytes())
             .map_err(failed)?;
-        // T3 Code's instances share a native root, and so its account and answer.
-        let roots: Vec<String> = found
-            .profiles
-            .into_iter()
-            .filter(|p| {
-                p.harness == Harness::Claude && p.provider.is_none() && !p.histories.is_empty()
-            })
-            .map(|p| p.root)
-            .collect::<IndexSet<_>>()
-            .into_iter()
-            .collect();
-        enter(Phase::Asking);
-        discovery.billing = ask_billing(
-            &roots,
-            &style,
-            &mut io::stdin().lock(),
-            &mut io::stdout().lock(),
-        )
-        .map_err(failed)?;
-        enter(Phase::Running);
-    }
+        Some(Ask {
+            roots: found.billing_roots(),
+            style: style.clone(),
+        })
+    } else {
+        None
+    };
     let replies = gather(Gather {
         since,
         defaults: values.defaults,
@@ -1337,7 +1508,12 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
         home: home.clone(),
         progress: (stdout && io::stderr().is_terminal() && !term_dumb)
             .then_some(Look { color, unicode }),
+        ask,
     })?;
+    // Without a terminal the check ran alongside the scan, and the news goes to stderr.
+    if let Some((_, check)) = check.take().map(joined) {
+        warn_upgrade(check);
+    }
     let sections = replies.len();
     let mut code = 0;
     let mut text = String::new();
@@ -1425,6 +1601,182 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
         return Ok((Output::Walk(Walk { hosts, head, style }), 0));
     }
     Ok((Output::Text(format!("{head}{text}")), code))
+}
+
+/// The release check's result once its thread finishes, with the releases it asked.
+fn joined(handle: thread::JoinHandle<(String, Check)>) -> (String, Check) {
+    handle.join().unwrap_or_else(|_| {
+        let failed = Check::Failed("the check failed".into());
+        (upgrade::releases(), failed)
+    })
+}
+
+/// Say on a terminal what the release check found, offering to upgrade and rerun when `offer`
+/// and a newer release can replace this binary. Returns the rerun's exit code once it has run
+/// in this process's place, and fails when it cannot start; otherwise this run goes on with
+/// this build.
+fn offer_upgrade(
+    releases: &str,
+    check: Check,
+    offer: bool,
+    style: &Style,
+) -> Result<Option<u8>, ScanError> {
+    let failed = |_| ScanError::new("cannot use the terminal; no report produced");
+    let mut stdout = io::stdout().lock();
+    // A leading line break is a blank line before the text, which styling would escape.
+    let say = |stdout: &mut io::StdoutLock, text: &str, note: bool| {
+        let (gap, text) = text
+            .strip_prefix('\n')
+            .map_or(("", text), |text| ("\n", text));
+        let line = format!("{gap}{}", upgrade_line(text, note, style));
+        stdout
+            .write_all(line.as_bytes())
+            .and_then(|()| stdout.flush())
+            .map_err(failed)
+    };
+    let latest = match check {
+        Check::Current => return Ok(None),
+        // A failed check is a diagnostic, so it goes to stderr as it does without a terminal.
+        failed @ Check::Failed(_) => {
+            warn_upgrade(failed);
+            return Ok(None);
+        }
+        Check::Newer(latest) => latest,
+    };
+    let (exe, target) = match upgrade::install() {
+        Install::Replace { .. } if !offer => {
+            let how = "Run token-max doctor without --defaults to upgrade.";
+            let text = format!("\ntoken-max {} {how}", stale(&latest));
+            say(&mut stdout, &text, false)?;
+            return Ok(None);
+        }
+        // Only a run about to ask probes the directory, since probing writes beside the binary.
+        Install::Replace { exe, target } => match upgrade::writable(&exe) {
+            Ok(()) => (exe, target),
+            Err(why) => {
+                let text = format!("\ntoken-max {} {}", stale(&latest), reinstall(&why));
+                say(&mut stdout, &text, false)?;
+                return Ok(None);
+            }
+        },
+        Install::Manager(command) => {
+            let text = format!("\ntoken-max {} Upgrade with {command}.", stale(&latest));
+            say(&mut stdout, &text, false)?;
+            return Ok(None);
+        }
+        Install::Reinstall(why) => {
+            let text = format!("\ntoken-max {} {}", stale(&latest), reinstall(&why));
+            say(&mut stdout, &text, false)?;
+            return Ok(None);
+        }
+    };
+    enter(Phase::Asking);
+    let yes = ask_upgrade(&latest, style, &mut unbuffered_stdin()?, &mut stdout).map_err(failed)?;
+    enter(Phase::Running);
+    if !yes {
+        return Ok(None);
+    }
+    say(&mut stdout, &format!("Downloading {latest}..."), true)?;
+    let installed = upgrade::stage(releases, &latest, &exe, target).and_then(|staged| {
+        // Windows' swap is two renames, which a cancellation must not split.
+        enter(Phase::Writing);
+        let installed = staged.install();
+        enter(Phase::Running);
+        installed
+    });
+    if let Err(why) = installed {
+        let version = upgrade::VERSION;
+        let text = format!("Could not upgrade: {why}. Continuing with v{version}.");
+        say(&mut stdout, &text, false)?;
+        return Ok(None);
+    }
+    // A Ctrl-C during the swap waited for it to finish, so the upgrade stands but nothing reruns.
+    if ssh::cancelled() {
+        return Err(ScanError::new(format!(
+            "cancelled after upgrading to {latest}; no report produced"
+        )));
+    }
+    say(
+        &mut stdout,
+        &format!("Upgraded to {latest}; rerunning."),
+        false,
+    )?;
+    // This build's binary is gone, and an SSH audit copies the binary at its path, so a rerun
+    // that cannot start ends the run rather than go on with this build.
+    rerun(&exe).map(Some).map_err(|error| {
+        ScanError::new(format!(
+            "could not rerun {latest}: {error}; it is installed, so run token-max doctor again"
+        ))
+    })
+}
+
+/// Stdin read a byte at a time, so the answer takes no more than its own line: the rerun
+/// reads the same input, and anything typed ahead is its.
+fn unbuffered_stdin() -> Result<io::BufReader<std::fs::File>, ScanError> {
+    let failed = |_| ScanError::new("cannot use the terminal; no report produced");
+    #[cfg(unix)]
+    let owned = std::os::fd::AsFd::as_fd(&io::stdin())
+        .try_clone_to_owned()
+        .map_err(failed)?;
+    #[cfg(windows)]
+    let owned = std::os::windows::io::AsHandle::as_handle(&io::stdin())
+        .try_clone_to_owned()
+        .map_err(failed)?;
+    Ok(io::BufReader::with_capacity(1, std::fs::File::from(owned)))
+}
+
+/// Run the upgraded binary at `exe` with this run's arguments, in this process's place.
+#[cfg(unix)]
+fn rerun(exe: &std::path::Path) -> io::Result<u8> {
+    use std::os::unix::process::CommandExt;
+    Err(std::process::Command::new(exe)
+        .args(std::env::args_os().skip(1))
+        .exec())
+}
+
+/// Run the upgraded binary at `exe` with this run's arguments, and wait for its exit code:
+/// Windows cannot replace a running process's program.
+#[cfg(windows)]
+fn rerun(exe: &std::path::Path) -> io::Result<u8> {
+    // The rerun owns the console and cancels itself on Ctrl-C, so this process only waits.
+    enter(Phase::Writing);
+    let status = std::process::Command::new(exe)
+        .args(std::env::args_os().skip(1))
+        .status();
+    enter(Phase::Running);
+    Ok(status?
+        .code()
+        .map_or(2, |code| u8::try_from(code).unwrap_or(2)))
+}
+
+/// How to upgrade a binary this run cannot replace, for the reason `why`, and no package
+/// manager owns.
+fn reinstall(why: &str) -> String {
+    let mut why = why.to_string();
+    if let Some(first) = why.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    format!(
+        "{why}, so install it again as {} describes.",
+        upgrade::INSTALL
+    )
+}
+
+/// Say on stderr what the release check found when there is no terminal to offer an upgrade on.
+fn warn_upgrade(check: Check) {
+    let line = match check {
+        Check::Current => return,
+        Check::Failed(why) => format!("could not check for a newer release: {why}"),
+        Check::Newer(latest) => {
+            let how = match upgrade::install() {
+                Install::Replace { .. } => "Run token-max doctor on a terminal to upgrade.".into(),
+                Install::Manager(command) => format!("Upgrade with {command}."),
+                Install::Reinstall(why) => reinstall(&why),
+            };
+            format!("{} {how}", stale(&latest))
+        }
+    };
+    eprintln!("token-max: {}", crate::safe::terminal_text(&line));
 }
 
 /// Walk through every host's changes, print each host's report with the accepted ones first,
@@ -1646,6 +1998,39 @@ pub fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_host_stops_the_questions_before_the_next_one() {
+        let (sender, results) = mpsc::channel();
+        let profiles = ssh::Profiles {
+            home: None,
+            roots: vec![],
+        };
+        sender.send(Arrival::Profiles(2, profiles)).unwrap();
+        sender
+            .send(Arrival::Host(1, Err(ScanError::new("devbox: gone"))))
+            .unwrap();
+        let mut asking = Asking {
+            questions: BillingQuestions::default(),
+            results: &results,
+            profiles: vec![None, None, None],
+            early: vec![],
+        };
+        let style = Style {
+            color: false,
+            unicode: false,
+            width: None,
+            home: None,
+            host: None,
+        };
+        // Failing before it prompts, so this test never reads its own stdin.
+        let error = asking
+            .ask(&["/home/me/.claude".into()], &style)
+            .unwrap_err();
+        assert_eq!(error.message, "devbox: gone");
+        // What arrived before the failure is kept.
+        assert!(asking.profiles[2].is_some());
+    }
 
     #[test]
     fn the_reading_bar_fills_by_eighths_fits_its_row_and_estimates_only_after_a_second() {

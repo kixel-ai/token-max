@@ -22,7 +22,7 @@ use crate::model::{
 use crate::prices::{Catalog, Sample, Sum, price_part, price_request, server_cost};
 use crate::reader::UNRECORDED;
 use crate::safe::{ScanError, label};
-use crate::version::{claude_at_least, claude_version};
+use crate::version::{claude_at_least, plain};
 
 /// Claude Code 2.1.198 made the built-in Explore inherit the main model; it ran on Haiku before.
 const EXPLORE_INHERITS_PATCH: u64 = 198;
@@ -757,7 +757,7 @@ fn claude_source(run: &Run<'_>, controls: &AgentControls, kind: &str) -> (ModelS
         };
     };
     if builtin.name == "Explore" {
-        return match run.version.filter(|v| claude_version(v).is_some()) {
+        return match run.version.filter(|v| plain(v).is_some()) {
             None => unknown("the Claude Code version is not recorded as plain digits".into()),
             Some(v) if !claude_at_least(Some(v), 1, EXPLORE_INHERITS_PATCH) => decided((
                 ModelSource::Definition,

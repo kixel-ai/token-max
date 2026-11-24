@@ -16,7 +16,7 @@ Decided 2026-11-23 (maintainer, /quest-plan): ✅ a recurring release check
 every two weeks (rejected: weekly, where most runs would find nothing;
 monthly, which leaves advice stale for a month). Claude Code ships almost
 daily and Codex weekly, and
-[the upgrade check](/quest/m1/upgrade-check.md) only helps once token-max
+doctor's upgrade offer for newer token-max releases only helps once token-max
 itself has caught up.
 
 Each run:

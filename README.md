@@ -55,7 +55,8 @@ count. Your sessions differ: run it to see yours.
    it was written and whether it had expired by the next one, then plays the
    same sessions again under the other setting.
 3. **Prices both.** At public API prices from `https://models.dev/api.json`,
-   its only network request unless you name other machines with `--ssh`. What
+   its only network request besides a check for a newer token-max release,
+   unless you name other machines with `--ssh`. What
    it can't price stays unknown, never zero. A provider's guidance that no
    transcript can price is a cited warning apart from the lines, never a
    verdict.

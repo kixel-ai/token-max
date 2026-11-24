@@ -242,7 +242,8 @@ pub enum Ttl {
 }
 
 /// How a Claude profile pays for its requests, as the person running doctor answered it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Billing {
     /// A Claude plan's included usage; usage credits pay for requests past it.
     Plan,

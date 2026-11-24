@@ -428,7 +428,7 @@ fn parse_catalog(reader: impl Read) -> Result<Catalog, Failure> {
     })
 }
 
-/// Explicit offline and fixture modes never make network requests.
+/// Explicit offline and fixture modes never fetch prices.
 #[derive(Clone, Debug, Default)]
 pub struct PriceOptions {
     /// A prices file to read instead of fetching.
@@ -469,7 +469,8 @@ fn downloads() -> MutexGuard<'static, Downloads> {
     DOWNLOADS.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Delete every partial price download and refuse new ones, before a cancelled process exits.
+/// Delete every partial download, of prices or a release, and refuse new ones, before a
+/// cancelled process exits.
 pub fn cancel_downloads() {
     let mut downloads = downloads();
     downloads.cancelled = true;
@@ -479,7 +480,7 @@ pub fn cancel_downloads() {
 }
 
 /// Create a partial download, registered so cancellation can delete it.
-fn create_temporary(temporary: &Path) -> io::Result<File> {
+pub(crate) fn create_temporary(temporary: &Path) -> io::Result<File> {
     let mut downloads = downloads();
     if downloads.cancelled {
         return Err(io::ErrorKind::Interrupted.into());
@@ -498,13 +499,13 @@ fn create_temporary(temporary: &Path) -> io::Result<File> {
 }
 
 /// Removes this operation's partial download however it ends; other downloads own other names.
-struct Discard<'a>(&'a Path);
+pub(crate) struct Discard(pub(crate) PathBuf);
 
-impl Drop for Discard<'_> {
+impl Drop for Discard {
     fn drop(&mut self) {
         let mut downloads = downloads();
-        downloads.files.retain(|file| file != self.0);
-        let _ = fs::remove_file(self.0);
+        downloads.files.retain(|file| file != &self.0);
+        let _ = fs::remove_file(&self.0);
     }
 }
 
@@ -513,7 +514,7 @@ fn millis(time: SystemTime) -> Option<i64> {
 }
 
 /// A name no concurrent download in this or another process will pick.
-fn unique() -> String {
+pub(crate) fn unique() -> String {
     use std::hash::{BuildHasher, RandomState};
     let state = RandomState::new();
     format!(
@@ -576,7 +577,7 @@ pub fn load_prices(options: &PriceOptions) -> Result<Catalog, ScanError> {
     let mut temporary = options.cache.clone().into_os_string();
     temporary.push(format!(".{}.tmp", unique()));
     let temporary = PathBuf::from(temporary);
-    let _discard = Discard(&temporary);
+    let _discard = Discard(temporary.clone());
     match download(&options.cache, &temporary) {
         Ok(catalog) => Ok(Catalog {
             fetched_at: Some(iso(crate::reader::now())),
@@ -1682,7 +1683,7 @@ mod tests {
         let mut file = create_temporary(&partial).unwrap();
         file.write_all(b"{\"anthropic\":").unwrap();
         create_temporary(&finished).unwrap();
-        drop(Discard(&finished));
+        drop(Discard(finished.clone()));
         assert!(!finished.exists());
         assert_eq!(downloads().files, vec![partial.clone()]);
         cancel_downloads();

@@ -1,6 +1,8 @@
 //! `--ssh` audits through a fake `ssh` that runs each destination's command locally.
 #![cfg(unix)]
 
+mod support;
+
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
@@ -156,6 +158,7 @@ HOME="$TEST_ROOT/homes/$host" PATH="$TEST_ROOT/remote/$host:$TEST_PATH" exec sh 
             )
             .env("TEST_ROOT", &self.root)
             .env("TEST_PATH", self.root.join("tools"))
+            .env("TOKEN_MAX_RELEASES", support::current())
             .stdin(Stdio::null());
         command
     }
@@ -1460,7 +1463,7 @@ const HOME_SETTINGS: &str = r#"{"promptCacheTtl":"1h","env":{"BASH_MAX_TIMEOUT_M
 const CAP_LOWERED: &str = "{\n  \"promptCacheTtl\": \"1h\",\n  \"env\": {\n    \"BASH_MAX_TIMEOUT_MS\": \"3300000\"\n  }\n}";
 
 impl Hosts {
-    /// `doctor` on this host, devbox and laptop, walked on a terminal after the billing question.
+    /// `doctor` on this host, devbox and laptop, walked on a terminal after the billing questions.
     fn walk(&self) -> Terminal {
         self.host("devbox");
         self.host("laptop");
@@ -1476,7 +1479,10 @@ impl Hosts {
         let mut command = self.command(&["--ssh", "devbox", "--ssh", "laptop"]);
         command.env("NO_COLOR", "1");
         let mut terminal = Terminal::spawn(command);
-        terminal.answer("[s]kip:", "a");
+        // Each host's profile, in the order the hosts were given.
+        for profile in ["~/.claude", "devbox:~/.claude", "laptop:~/.claude"] {
+            terminal.answer(&format!("How is {profile} paid for?"), "a");
+        }
         terminal
     }
 
@@ -1687,5 +1693,62 @@ done"#
     assert_eq!(
         std::fs::read_to_string(hosts.settings("laptop")).unwrap(),
         HOME_SETTINGS
+    );
+}
+
+#[test]
+fn each_destination_prices_its_main_ttl_by_the_answer_given_for_it() {
+    let hosts = Hosts::new();
+    hosts.host("devbox");
+    hosts.host("laptop");
+    let mut command = hosts.command(&["--defaults", "--ssh", "devbox", "--ssh", "laptop"]);
+    command.env("NO_COLOR", "1");
+    let mut terminal = Terminal::spawn(command);
+    for (profile, answer) in [
+        ("~/.claude", "s"),
+        ("devbox:~/.claude", "p"),
+        ("laptop:~/.claude", "a"),
+    ] {
+        terminal.answer(&format!("How is {profile} paid for?"), answer);
+    }
+    let (code, output, stderr) = terminal.finish();
+    assert_eq!(code, 1, "{output}{stderr}");
+    // Skipped, a plan's 1h, and an API key's 5m: each host's own answer, not this host's.
+    for (host, line) in [
+        (
+            "this host",
+            "Main-agent prompt cache TTL unset -> 1h saves up to",
+        ),
+        ("devbox", "Main-agent prompt cache TTL 1h (default)"),
+        (
+            "laptop",
+            "Main-agent prompt cache TTL 5m (default) -> 1h saves <$0.01/mo",
+        ),
+    ] {
+        let section = flat(section(&output, host));
+        assert!(section.contains(line), "{host}: {section}");
+    }
+}
+
+#[test]
+fn a_destination_takes_answers_only_for_the_profiles_it_listed() {
+    let hosts = Hosts::new();
+    hosts.host("devbox");
+    // Answers for another root than the one devbox lists, as a coordinator that misread it
+    // would send.
+    hosts.fake(
+        "devbox",
+        &format!(
+            r#"{{ read -r paid; echo '{{"profiles":{{"/elsewhere":"plan"}}}}'; cat; }} | '{BIN}' "$@""#
+        ),
+    );
+    let (status, stdout, stderr) = hosts.run(&["--ssh", "devbox"]);
+    assert_eq!(status, 2, "{stderr}");
+    assert_eq!(stdout, "");
+    assert!(
+        stderr.starts_with(
+            "token-max: devbox: the coordinator answered how a profile pays that this host did not list"
+        ),
+        "{stderr}"
     );
 }

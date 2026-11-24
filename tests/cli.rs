@@ -1,5 +1,7 @@
 //! The built `token-max` binary against synthetic homes under Cargo's target scratch directory.
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -104,14 +106,19 @@ fn text(path: &Path) -> String {
 
 /// The binary with only this workspace's environment and no inherited settings controls.
 fn command(w: &Workspace, args: &[&str]) -> Command {
-    let mut command = Command::new(BIN);
-    command
+    command_at(Path::new(BIN), w, args)
+}
+
+/// The binary at `bin`, as [`command`] runs the built one.
+fn command_at(bin: &Path, w: &Workspace, args: &[&str]) -> Command {
+    let mut command = Command::new(bin);
+    support::isolated(&mut command)
         .args(args)
-        .env_clear()
         .env("HOME", &w.home)
         // Windows resolves the home from USERPROFILE and ignores HOME.
         .env("USERPROFILE", &w.home)
         .env("TERM", "xterm-256color")
+        .env("TOKEN_MAX_RELEASES", support::current())
         .stdin(Stdio::null());
     command
 }
@@ -972,13 +979,14 @@ fn a_relocated_binary_runs_from_any_directory_with_relative_paths() {
     let original = std::fs::read(&transcript).unwrap();
     let invoke = |extra: &[&str]| {
         let mut c = Command::new(&bin);
-        c.args(extra)
+        support::isolated(&mut c)
+            .args(extra)
             .current_dir(&consumer)
-            .env_clear()
             .env("HOME", &w.home)
             // Windows resolves the home from USERPROFILE and ignores HOME.
             .env("USERPROFILE", &w.home)
             .env("NO_COLOR", "1")
+            .env("TOKEN_MAX_RELEASES", support::current())
             .stdin(Stdio::null());
         run(&mut c)
     };
@@ -1035,6 +1043,102 @@ fn a_relocated_binary_runs_from_any_directory_with_relative_paths() {
     assert_eq!(stdout, "");
     assert!(stderr.ends_with(":1\n"), "{stderr}");
     assert!(!stderr.contains("SYNTHETIC_PRIVATE"));
+}
+
+/// Piped, a newer release is a line on stderr naming how to upgrade, and the run goes on with
+/// this build and its exit code; offline, nothing is asked.
+#[test]
+// Only a platform with a release has one to offer.
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    target_os = "macos",
+    windows
+))]
+fn without_a_terminal_a_newer_release_or_a_failed_check_is_one_line_on_stderr() {
+    let w = Workspace::new();
+    w.fixture();
+    w.settings(r#"{"promptCacheTtl":"5m"}"#);
+    let base = prices_args(&w);
+    let doctor = args(&base, &["--plain"]);
+    let (status, report, stderr) = run(&mut command(&w, &doctor));
+    assert_eq!((status, stderr.as_str()), (1, ""));
+    let releases = support::Releases::new();
+    releases.latest("v99.0.0");
+    let mut c = command(&w, &doctor);
+    c.env("TOKEN_MAX_RELEASES", &releases.url);
+    let ours = env!("CARGO_PKG_VERSION");
+    let stale =
+        format!("token-max: v99.0.0 is out; this is v{ours}, and its advice may be out of date.");
+    assert_eq!(
+        run(&mut c),
+        (
+            1,
+            report.clone(),
+            format!("{stale} Run token-max doctor on a terminal to upgrade.\n")
+        )
+    );
+    assert_eq!(releases.checks(), 1);
+    // A binary Cargo installed is Cargo's to upgrade.
+    let cargo = w.home.join(".cargo/bin");
+    std::fs::create_dir_all(&cargo).unwrap();
+    let bin = cargo.join(format!("token-max{}", std::env::consts::EXE_SUFFIX));
+    std::fs::hard_link(BIN, &bin).unwrap();
+    let mut c = command_at(&bin, &w, &doctor);
+    c.env("TOKEN_MAX_RELEASES", &releases.url);
+    assert_eq!(
+        run(&mut c),
+        (
+            1,
+            report.clone(),
+            format!(
+                "{stale} Upgrade with cargo binstall token-max or cargo install --locked token-max.\n"
+            )
+        )
+    );
+    // A run without a terminal never probes the directory, which writes beside the binary, so
+    // even one this user cannot write only hears that a terminal run upgrades.
+    #[cfg(unix)]
+    // SAFETY: geteuid has no preconditions. Root can write anything.
+    if unsafe { libc::geteuid() } != 0 {
+        use std::os::unix::fs::PermissionsExt;
+        let locked = w.home.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        let bin = locked.join("token-max");
+        std::fs::hard_link(BIN, &bin).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let mut c = command_at(&bin, &w, &doctor);
+        c.env("TOKEN_MAX_RELEASES", &releases.url);
+        let ran = run(&mut c);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            ran,
+            (
+                1,
+                report.clone(),
+                format!("{stale} Run token-max doctor on a terminal to upgrade.\n")
+            )
+        );
+    }
+    // Offline asks nothing.
+    let checked = releases.checks();
+    let mut c = command(&w, &args(&base, &["--plain", "--offline"]));
+    c.env("TOKEN_MAX_RELEASES", &releases.url);
+    assert_eq!(run(&mut c), (1, report.clone(), String::new()));
+    assert_eq!(releases.checks(), checked);
+    // Unreachable releases are one line, and the run goes on.
+    let mut c = command(&w, &doctor);
+    let nowhere = "http://127.0.0.1:1/releases";
+    c.env("TOKEN_MAX_RELEASES", nowhere);
+    let (status, stdout, stderr) = run(&mut c);
+    assert_eq!((status, stdout), (1, report));
+    // The cause is the platform's own wording.
+    let failed =
+        format!("token-max: could not check for a newer release: could not reach {nowhere}: ");
+    assert!(stderr.starts_with(&failed), "{stderr}");
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
 }
 
 // Built CLI warns from current settings alone, remains read-only and skips unreadable lines.
@@ -1423,6 +1527,205 @@ mod unix {
         drop(keyboard);
     }
 
+    /// The binary hard-linked into its own directory, so an upgrade replaces only the link.
+    fn installed(w: &Workspace) -> PathBuf {
+        let dir = w.home.join("bin");
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("token-max");
+        std::fs::hard_link(BIN, &bin).unwrap();
+        bin
+    }
+
+    /// Run `command` with stdin, stdout and stderr on terminals, typing `keys`.
+    fn typed(command: &mut Command, keys: &[u8]) -> (i32, String, String) {
+        let Pty { master, slave } = Pty::new(80);
+        let (stdout, out) = Pty::new(80).drain();
+        let (stderr, err) = Pty::new(80).drain();
+        command
+            .stdin(Stdio::from(slave))
+            .stdout(stdout)
+            .stderr(stderr);
+        let mut child = command.spawn().unwrap();
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut keyboard = std::fs::File::from(master);
+        keyboard.write_all(keys).unwrap();
+        let status = child.wait().unwrap().code().unwrap();
+        drop(keyboard);
+        (status, out.join().unwrap(), err.join().unwrap())
+    }
+
+    /// Every name in `dir`.
+    fn names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    // Only a platform with a release has one to offer.
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos",
+        windows
+    ))]
+    fn a_newer_release_is_offered_first_and_a_yes_replaces_the_binary_and_reruns() {
+        let w = Workspace::new();
+        w.fixture();
+        let bin = installed(&w);
+        let releases = support::Releases::new();
+        releases.publish("v99.0.0", false);
+        let base = prices_args(&w);
+        let doctor = args(&base, &["--plain"]);
+        let mut c = command_at(&bin, &w, &doctor);
+        // The upgrade unpacks with the host's tar.
+        c.env("TOKEN_MAX_RELEASES", &releases.url)
+            .env("PATH", std::env::var_os("PATH").unwrap());
+        let (status, stdout, stderr) = typed(&mut c, b"y\n");
+        assert_eq!(status, 0, "{stderr}");
+        let ours = env!("CARGO_PKG_VERSION");
+        // Before the opening, then the release's own run with the same arguments. The answer
+        // echoes on the input terminal, so a separate stdout shows none.
+        assert_eq!(
+            stdout,
+            format!(
+                "\n  token-max v99.0.0 is out; this is v{ours}, and its advice may be out of date.\n  Upgrade to v99.0.0 and rerun? [y]es, [n]o:   Downloading v99.0.0...\n  Upgraded to v99.0.0; rerunning.\nran {}\n",
+                doctor.join(" ")
+            )
+        );
+        assert_eq!(stderr, "");
+        assert!(
+            std::fs::read_to_string(&bin)
+                .unwrap()
+                .starts_with("#!/bin/sh\n")
+        );
+        // Executable as the binary it replaced was, and nothing left beside it.
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&bin).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode,
+            std::fs::metadata(BIN).unwrap().permissions().mode() & 0o777
+        );
+        assert_eq!(names(bin.parent().unwrap()), ["token-max"]);
+    }
+
+    #[test]
+    // Only a platform with a release has one to offer.
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos",
+        windows
+    ))]
+    fn a_declined_or_failed_upgrade_runs_this_build_and_leaves_it_in_place() {
+        let w = Workspace::new();
+        w.fixture();
+        let bin = installed(&w);
+        let releases = support::Releases::new();
+        // The checksum file lies, so only a yes downloads anything and nothing is replaced.
+        releases.publish("v99.0.0", true);
+        let base = prices_args(&w);
+        let doctor = args(&base, &["--plain"]);
+        let ours = env!("CARGO_PKG_VERSION");
+        let offer = format!(
+            "\n  token-max v99.0.0 is out; this is v{ours}, and its advice may be out of date.\n  Upgrade to v99.0.0 and rerun? [y]es, [n]o: "
+        );
+        let (code, _, stderr) = typed(&mut command_at(&bin, &w, &doctor), b"s\nq\n");
+        assert_ne!(code, 2, "{stderr}");
+        let opening = format!("\n  token-max {ours}\n");
+        let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let failed = format!(
+            "Downloading v99.0.0... Could not upgrade: token-max-{}.tar.xz does not match its checksum. Continuing with v{ours}.",
+            support::TARGET
+        );
+        for (keys, said) in [
+            // An unknown answer asks again; then no, then skip how the profile pays.
+            (
+                &b"maybe\nn\ns\nq\n"[..],
+                "Upgrade to v99.0.0 and rerun? [y]es, [n]o:".to_string(),
+            ),
+            (&b"y\ns\nq\n"[..], failed),
+        ] {
+            let before = releases.downloads();
+            let mut c = command_at(&bin, &w, &doctor);
+            c.env("TOKEN_MAX_RELEASES", &releases.url)
+                .env("PATH", std::env::var_os("PATH").unwrap());
+            let (status, stdout, stderr) = typed(&mut c, keys);
+            // The exit code a run with no newer release gets.
+            assert_eq!(status, code, "{stderr}");
+            let (before_opening, _) = stdout.split_once(&opening).expect(&stdout);
+            assert!(before_opening.starts_with(&offer), "{stdout}");
+            assert_eq!(words(&before_opening[offer.len()..]), said, "{stdout}");
+            assert!(stdout.contains("How is ~/.claude paid for?"), "{stdout}");
+            assert_eq!(
+                releases.downloads() - before,
+                if keys[0] == b'y' { 2 } else { 0 }
+            );
+            assert_eq!(std::fs::read(&bin).unwrap(), std::fs::read(BIN).unwrap());
+            assert_eq!(names(bin.parent().unwrap()), ["token-max"]);
+        }
+        // Reporting as a default user would, it changes nothing, so it only says how.
+        let before = releases.downloads();
+        let mut c = command_at(&bin, &w, &args(&base, &["--plain", "--defaults"]));
+        c.env("TOKEN_MAX_RELEASES", &releases.url);
+        let (status, stdout, stderr) = typed(&mut c, b"s\n");
+        assert_ne!(status, 2, "{stderr}");
+        let (before_opening, _) = stdout.split_once(&opening).expect(&stdout);
+        assert_eq!(
+            words(before_opening),
+            format!(
+                "token-max v99.0.0 is out; this is v{ours}, and its advice may be out of date. Run token-max doctor without --defaults to upgrade."
+            )
+        );
+        assert_eq!(releases.downloads(), before);
+        // A check that cannot run is one diagnostic line on stderr, and the run goes on.
+        let mut c = command_at(&bin, &w, &doctor);
+        let nowhere = "http://127.0.0.1:1/releases";
+        c.env("TOKEN_MAX_RELEASES", nowhere);
+        let (status, stdout, stderr) = typed(&mut c, b"s\nq\n");
+        assert_eq!(status, code, "{stderr}");
+        assert!(stdout.starts_with(&opening), "{stdout}");
+        let failed =
+            format!("token-max: could not check for a newer release: could not reach {nowhere}: ");
+        assert!(words(&stderr).contains(&words(&failed)), "{stderr}");
+        // A directory this user cannot write keeps its binary, and gets the install link
+        // instead of the question.
+        // SAFETY: geteuid has no preconditions. Root can write anything.
+        if unsafe { libc::geteuid() } != 0 {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = w.home.join("locked");
+            std::fs::create_dir_all(&locked).unwrap();
+            let bin = locked.join("token-max");
+            std::fs::hard_link(BIN, &bin).unwrap();
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+            let mut c = command_at(&bin, &w, &doctor);
+            c.env("TOKEN_MAX_RELEASES", &releases.url);
+            let (status, stdout, stderr) = typed(&mut c, b"s\nq\n");
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(status, code, "{stderr}");
+            let (before_opening, _) = stdout.split_once(&opening).expect(&stdout);
+            // The line wraps inside the path, so compare without whitespace.
+            let bare = |text: &str| text.split_whitespace().collect::<String>();
+            let said = format!(
+                "token-max v99.0.0 is out; this is v{ours}, and its advice may be out of date. This user cannot write to {}, so install it again as https://github.com/kixel-ai/token-max#install describes.",
+                locked.canonicalize().unwrap().display()
+            );
+            assert_eq!(bare(before_opening), bare(&said));
+            assert_eq!(releases.downloads(), before);
+            assert_eq!(names(&locked), ["token-max"]);
+        }
+    }
+
     fn signal(pid: u32, signal: libc::c_int) {
         // SAFETY: kill only sends a signal to the child process this test spawned.
         assert_eq!(unsafe { libc::kill(pid as libc::pid_t, signal) }, 0);
@@ -1444,6 +1747,9 @@ mod unix {
                     "ALL_PROXY",
                     format!("http://{}", proxy.local_addr().unwrap()),
                 )
+                // The release check goes straight to its local server, so the proxy holds only the
+                // price fetch.
+                .env("NO_PROXY", "127.0.0.1")
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
                 let child = c.spawn().unwrap();

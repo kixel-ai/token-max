@@ -20,7 +20,7 @@ use crate::model::{
     RequestEvidence, ReturnTiming, Scalar, Share, SubagentCost, T3IdleCheck, T3TextGeneration, Ttl,
     UsageEstimate, Verdict,
 };
-use crate::prices::{TIER_SENSITIVITY, add_costs};
+use crate::prices::{TIER_SENSITIVITY, TIER_SIGNS, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
 use crate::terminal::{BOLD, DIM, GREEN, RED, WrapOptions, YELLOW, cells, wrap_spans};
 use crate::vibes::Item;
@@ -3087,13 +3087,14 @@ fn keepalive_keep(k: &KeepaliveCheck, r: &Common<'_>) -> String {
     };
     match k.margin_usd {
         Some(m) => format!(
-            "Pinging idle sessions every {interval} would cost {} more than {}.",
+            "Pinging idle sessions every {interval} would cost {} more than {}.{}",
             figure(-m),
             if k.idle_compaction_savings.is_some_and(|s| s.usd > 0.0) {
                 "idle compaction"
             } else {
                 "leaving them idle"
-            }
+            },
+            assumed_tier(r)
         ),
         None => format!(
             "No session sat idle past its {} cache and came back, so pings would only add cost.",
@@ -3110,7 +3111,7 @@ fn keepalive_unresolved(k: &KeepaliveCheck, r: &Common<'_>) -> String {
     let margin = r.margin.map(|m| m.scale(monthly(1.0, r.since, r.until)));
     if let Some(Setting::Keepalive(policy)) = r.recommended {
         return format!(
-            "Pinging idle sessions {policy} would save {}, but {}.",
+            "Pinging idle sessions {policy} would save {}, but {}.{}",
             approx(
                 r.monthly_savings_usd.unwrap_or_else(|| monthly(
                     r.savings_usd.unwrap_or(0.0),
@@ -3120,7 +3121,8 @@ fn keepalive_unresolved(k: &KeepaliveCheck, r: &Common<'_>) -> String {
                 margin,
                 "/mo"
             ),
-            r.owner.strip_prefix("no setting: ").unwrap_or(r.owner)
+            r.owner.strip_prefix("no setting: ").unwrap_or(r.owner),
+            assumed_tier(r)
         );
     }
     if r.uncertainty
@@ -3916,6 +3918,15 @@ fn coverage_note(r: &Common<'_>, items: &str) -> String {
         );
     }
     note
+}
+
+/// The sentence a verdict priced at an assumed service tier adds, or nothing.
+fn assumed_tier(r: &Common<'_>) -> &'static str {
+    if r.assumptions.iter().any(|s| s == TIER_SIGNS) {
+        " Its dollars are at an assumed service tier, since none was recorded, but every session moved the same way, so no tier could reverse this unless one changed within a session."
+    } else {
+        ""
+    }
 }
 
 /// What most replays extrapolate from.
@@ -5208,8 +5219,9 @@ fn summary(
                             (Some(Setting::Window(a)), Some(Setting::Window(b))) if b < a
                         );
                         format!(
-                            "Replayed assuming the same sessions{}{net}. {}{} {set_in}",
+                            "Replayed assuming the same sessions{}{net}.{} {}{} {set_in}",
                             coverage_note(r, MEASURED),
+                            assumed_tier(r),
                             if smaller {
                                 "Detail lost to summaries is not measured."
                             } else {
@@ -5219,7 +5231,8 @@ fn summary(
                         )
                     }
                     Mark::Keep => format!(
-                        "No other window was cheaper, replayed assuming the same sessions.{} {set_in}",
+                        "No other window was cheaper, replayed assuming the same sessions.{}{} {set_in}",
+                        assumed_tier(r),
                         context_rot(report, result)
                     ),
                     _ => unknown(),
@@ -5249,14 +5262,16 @@ fn summary(
                             .find(|s| r.recommended == Some(Setting::Percent(s.window)))
                             .map_or(0, |s| s.added.len());
                         format!(
-                            "Replayed{after}, assuming the same sessions{}, net of {} added summar{}.{assumes} Detail lost to summaries is not measured. {set_in}",
+                            "Replayed{after}, assuming the same sessions{}, net of {} added summar{}.{}{assumes} Detail lost to summaries is not measured. {set_in}",
                             coverage_note(r, MEASURED),
                             count(added as u64),
-                            if added == 1 { "y" } else { "ies" }
+                            if added == 1 { "y" } else { "ies" },
+                            assumed_tier(r)
                         )
                     }
                     Mark::Keep => format!(
-                        "No other threshold was cheaper, replayed{after} assuming the same sessions. {set_in}"
+                        "No other threshold was cheaper, replayed{after} assuming the same sessions.{} {set_in}",
+                        assumed_tier(r)
                     ),
                     _ => unknown(),
                 }

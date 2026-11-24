@@ -33,6 +33,10 @@ pub const PRICE_SOURCES: [&str; 7] = [
 /// Why a conditional tier estimate cannot decide a cost comparison.
 pub const TIER_SENSITIVITY: &str = "effective service tier is absent or conflicting; project defaults and served tiers can differ from requests; tier sensitivity has no verified bounds, so affected cost-based recommendations are withheld";
 
+/// Why a cost comparison priced at an assumed tier still decides: every priced session moved
+/// the same way.
+pub const TIER_SIGNS: &str = "effective service tier is absent or conflicting, so dollars are priced at an assumed tier; each session's saving at an assumed tier, and the saving at recorded tiers, went the same way, and a service tier multiplies all of a request's token rates by one positive factor, so no tier could reverse the verdict, assuming one tier bills every request of a session in both replays";
+
 /// Whether this Codex part lacks consistent effective-tier evidence.
 pub fn conditional_tier(r: &Request, p: &BillingPart) -> bool {
     r.harness == Harness::Codex
@@ -820,6 +824,34 @@ impl PairedSavings {
     /// The extrapolated savings in dollars, positive when the alternative is cheaper.
     pub fn usd(&self) -> Option<f64> {
         self.savings.map(|s| s.usd)
+    }
+}
+
+/// Which ways a comparison's priced savings went: each session's at an assumed tier, and all
+/// of those at recorded tiers together. A service tier multiplies a request's prices by one
+/// positive factor, so when one tier bills each session and no saving went the other way, no
+/// tier could reverse the total's sign; one that did could be scaled past the rest.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Signs {
+    saves: bool,
+    loses: bool,
+}
+
+impl Signs {
+    /// Count one baseline-minus-alternative saving.
+    pub fn add(&mut self, savings: Usd) {
+        self.saves |= savings > Usd::ZERO;
+        self.loses |= savings < Usd::ZERO;
+    }
+
+    /// Whether no saving was negative, so the alternative costs no more under any tier.
+    pub fn never_loses(&self) -> bool {
+        !self.loses
+    }
+
+    /// Whether no saving was positive, so the alternative saves nothing under any tier.
+    pub fn never_saves(&self) -> bool {
+        !self.saves
     }
 }
 

@@ -946,7 +946,9 @@ charged once, including when earlier hypothetical passes might replace them.
 Summary generation and cold resumed prefixes are included in net savings. Larger
 observed summaries/prefixes, cold-summary costs, and the extra re-read spend that
 would erase a saving accompany the aggregate winner. Lost detail and changed work
-remain unmeasured risks, not zero-cost observations.
+remain unmeasured risks, not zero-cost observations. Requests priced at an
+assumed service tier decide only as
+[Tier-sensitive verdicts](#tier-sensitive-verdicts) describes.
 
 ## Turn-end compaction
 
@@ -1004,10 +1006,10 @@ which applied is not recorded, as does a latest recorded Codex before v0.156.0,
 which added the setting. Lost detail and changed work remain unmeasured risks.
 
 Native Codex transcripts record no billed service tier, so their requests are
-priced at an assumed one and, as for the compaction window, a winner that
-rests on it is withheld (see [Fast mode](#fast-mode)):
-`--details` shows each threshold's priced saving, and the line gives no
-verdict.
+priced at an assumed one and, as for the compaction window, the line gives a
+verdict only when no tier could reverse it (see
+[Tier-sensitive verdicts](#tier-sensitive-verdicts)); otherwise `--details`
+shows each threshold's priced saving, and the line gives no verdict.
 
 ## Idle compaction
 
@@ -1199,7 +1201,9 @@ once, and how soon they would need to close for pinging to pay.
 
 Neither harness has a capped keepalive setting: a `/loop` task pings on a fixed
 schedule until cancelled or for seven days, and Codex cannot schedule pings. A
-priced result is therefore advisory and never changes the exit code. Current
+priced result is therefore advisory and never changes the exit code; one priced
+at an assumed service tier is reported only as
+[Tier-sensitive verdicts](#tier-sensitive-verdicts) describes. Current
 ping state stays unknown: recorded turns, including scheduled-task turns, are
 activity, and their metadata does not establish whether they are keepalive pings.
 
@@ -1250,8 +1254,29 @@ Reports count conditional requests separately from recorded tier coverage.
 conditionally priced parts, preserving recorded tiers and all context/cache
 categories. Unsupported scenarios, including Flex and Scale without verified
 rates, remain unknown. These are sensitivity examples, not bounds on actual
-charges. Context keep/off, compaction and keepalive winners that depend on missing tiers stay
-advisory because tier sensitivity could reverse them. SSH reports use the same pricing and evidence.
+charges. Context keep/off winners that depend on missing tiers stay advisory because
+tier sensitivity could reverse them; compaction and keepalive winners follow
+[Tier-sensitive verdicts](#tier-sensitive-verdicts). SSH reports use the same pricing and evidence.
+
+### Tier-sensitive verdicts
+
+The compaction window, turn-end compaction and keepalive lines reach a verdict
+on requests priced at an assumed tier only when no tier could reverse it. A
+service tier multiplies all of a request's token rates by one positive factor,
+so scaling a saving never flips its sign. Each session's saving at an assumed
+tier, and the saving at recorded tiers pooled, must go the same way as the
+verdict: every one saves for a change, or none saves for keeping the current
+setting. One that went the other way could be scaled past the rest by a dearer
+or cheaper tier, so the line gives no verdict. The rule assumes one tier bills
+every request of a session, in history and in the replay; a tier changed within
+a session, such as by `/fast` or a server serving another tier, could break it.
+The line's dollars stay priced at the assumed tier, and it says so. A change
+verdict always adds summaries or pings, which cost, so it settles only when
+each session's saving outweighs them. For a window or threshold, the rule
+settles the winner against the current setting; a tier could still make another
+candidate cheaper than the winner.
+Bounds over the documented tier multipliers are not shown, since Flex and Scale
+have no verified rate.
 
 ## Background generation
 

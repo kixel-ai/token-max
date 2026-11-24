@@ -4,4 +4,4 @@ description: Run a project's quest work from one session, starting ready quests 
 allowed-tools: Bash(quest skill run) PowerShell(quest skill run)
 ---
 
-!`quest skill run; echo "If quest skill run printed an error instead of instructions, install quest as https://github.com/moq-dev/quest/blob/main/SETUP.md describes, then run quest skill run and follow its output."`
+!`quest skill run; echo "If quest skill run printed an error instead of instructions, install quest as https://github.com/kixel-ai/quest/blob/main/SETUP.md describes, then run quest skill run and follow its output."`

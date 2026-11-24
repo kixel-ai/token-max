@@ -7,7 +7,7 @@ they save, and one dim line counting what was left out or assumed, such as
 unsupported T3 instances, unattributed or removed T3 requests, requests at
 an assumed service tier or with no usage, and unreadable lines, pointing to
 `--details`. The `--defaults` explanation, profiles, T3 state, pricing and
-percent caveats and the legend print only under `--details`.
+percent caveats print only under `--details`; the one-line legend stays.
 
 ## Plan
 

@@ -39,13 +39,15 @@ pub const TIER_SIGNS: &str = "effective service tier is absent or conflicting, s
 
 /// What a part priced at an assumed tier scales with when another tier bills it: the
 /// documented default, fast and ultrafast rates relative to the assumed one's, or, where one
-/// is unknown, its model and which side of the model's context threshold its input falls on.
+/// is unknown, its model, its assumed tier and which side of the model's context threshold
+/// its input falls on.
 /// Parts that share one scale alike under any tier.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TierScale {
     /// Each tier's rate per thousand of the assumed tier's.
     ratios: Option<[u64; 3]>,
     model: Option<Text>,
+    assumed: Option<Text>,
     long: bool,
 }
 
@@ -69,6 +71,7 @@ pub fn tier_scale(r: &Request, p: &BillingPart) -> Option<TierScale> {
         return Some(TierScale {
             ratios,
             model: None,
+            assumed: None,
             long: false,
         });
     }
@@ -79,6 +82,7 @@ pub fn tier_scale(r: &Request, p: &BillingPart) -> Option<TierScale> {
     Some(TierScale {
         ratios,
         model: Some(model.into()),
+        assumed: Some(tier_name(assumed).into()),
         long: input.zip(limit).is_some_and(|(input, limit)| input > limit),
     })
 }
@@ -1656,6 +1660,15 @@ mod tests {
         // A premium tier is 2x on GPT-6.1 and 2.5x on GPT-5.5, so the models scale apart.
         assert_ne!(part("gpt-5.5", 1000, None, None), base);
         assert_ne!(part("gpt-6.1-sol", 1000, Some("fast"), None), base);
+        // GPT-5.5 has no published ultrafast rate, so its assumed tier keys it instead.
+        assert_ne!(
+            part("gpt-5.5", 1000, Some("fast"), None),
+            part("gpt-5.5", 1000, None, None)
+        );
+        assert_eq!(
+            part("gpt-5.5", 1000, Some("default"), None),
+            part("gpt-5.5", 2000, None, None)
+        );
         assert_ne!(
             part("gpt-5.5", 300_000, None, None),
             part("gpt-5.5", 1000, None, None)

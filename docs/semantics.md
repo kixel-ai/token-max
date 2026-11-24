@@ -1370,7 +1370,9 @@ and never change the exit code: a cheaper model or lower effort trades
 capability, and the main agent's extra work after a weaker subagent lands in
 its own requests, where transcripts cannot attribute it. Claude's built-in
 Explore, when it ran off Haiku, gets a `vibes` card citing Anthropic's model guide
-(checked 2026-11-14), equally verdict-free. When runs in
+(checked 2026-11-14), equally verdict-free, whose agent file is a step by hand
+because the built-in's system prompt is unpublished (Claude Code's subagent
+docs, checked 2026-11-23, give only its tools). When runs in
 different projects are set by different files, the model and effort settings
 name each.
 

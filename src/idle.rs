@@ -3479,6 +3479,7 @@ mod tests {
                 pre_tokens: Some(300_000),
                 post_tokens: Some(2000),
                 duration_ms: Some(1000),
+                usable_window: None,
                 tool: None,
                 t3: None,
                 pricing: Some(std::sync::Arc::new(Pricing {
@@ -3581,6 +3582,7 @@ mod tests {
             speed: None,
             bash: None,
             retention: None,
+            turn_end: None,
             effort: None,
             speed_directories: None,
             idle_directories: None,

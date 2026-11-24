@@ -6,7 +6,8 @@ max.kixel.me opens on a `node` tab showing `npx @kixel/crabx token-max doctor`,
 followed by a `crabx` tab and then today's `macOS / Linux` and `Windows` run
 scripts, which stay. The README and `docs/reference.md` list the same lines.
 Run through crabx, `doctor` is interactive on Linux, macOS and Windows, and
-token-max's upgrade offer never touches a binary crabx manages. Non-goals:
+[its upgrade guard](/quest/m1/crabx-upgrade.md) keeps 0.1.0's upgrade offer
+away from crabx's cache. Non-goals:
 publishing token-max to npm itself, and holding back 0.1.0 for this.
 
 ## Plan
@@ -36,14 +37,15 @@ crabx release this quest waits on falls back to musl.
 
 Recommendations:
 
-- `upgrade.rs`: a binary under crabx's cache (`crabx/v1/` in the OS user
-  cache directory) is managed by crabx. Its upgrade offer replaces the file in
-  place, which would corrupt crabx's verified cache entry. An unpinned crabx
-  run has already started a background fetch of the newest release, so name
-  crabx as the manager and say the next run picks the new version up.
 - The README's "Run this:" leads with the npx line and gives the curl and irm
   lines as the way to run it without Node. Its Install section adds
   `npx @kixel/crabx install token-max`.
+- Linux hosts without glibc, such as Alpine, can't run crabx's npm launcher,
+  so the README and `docs/reference.md` name the run script as their way in;
+  it picks the static musl build.
+- The page is deployed by hand (`docs/releasing.md`), so this quest's PR
+  deploys it once the crabx release is out, and checks that
+  https://max.kixel.me opens on the `node` tab.
 - Retake `og.png` and update its `og:image:alt` so a shared link shows the
   npx line.
 - crabx runs an unpinned crate's newest version only once it is 24 hours

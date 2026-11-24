@@ -36,7 +36,7 @@ Decided 2026-11-24 (maintainer, /quest-plan): ✅ promotion also waits for
 
 ## Waiting
 
-- Maintainer: once 0.1.0 is released and the page deployed, open https://max.kixel.me, try it on a desktop and a phone, and promote it; report anything to change as a new quest. Only the maintainer can judge the page and post as themselves.
+- Maintainer: once 0.1.0 is released and https://max.kixel.me is deployed with the crabx tabs, opening on `node`, open it, try it on a desktop and a phone, and promote it; report anything to change as a new quest. Only the maintainer can judge the page and post as themselves.
 
 ## Required
 

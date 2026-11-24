@@ -754,6 +754,8 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
         sources: vec![COSTS.into(), GUIDE.into(), s.readme.into()],
         how,
         quiet,
+        // No `doctor` line writes `enabledPlugins` or installs a server, so none moves this card.
+        after: vec![],
     })
 }
 

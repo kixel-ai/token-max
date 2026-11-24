@@ -169,10 +169,10 @@ impl Plugin {
     }
 }
 
-/// Whether `path` is `dir` or under it.
+/// Whether `path` is `dir` or under it, by this host's path components: a recorded path and
+/// an install's project both name this host's files.
 fn within(path: &str, dir: &str) -> bool {
-    path.strip_prefix(dir)
-        .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '\\']))
+    Path::new(path).starts_with(dir)
 }
 
 /// Whether an environment variable's name is `PATH`, which Windows spells `Path` and reads in
@@ -186,6 +186,8 @@ pub(crate) fn is_path(name: &str) -> bool {
 pub struct Controls {
     /// The `installed_plugins.json` read, which profiles share only when they share it.
     pub installs: String,
+    /// `CLAUDE_CODE_PLUGIN_CACHE_DIR`, when it moves the plugins directory.
+    pub cache_dir: Option<String>,
     /// Each of [`SERVERS`]' plugins, in its order, and whether its binary is on `PATH`.
     pub plugins: Vec<(Plugin, bool)>,
 }
@@ -200,7 +202,8 @@ pub fn controls(
     managed: &Map<String, Value>,
     path: Option<&str>,
 ) -> Result<Controls, ScanError> {
-    let plugins = match cache_dir.filter(|d| !d.is_empty()) {
+    let cache_dir = cache_dir.filter(|d| !d.is_empty());
+    let plugins = match cache_dir {
         Some(dir) => dir.to_string(),
         None => join(&[root, "plugins"]),
     };
@@ -252,6 +255,7 @@ pub fn controls(
     };
     Ok(Controls {
         installs: file.clone(),
+        cache_dir: cache_dir.map(str::to_string),
         plugins: SERVERS
             .iter()
             .map(|s| {
@@ -310,7 +314,15 @@ fn installs(file: &str) -> Result<IndexMap<String, Vec<Option<String>>>, ScanErr
         };
         let mut scopes = vec![];
         for record in records {
-            let scope = record.get("scope").and_then(Value::as_str);
+            let Value::Object(record) = record else {
+                return Err(invalid());
+            };
+            // The first version's records carry no scope; a scope that isn't a name is invalid.
+            let scope = match record.get("scope") {
+                None => None,
+                Some(Value::String(scope)) => Some(scope.as_str()),
+                Some(_) => return Err(invalid()),
+            };
             let project = record.get("projectPath").and_then(Value::as_str);
             scopes.push(match (scope, project) {
                 (None | Some("user" | "managed"), _) => None,
@@ -367,6 +379,8 @@ pub struct LspUse {
     pub settings_file: String,
     /// The Claude home the plugins are installed in.
     pub root: String,
+    /// `CLAUDE_CODE_PLUGIN_CACHE_DIR`, when it moves the plugins directory.
+    pub cache_dir: Option<String>,
     /// T3 launches the profile with arguments that can replace the settings it reads.
     pub unresolved: bool,
 }
@@ -489,6 +503,7 @@ pub fn lsp_use(scan: &Scan, since: Option<Millis>, now: Millis) -> Vec<LspUse> {
                 languages,
                 settings_file: lead.settings_file.clone(),
                 root: lead.root.clone(),
+                cache_dir: controls.cache_dir.clone(),
                 unresolved: unresolved(lead),
             }
         })
@@ -509,22 +524,19 @@ fn project(cwd: &str, home: Option<&str>) -> String {
         dir = up;
     }
     let mut at = dir;
-    loop {
-        if home.is_some_and(|h| h == at) && at != dir {
-            return dir.into();
-        }
+    let checkout = loop {
         match git_dir(at) {
             // A linked worktree's common directory is its main checkout's `.git`.
             Ok(Some(git)) if git.linked => {
                 let common = Path::new(&git.common);
-                return match (common.file_name(), common.parent()) {
+                break match (common.file_name(), common.parent()) {
                     (Some(name), Some(main)) if name == ".git" => {
                         main.to_string_lossy().into_owned()
                     }
                     _ => at.into(),
                 };
             }
-            Ok(Some(_)) => return at.into(),
+            Ok(Some(_)) => break at.to_string(),
             Ok(None) => {}
             Err(_) => return dir.into(),
         }
@@ -533,7 +545,11 @@ fn project(cwd: &str, home: Option<&str>) -> String {
             return dir.into();
         }
         at = up;
+    };
+    if checkout != dir && home.is_some_and(|h| within(h, &checkout)) {
+        return dir.into();
     }
+    checkout
 }
 
 /// How a card prints: paths from `~` under `home`, and the report's arrow, such as "->".
@@ -601,32 +617,47 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
             s.binary
         )
     };
-    // A bare install goes to whichever Claude home the shell selects, so the home is named.
+    // A bare install goes to whichever Claude home and plugins directory the shell selects,
+    // so both are named.
+    let cache = u.cache_dir.as_deref().map_or(String::new(), |d| {
+        format!(" and CLAUDE_CODE_PLUGIN_CACHE_DIR set to {}", home(d))
+    });
     let install = format!(
-        "with CLAUDE_CONFIG_DIR set to {}, run `claude plugin install {id}`, then start a new session",
+        "with CLAUDE_CONFIG_DIR set to {}{cache}, run `claude plugin install {id}`, then start a new session",
         home(&u.root)
     );
     let server = format!("install {}, as the plugin's README says", s.binary);
+    let server_only = || How::Manual {
+        step: server.clone(),
+        reason: "token-max installs no programs".into(),
+    };
+    // `loaded` counts the sessions that worked only where the plugin loads.
+    let installed_for = |projects: &[String]| {
+        format!(
+            " The {} plugin is installed only for {}, and {loaded} of them worked only there.",
+            s.plugin,
+            list(&projects.iter().map(|p| home(p)).collect::<Vec<_>>()),
+        )
+    };
     let (how, quiet) = match &l.plugin {
+        // The official copy can't be installed for the rest, but the copies that load still
+        // need their server.
         Plugin::Projects {
             blocked: true,
             projects,
         } => {
-            text += &format!(
-                " The {} plugin is installed only for {}, which {loaded} of them ran in, and managed settings turn {id} off.",
-                s.plugin,
-                list(&projects.iter().map(|p| home(p)).collect::<Vec<_>>()),
-            );
-            (None, true)
+            text += &installed_for(projects);
+            text += &format!(" Managed settings turn {id} off.");
+            ((!l.binary).then(server_only), l.binary)
+        }
+        // Every session worked where the plugin loads, so only its server is missing.
+        Plugin::Projects { projects, .. } if l.uncovered == 0 => {
+            text += &installed_for(projects);
+            (Some(server_only()), false)
         }
         Plugin::Missing | Plugin::Projects { .. } => {
             text += &match &l.plugin {
-                Plugin::Projects { projects, .. } => format!(
-                    " The {} plugin is installed only for {}, which {} of them ran in.",
-                    s.plugin,
-                    list(&projects.iter().map(|p| home(p)).collect::<Vec<_>>()),
-                    loaded
-                ),
+                Plugin::Projects { projects, .. } => installed_for(projects),
                 _ => format!(" The {} plugin is not installed.", s.plugin),
             };
             let step = if l.binary {
@@ -660,7 +691,10 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
             };
             let how = if u.unresolved {
                 How::Manual {
-                    step: format!("set {} in {file}", edit.text(Harness::Claude)),
+                    step: format!(
+                        "set {} in {file}, or in the settings this T3 instance's launch arguments name instead",
+                        edit.text(Harness::Claude)
+                    ),
                     reason: "T3 launches this instance with arguments that can replace the settings it reads".into(),
                 }
             } else {
@@ -681,11 +715,7 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
         }
         Plugin::On => {
             text += &format!(" The {} plugin is installed.", s.plugin);
-            let how = How::Manual {
-                step: server.clone(),
-                reason: "token-max installs no programs".into(),
-            };
-            (Some(how), false)
+            (Some(server_only()), false)
         }
     };
     text += &format!(
@@ -914,6 +944,8 @@ mod tests {
         };
         assert!(projects.covers(&format!("{project}/sub")));
         assert!(!projects.covers(&format!("{project}-other")));
+        // A backslash separates components only on Windows.
+        assert_eq!(projects.covers(&format!("{project}\\sub")), cfg!(windows));
         // Managed settings win both ways, whatever is installed.
         assert_eq!(state("clangd-lsp").0, Plugin::Blocked);
         assert_eq!(state("swift-lsp").0, Plugin::On);
@@ -938,6 +970,8 @@ mod tests {
             "[]",
             r#"{"plugins": {"x@y": [{"scope": "project"}]}}"#,
             r#"{"plugins": {"x@y": 1}}"#,
+            r#"{"plugins": {"x@y": [null]}}"#,
+            r#"{"plugins": {"x@y": [{"scope": 1}]}}"#,
             "{",
         ] {
             fs::write(plugins.join("installed_plugins.json"), invalid).unwrap();
@@ -1093,7 +1127,7 @@ mod tests {
         let python = &items[1].text;
         assert!(
             python.contains(&format!(
-                " The pyright-lsp plugin is installed only for {}, which 0 of them ran in. Its language server, pyright-langserver, is not on the PATH token-max runs with,",
+                " The pyright-lsp plugin is installed only for {}, and 0 of them worked only there. Its language server, pyright-langserver, is not on the PATH token-max runs with,",
                 home(&other_s)
             )),
             "{python}"
@@ -1116,6 +1150,11 @@ mod tests {
         assert_eq!(project(&home, Some(&home)), home);
         // Without a home to stop at, the dotfiles repository would claim it.
         assert_eq!(project(&gone, None), home);
+        // A repository above home holds no project either, even for a directory outside it.
+        let shared = w.home.join("shared/x");
+        fs::create_dir_all(&shared).unwrap();
+        let alex = text(&w.home.join("alex"));
+        assert_eq!(project(&text(&shared), Some(&alex)), text(&shared));
     }
 
     fn language(
@@ -1146,6 +1185,7 @@ mod tests {
             languages: vec![l],
             settings_file: text(&settings),
             root: text(&w.home.join(".claude-work")),
+            cache_dir: None,
             unresolved: false,
         };
         // Five projects, the first two with more sessions.
@@ -1200,9 +1240,55 @@ mod tests {
                 text(&w.home.join(".claude-work"))
             )
         );
+        // A moved plugins directory is named too.
+        let cache = text(&w.home.join("cache"));
+        let moved = items(
+            &LspUse {
+                cache_dir: Some(cache.clone()),
+                ..u(language(10, 1, 1, Plugin::Missing, true))
+            },
+            &view,
+        );
+        let Some(How::Manual { step, .. }) = &moved[0].how else {
+            panic!("{:?}", moved[0].how)
+        };
+        assert!(
+            step.starts_with(&format!(
+                "with CLAUDE_CONFIG_DIR set to {} and CLAUDE_CODE_PLUGIN_CACHE_DIR set to {cache}, run",
+                text(&w.home.join(".claude-work"))
+            )),
+            "{step}"
+        );
         // Blocked by policy: shown, with nothing to act on.
         let blocked = card(language(10, 10, 10, Plugin::Blocked, true));
         assert!(blocked[0].quiet && blocked[0].how.is_none());
+        let server = Some(How::Manual {
+            step: "install rust-analyzer, as the plugin's README says".into(),
+            reason: "token-max installs no programs".into(),
+        });
+        // Installed for some projects: their sessions still need its server, whether or not
+        // policy blocks installing it for the rest.
+        let a = vec![dirs[0].0.clone()];
+        for blocked in [false, true] {
+            let projects = Plugin::Projects {
+                projects: a.clone(),
+                blocked,
+            };
+            let covered = card(language(10, 10, 0, projects.clone(), false));
+            assert_eq!(covered[0].how, server, "blocked: {blocked}");
+            assert!(!covered[0].quiet);
+            assert!(
+                covered[0].text.contains(&format!(
+                    " is installed only for {}, and 10 of them worked only there.",
+                    a[0]
+                )),
+                "{}",
+                covered[0].text
+            );
+            let partly = card(language(10, 10, 4, projects, true));
+            assert_eq!(partly[0].quiet, blocked);
+            assert_eq!(partly[0].how.is_none(), blocked);
+        }
         // Turned off in the user file: one edit there, which the walk writes.
         let id = "rust-analyzer-lsp@claude-plugins-official".to_string();
         let off = card(language(
@@ -1233,7 +1319,7 @@ mod tests {
         let by_hand = items(&unsettled, &view);
         assert!(by_hand[0].text.contains("no enabledPlugins entry in"));
         assert!(
-            matches!(&by_hand[0].how, Some(How::Manual { reason, .. }) if reason.starts_with("T3 launches"))
+            matches!(&by_hand[0].how, Some(How::Manual { step, reason }) if reason.starts_with("T3 launches") && step.ends_with("or in the settings this T3 instance's launch arguments name instead"))
         );
         let owner = crate::vibes::owner(&off, None, 100.0);
         let plan = owner

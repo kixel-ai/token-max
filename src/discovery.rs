@@ -73,14 +73,16 @@ impl DiscoveryOptions {
     }
 
     /// Pretend the settings files and the shell's setting variables away, keeping the
-    /// variables that only say where each CLI keeps its files or sends its requests.
+    /// variables that only say where each CLI keeps its files, sends its requests or finds
+    /// the programs its plugins start.
     pub fn pretend_defaults(&mut self) {
         self.defaults = true;
         self.env.retain(|k, _| {
             matches!(
                 k.as_str(),
-                "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "T3CODE_HOME"
+                "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "T3CODE_HOME" | "CLAUDE_CODE_PLUGIN_CACHE_DIR"
             ) || CLAUDE_PROVIDERS.contains(&k.as_str())
+                || crate::lsp::is_path(k)
         });
     }
 
@@ -3165,11 +3167,19 @@ mod tests {
         o.env = env(&[
             ("CLAUDE_CONFIG_DIR", &text(&w.claude)),
             ("CLAUDE_CODE_PROMPT_CACHE_TTL", "5m"),
+            (
+                "CLAUDE_CODE_PLUGIN_CACHE_DIR",
+                &text(&w.home.join("plugins")),
+            ),
+            ("PATH", &text(&w.home.join("bin"))),
         ]);
         o.pretend_defaults();
+        // Where files and programs are found is host state, not a setting.
+        let mut kept: Vec<&String> = o.env.keys().collect();
+        kept.sort();
         assert_eq!(
-            o.env.keys().collect::<Vec<_>>(),
-            [&"CLAUDE_CONFIG_DIR".to_string()]
+            kept,
+            ["CLAUDE_CODE_PLUGIN_CACHE_DIR", "CLAUDE_CONFIG_DIR", "PATH"]
         );
         let data = discover(&o).unwrap();
         let claude = claude(&data);

@@ -25,7 +25,9 @@ host writes exactly the members accepted for it. `vibes`' skipped-change
 cards apply the section's total across hosts, as within one host.
 
 The report after the walk (`Outcome::Reviewed`'s text, printed before the
-confirm) merges the same way; validation and writing stay on each host.
+confirm) merges the same way, keeping each section's accepted and declined members
+apart, as the post-walk report already lists them, so its accepted total
+counts only what was accepted; validation and writing stay on each host.
 
 Percents are of every host's spend together, as the total line already
 computes (`Totals::monthly`). The left-out line from the

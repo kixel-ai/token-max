@@ -24,7 +24,7 @@ Recommendations:
   and one whose sync is turned off, which removes typed use too, are
   separate sections, so a yes never approves an effect the row didn't name.
 - When the TTL section's members would get different values, the row names
-  each, such as `5m → 1h, main 1h, subagent 1h`, never one value for both.
+  each, such as `main 5m → 1h, subagent 1h → 5m`, never one value for both.
 - Keep an "up to" saving, such as an unset main-agent TTL under unknown
   billing, apart from the measured one within the TTL section's row, as the
   walk's running total already does.

@@ -1731,6 +1731,8 @@ pub struct AddedCompaction {
     pub prefix_tokens: i64,
     pub basis: Vec<CompactionBasis>,
     pub summary_cost: Cost,
+    /// What `summary_cost` scales with when it was priced at an assumed tier.
+    pub summary_scale: Option<crate::prices::TierScale>,
     pub prefix_cost: Cost,
 }
 

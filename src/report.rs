@@ -9799,7 +9799,11 @@ mod tests {
         let cards = |lines: Vec<SubagentCost>| {
             let mut report = synthetic();
             report.subagents = lines;
+            // The synthetic report's memory line has its own card.
             advice(&report, ReportOptions::default())
+                .into_iter()
+                .filter(|i| i.name != "Auto memory")
+                .collect::<Vec<_>>()
         };
         assert_eq!(cards(vec![line(Harness::Codex, "explorer", "gpt-5")]), []);
         assert_eq!(

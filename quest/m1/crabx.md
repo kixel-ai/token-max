@@ -40,11 +40,12 @@ Recommendations:
 - The README's "Run this:" leads with the npx line and gives the curl and irm
   lines as the way to run it without Node. Its Install section adds
   `npx @kixel/crabx install token-max`.
-- `crabx install` puts token-max in `~/.local/bin` and, on Unix, only warns
-  when that directory is missing from `PATH`, as `install.sh` does. The page's
-  "Or install it" line says so for every install tab, so
+- The page's "Or install it" line says, for the selected tab, where its
+  installer puts token-max and whether it adds that directory to `PATH`, so
   `token-max doctor --ssh devbox` doesn't surprise anyone with
-  `command not found`.
+  `command not found`. Read each installer for its directory: `crabx install`
+  uses crabx's install directory and handles `PATH` as crabx's installers
+  do, and the run-script tabs' installers are cargo-dist's.
 - Linux hosts without glibc, such as Alpine, can't run crabx's npm launcher,
   so the README and `docs/reference.md` name the run script as their way in;
   it picks the static musl build.

@@ -23,11 +23,8 @@ Recommendations:
   version comes from crabx, so say crabx picks it up, without promising when:
   crabx waits until a release is a day old, and a pinned run never moves.
 - Cover it with a `Paths` unit test, as the run-script and Nix cases have.
-- Exercise it on a real cache too: run a pinned
-  `crabx token-max@<older version> doctor` against a fixture or real release
-  newer than it, check that the offer names crabx, and check that the cached
-  binary's SHA-256 is unchanged afterwards.
-
-## Related
-
-- [crabx tabs](/quest/m1/crabx.md) - the site lines that send people through crabx
+- Exercise it on the built binary before 0.1.0 ships: copy it into a
+  crabx-shaped cache path (`<cache dir>/crabx/v1/.../bin/token-max`), run
+  `doctor` against a fixture release newer than it, as `tests/run_script.rs`
+  serves one, and check that the offer names crabx and the copy's SHA-256 is
+  unchanged afterwards.

@@ -34,10 +34,6 @@ Recommendations:
 - `src/fable.rs` already parses advisor parts, so `doctor` can price advisor
   use once it is on; extend that line if it doesn't show advisor cost yet.
 
-## Required
-
-- [Vibes command](/quest/m1/vibes/command.md) - the `vibes` walk this card joins
-
 ## Related
 
 - [Default model](/quest/m1/vibes/default-model.md) - the main default this card ranks against

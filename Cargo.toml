@@ -37,11 +37,16 @@ libc = "0.2.191"
 winapi-util = "0.1.11"
 
 [target."cfg(windows)".dev-dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Threading"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Console", "Win32_System_JobObjects", "Win32_System_Pipes", "Win32_System_Threading"] }
 
 # Its binary is also the fake `ssh.exe` it runs, which libtest's argument parsing would reject.
 [[test]]
 name = "ssh_windows"
+harness = false
+
+# Its binary is also the release doctor upgrades to, run with doctor's arguments.
+[[test]]
+name = "upgrade_windows"
 harness = false
 
 # The profile cargo-dist builds release binaries with.

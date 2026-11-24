@@ -39,7 +39,3 @@ Recommendations:
   `doctor` already offered memory off, `vibes` doesn't ask again.
 - Reuse the memory edit `doctor` already makes, including its by-hand cases
   for named profiles and untrusted projects.
-
-## Required
-
-- [Vibes command](/quest/m1/vibes/command.md) - the `vibes` walk this card joins

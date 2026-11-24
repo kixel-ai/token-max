@@ -33,7 +33,3 @@ Recommendations:
   be on `PATH`, and check whether it is.
 - Its effect becomes measurable once installed: fewer reads per session. That
   is a possible later `doctor` line, not this quest.
-
-## Required
-
-- [Vibes command](/quest/m1/vibes/command.md) - the `vibes` walk this card joins

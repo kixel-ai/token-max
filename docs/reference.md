@@ -6,7 +6,9 @@ the accounting underneath.
 ## Running it
 
 `token-max doctor` prints the report, then, when stdin and stdout are both a
-terminal, walks through its changes. Bare `token-max` prints the commands and
+terminal, walks through its changes. [`token-max vibes`](#vibes) prints the
+advice the transcripts can't price, which `doctor` leaves out. Bare
+`token-max` prints the commands and
 exits 2; options follow a command. Relative paths resolve from the working
 directory. Reports go to stdout; diagnostics go to stderr; exit codes are as
 described below. Ctrl-C cancels the running analysis: SIGINT or SIGTERM exits 2
@@ -85,8 +87,14 @@ feature does (see [What each line does](#what-each-line-does)), and `Why`
 gives what was measured, such as the requests a replay covered or a tool's
 uses and what each cost, and why the change makes sense. A card leaves out the
 edit, which repeats the value change; the confirm shows every accepted edit
-once, as a diff. A change whose saving was not measured, such as lowering a
-Bash timeout cap, comes after the measured ones and says so.
+once, as a diff. A change whose saving was not measured, such as turning off
+a Codex catalog skill, comes after the measured ones and says so.
+
+When the walk ends, and [`vibes`](#vibes) has advice for these profiles,
+`doctor` asks whether to show it. A yes walks through `vibes`' cards from the
+same scan, with nothing read or asked again, and with its own confirm before
+anything more is written. Without a terminal, the report ends with one line
+naming `token-max vibes`.
 
 A tool, skill or MCP server's change joins a group of its kind and reason, such
 as never-used skills or MCP servers over $1 per use, whatever it saves. The
@@ -283,7 +291,9 @@ destination makes those and nothing else. After the yes, this host's files are
 written first, then each destination's in the order given. A host that fails
 stops the run before any later host is written: the summary names what each
 host already wrote, and the error names the host that failed and the hosts left
-unwritten. If the connection drops while a destination writes, its files may or
+unwritten. A destination's write is done once it reports its files: one that
+fails after that fails the run when every host has been walked, and stops no
+later host's write. If the connection drops while a destination writes, its files may or
 may not have changed, and the error says to check them and their backups.
 
 Ctrl-C before the confirm stops every destination with nothing written. After
@@ -364,7 +374,7 @@ What the providers document, checked 2026-11-14:
 Where a provider documents a rule that API prices alone don't show, the line's
 evidence under `--details` states it before the setting that changes it, and
 the list ends with the source. Fable weekly use is the exception: its rule is
-a [warning](#reading-the-report), shown when the window holds a Fable request:
+a [`vibes`](#vibes) card, shown when the window holds a Fable request:
 
 | Line | On a plan |
 | --- | --- |
@@ -373,7 +383,7 @@ a [warning](#reading-the-report), shown when the window holds a Fable request:
 | Codex fast mode | A ChatGPT plan [counts Fast at 2.5x and Ultrafast at 8x](https://learn.chatgpt.com/docs/pricing) standard against included usage, and 2x and 6x on credits. The API premium priced is the [documented API rate](semantics.md#speed-controls-and-premiums), which can be lower, so included usage can draw faster than it shows. |
 | Prompt suggestions | Claude Code [skips them](https://code.claude.com/docs/en/costs#background-token-usage) while a plan is near its usage limit, which the estimate, run on every eligible turn, cannot see. |
 | Fable weekly use | Anthropic [caps Fable models](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan) at up to half the weekly usage limit on Max, Ultra and Team and seat-based Enterprise premium seats, drawing it faster than other models, runs them on usage credits on Pro and Team and seat-based Enterprise standard seats, and bills them at API rates on usage-based Enterprise. The line shows weekly API-price spend and no share of the cap, as [Fable weekly use](#fable-weekly-use) explains. |
-| Codex compaction window and keepalive pings | ChatGPT credits [charge cache writes as ordinary input](https://learn.chatgpt.com/docs/pricing), while API prices from GPT-5.6 on charge 1.25x for a 30-minute write, so a replay that trades writes for reads can come out differently on credits. |
+| Codex compaction window, turn-end compaction and keepalive pings | ChatGPT credits [charge cache writes as ordinary input](https://learn.chatgpt.com/docs/pricing), while API prices from GPT-5.6 on charge 1.25x for a 30-minute write, so a replay that trades writes for reads can come out differently on credits. |
 
 Every other line's dollars are API prices with no documented plan rule beside
 them.
@@ -414,8 +424,10 @@ setting or environment override.
 
 ## Exit codes and unreadable lines
 
+`vibes` exits `0`, or `2` for a failed scan, price fetch, invalid argument or
+cancellation: advice never sets an exit code, in `vibes` or in `doctor`.
 When `doctor` walks through the changes on a terminal, it exits `0`, or
-`2` for a failure or cancellation. Otherwise exit codes are `0` for no applicable
+`2` for a failure or cancellation. Otherwise its exit codes are `0` for no applicable
 change, `1` for a recommended setting or feature change, and `2`
 for a failed scan, price fetch, invalid argument, or cancellation. A failed run emits no
 success report or partial recommendations. Invalid selected usage fails with only
@@ -456,17 +468,9 @@ Every line is measured: replayed or priced from your own transcripts at public
 API prices, or marked unknown where they can't price it. No verdict rests on
 anyone's preference or on a provider's advice alone.
 
-A provider's guidance that the transcripts can't price comes after the lines,
-under **Warnings**, each naming its line, saying what the provider advises
-beside what was measured, and citing the page. A warning has no verdict, never
-changes the exit code, and `doctor` never asks about it:
-
-| Warning | When |
-| --- | --- |
-| Main-session effort | The default level is above `high`: Anthropic's [model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/) and [model configuration docs](https://code.claude.com/docs/en/model-config#choose-an-effort-level) for Claude, OpenAI's [reasoning guide](https://developers.openai.com/api/docs/guides/reasoning) for Codex. |
-| An instruction file | A CLAUDE.md of 200 lines or more, past Claude Code's [guidance](https://code.claude.com/docs/en/memory#write-effective-instructions), or an AGENTS.md at or above the byte budget Codex [loads](https://learn.chatgpt.com/docs/agent-configuration/agents-md), with what each 100 lines of it costs. |
-| Explore subagent | Claude's built-in Explore ran off Haiku: what it cost, the same tokens on the cheapest model, and the model guide's tip. |
-| Fable weekly use | Any Fable request in the window: what they cost, and Anthropic's [plan rule](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan). |
+Advice that the transcripts can't price, such as a provider's guidance, is no
+part of this report: [`token-max vibes`](#vibes) shows it, and `doctor` only
+offers to.
 
 The lines come in two groups. **Changes** come first: every line recommended
 (red, exit 1) or worth considering (yellow, exit 0), ranked together by what
@@ -511,13 +515,13 @@ headline's totals add their changes' margins, since savings from overlapping
 requests can err the same way.
 
 Comparisons between setting values are per 30 days at the window's rate; what
-features, context and long Bash waits cost, and how often they were used, are
-totals over the whole window.
+features and context cost, and how often they were used, are totals over the
+whole window.
 
 `--details` puts each line's evidence under it: what the replay held constant,
 such as the same sessions, and what it could not measure, such as the detail a
-smaller compaction window or idle summary loses, or what checking on a
-backgrounded Bash command costs, then the setting that changes it. A line
+smaller compaction window or idle summary loses, then the setting that changes
+it. A line
 without enough evidence says why there, such as no request with recorded usage
 to compare; a line extrapolated over unpriced requests names the share measured.
 Unresolved current ownership gives
@@ -591,9 +595,9 @@ one that cannot be measured is counted, never priced at zero.
 | Subagent prompt cache TTL | 5m | The TTL replay's gap, when the line has a verdict; otherwise not measured. |
 | Main-agent prompt cache TTL | 1h on a Claude plan within its included usage, 5m on usage credits or an API key; 5m under Bedrock, Vertex or Foundry | The replay's gap as "up to", saved only while the default would be the other value; against the answered default alone when `doctor` asked [how the profile pays](#how-a-profile-pays); under a cloud provider, the replay's gap against 5m. "Up to" savings and costs are bounded apart, never netted. |
 | Compaction window | The model's tuned window (see [Compaction window](#compaction-window)), or Codex's per-model limit | Not measured: a window smaller than the default can't be replayed at the default, since the detail its summaries dropped is gone. |
+| Turn-end compaction | Off | Not measured: a threshold in force can't be replayed off, since the detail its summaries dropped is gone. |
 | Idle compaction | On | The on and off replay under the current settings. |
 | T3 idle compaction | `onReturn` | The difference between the two modes' replays. |
-| Bash timeout cap | 10m | Not measured: what checking on a backgrounded command costs is not recorded. |
 | Fast mode | Off | The measured premium, as a cost. |
 | Background generation | On | Not measured: its requests are estimated only where it runs. |
 | Auto memory | On for Claude Code, off for Codex | Codex memories on cost what the line measured; Claude Code's off is not measured. |
@@ -702,13 +706,13 @@ instructions is worth is not recorded, so the line gives no verdict and
 `doctor` offers no change.
 
 A CLAUDE.md of 200 recorded lines or more, past Claude Code's documented
-guidance, gets a warning. So does a Codex AGENTS.md at or above the selected
+guidance, gets a [`vibes`](#vibes) card. So does a Codex AGENTS.md at or above the selected
 profiles' `project_doc_max_bytes` from the system and user configuration (32
 KiB by default), where Codex may have cut it short: the recorded rendered bytes
 include headers and wrappers, so only reaching the budget can mean truncation.
-The warning names the file that sets the budget, or says it is the default. A
+The card names the file that sets the budget, or says it is the default. A
 project `.codex/config.toml` at a recorded directory or a named profile that
-sets it gives no warning, since the transcripts do not record which applied;
+sets it gives no card, since the transcripts do not record which applied;
 neither do profiles with different or unreadable budgets, or records with no
 rendered text. Command-line overrides and original file sizes are unavailable.
 Output-cap lines
@@ -972,6 +976,67 @@ observed summaries/prefixes, cold-summary costs, and the extra re-read spend tha
 would erase a saving accompany the aggregate winner. Lost detail and changed work
 remain unmeasured risks, not zero-cost observations.
 
+## Turn-end compaction
+
+Codex's `model_post_turn_compact_threshold_percent` compacts a conversation
+after a turn's final response once its context reaches that percentage of the
+usable context window or the auto-compact limit; unset or zero is off, and the
+limit still applies before each request ([config reference](https://developers.openai.com/codex/config-reference),
+[Codex's source](https://github.com/openai/codex/blob/rust-v0.171.0/codex-rs/core/src/session/context_window.rs),
+checked 2026-11-23). The line replays candidate thresholds against the current
+one, under the limit the [compaction window](#compaction-window) line
+recommends, and recommends the cheapest. Its baseline names the threshold and
+the limit it replayed. `doctor` offers the two edits apart, so when the limit
+is one the window line recommends, the threshold's card says its saving assumes
+that limit is set too. Both replay in one pass, so a turn's end that compacts
+first spares the limit's compaction before the next request.
+
+A turn ends where the transcript records its completion, so an interrupted turn
+compacts nothing. Its context is its final request's input and output, and the
+usable window is the one Codex last recorded for the model, which is the model's
+context window less the share Codex reserves. A model with no recorded window
+leaves its turns unpriced.
+
+Candidates are the current threshold and, as percentages of each model's usable
+window, its price-tier boundaries and the auto-compact limit. This is not a
+search over every percentage. Any threshold but off compacts a turn that ends
+at the limit, so thresholds above the limit's percentage replay alike and the
+highest wins their tie. With no limit set, Codex's built-in one is not
+recorded. The compactions it caused stay charged as recorded, and a turn the
+session carried on from without one ended under it. A session's final turn
+under its threshold is decided only when it ended with no more context than
+some request the model carried into a next request on the same model; otherwise the threshold is unpriced
+there. A threshold already in force replays only lower
+ones: a higher one, or off, would need the detail its recorded summaries
+dropped.
+
+A summary at a turn's end reads the conversation while its cache is warm: what
+the turn's final request read from the cache is read again, and the rest is
+ordinary input. Its output and the prefix the next request resumes from use the
+same calibration as the window replay. It replaces only the context the turn
+finished with, so what the next turn adds stays, and a next request on another
+model leaves the threshold unpriced. That next request starts cold, later ones
+reuse the prefix, and a session's final turn pays for its summary and gets
+nothing back. Every recorded compaction stays charged once, and a turn that one
+follows adds none. Larger summaries, a summary that reads nothing from the
+cache, and the re-read spend that would erase a saving accompany the winner.
+
+A threshold no recorded turn reached decides nothing, unless some turn's end
+could not be decided, such as one on a model with no recorded usable window,
+which might compact under one threshold and not another. A tie with the current
+threshold, or a candidate that could not be priced beside none that wins, is not
+enough evidence. Neither is any threshold beside an auto-compact limit the
+replay cannot model, such as one scoped to the body after the prefix. A named profile, a `profiles` table or a project's
+`.codex/config.toml` that sets the threshold keeps the line advisory, since
+which applied is not recorded, as does a latest recorded Codex before v0.156.0,
+which added the setting. Lost detail and changed work remain unmeasured risks.
+
+Native Codex transcripts record no billed service tier, so their requests are
+priced at an assumed one and, as for the compaction window, a winner that
+rests on it is withheld (see [Fast mode](#fast-mode)):
+`--details` shows each threshold's priced saving, and the line gives no
+verdict.
+
 ## Idle compaction
 
 Idle compaction compares on and off over the same window, first with current
@@ -1077,7 +1142,8 @@ host, which every run audits. You install nothing
 there: each destination runs this build of token-max, which token-max puts
 there itself. Linux and macOS destinations on x86_64 or arm64 are supported.
 `token-max sessions` takes the same flags, and each destination sends only its
-priced session lines.
+priced session lines. `token-max vibes` takes them too, and each destination
+sends only its cards and, for a walk, the changes they offer.
 
 ```sh
 token-max doctor --ssh devbox --ssh user@laptop
@@ -1242,27 +1308,88 @@ are not recorded either, so one never counts as unused: a whole cost above
 kept. Goal check-ins and Codex recaps
 cannot be told apart in transcripts, so their cost is shown as unknown.
 
-## Bash timeout cap
+## Vibes
+
+`token-max vibes` is the advice the transcripts can't price, which `doctor`
+leaves out so that every line of its report is measured. It reads the hosts,
+profiles and window `doctor` reads, takes the same selection flags (`--since`,
+the directory flags, `--ssh`, `--plain` and the price
+flags), and asks the same question about [how a profile pays](#how-a-profile-pays).
+
+Each piece of advice is a card: the setting or feature, the change advised
+when it names one, what the setting does, the advice beside what was measured,
+and `Source`, which says whose advice it is, a provider's page or the
+maintainer's pick. A card has no verdict and no saving, and nothing here sets
+an exit code.
+
+| Card | When |
+| --- | --- |
+| [Bash timeout cap](#bash-timeout-cap) | Every Claude settings file: the cap beside the long waits measured under it. |
+| Main-session effort | The default level is above `high`: Anthropic's [model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/) and [model configuration docs](https://code.claude.com/docs/en/model-config#choose-an-effort-level) for Claude, OpenAI's [reasoning guide](https://developers.openai.com/api/docs/guides/reasoning) for Codex. |
+| An instruction file | A CLAUDE.md of 200 lines or more, past Claude Code's [guidance](https://code.claude.com/docs/en/memory#write-effective-instructions), or an AGENTS.md at or above the byte budget Codex [loads](https://learn.chatgpt.com/docs/agent-configuration/agents-md), with what each 100 lines of it costs. |
+| Explore subagent | Claude's built-in Explore ran off Haiku: what it cost, the same tokens on the cheapest model, and the model guide's tip. |
+| Fable weekly use | Any Fable request in the window: what they cost, and Anthropic's [plan rule](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan). |
+
+The effort, instruction-file, subagent and Fable lines stay in `doctor`, where
+their costs are measured; only the advice about them is here.
+
+On a terminal, a card that names the settings to change ends with `Change`,
+the edit and its file, and asks `Accept?` with `y`, `n` or `q` to stop. Every
+other card is shown with no question. The accepted edits are then shown as a
+diff of each file and written only after a final yes, with the checks, lock
+and [backups](#backups) `doctor` uses. One card is one edit to one file, even
+when it sets two keys. A change another owner would override, such as a shell
+variable or T3, is named on its card as a step by hand. Without a terminal,
+`vibes` prints the cards, each change naming its edit, and edits nothing.
+
+`doctor` offers `vibes` when its walk ends, counting the cards that advise
+something, as `vibes`' own heading does: a setting already as advised still
+has its card in `vibes`, and is not worth the question. Under `--defaults`,
+`doctor` names no count, since `vibes` reads the settings as they are. With `--ssh`, each host's cards name their host, and
+each destination checks and writes its own files, as in
+[`doctor`'s walk](#on-ssh-hosts).
+
+### Bash timeout cap
 
 Claude Code waits on a foreground Bash call for at most
 `max(BASH_MAX_TIMEOUT_MS, BASH_DEFAULT_TIMEOUT_MS)`, 600000 ms by default,
 then moves the command to the background. A wait at least as long as the cache
 TTL lets the cache expire before the model replies, so the next request
-rewrites the whole prefix. The `bash-timeout-cap` check compares the cap with
-the main-agent TTL: the one this report recommends, else the current setting,
-else the lifetime the latest main-agent request wrote. At or above it, the
-check recommends 240000 ms for a 5m cache or 3300000 ms for 1h, which leaves
-room for the model's reply on either side of the wait, and exits 1. Commands
-longer than the cap keep running in the background, where checking on them
-reads the cache instead.
+rewrites the whole prefix.
 
-The line also counts foreground Bash waits that outlasted the cache the
+The card compares the cap with the main-agent TTL in effect now: the current
+setting, else the lifetime the latest main-agent request wrote. It never uses
+a TTL `doctor` recommends changing to. The card `doctor` hands off to comes
+from the scan made before `doctor` wrote anything, so right after a TTL change
+is written it still advises the cap for the old TTL: accepted after a change
+from 1h to 5m, a 55m cap outlasts the new cache until the next run advises 4m.
+Run `token-max vibes` again after changing the TTL. It advises 240000 ms
+under a 5m cache and 3300000 ms under 1h, a margin that leaves room for the
+model's reply on either side of the wait, whenever the cap is anything else: a
+higher cap comes down, and a lower one goes up. That margin is the maintainer's pick, not a measurement, and the card
+says so. A cap already there, or one with no TTL to compare with or an owner
+T3 left unsettled, has a card that advises nothing.
+
+The card counts the foreground Bash waits that outlasted the cache the
 starting request wrote, how many hit their timeout or slept in a polling loop,
-and what their cache misses cost: the prefix the next request wrote instead of
-read, at the write rate minus the read rate. Background commands and the user's
-own processes are unaffected by the cap. Codex's
-`background_terminal_max_timeout` bounds one poll of a background terminal,
-and each poll reads the cache, so it is not checked.
+and what their cache misses cost at API prices over the window: the prefix the next request
+wrote instead of read, at the write rate minus the read rate. Those are
+measured. A wait of 5m or more whose request recorded no cache lifetime, under a TTL the
+card can't resolve, is counted as not compared rather than as short; a shorter
+one fits under either lifetime. What another cap would save is not: a lower cap doesn't kill a
+command, which keeps running in the background, where checking on it takes
+later turns the transcripts can't predict; a higher cap trades those check-ins
+for longer foreground waits. Some commands need longer in the foreground, so
+the card is advice to weigh: `doctor` gives it no line or verdict, and offers
+it only through `vibes` once its own walk ends. When the owner of the cap
+can't be resolved, the card says the cap it read may not be the one the
+sessions ran under. Project and local settings,
+which override the user file the edit goes to, are not read, and the card
+says so.
+
+Background commands and the user's own processes are unaffected by the cap.
+Codex's `background_terminal_max_timeout` bounds one poll of a background
+terminal, and each poll reads the cache, so it has no card.
 
 ## Main-session effort
 
@@ -1275,7 +1402,7 @@ is repriced, no saving is claimed, and the line gives no verdict; `doctor`
 never offers to change it. A default token-max cannot resolve, such as a T3
 thread's selection, is unknown.
 
-A default above `high` gets a warning citing the provider's own guidance. For
+A default above `high` gets a [`vibes`](#vibes) card citing the provider's own guidance. For
 Claude, `xhigh` and `max` cite Anthropic's
 [model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/)
 (past `high`, test the next model up at a lower effort), and `max` also the
@@ -1309,11 +1436,11 @@ attributed. The reprice assumes the same turns, and a lower effort's cost
 cannot be measured. The source is unknown when today's settings and agent
 files do not explain the recorded model, for example after a file changed.
 
-When Claude's built-in Explore ran off Haiku, a warning gives what it cost,
+When Claude's built-in Explore ran off Haiku, a [`vibes`](#vibes) card gives what it cost,
 the same tokens on the cheapest model, and the tip from Anthropic's
 [model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/):
 a user agent named `Explore` with `model: haiku`. A run of an agent file
-named `Explore`, which replaces the built-in, gets none. Other types get no warning:
+named `Explore`, which replaces the built-in, gets none. Other types get no card:
 the guide splits subagents by whether they search or edit, which the
 transcripts don't record.
 See [subagent models](semantics.md#subagent-models).
@@ -1323,8 +1450,8 @@ See [subagent models](semantics.md#subagent-models).
 The report gives every Claude settings file whose profiles sign in to
 Anthropic its own Fable line, shared by native Claude Code and the T3
 instances that use it: what its Fable requests cost at API prices in each 7-day span
-of the window, counted back from the report. With any Fable request, a warning
-gives their cost beside the plan rule Anthropic documents in
+of the window, counted back from the report. With any Fable request, a
+[`vibes`](#vibes) card gives their cost beside the plan rule Anthropic documents in
 [Fable models on your plan](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan),
 as [Plans and API prices](#plans-and-api-prices) describes: on a Claude Max or
 Ultra plan or a Team or seat-based Enterprise premium seat, Fable models can
@@ -1335,7 +1462,8 @@ are left out.
 
 No plan limit is published in tokens or dollars, so the line shows no share of
 the limit and gives no verdict: its dot is dim, and it never changes the exit
-code or offers a change. The figures are partial evidence. The cap counts Fable
+code or offers a change. The figures are partial evidence, which the card
+says too. The cap counts Fable
 use on every Claude surface, such as claude.ai and Claude Desktop, while the
 line covers only its profiles' recorded sessions, and it may include requests
 paid with usage credits after the cap was reached. The plan's weekly reset time

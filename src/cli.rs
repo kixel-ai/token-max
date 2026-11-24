@@ -15,8 +15,8 @@ use serde_json::ser::Formatter;
 use crate::collections::IndexMap;
 use crate::discovery::{DiscoveryOptions, discover};
 use crate::doctor::{
-    BillingQuestions, Confirm, Fix, Found, Offers, Owner, Style, Walking, ask, ask_upgrade,
-    confirm, finish, opening, preview, stale, upgrade_line, write, wrote,
+    BillingQuestions, Confirm, Fix, Found, Offers, Owner, Selection, Style, Walking, ask,
+    ask_upgrade, confirm, finish, opening, preview, stale, upgrade_line, write, wrote,
 };
 use crate::model::{Billing, Location, Millis, Scan, Verdict};
 use crate::prices::{Catalog, PriceOptions, cancel_downloads, load_prices};
@@ -29,6 +29,7 @@ use crate::ssh::{self, Reply, Scope};
 use crate::terminal::{WrapOptions, wrap_text};
 use crate::totals::Totals;
 use crate::upgrade::{self, Check, Install};
+use crate::vibes::{self, Item};
 use crate::wire::{Format, Job, Paid, Request};
 
 const HELP: &str =
@@ -38,6 +39,7 @@ Usage: token-max <command> [options]
 
 Commands:
   doctor    Report which settings to change, then offer to change them
+  vibes     Advice the transcripts can't price, with no verdict
   sessions  Each session's priced usage as JSON lines
 
   -v, --version  Show the package version
@@ -111,9 +113,47 @@ never with redirected output.
 SIGINT/SIGTERM cancel with exit 2 and no success report; settings are written only after
 the list of accepted changes is confirmed.
 
+Every line is measured. Advice the transcripts can't price, such as a provider's guidance
+or the Bash timeout cap, is in token-max vibes: when the walk ends and vibes has advice,
+doctor asks whether to show it, from the same scan. Without a terminal it names the command.
+
 When it walks through the changes on a terminal: exit 0, or 2 on failure or cancellation.
 Otherwise: exit 0 for no applicable change (advisory findings may remain), 1 for a
 recommended change, 2 for a scan, pricing, argument or cancellation failure.
+";
+
+const VIBES_HELP: &str = "token-max vibes: advice the transcripts can't price, with no verdict
+
+Usage: token-max vibes [options]
+
+  --since YYYY-MM-DD|ISO  Select from midnight UTC or an instant with timezone
+  --claude-dir DIR        Select a Claude profile (repeatable)
+  --codex-dir DIR         Select a Codex home, including archived sessions (repeatable)
+  --t3-dir DIR            Select a T3 state directory (repeatable)
+  --ssh HOST              Also read an SSH destination, putting this build there first if needed (repeatable)
+  --plain                 Plain text without color or decorative Unicode
+  --offline               Use cached public prices without network access
+  --prices-file FILE      Use a local models.dev catalog without network access
+  --price-cache FILE      Cache path (default: ~/.cache/token-max/models.json)
+  -h, --help              Show this help
+
+Prints one card for each piece of advice token-max doctor leaves out because no transcript
+can price it: a provider's guidance, such as an effort above high or an instruction file
+past its budget, and settings whose saving is a guess, such as the Bash timeout cap. Each
+card says what was measured beside the advice and names whose advice it is: the provider's
+page, or the maintainer's pick. None of it is a verdict.
+
+When stdin and stdout are both a terminal, a card that names the settings to change asks
+whether to change them (y, n, or q to stop), shows the accepted edits as a diff of each
+file, and writes the profile's own settings.json only after a final yes, one edit per
+file. A change another owner would override is named to make by hand. Every other card is
+shown with no question. Without a terminal it prints the cards, each change naming its
+edit, and edits nothing.
+
+It reads the hosts, profiles and window token-max doctor reads, with the same flags, and
+asks the same question about how each Claude profile pays.
+
+Exit 0: printed, or walked. Exit 2: scan, pricing, argument or cancellation failure.
 ";
 
 const SESSIONS_HELP: &str =
@@ -165,6 +205,8 @@ enum Phase {
     Running,
     /// Waiting on the person's answers; nothing has been written to a settings file yet.
     Asking,
+    /// Waiting on answers about `vibes`' advice after `doctor`'s walk wrote its changes.
+    AskingMore,
     /// Writing the report or settings, which finishes whole.
     Writing,
 }
@@ -781,6 +823,15 @@ struct Walk {
     /// The total across hosts, printed first; empty for one host.
     head: String,
     style: Style,
+    /// Which command's changes the hosts offer; `doctor`'s walk goes on to `vibes`'.
+    command: Command,
+}
+
+/// The command a run's hosts are read for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Command {
+    Doctor,
+    Vibes,
 }
 
 /// One host in the walk.
@@ -790,12 +841,23 @@ struct WalkHost {
     side: Side,
     /// How its changes print: its paths from its own home.
     style: Style,
+    /// What `vibes` has for it: known from the start here, and once asked for there.
+    items: Vec<Item>,
+    /// How many pieces of advice `doctor` offers `vibes` for.
+    pending: usize,
+    /// Whether a walk wrote its files, so a destination's audit is ended, not dropped.
+    wrote: bool,
 }
 
 /// Where a host's files are read and written.
 enum Side {
-    /// This host's own, with its report.
-    Here { owner: Owner, listing: Box<Listing> },
+    /// This host's own, with its report when the walk is `doctor`'s.
+    Here {
+        owner: Owner,
+        listing: Option<Box<Listing>>,
+        /// Its spend every 30 days.
+        monthly: f64,
+    },
     /// A destination's, through its open audit.
     There {
         offers: Box<Offers>,
@@ -809,6 +871,27 @@ impl WalkHost {
             Side::Here { owner, .. } => owner.offers(),
             Side::There { offers, .. } => offers,
         }
+    }
+
+    /// Go on from `doctor`'s walk to `vibes`': the changes its advice names, checked against
+    /// the files as they are now, after whatever `doctor` wrote.
+    fn advise(&mut self) -> Result<(), ScanError> {
+        match &mut self.side {
+            Side::Here {
+                owner,
+                listing,
+                monthly,
+            } => {
+                *owner = vibes::owner(&self.items, self.style.home.clone(), *monthly);
+                *listing = None;
+            }
+            Side::There { offers, remote } => {
+                let (items, theirs) = remote.vibes()?;
+                self.items = items;
+                *offers = theirs;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -850,6 +933,8 @@ pub struct Printed {
     pub change: bool,
     /// What the report adds to a total across hosts.
     pub totals: Box<Totals>,
+    /// How many pieces of advice `vibes` has, which `doctor` offers to show.
+    pub vibes: usize,
 }
 
 /// This host's own report, with the changes it names.
@@ -862,6 +947,8 @@ pub struct Rendered {
     pub listing: Box<Listing>,
     /// MCP servers whose tools are off already, which the walk offers to remove.
     pub turned_off: Vec<crate::mcp::Definition>,
+    /// The advice the transcripts cannot price, which `vibes` shows.
+    pub vibes: Vec<Item>,
 }
 
 /// Analyze one host's scan and print its report.
@@ -884,17 +971,20 @@ pub fn render(scan: Scan, options: Render<'_>) -> Result<Rendered, ScanError> {
     // Computed once, since each reads the files that may outrank a switch: the edits the
     // report names and the walk's offers are the same value.
     let mut fixes = crate::doctor::fixes(&report, format.unicode);
-    let listing = format_report(&report, &fixes, format.report(options.home));
+    let mut listing = format_report(&report, &fixes, format.report(options.home));
     crate::doctor::explain(&mut fixes, &listing);
+    let vibes = std::mem::take(&mut listing.vibes);
     Ok(Rendered {
         printed: Printed {
             text: listing.text(),
             change,
             totals: Box::new(Totals::new(&report, &fixes)),
+            vibes: vibes::pending(&vibes),
         },
         fixes,
         listing: Box::new(listing),
         turned_off: crate::mcp::turned_off(&report.scan.profiles),
+        vibes,
     })
 }
 
@@ -1015,7 +1105,8 @@ fn sessions(args: &[String]) -> Result<(Output, u8), ScanError> {
 fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
     match args.first().map(String::as_str) {
         None => return Ok((Output::Usage(help(HELP)), 2)),
-        Some("doctor") => return doctor(&args[1..]),
+        Some("doctor") => return audit(&args[1..], Command::Doctor),
+        Some("vibes") => return audit(&args[1..], Command::Vibes),
         Some("sessions") => return sessions(&args[1..]),
         Some(_) => {}
     }
@@ -1186,6 +1277,7 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
             max_cost_per_use_usd,
             format,
             walk,
+            vibes,
         } => Job::Report {
             max_cost_per_use_usd: *max_cost_per_use_usd,
             format: Format {
@@ -1193,6 +1285,7 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
                 ..format.clone()
             },
             walk: *walk,
+            vibes: *vibes,
         },
         Job::Sessions => Job::Sessions,
     };
@@ -1398,13 +1491,31 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
         .collect())
 }
 
-/// `token-max doctor`: audit the selected hosts, then walk through their changes when stdin
-/// and stdout are a terminal.
-fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
-    let invalid = || ScanError::new("invalid arguments; use token-max doctor --help");
+/// `token-max doctor` or `token-max vibes`: audit the selected hosts, then walk through the
+/// command's changes when stdin and stdout are a terminal.
+fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
+    let advice = command == Command::Vibes;
+    let invalid = || {
+        ScanError::new(if advice {
+            "invalid arguments; use token-max vibes --help"
+        } else {
+            "invalid arguments; use token-max doctor --help"
+        })
+    };
     let mut values = parse(args).ok_or_else(invalid)?;
+    // Advice has no verdict to tune, evidence cards to expand or settings to pretend away.
+    if advice
+        && (values.details
+            || values.defaults
+            || values.version
+            || values.ssh_scan
+            || values.max_cost_per_use.is_some())
+    {
+        return Err(invalid());
+    }
     if values.help {
-        return Ok((Output::Text(help(DOCTOR_HELP)), 0));
+        let text = if advice { VIBES_HELP } else { DOCTOR_HELP };
+        return Ok((Output::Text(help(text)), 0));
     }
     if values.version {
         return Ok((Output::Text(format!("{}\n", env!("CARGO_PKG_VERSION"))), 0));
@@ -1460,9 +1571,9 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
     let home = std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned());
     let style = format.style(home.clone());
     upgrade::tidy();
-    // Every run but an offline one asks for the latest release, alongside discovery on a
+    // `doctor` alone asks for the latest release, unless offline, alongside discovery on a
     // terminal and alongside the whole scan otherwise.
-    let mut check = (!values.offline).then(|| {
+    let mut check = (!values.offline && command == Command::Doctor).then(|| {
         thread::spawn(|| {
             let releases = upgrade::releases();
             let check = upgrade::check(&releases);
@@ -1504,6 +1615,7 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
             max_cost_per_use_usd,
             format,
             walk,
+            vibes: advice,
         },
         home: home.clone(),
         progress: (stdout && io::stderr().is_terminal() && !term_dumb)
@@ -1518,58 +1630,100 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
     let mut code = 0;
     let mut text = String::new();
     let mut hosts = vec![];
+    // Each host's advice off a terminal, for `vibes` to print.
+    let mut cards: Vec<(Option<String>, Vec<Item>, Style)> = vec![];
     let mut sum: Option<Totals> = None;
+    // Advice `doctor` leaves to `vibes`, counted across hosts.
+    let mut pending = 0;
     for (ssh, reply) in replies {
+        let there = |theirs: &Option<String>| Style {
+            home: theirs.clone(),
+            host: ssh.clone(),
+            ..style.clone()
+        };
+        let here = || {
+            (
+                (sections > 1).then(|| "this host".to_string()),
+                style.clone(),
+            )
+        };
         // Each host's report follows the walk, marked with its answers.
-        let (printed, side) = match reply {
+        let (printed, side, items) = match reply {
             Reply::Here(rendered) => {
                 let Rendered {
                     printed,
                     fixes,
                     listing,
                     turned_off,
+                    vibes: items,
                 } = *rendered;
-                let side = walk.then(|| Side::Here {
-                    owner: Owner::new(fixes, turned_off, home.clone(), printed.totals.monthly),
-                    listing,
+                let monthly = printed.totals.monthly;
+                let side = walk.then(|| {
+                    let (fixes, turned_off, listing) = if advice {
+                        (vibes::fixes(&items), vec![], None)
+                    } else {
+                        (fixes, turned_off, Some(listing))
+                    };
+                    Side::Here {
+                        owner: Owner::new(fixes, turned_off, home.clone(), monthly),
+                        listing,
+                        monthly,
+                    }
                 });
-                (printed, side)
+                (Some(printed), side, items)
             }
-            Reply::Report(printed) => (printed, None),
+            Reply::Report(printed) => (Some(printed), None, vec![]),
             Reply::Walk {
                 printed,
                 offers,
                 remote,
-            } => (printed, Some(Side::There { offers, remote })),
+            } => (Some(printed), Some(Side::There { offers, remote }), vec![]),
+            Reply::Vibes(ssh::Advice {
+                items,
+                home: theirs,
+                walk: None,
+            }) => {
+                cards.push((ssh.clone(), items, there(&theirs)));
+                continue;
+            }
+            Reply::Vibes(ssh::Advice {
+                items,
+                walk: Some((offers, remote)),
+                ..
+            }) => (None, Some(Side::There { offers, remote }), items),
             Reply::Sessions(_) => unreachable!("a report job gets reports"),
         };
-        code = code.max(u8::from(printed.change));
-        match &mut sum {
-            Some(sum) => sum.merge(&printed.totals),
-            None => sum = Some(*printed.totals.clone()),
+        if let Some(printed) = &printed {
+            code = code.max(u8::from(printed.change));
+            pending += printed.vibes;
+            match &mut sum {
+                Some(sum) => sum.merge(&printed.totals),
+                None => sum = Some(*printed.totals.clone()),
+            }
         }
         if let Some(side) = side {
             let (label, host_style) = match &side {
-                Side::Here { .. } => (
-                    (sections > 1).then(|| "this host".to_string()),
-                    style.clone(),
-                ),
-                Side::There { offers, .. } => (
-                    ssh.clone(),
-                    Style {
-                        home: offers.home.clone(),
-                        host: ssh.clone(),
-                        ..style.clone()
-                    },
-                ),
+                Side::Here { .. } => here(),
+                Side::There { offers, .. } => (ssh.clone(), there(&offers.home)),
             };
             hosts.push(WalkHost {
                 label,
                 side,
                 style: host_style,
+                items,
+                pending: printed.as_ref().map_or(0, |p| p.vibes),
+                wrote: false,
             });
             continue;
         }
+        if advice {
+            let (label, style) = here();
+            cards.push((label, vibes::resolved(items), style));
+            continue;
+        }
+        let Some(printed) = printed else {
+            unreachable!("a report without a walk is printed")
+        };
         if !text.is_empty() {
             text.push('\n');
         }
@@ -1581,7 +1735,7 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
     }
     // Several hosts get one total at the head, beside each host's own section.
     let head = match sum {
-        Some(sum) if sections > 1 => {
+        Some(sum) if sections > 1 && !advice => {
             let mut head = totals_section(
                 &sum,
                 sections,
@@ -1598,9 +1752,39 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
         _ => String::new(),
     };
     if walk {
-        return Ok((Output::Walk(Walk { hosts, head, style }), 0));
+        let walk = Walk {
+            hosts,
+            head,
+            style,
+            command,
+        };
+        return Ok((Output::Walk(walk), 0));
     }
-    Ok((Output::Text(format!("{head}{text}")), code))
+    if advice {
+        let hosts: Vec<vibes::Host> = cards
+            .iter()
+            .map(|(label, items, style)| vibes::Host {
+                label: label.as_deref(),
+                items,
+                offers: None,
+                style,
+            })
+            .collect();
+        return Ok((Output::Text(vibes::text(&hosts, &style)), 0));
+    }
+    // Off a terminal, the advice this report leaves out is one command away. Under
+    // `--defaults` the count is of settings pretended away, which `vibes` reads as they are.
+    let hint = if pending > 0 && !values.defaults {
+        let hint = format!(
+            "{} Run token-max vibes with the same profile, host, --since and price options to see {}.",
+            vibes::hint(pending),
+            if pending == 1 { "it" } else { "them" }
+        );
+        format!("\n{}", style.line(&hint))
+    } else {
+        String::new()
+    };
+    Ok((Output::Text(format!("{head}{text}{hint}")), code))
 }
 
 /// The release check's result once its thread finishes, with the releases it asked.
@@ -1780,47 +1964,135 @@ fn warn_upgrade(check: Check) {
 }
 
 /// Walk through every host's changes, print each host's report with the accepted ones first,
-/// then write them once the person confirms: this host's first, then each destination's
-/// there, stopping at the first host that fails.
+/// then write them once the person confirms. After `doctor`'s walk, offer `vibes`' advice
+/// from the same scan and walk through it the same way.
 fn walk(walk: Walk) -> Result<(), ScanError> {
     let Walk {
         mut hosts,
         head,
         style,
+        command,
     } = walk;
-    let failed = |_| ScanError::new("cannot use the terminal; no settings were changed");
     let mut stdout = io::stdout().lock();
     let mut stdin = io::stdin().lock();
-    let title = hosts.iter().find_map(|h| match &h.side {
-        Side::Here { listing, .. } => Some(listing.title()),
-        Side::There { .. } => None,
-    });
-    write!(stdout, "{head}{}", title.unwrap_or_default()).map_err(failed)?;
-    let walking: Vec<Walking> = hosts
+    let walked = (|| {
+        if command == Command::Doctor {
+            let failed = |_| ScanError::new("cannot use the terminal; no settings were changed");
+            let title = hosts.iter().find_map(|h| match &h.side {
+                Side::Here { listing, .. } => listing.as_ref().map(|l| l.title().to_string()),
+                Side::There { .. } => None,
+            });
+            write!(stdout, "{head}{}", title.unwrap_or_default()).map_err(failed)?;
+            let walking: Vec<Walking> = hosts
+                .iter()
+                .map(|h| Walking {
+                    label: h.label.as_deref(),
+                    offers: h.offers(),
+                    style: &h.style,
+                })
+                .collect();
+            let selections = ask(&walking, &style, &mut stdin, &mut stdout).map_err(failed)?;
+            drop(walking);
+            settle(&mut hosts, &selections, &style, &mut stdin, &mut stdout)?;
+            let pending: usize = hosts.iter().map(|h| h.pending).sum();
+            if pending == 0 {
+                return Ok(());
+            }
+            let wrote = hosts.iter().any(|h| h.wrote);
+            enter(if wrote {
+                Phase::AskingMore
+            } else {
+                Phase::Asking
+            });
+            // A Ctrl-C while the changes were written ends the run after them. Read once the
+            // phase has moved on, since one that lands after that exits in the handler.
+            if ssh::cancelled() {
+                return Ok(());
+            }
+            let failed = |_| unusable(wrote);
+            if !vibes::offer(pending, &style, &mut stdin, &mut stdout).map_err(failed)? {
+                return Ok(());
+            }
+            writeln!(stdout).map_err(failed)?;
+            for host in &mut hosts {
+                host.advise()?;
+            }
+        }
+        let wrote = hosts.iter().any(|h| h.wrote);
+        let asking: Vec<vibes::Host> = hosts
+            .iter()
+            .map(|h| vibes::Host {
+                label: h.label.as_deref(),
+                items: &h.items,
+                offers: Some(h.offers()),
+                style: &h.style,
+            })
+            .collect();
+        let selections =
+            vibes::ask(&asking, &style, &mut stdin, &mut stdout).map_err(|_| unusable(wrote))?;
+        drop(asking);
+        // Cards with no change to make leave nothing to confirm or to report written.
+        let changes = hosts
+            .iter()
+            .zip(&selections)
+            .any(|(h, s)| s.summary(h.offers()).answered());
+        if changes {
+            settle(&mut hosts, &selections, &style, &mut stdin, &mut stdout)?;
+        }
+        Ok(())
+    })();
+    // A destination that wrote is told the audit is over, and must end it cleanly; the
+    // rest are dropped, which stops them.
+    let mut ended = Ok(());
+    for host in hosts {
+        if let (Side::There { remote, .. }, true) = (host.side, host.wrote)
+            && let Err(error) = remote.end()
+            && ended.is_ok()
+        {
+            ended = Err(error);
+        }
+    }
+    walked.and(ended)
+}
+
+/// The terminal failed under a walk, after `wrote` says whether settings were written.
+fn unusable(wrote: bool) -> ScanError {
+    ScanError::new(if wrote {
+        "cannot use the terminal; no further settings were changed"
+    } else {
+        "cannot use the terminal; no settings were changed"
+    })
+}
+
+/// Print each host's report with the walk's `selections` marked on it, show what the accepted
+/// changes would write, and write them once the person confirms: this host's first, then
+/// each destination's there, stopping at the first host that fails.
+fn settle(
+    hosts: &mut [WalkHost],
+    selections: &[Selection],
+    style: &Style,
+    stdin: &mut impl io::BufRead,
+    stdout: &mut impl Write,
+) -> Result<(), ScanError> {
+    let before = hosts.iter().any(|h| h.wrote);
+    let failed = |_| unusable(before);
+    let summaries: Vec<_> = hosts
         .iter()
-        .map(|h| Walking {
-            label: h.label.as_deref(),
-            offers: h.offers(),
-            style: &h.style,
-        })
+        .zip(selections)
+        .map(|(h, s)| s.summary(h.offers()))
         .collect();
-    let selections = ask(&walking, &style, &mut stdin, &mut stdout).map_err(failed)?;
-    let summaries: Vec<_> = walking
-        .iter()
-        .zip(&selections)
-        .map(|(w, s)| s.summary(w.offers))
-        .collect();
-    drop(walking);
     // Each host makes its own plan from the answers, and the report reads as its own section
     // after the questions.
     let mut plans = vec![];
     let mut previews = String::new();
     let mut gap = summaries.iter().any(|s| s.answered());
-    for (host, selection) in hosts.iter_mut().zip(&selections) {
+    for (host, selection) in hosts.iter_mut().zip(selections) {
         let (report, preview) = match &mut host.side {
-            Side::Here { owner, listing } => {
+            Side::Here { owner, listing, .. } => {
                 let plan = owner.plan(selection.events())?;
-                let report = listing.review(plan.choices(), &plan.total("Accepted"));
+                let report = listing.as_ref().map_or_else(String::new, |listing| {
+                    listing.review(plan.choices(), &plan.total("Accepted"))
+                });
                 let shown = preview(&plan, &host.style);
                 plans.push(Some(plan));
                 (report, shown)
@@ -1834,12 +2106,15 @@ fn walk(walk: Walk) -> Result<(), ScanError> {
                 )
             }
         };
-        let gap = if std::mem::replace(&mut gap, true) {
-            "\n"
-        } else {
-            ""
-        };
-        write!(stdout, "{gap}{report}").map_err(failed)?;
+        // `vibes` has no report to print again.
+        if !report.is_empty() {
+            let gap = if std::mem::replace(&mut gap, true) {
+                "\n"
+            } else {
+                ""
+            };
+            write!(stdout, "{gap}{report}").map_err(failed)?;
+        }
         previews += &preview;
     }
     stdout.flush().map_err(failed)?;
@@ -1848,13 +2123,13 @@ fn walk(walk: Walk) -> Result<(), ScanError> {
         preview: &previews,
         hosts: summaries.iter().zip(&styles).collect(),
     };
-    let yes = confirm(&request, &style, &mut stdin, &mut stdout).map_err(failed)?;
+    let yes = confirm(&request, style, stdin, stdout).map_err(failed)?;
     enter(Phase::Writing);
     let mut written = vec![];
     let mut error = None;
     // Hosts left unwritten after one fails.
     let mut skipped = vec![];
-    for ((host, plan), summary) in hosts.into_iter().zip(plans).zip(&summaries) {
+    for ((host, plan), summary) in hosts.iter_mut().zip(plans).zip(&summaries) {
         if !yes || !summary.accepted() {
             written.push(vec![]);
             continue;
@@ -1864,20 +2139,25 @@ fn walk(walk: Walk) -> Result<(), ScanError> {
             error = Some(ScanError::new("cancelled while writing"));
         }
         if error.is_some() {
-            skipped.push(host.label.unwrap_or_else(|| "this host".into()));
+            skipped.push(host.label.clone().unwrap_or_else(|| "this host".into()));
             written.push(vec![]);
             continue;
         }
-        let (files, failed) = match (host.side, plan) {
-            (Side::Here { .. }, Some(plan)) => match write(&plan) {
-                Ok(files) => (files, None),
-                Err(e) => (vec![], Some(e)),
-            },
+        let result = match (&mut host.side, plan) {
+            (Side::Here { .. }, Some(plan)) => write(&plan),
             (Side::There { remote, .. }, None) => remote.write(),
             _ => unreachable!("a plan for each host here"),
         };
-        written.push(files);
-        error = failed;
+        match result {
+            Ok(files) => {
+                host.wrote = true;
+                written.push(files);
+            }
+            Err(failed) => {
+                written.push(vec![]);
+                error = Some(failed);
+            }
+        }
     }
     let done: Vec<_> = summaries
         .iter()
@@ -1895,7 +2175,7 @@ fn walk(walk: Walk) -> Result<(), ScanError> {
             format!("\n{lines}")
         }
     } else {
-        finish(&done, &style)
+        finish(&done, style)
     };
     // The settings are written, so a failure to say so must not read as nothing changed.
     let _ = stdout.write_all(closing.as_bytes());
@@ -1932,6 +2212,7 @@ pub fn main() -> ExitCode {
                 return;
             }
             Phase::Asking => "cancelled; no settings were changed",
+            Phase::AskingMore => "cancelled; no further settings were changed",
             Phase::Running => "cancelled; no report produced",
         };
         // The analysis may be blocked in I/O, so exit now, holding the lock so nothing else
@@ -1975,7 +2256,7 @@ pub fn main() -> ExitCode {
                 Err(_) => {
                     diagnose(
                         json,
-                        &ScanError::new("doctor failed while applying changes"),
+                        &ScanError::new("token-max failed while applying changes"),
                     );
                     return ExitCode::from(2);
                 }

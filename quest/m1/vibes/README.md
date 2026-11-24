@@ -27,12 +27,18 @@ Decision prompts, chosen options marked ✅:
 - Against the morning's decision: ✅ build `vibes` (rejected: keep it
   rejected and move the Bash cap into doctor's Warnings as a no-verdict
   warning).
-- Its first items: ✅ the Bash cap and today's Warnings, in
-  [the command quest](/quest/m1/vibes/command.md); ✅
+- Its first items: ✅ the Bash cap and the old Warnings, which the `vibes`
+  command shipped with; ✅
   [a default main-session model and effort](/quest/m1/vibes/default-model.md);
   ✅ [Explore on Haiku](/quest/m1/vibes/explore-haiku.md) (rejected for now:
   cache habits from the 2026-11-17 study, which can return as their own quest
   here).
+- The TTL the Bash cap card compares with (2026-11-23, maintainer,
+  [#205](https://github.com/kixel-ai/token-max/pull/205#issuecomment-7116807299)):
+  ✅ the cache TTL set now (rejected: the TTL `doctor` recommends, with a
+  step by hand for a cap raised past the TTL set now; merging that as is).
+  Accepted cost: right after `doctor`'s hand-off writes a TTL change, the
+  card advises a cap for the old TTL, and the next run reverses it.
 
 Expanded 2026-11-23 (maintainer, /quest-plan after a pass over their
 token-max transcripts and dotfiles, and a survey of Claude Code 2.1.322 and
@@ -51,12 +57,18 @@ codex-cli 0.167.1 settings worth turning on):
   [an advisor model](/quest/m1/vibes/advisor.md) (rejected:
   `includeGitInstructions: false`, spend caps, and Codex code mode, which the
   model catalog already turns on). The one measurable find,
-  Codex turn-end compaction, is
-  [a `doctor` line](/quest/m1/codex-turn-end-compaction.md). Idle compaction
-  is already a measured `doctor` line, native and T3.
+  Codex turn-end compaction, is a measured `doctor` line, as idle compaction
+  is, native and T3.
 - New releases: ✅ [a check every two weeks](/quest/m1/releases.md) for
   settings to measure or suggest.
 
 Recommendation, not asked: each `vibes` card names its source, either a
 cited provider page or "the maintainer's pick", so a reader can tell whose
 advice it is.
+
+How a card is added, since the command landed: a card is one `vibes::Item`
+(`src/vibes.rs`), built where `summary` in `src/report.rs` builds the others.
+Give it `how` and the walk offers its edit, over SSH too, with nothing else
+to wire; leave `how` empty for a cited card with no question. `quiet` marks
+a card that advises nothing, which `doctor` does not offer `vibes` for.
+`docs/reference.md#vibes` lists every card.

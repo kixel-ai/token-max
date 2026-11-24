@@ -29,7 +29,3 @@ Recommendations:
   already removed is gone.
 - Codex keeps its sessions until deleted by hand, so this card is
   Claude-only. Confirm that against current Codex docs before writing it.
-
-## Required
-
-- [Vibes command](/quest/m1/vibes/command.md) - the `vibes` walk this card joins

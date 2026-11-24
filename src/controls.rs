@@ -538,6 +538,36 @@ fn model_key(key: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"_.:/@<>+[]-".contains(&b))
 }
 
+/// Codex's setting for compacting at the end of a turn.
+pub const TURN_END_KEY: &str = "model_post_turn_compact_threshold_percent";
+
+/// Codex's turn-end compaction threshold from `scopes`, later ones outranking earlier, such
+/// as the system config then the user's. The user's `file` owns it, since a value there
+/// outranks every scope given. Codex refuses to start on a value outside 0 to 100.
+pub fn turn_end_control(
+    scopes: &[SettingsScope],
+    file: &str,
+) -> Result<crate::model::TurnEndControl, ScanError> {
+    let mut percent = None;
+    for scope in scopes {
+        let Some(value) = scope.config.get(TURN_END_KEY) else {
+            continue;
+        };
+        match safe_integer(value).filter(|n| (0..=100).contains(n)) {
+            Some(n) => percent = Some(n),
+            None => {
+                return Err(invalid("invalid turn-end compaction threshold", scope.file));
+            }
+        }
+    }
+    Ok(crate::model::TurnEndControl {
+        percent: percent.unwrap_or(0),
+        owner: format!("{file}:{TURN_END_KEY}"),
+        unset: percent.is_none(),
+        unresolved: None,
+    })
+}
+
 /// Resolve observed current files and environment, preserving each control's owner.
 pub fn compaction_controls(sources: &CompactionSources) -> Result<CompactionControls, ScanError> {
     let CompactionSources {

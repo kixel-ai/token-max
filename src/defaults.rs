@@ -6,10 +6,7 @@ use crate::model::{
     Action, Bucket, CheckResult, ContextCost, Control, ControlValue, Harness, Margin, Profile,
     Report, T3IdleMode, Ttl,
 };
-use crate::report::{approx, duration, monthly, tokens};
-
-/// Claude Code's `BASH_MAX_TIMEOUT_MS` when unset, which `BASH_DEFAULT_TIMEOUT_MS`'s default stays under.
-const BASH_CAP_DEFAULT: i64 = 600_000;
+use crate::report::{approx, monthly, tokens};
 
 /// A setting whose current value differs from its default, and what that saves.
 #[derive(Clone, Debug, PartialEq)]
@@ -136,6 +133,12 @@ pub fn check(result: &CheckResult, profile: Option<&Profile>) -> Option<Baseline
             };
             baseline(&default, Saving::NotMeasured)
         }
+        // Off is the default, and a threshold in force cannot be replayed off: the detail
+        // its summaries dropped is gone.
+        CheckResult::TurnEnd(c) => match c.base.current? {
+            0 => None,
+            _ => baseline("off", Saving::NotMeasured),
+        },
         CheckResult::Idle(i) => {
             if i.base.current != Some(false) {
                 return None;
@@ -175,12 +178,6 @@ pub fn check(result: &CheckResult, profile: Option<&Profile>) -> Option<Baseline
                 None => baseline(T3IdleMode::OnReturn.as_str(), Saving::NotMeasured),
             }
         }
-        // A cap other than the default changes when commands move to the background, and
-        // what checking on them costs is not recorded.
-        CheckResult::BashCap(b) => match b.base.current? {
-            BASH_CAP_DEFAULT => None,
-            _ => baseline(&duration(BASH_CAP_DEFAULT), Saving::NotMeasured),
-        },
         CheckResult::Speed(s) => match s.base.current.as_deref()? {
             "standard" => None,
             // What turning it off saves is the premium the current speed costs.

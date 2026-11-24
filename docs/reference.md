@@ -906,8 +906,8 @@ remain unmeasured risks, not zero-cost observations.
 
 Codex's `model_post_turn_compact_threshold_percent` compacts a conversation
 after a turn's final response once its context reaches that percentage of the
-usable context window; unset or zero is off, and the auto-compact limit still
-applies ([config reference](https://developers.openai.com/codex/config-reference),
+usable context window or the auto-compact limit; unset or zero is off, and the
+limit still applies before each request ([config reference](https://developers.openai.com/codex/config-reference),
 [Codex's source](https://github.com/openai/codex/blob/rust-v0.171.0/codex-rs/core/src/session/context_window.rs),
 checked 2026-11-23). The line replays candidate thresholds against the current
 one, under the limit the [compaction window](#compaction-window) line
@@ -923,7 +923,11 @@ leaves its turns unpriced.
 
 Candidates are the current threshold and, as percentages of each model's usable
 window, its price-tier boundaries and the auto-compact limit. This is not a
-search over every percentage. A threshold already in force replays only lower
+search over every percentage. Any threshold but off compacts a turn that ends
+at the limit, so thresholds above the limit's percentage replay alike and the
+highest wins their tie. With no limit set, Codex's built-in one is not
+recorded: the compactions it caused stay charged as recorded, and a session's
+final turn that ended past it is not charged the summary a threshold would add. A threshold already in force replays only lower
 ones: a higher one, or off, would need the detail its recorded summaries
 dropped.
 

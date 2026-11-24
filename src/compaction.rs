@@ -622,13 +622,24 @@ pub(crate) struct TurnEnds {
 
 impl TurnEnds {
     /// Whether a turn that ended with `active` tokens of context on `model` compacts at
-    /// `percent`; None when its context or the model's usable window is unknown.
-    fn due(&self, percent: i64, active: Option<i64>, model: &Option<Text>) -> Option<bool> {
+    /// `percent`, under an auto-compact `limit`; None when its context or the model's usable
+    /// window is unknown. Any threshold but off also compacts a turn that ends at the limit.
+    fn due(
+        &self,
+        percent: i64,
+        limit: Option<i64>,
+        active: Option<i64>,
+        model: &Option<Text>,
+    ) -> Option<bool> {
         if percent == 0 {
             return Some(false);
         }
+        let active = active?;
+        if limit.is_some_and(|limit| active >= limit) {
+            return Some(true);
+        }
         let usable = *self.usable.get(model)?;
-        Some(i128::from(active?) * 100 >= i128::from(usable) * i128::from(percent))
+        Some(i128::from(active) * 100 >= i128::from(usable) * i128::from(percent))
     }
 
     /// Index the turn ends among `events`, with each model's `usable` window.
@@ -652,9 +663,10 @@ pub(crate) enum Trigger<'m> {
         models: &'m [Option<Text>],
     },
     /// After a turn's final response, once its context reaches `percent` of its model's
-    /// usable window, as Codex's `model_post_turn_compact_threshold_percent` does. Zero is off.
-    /// Codex's auto-compact limit still applies before any request whose context exceeds
-    /// `window`, so a turn's end that compacts first can spare the limit's compaction.
+    /// usable window or the auto-compact limit `window`, as Codex's
+    /// `model_post_turn_compact_threshold_percent` does. Zero is off.
+    /// The limit still applies before any request whose context exceeds `window`, so a
+    /// turn's end that compacts first can spare the limit's compaction.
     TurnEnd {
         percent: i64,
         turns: &'m TurnEnds,
@@ -662,8 +674,12 @@ pub(crate) enum Trigger<'m> {
     },
 }
 
+/// Why samples that disagree leave an added summary unpriced.
+const DISAGREE: &str =
+    "compatible samples disagree about summary model/provider/tier/speed/geography";
+
 /// Why a turn-end pass cannot tell whether a turn's end compacts.
-const TURN_END_UNKNOWN: &str = "a turn's final context or its model's usable window is not recorded, so whether its end compacts is unknown";
+pub(crate) const TURN_END_UNKNOWN: &str = "a turn's final context or its model's usable window is not recorded, so whether its end compacts is unknown";
 
 #[derive(Clone, Copy)]
 pub(crate) struct Pass<'m> {
@@ -757,11 +773,7 @@ impl<'r, 'o> Simulator<'r, 'o> {
         let template = &matches.samples[0];
         // Mixed summary models cannot establish which model an added pass would use.
         if !matches.uniform {
-            self.result.fail(
-                &req.session,
-                req.time,
-                "compatible samples disagree about summary model/provider/tier/speed/geography",
-            );
+            self.result.fail(&req.session, req.time, DISAGREE);
         }
         let output = if larger {
             matches.larger.output
@@ -782,11 +794,16 @@ impl<'r, 'o> Simulator<'r, 'o> {
                     request: s.request.id.clone(),
                 })
                 .collect(),
-            summary_cost: price_part(
-                self.options.catalog,
-                template.summary_request,
-                &summary_part(template, input, read, output, cold),
-            ),
+            // No one sample's rate stands for samples that disagree.
+            summary_cost: if matches.uniform {
+                price_part(
+                    self.options.catalog,
+                    template.summary_request,
+                    &summary_part(template, input, read, output, cold),
+                )
+            } else {
+                unknown_cost(DISAGREE)
+            },
             prefix_cost: zero_cost(),
         });
         self.result.added.len() - 1
@@ -803,7 +820,11 @@ impl<'r, 'o> Simulator<'r, 'o> {
                 percent,
                 turns,
                 window,
-            } => (window.unwrap_or(i64::MAX), None, Some((percent, turns))),
+            } => (
+                window.unwrap_or(i64::MAX),
+                None,
+                Some((percent, turns, window)),
+            ),
         };
         let options = self.options;
         let estimates = self.estimates;
@@ -843,10 +864,18 @@ impl<'r, 'o> Simulator<'r, 'o> {
         // A turn that ended since the session's last request, with no boundary between: at
         // or after that request and before this one.
         let ended = match (turn_end, &state) {
-            (Some((_, turns)), Some(s)) => {
+            (Some((_, turns, _)), Some(s)) => {
                 turns.ends.crossed(&req.session, s.time - 1, req.time - 1)
             }
             _ => false,
+        };
+        // Whether that turn's end compacts, from the context it finished with; None when
+        // unknown. The request's first conversation part meets it.
+        let mut ended_due = match (turn_end, &state) {
+            (Some((percent, turns, limit)), Some(s)) if ended && req.time >= options.since => {
+                turns.due(percent, limit, s.active, &s.cohort.model)
+            }
+            _ => Some(false),
         };
         let messages = req.parts.iter().filter(|p| is_conversation(p)).count();
         for index in 0..req.parts.len() {
@@ -870,13 +899,7 @@ impl<'r, 'o> Simulator<'r, 'o> {
                 recorded: None,
             });
             let selected = req.time >= options.since;
-            // Whether the turn that ended before this request compacts; None when unknown.
-            let ended_due = match turn_end {
-                Some((percent, turns)) if ended && selected => {
-                    turns.due(percent, st.active, &st.cohort.model)
-                }
-                _ => Some(false),
-            };
+            let ended_due = ended_due.replace(false);
             if ended_due != Some(false) {
                 self.result.turn_ends.push((req.session.clone(), req.time));
             }
@@ -1115,7 +1138,7 @@ impl<'r, 'o> Simulator<'r, 'o> {
         // A session's final turn pays for its summary and has no later request to shrink,
         // unless a recorded compaction already follows it.
         if last
-            && let Some((percent, turns)) = turn_end
+            && let Some((percent, turns, limit)) = turn_end
             && req.time >= options.since
             && let Some(st) = state.as_ref().filter(|_| aliased)
             && turns.ends.first_after(&req.session, req.time - 1).is_some()
@@ -1130,7 +1153,7 @@ impl<'r, 'o> Simulator<'r, 'o> {
                 (Some(only), None) => Some(only),
                 _ => None,
             };
-            let due = turns.due(percent, st.active, &st.cohort.model);
+            let due = turns.due(percent, limit, st.active, &st.cohort.model);
             if due != Some(false) {
                 // A final turn's end is apart from one the same request met before it.
                 self.result

@@ -1795,7 +1795,11 @@ impl Reader {
                     context.tier = Some(tier.into());
                 }
                 if let Some(model) = label(member(applied, "model")) {
+                    let before = context.model.clone();
                     set(&mut context.model, Some(&model));
+                    if context.model != before {
+                        context.usable_window = None;
+                    }
                 }
                 if let Some(effort) = label(member(applied, "reasoning_effort")) {
                     set(&mut context.effort, Some(&effort));
@@ -3195,6 +3199,32 @@ mod tests {
                 "payload": { "turn_id": "third", "model": "gpt-6.1-luna" },
             }),
             end(5, "third"),
+            json!({
+                "type": "event_msg",
+                "timestamp": "2026-11-01T00:06:00Z",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "last_token_usage": { "input_tokens": 100, "output_tokens": 10 },
+                        "model_context_window": 380000,
+                    },
+                },
+            }),
+            end(7, "fourth"),
+            json!({
+                "type": "event_msg",
+                "timestamp": "2026-11-01T00:08:00Z",
+                "payload": {
+                    "type": "thread_settings_applied",
+                    "thread_settings": { "model": "gpt-6.1-sol" },
+                },
+            }),
+            json!({
+                "type": "turn_context",
+                "timestamp": "2026-11-01T00:09:00Z",
+                "payload": { "turn_id": "fifth", "model": "gpt-6.1-sol" },
+            }),
+            end(10, "fifth"),
         ]);
         write(w.codex.join("sessions/thread.jsonl"), &raw);
         let result = scan(&options(&w)).unwrap();
@@ -3204,8 +3234,9 @@ mod tests {
             .filter(|e| e.kind == EventKind::TurnEnd)
             .map(|e| e.usable_window)
             .collect();
-        // The window belongs to the model that recorded it, so a switch forgets it.
-        assert_eq!(windows, [None, Some(258_400), None]);
+        // The window belongs to the model that recorded it, so a switch forgets it, whether
+        // a turn's context or the thread's settings record the switch.
+        assert_eq!(windows, [None, Some(258_400), None, Some(380_000), None]);
     }
 
     #[test]

@@ -400,7 +400,8 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
                 )
             }),
             assumptions: vec![
-                "a turn's end compacts when its final request's input and output reach the threshold's share of the model's usable window, the window Codex last recorded for the model; the usual auto-compact limit still applies in the same replay, so a turn's end that compacts first spares the limit's compaction before the next request".into(),
+                "a turn's end compacts when its final request's input and output reach the threshold's share of the model's usable window, the window Codex last recorded for the model, or the auto-compact limit, which any threshold but off also compacts at; the limit still applies before each request in the same replay, so a turn's end that compacts first spares the limit's compaction before the next request".into(),
+                "with no auto-compact limit set, Codex's built-in limit is not recorded: the compactions it caused are in the transcripts and stay charged, and a session's final turn that ended past it is not charged the summary a threshold would add".into(),
                 "candidate thresholds are the current one and, as percentages of each model's usable window, its catalog price tiers and the auto-compact limit; this is not an exhaustive optimizer over every percentage".into(),
                 "a turn-end summary replaces only the context the turn finished with, so what the next turn adds stays, and a next request on another model, agent, provider or speed leaves it unpriced; it reads that context while its cache is warm: what the turn's final request read from the cache is read again, and the rest is ordinary input; output and the resumed prefix use cohort medians from linked billed summaries and first subsequent requests".into(),
                 "the next request starts from the resumed prefix, cold, and later requests reuse it within the documented 30m billed Codex lifetime; a session's final turn pays for its summary and gets nothing back".into(),
@@ -658,6 +659,33 @@ mod tests {
         checks.remove(0)
     }
 
+    /// Add a session of one turn on `model`, whose usable window is `usable`.
+    fn other_model(scan: &mut Scan, model: &str, usable: Option<i64>, time: Millis) {
+        let mut request = at(&format!("only-{model}"), model, time, usage(1000, 0, 10));
+        request.model = Some(model.into());
+        request.parts[0].model = request.model.clone();
+        scan.requests.push(request);
+        let mut end = turn_end(model, time + 1000);
+        end.meta = std::sync::Arc::new(crate::model::EventMeta {
+            model: Some(model.into()),
+            usable_window: usable,
+            ..(*end.meta).clone()
+        });
+        scan.events.push(end);
+    }
+
+    /// `scan`'s report with its turn-end line replaced by `check`.
+    fn report_of(scan: &Scan, check: TurnEndCheck) -> crate::model::Report {
+        let mut report = report(scan);
+        let line = report
+            .checks
+            .iter()
+            .position(|c| matches!(c, CheckResult::TurnEnd(_)))
+            .unwrap();
+        report.checks[line] = CheckResult::TurnEnd(check);
+        report
+    }
+
     fn at_percent(check: &TurnEndCheck, percent: i64) -> &WindowScenario {
         check
             .scenarios
@@ -701,13 +729,16 @@ mod tests {
         // turn ends at 21k tokens, under the threshold, so it adds no summary.
         near(on.savings_usd, 0.504 - 0.056 - 0.382);
         assert_eq!(on.affected_requests, 4);
+        // Any threshold but off also compacts a turn that ends at the limit, so 100% does
+        // what 90% does, and the higher of the two wins the tie.
+        let whole = at_percent(&c, 100);
+        assert_eq!((whole.added.len(), whole.affected_requests), (1, 4));
+        assert_eq!(whole.savings_usd, on.savings_usd);
         assert_eq!(
             (c.base.action, c.base.recommended),
-            (Action::Change, Some(90))
+            (Action::Change, Some(100))
         );
         near(c.base.savings_usd, 0.066);
-        // Nothing reaches the whole usable window, so 100% decides nothing.
-        assert_eq!(at_percent(&c, 100).affected_requests, 0);
         assert!(c.base.baseline.starts_with(
             "turn-end compaction off, applied to recorded requests under the current 180000-token auto-compact limit"
         ));
@@ -811,7 +842,7 @@ mod tests {
         near(at_percent(&c, 90).savings_usd, 0.382 - 0.059);
         assert_eq!(
             (c.base.action, c.base.recommended),
-            (Action::Change, Some(90))
+            (Action::Change, Some(100))
         );
     }
 
@@ -862,6 +893,8 @@ mod tests {
         assert_eq!(on.added[0].prefix_tokens, 0);
         assert_eq!(&*on.added[0].request, "first");
         near(on.savings_usd, -0.382);
+        // Its 181k tokens are past the limit, which 100% compacts at a turn's end too.
+        near(at_percent(&c, 100).savings_usd, -0.382);
         assert_eq!((c.base.action, c.base.recommended), (Action::Keep, Some(0)));
 
         // A turn that never ended, such as one interrupted, compacts nothing.
@@ -939,7 +972,7 @@ mod tests {
         let c = check(&old);
         assert_eq!(
             (c.base.action, c.base.recommended),
-            (Action::Advisory, Some(90))
+            (Action::Advisory, Some(100))
         );
         assert!(c.base.uncertainty.iter().any(|u| u.contains("v0.156.0")));
 
@@ -949,15 +982,19 @@ mod tests {
         let c = check(&shared);
         assert_eq!(
             (c.base.action, c.base.recommended),
-            (Action::Advisory, Some(90))
+            (Action::Advisory, Some(100))
         );
     }
 
     #[test]
     fn a_threshold_in_force_replays_only_lower_ones() {
-        let mut user = limit();
+        // A 190k limit is 95% of the session's usable window and 90% of another model's
+        // 211k. The session's turn ends at 181k, under the limit, so only 90% compacts it.
+        let mut user = json!({ "model_auto_compact_token_limit": 190_000 });
         user[TURN_END_KEY] = json!(95);
-        let c = check(&data(HOUR, user.clone()));
+        let mut scan = data(HOUR, user);
+        other_model(&mut scan, "gpt-6.1-terra", Some(211_000), 2 * HOUR);
+        let c = check(&scan);
         let percents: Vec<i64> = c.scenarios.iter().map(|s| s.window).collect();
         assert_eq!(percents, [90, 95]);
         assert_eq!((c.base.current, c.unset), (Some(95), false));
@@ -968,9 +1005,22 @@ mod tests {
         assert!(c.base.baseline.starts_with("turn-end compaction at 95%"));
 
         // At the limit's own percentage, nothing lower is a candidate.
+        let mut user = limit();
         user[TURN_END_KEY] = json!(90);
-        let c = check(&data(HOUR, user));
+        let c = check(&data(HOUR, user.clone()));
         assert_eq!(c.scenarios.len(), 1);
+        assert_eq!(
+            (c.base.action, c.base.recommended),
+            (Action::Advisory, None)
+        );
+
+        // A threshold above the limit's percentage compacts the turns the limit's does, so
+        // the lower one decides nothing.
+        user[TURN_END_KEY] = json!(95);
+        let c = check(&data(HOUR, user));
+        let percents: Vec<i64> = c.scenarios.iter().map(|s| s.window).collect();
+        assert_eq!(percents, [90, 95]);
+        assert_eq!(at_percent(&c, 90).savings_usd, Some(0.0));
         assert_eq!(
             (c.base.action, c.base.recommended),
             (Action::Advisory, None)
@@ -979,22 +1029,14 @@ mod tests {
 
     #[test]
     fn an_undecided_turn_end_withholds_the_keep_verdict() {
-        // After a warm return 90% loses to the 95% in force. A second model's 195k usable
-        // window puts the limit at 92%, where no turn ends, so 92% replays as 95% does.
-        let mut user = limit();
+        // After a warm return 90% loses to the 95% in force. The 190k limit is 95% of the
+        // session's usable window, 92% of a second model's 206k and 90% of a third's 211k.
+        // No turn ends between 92% and the limit, so 92% replays as 95% does.
+        let mut user = json!({ "model_auto_compact_token_limit": 190_000 });
         user[TURN_END_KEY] = json!(95);
         let mut scan = data(10 * MINUTE, user);
-        let mut small = at("small", "other", 2 * HOUR, usage(1000, 0, 10));
-        small.model = Some("gpt-6.1-terra".into());
-        small.parts[0].model = small.model.clone();
-        scan.requests.push(small);
-        let mut end = turn_end("other", 2 * HOUR + 1000);
-        end.meta = std::sync::Arc::new(crate::model::EventMeta {
-            model: Some("gpt-6.1-terra".into()),
-            usable_window: Some(195_000),
-            ..(*end.meta).clone()
-        });
-        scan.events.push(end);
+        other_model(&mut scan, "gpt-6.1-terra", Some(206_000), 2 * HOUR);
+        other_model(&mut scan, "gpt-6.1-vega", Some(211_000), 2 * HOUR + MINUTE);
         let c = check(&scan);
         let percents: Vec<i64> = c.scenarios.iter().map(|s| s.window).collect();
         assert_eq!(percents, [90, 92, 95]);
@@ -1005,59 +1047,103 @@ mod tests {
 
         // A turn that ends on a model with no recorded usable window might compact at 92%
         // and not at 95%, so 92% is no longer known to replay the same and nothing is kept.
-        let mut blind = at("blind", "unknown", 3 * HOUR, usage(1000, 0, 10));
-        blind.model = Some("gpt-6.1-luna".into());
-        blind.parts[0].model = blind.model.clone();
-        let mut after = at("after", "unknown", 3 * HOUR + MINUTE, usage(1000, 0, 10));
-        after.model = blind.model.clone();
-        after.parts[0].model = blind.model.clone();
-        scan.requests.extend([blind, after]);
-        let mut end = turn_end("unknown", 3 * HOUR + 1000);
-        end.meta = std::sync::Arc::new(crate::model::EventMeta {
-            model: Some("gpt-6.1-luna".into()),
-            usable_window: None,
-            ..(*end.meta).clone()
-        });
-        scan.events.push(end);
+        other_model(&mut scan, "gpt-6.1-luna", None, 3 * HOUR);
+        let mut after = at(
+            "after",
+            "gpt-6.1-luna",
+            3 * HOUR + MINUTE,
+            usage(1000, 0, 10),
+        );
+        after.model = Some("gpt-6.1-luna".into());
+        after.parts[0].model = after.model.clone();
+        scan.requests.push(after);
         let c = check(&scan);
         assert_eq!(
             (c.base.action, c.base.recommended),
             (Action::Advisory, None)
         );
+
+        // With no threshold that compacts a turn, the line says a turn end was undecided
+        // rather than that none had enough context.
+        scan.requests.retain(|r| &*r.session != "gpt-6.1-vega");
+        scan.events.retain(|e| &*e.session != "gpt-6.1-vega");
+        scan.requests.retain(|r| &*r.id != "after");
+        let c = check(&scan);
+        assert_eq!(c.scenarios.len(), 2);
+        let options = crate::report::ReportOptions {
+            details: true,
+            ..Default::default()
+        };
+        let text = crate::report::rendered(&report_of(&scan, c), options);
+        assert!(
+            text.contains("whether its end compacts is unknown"),
+            "{text}"
+        );
+        assert!(!text.contains("o recorded turn ended"), "{text}");
+    }
+
+    #[test]
+    fn a_turn_end_is_decided_once_from_the_context_it_finished_with() {
+        // No limit is set and the 272k price tier caps at 100%. The turn ends at 102k, and
+        // the return's first part alone fills the usable window.
+        let mut s = data(HOUR, json!({}));
+        s.requests[2].parts[0].usage = usage(100_000, 0, 2000);
+        let mut second = s.requests[3].parts[0].clone();
+        second.usage = usage(1000, 0, 10);
+        s.requests[3].parts[0].usage = usage(199_000, 0, 1000);
+        s.requests[3].parts.push(second);
+        let c = check(&s);
+        let whole = at_percent(&c, 100);
+        assert!(whole.added.is_empty());
+        assert_eq!(whole.comparison_cost.unknown, Vec::<String>::new());
+    }
+
+    #[test]
+    fn samples_that_disagree_leave_the_summary_unpriced() {
+        let mut s = data(HOUR, limit());
+        let mut summary = at("summary-2", "sample-2", -1000, usage(100_000, 0, 2000));
+        summary.parts[0].kind = PartKind::Compaction;
+        summary.parts[0].tier = Some("priority".into());
+        let mut boundary = event("boundary-2", "sample-2", 0, EventKind::Compaction);
+        boundary.request = Some("summary-2".into());
+        s.requests.push(summary);
+        s.requests
+            .push(at("resume-2", "sample-2", 1000, usage(20_000, 0, 10)));
+        s.events.push(boundary);
+        let c = check(&s);
+        let on = at_percent(&c, 90);
+        assert_eq!(on.added.len(), 1);
+        assert_eq!(usd(&on.added[0].summary_cost), None);
+        assert_eq!(on.savings_usd, None);
+        assert_eq!(c.base.recommended, None);
     }
 
     #[test]
     fn doctor_names_the_line_and_offers_the_config_edit() {
         let scan = data(HOUR, limit());
-        let mut report = report(&scan);
-        let line = report
-            .checks
-            .iter()
-            .position(|c| matches!(c, CheckResult::TurnEnd(_)))
-            .unwrap();
-        report.checks[line] = CheckResult::TurnEnd(check(&scan));
+        let report = report_of(&scan, check(&scan));
         let fixes = crate::doctor::fixes(&report, false);
         let fix = fixes
             .iter()
             .find(|f| f.name == "Turn-end compaction")
             .expect("a change is offered");
-        assert_eq!(fix.value, "off (default) -> 90%");
+        assert_eq!(fix.value, "off (default) -> 100%");
         let crate::doctor::How::Edit(patch) = &fix.how else {
             panic!("{:?} is not an edit", fix.how);
         };
         assert_eq!((patch.file.as_str(), patch.harness), (FILE, Harness::Codex));
         assert_eq!(patch.edits.len(), 1);
         assert_eq!(patch.edits[0].path, [TURN_END_KEY]);
-        assert_eq!(patch.edits[0].value, json!(90));
+        assert_eq!(patch.edits[0].value, json!(100));
 
         let text = crate::report::rendered(&report, crate::report::ReportOptions::default());
         let line = text
             .lines()
             .find(|l| l.contains("Turn-end compaction"))
             .expect("the line is shown");
-        assert!(line.contains("off (default) -> 90%"), "{line}");
+        assert!(line.contains("off (default) -> 100%"), "{line}");
         assert!(
-            line.contains(&format!("{TURN_END_KEY} = 90 in {FILE}")),
+            line.contains(&format!("{TURN_END_KEY} = 100 in {FILE}")),
             "{line}"
         );
         let mut explained = fixes.clone();

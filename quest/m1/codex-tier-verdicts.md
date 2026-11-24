@@ -23,10 +23,16 @@ assumed tier gives a verdict only when every priced pair agrees in sign
 Recommendations:
 
 - A service tier multiplies a whole request's price, so it scales both sides
-  of a paired difference alike. Keep each pair's sign: when every priced pair
-  of the winner saves, or every one loses, no assignment of tiers to requests
-  reverses it, and the line gives its verdict with the saving still marked as
-  priced at an assumed tier. Mixed signs stay withheld, as now.
+  of a paired difference alike when one tier bills the whole pair. Keep each
+  pair's sign: when every priced pair of the winner saves, or every one loses,
+  no assignment of a tier to each pair reverses it, and the line gives its
+  verdict with the saving still marked as priced at an assumed tier. Mixed
+  signs stay withheld, as now.
+- A pair that spans requests, such as an added summary and the request it
+  shrinks, can be billed at two tiers if the tier changed between them, which
+  could reverse its sign. Say the rule assumes one tier within a pair, or
+  bound each such pair over the documented multipliers of its requests
+  apart and give the verdict only when the sign holds at every bound.
 - Bound the saving over the documented tier multipliers rather than report
   the default tier's figure alone.
 - `src/prices.rs` holds the rule (`TIER_SENSITIVITY`, `tier_sensitive`) and

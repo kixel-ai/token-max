@@ -1259,7 +1259,7 @@ stopped there is not asked to end its audit.
 `Profile.retention`, a Claude-only control, is `cleanupPeriodDays` from the managed
 file, else the user file, else 30 days (the user file's key, marked default). A value
 that is not a whole number of at least 1 owns the setting with no days, and has no
-card. The disk figure is the sum of the sizes of the Claude transcripts the scan read
+card, and a T3 instance with disabled or unresolved settings has none either. The disk figure is the sum of the sizes of the Claude transcripts the scan read
 for the profiles whose line shares that owner, counted once per file; transcripts
 the scan did not read, and the other files Claude Code sweeps, are not in it.
 

@@ -4642,6 +4642,17 @@ const RETENTION_PICK: &str = "The maintainer's pick of 365 days, which keeps a y
 /// The days of transcripts Claude Code is advised to keep, a year.
 const RETENTION_DAYS: u64 = 365;
 
+/// Whether the retention a profile's settings give is the one in force: a T3 instance that is
+/// disabled, or whose launch arguments may replace the native settings, may keep other
+/// transcripts than that file says, so no edit to it is offered.
+fn retention_settled(profile: &Profile) -> bool {
+    profile.retention.is_some()
+        && profile
+            .t3
+            .as_ref()
+            .is_none_or(|t| t.enabled && !t.settings_unresolved)
+}
+
 /// How long Claude Code keeps transcripts, as `vibes` shows it when it is under a year, with
 /// the disk the transcripts token-max read take today and `how` to raise it.
 fn retention_item(
@@ -5694,11 +5705,7 @@ fn summary(
             .as_ref()
             .map_or_else(String::new, |r| r.owner.clone())
     };
-    let retained = report
-        .scan
-        .profiles
-        .iter()
-        .filter(|p| p.retention.is_some());
+    let retained = report.scan.profiles.iter().filter(|p| retention_settled(p));
     for line in crate::rows::groups(retained, owned) {
         let control = line
             .lead
@@ -6615,6 +6622,26 @@ mod tests {
     use crate::test_support::{
         Workspace, make_profile, make_request, prices, report_line, report_lines,
     };
+
+    #[test]
+    fn retention_is_advised_only_where_its_settings_are_the_ones_in_force() {
+        let mut native = make_profile("native", ROOT);
+        assert!(!retention_settled(&native));
+        native.retention = Some(RetentionControl {
+            days: Some(30),
+            owner: format!("{ROOT}/settings.json:cleanupPeriodDays (default)"),
+        });
+        assert!(retention_settled(&native));
+        let mut t3 = crate::test_support::make_t3_profile("t3", ROOT);
+        t3.retention = native.retention.clone();
+        assert!(retention_settled(&t3));
+        // Launch arguments may replace the settings file, so the days it names may not apply.
+        t3.t3.as_mut().unwrap().settings_unresolved = true;
+        assert!(!retention_settled(&t3));
+        t3.t3.as_mut().unwrap().settings_unresolved = false;
+        t3.t3.as_mut().unwrap().enabled = false;
+        assert!(!retention_settled(&t3));
+    }
 
     const NOV1: Millis = 1_793_491_200_000;
     const DAY_MS: Millis = 86_400_000;

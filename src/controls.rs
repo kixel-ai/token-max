@@ -498,7 +498,9 @@ pub fn retention_control(user: SettingsScope, managed: SettingsScope) -> Retenti
     for scope in [managed, user] {
         if let Some(value) = scope.config.get("cleanupPeriodDays") {
             return RetentionControl {
-                days: value.as_u64().filter(|days| *days >= 1),
+                days: safe_integer(value)
+                    .filter(|days| *days >= 1)
+                    .map(|days| days as u64),
                 owner: format!("{}:cleanupPeriodDays", scope.file),
             };
         }
@@ -2963,6 +2965,13 @@ mod tests {
             ),
             at(Some(7), "managed:cleanupPeriodDays")
         );
+        // JSON writes a whole number more than one way.
+        for whole in [json!(30.0), json!(3e1)] {
+            assert_eq!(
+                resolve(json!({"cleanupPeriodDays": whole}), json!({})).0,
+                Some(30)
+            );
+        }
         // A value Claude Code rejects still owns the setting, with no days to compare.
         for bad in [json!(0), json!(1.5), json!(-3), json!("90"), json!(null)] {
             assert_eq!(

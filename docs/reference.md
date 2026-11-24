@@ -1375,7 +1375,8 @@ much disk the transcripts the scan read take today, from their sizes. A year is
 the maintainer's pick: a longer period grows disk without bound for a heavy
 user, and 90 days loses longer comparisons. The card names whose file sets the
 value; the edit goes in the user's settings file, and a managed file's value,
-which outranks it, is a step by hand. Project and local settings are not read.
+which outranks it, is a step by hand. Project and local settings are not read, and a
+T3 instance whose launch arguments may replace the settings file has no card.
 A period of a year or more, or a value Claude Code rejects (not a whole number of
 days of at least 1), has no card.
 

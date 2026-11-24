@@ -138,10 +138,6 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
             })
         })
         .collect();
-    let turns = TurnEnds::new(
-        events.iter().copied(),
-        usable.iter().map(|u| (u.model.clone(), u.tokens)).collect(),
-    );
 
     // The limit is the window line's recommendation, as `doctor` applies it first.
     let window_check = options
@@ -153,6 +149,11 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
         _ => profile.compaction.default.value,
     };
     let index = WindowEvents::new(events.iter().copied());
+    let turns = TurnEnds::new(
+        events.iter().copied(),
+        usable.iter().map(|u| (u.model.clone(), u.tokens)).collect(),
+        index.carried(&requests),
+    );
     let calibration = compaction_samples(&requests, &events, options.summaries);
     let window_options = WindowOptions {
         events: &index,
@@ -358,6 +359,19 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
     } else {
         format!("turn-end compaction at {current}%")
     };
+    let mut assumptions: Vec<String> = vec![
+                "a turn's end compacts when its final request's input and output reach the threshold's share of the model's usable window, the window Codex last recorded for the model, or the auto-compact limit, which any threshold but off also compacts at; the limit still applies before each request in the same replay, so a turn's end that compacts first spares the limit's compaction before the next request".into(),
+                "candidate thresholds are the current one and, as percentages of each model's usable window, its catalog price tiers and the auto-compact limit; this is not an exhaustive optimizer over every percentage".into(),
+                "a turn-end summary replaces only the context the turn finished with, so what the next turn adds stays, and a next request on another model, agent, provider or speed leaves it unpriced; it reads that context while its cache is warm: what the turn's final request read from the cache is read again, and the rest is ordinary input; output and the resumed prefix use cohort medians from linked billed summaries and first subsequent requests".into(),
+                "the next request starts from the resumed prefix, cold, and later requests reuse it within the documented 30m billed Codex lifetime; a session's final turn pays for its summary and gets nothing back".into(),
+                "only added compactions are modeled; every observed compaction is retained once, a turn followed by one adds none, and a threshold above the current one or off cannot be replayed, since the detail recorded summaries dropped is gone".into(),
+                "ordinary requests, outputs, tools and incremental growth are held fixed until each observed boundary; proportional quality or behavioral improvements are not assumed".into(),
+                "cold-summary sensitivity charges the whole summary as ordinary input or a 12h billed write; larger-summary sensitivity uses observed cohort maxima; neither sensitivity vetoes the aggregate estimate".into(),
+                "a threshold no recorded turn reached decides nothing, and a tie with the current threshold gives no verdict".into(),
+            ];
+    if window.is_none() {
+        assumptions.push("with no auto-compact limit set, Codex's built-in limit is not recorded: the compactions it caused are in the transcripts and stay charged, a turn the session carried on from without one ended under it, and a session's final turn under its threshold is decided only when it ended with no more context than some request the model carried on from".into());
+    }
     Some(TurnEndCheck {
         base: CheckBase {
             profile: profile.id.clone(),
@@ -399,17 +413,7 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
                     "${s:.4} of additional re-read or changed-work cost erases the modeled saving over this window"
                 )
             }),
-            assumptions: vec![
-                "a turn's end compacts when its final request's input and output reach the threshold's share of the model's usable window, the window Codex last recorded for the model, or the auto-compact limit, which any threshold but off also compacts at; the limit still applies before each request in the same replay, so a turn's end that compacts first spares the limit's compaction before the next request".into(),
-                "with no auto-compact limit set, Codex's built-in limit is not recorded: the compactions it caused are in the transcripts and stay charged, and a session's final turn that ended past it is not charged the summary a threshold would add".into(),
-                "candidate thresholds are the current one and, as percentages of each model's usable window, its catalog price tiers and the auto-compact limit; this is not an exhaustive optimizer over every percentage".into(),
-                "a turn-end summary replaces only the context the turn finished with, so what the next turn adds stays, and a next request on another model, agent, provider or speed leaves it unpriced; it reads that context while its cache is warm: what the turn's final request read from the cache is read again, and the rest is ordinary input; output and the resumed prefix use cohort medians from linked billed summaries and first subsequent requests".into(),
-                "the next request starts from the resumed prefix, cold, and later requests reuse it within the documented 30m billed Codex lifetime; a session's final turn pays for its summary and gets nothing back".into(),
-                "only added compactions are modeled; every observed compaction is retained once, a turn followed by one adds none, and a threshold above the current one or off cannot be replayed, since the detail recorded summaries dropped is gone".into(),
-                "ordinary requests, outputs, tools and incremental growth are held fixed until each observed boundary; proportional quality or behavioral improvements are not assumed".into(),
-                "cold-summary sensitivity charges the whole summary as ordinary input or a 12h billed write; larger-summary sensitivity uses observed cohort maxima; neither sensitivity vetoes the aggregate estimate".into(),
-                "a threshold no recorded turn reached decides nothing, and a tie with the current threshold gives no verdict".into(),
-            ],
+            assumptions,
             uncertainty: uncertainty.into_iter().collect(),
             sources: SOURCES.iter().chain(&PRICE_SOURCES).map(|s| s.to_string()).collect(),
         },
@@ -905,6 +909,45 @@ mod tests {
             (c.base.action, c.base.recommended),
             (Action::Advisory, None)
         );
+    }
+
+    #[test]
+    fn a_final_turn_under_an_unrecorded_built_in_limit_is_undecided() {
+        // No limit is set, so Codex's built-in one applies and no transcript records it.
+        // The 272k price tier caps at 100%, and the final turn ends at 181k, under it:
+        // whether it compacts depends on a limit no request shows it to be under.
+        let mut s = data(HOUR, json!({}));
+        s.requests.truncate(3);
+        s.events.truncate(2);
+        let c = check(&s);
+        assert_eq!(c.window, None);
+        let whole = at_percent(&c, 100);
+        assert_eq!(whole.savings_usd, None);
+        assert!(
+            whole
+                .comparison_cost
+                .unknown
+                .iter()
+                .any(|u| u.contains("Codex's built-in limit")),
+            "{:?}",
+            whole.comparison_cost.unknown
+        );
+        assert_eq!(c.base.recommended, None);
+
+        // Another session carried 190k tokens into its next request with no compaction
+        // between, so the built-in limit is above 181k and the final turn compacts nothing.
+        s.requests
+            .push(at("big", "other", 2 * HOUR, usage(189_000, 0, 1000)));
+        s.requests.push(at(
+            "bigger",
+            "other",
+            2 * HOUR + MINUTE,
+            usage(190_000, 189_000, 10),
+        ));
+        let c = check(&s);
+        let whole = at_percent(&c, 100);
+        assert!(whole.added.is_empty());
+        assert_eq!(whole.comparison_cost.unknown, Vec::<String>::new());
     }
 
     #[test]

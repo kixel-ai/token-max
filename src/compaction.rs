@@ -340,6 +340,29 @@ pub struct WindowEvents<'a> {
 }
 
 impl<'a> WindowEvents<'a> {
+    /// The most context each model carried from one of `requests`, in time order, into its
+    /// session's next with no compaction between.
+    pub(crate) fn carried(&self, requests: &[&Request]) -> HashMap<Option<Text>, i64> {
+        let mut carried: HashMap<Option<Text>, i64> = HashMap::default();
+        let mut before: HashMap<&str, (Millis, &Option<Text>, Option<i64>)> = HashMap::default();
+        for r in requests {
+            let mut parts = r.parts.iter().filter(|p| is_conversation(p));
+            let (Some(p), None) = (parts.next(), parts.next()) else {
+                before.remove(&*r.session);
+                continue;
+            };
+            let active = p.usage.input.zip(p.usage.output).map(|(i, o)| i + o);
+            if let Some((time, model, Some(active))) =
+                before.insert(&r.session, (r.time, &p.model, active))
+                && !self.boundaries.crossed(&r.session, time, r.time)
+            {
+                let most = carried.entry(model.clone()).or_default();
+                *most = (*most).max(active);
+            }
+        }
+        carried
+    }
+
     /// Index these events by compaction boundary.
     pub fn new(events: impl IntoIterator<Item = &'a StructuralEvent>) -> Self {
         let events: Vec<&'a StructuralEvent> = events.into_iter().collect();
@@ -618,6 +641,9 @@ pub(crate) struct TurnEnds {
     ends: SessionBoundaries,
     /// Each model's usable context window, in tokens.
     usable: HashMap<Option<Text>, i64>,
+    /// The most context each model carried into a next request with no compaction between,
+    /// which Codex's built-in auto-compact limit must exceed.
+    carried: HashMap<Option<Text>, i64>,
 }
 
 impl TurnEnds {
@@ -642,14 +668,37 @@ impl TurnEnds {
         Some(i128::from(active) * 100 >= i128::from(usable) * i128::from(percent))
     }
 
-    /// Index the turn ends among `events`, with each model's `usable` window.
+    /// Whether a session's final turn compacts, as [`Self::due`] decides, or why that is
+    /// unknown. With no limit set, Codex's built-in one decides a turn under the threshold,
+    /// and only context a model is known to have carried on from is known to be under it.
+    fn final_due(
+        &self,
+        percent: i64,
+        limit: Option<i64>,
+        active: Option<i64>,
+        model: &Option<Text>,
+    ) -> Result<bool, &'static str> {
+        let due = self
+            .due(percent, limit, active, model)
+            .ok_or(TURN_END_UNKNOWN)?;
+        let carried = self.carried.get(model).copied().unwrap_or(0);
+        if !due && percent > 0 && limit.is_none() && active.is_some_and(|a| a > carried) {
+            return Err(BUILT_IN_UNKNOWN);
+        }
+        Ok(due)
+    }
+
+    /// Index the turn ends among `events`, with each model's `usable` window and the most
+    /// context it `carried` into a next request with no compaction between.
     pub(crate) fn new<'e>(
         events: impl IntoIterator<Item = &'e StructuralEvent>,
         usable: HashMap<Option<Text>, i64>,
+        carried: HashMap<Option<Text>, i64>,
     ) -> Self {
         Self {
             ends: SessionBoundaries::of(events, EventKind::TurnEnd),
             usable,
+            carried,
         }
     }
 }
@@ -677,6 +726,9 @@ pub(crate) enum Trigger<'m> {
 /// Why samples that disagree leave an added summary unpriced.
 const DISAGREE: &str =
     "compatible samples disagree about summary model/provider/tier/speed/geography";
+
+/// Why a final turn under its threshold is undecided when no auto-compact limit is set.
+pub(crate) const BUILT_IN_UNKNOWN: &str = "no auto-compact limit is set and a session's final turn ended with more context than any request known to be under Codex's built-in limit, so whether its end compacts is unknown";
 
 /// Why a turn-end pass cannot tell whether a turn's end compacts.
 pub(crate) const TURN_END_UNKNOWN: &str = "a turn's final context or its model's usable window is not recorded, so whether its end compacts is unknown";
@@ -1153,18 +1205,18 @@ impl<'r, 'o> Simulator<'r, 'o> {
                 (Some(only), None) => Some(only),
                 _ => None,
             };
-            let due = turns.due(percent, limit, st.active, &st.cohort.model);
-            if due != Some(false) {
+            let due = turns.final_due(percent, limit, st.active, &st.cohort.model);
+            if due != Ok(false) {
                 // A final turn's end is apart from one the same request met before it.
                 self.result
                     .turn_ends
                     .push((req.session.clone(), req.time + 1));
             }
-            self.result.undecided |= due.is_none();
+            self.result.undecided |= due.is_err();
             match due {
-                Some(false) => {}
-                None => self.result.fail(&req.session, req.time, TURN_END_UNKNOWN),
-                Some(true) => {
+                Ok(false) => {}
+                Err(reason) => self.result.fail(&req.session, req.time, reason),
+                Ok(true) => {
                     let matches = only.and_then(|i| options.samples.cohort(&req, &req.parts[i]));
                     match (matches, st.active) {
                         (Some(matches), Some(active)) => {

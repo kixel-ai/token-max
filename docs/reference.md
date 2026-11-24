@@ -926,8 +926,11 @@ window, its price-tier boundaries and the auto-compact limit. This is not a
 search over every percentage. Any threshold but off compacts a turn that ends
 at the limit, so thresholds above the limit's percentage replay alike and the
 highest wins their tie. With no limit set, Codex's built-in one is not
-recorded: the compactions it caused stay charged as recorded, and a session's
-final turn that ended past it is not charged the summary a threshold would add. A threshold already in force replays only lower
+recorded. The compactions it caused stay charged as recorded, and a turn the
+session carried on from without one ended under it. A session's final turn
+under its threshold is decided only when it ended with no more context than
+some request the model carried on from; otherwise the threshold is unpriced
+there. A threshold already in force replays only lower
 ones: a higher one, or off, would need the detail its recorded summaries
 dropped.
 

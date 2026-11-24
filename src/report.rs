@@ -3343,15 +3343,21 @@ fn turn_end_unresolved(c: &crate::model::TurnEndCheck) -> String {
             .iter()
             .flat_map(|s| &s.comparison_cost.unknown)
             .find(|u| u.contains("compaction summary"));
-        let undecided = c
-            .scenarios
-            .iter()
-            .flat_map(|s| &s.comparison_cost.unknown)
-            .any(|u| u.contains(crate::compaction::TURN_END_UNKNOWN));
+        let undecided = [
+            crate::compaction::TURN_END_UNKNOWN,
+            crate::compaction::BUILT_IN_UNKNOWN,
+        ]
+        .into_iter()
+        .find(|reason| {
+            c.scenarios
+                .iter()
+                .flat_map(|s| &s.comparison_cost.unknown)
+                .any(|u| u.contains(reason))
+        });
         return if unknown.is_some() {
             "Too few recorded compactions to model a summary at a turn's end.".into()
-        } else if undecided {
-            capitalize(crate::compaction::TURN_END_UNKNOWN) + "."
+        } else if let Some(reason) = undecided {
+            capitalize(reason) + "."
         } else if c.scenarios.len() < 2 {
             "No lower threshold can be replayed.".into()
         } else {

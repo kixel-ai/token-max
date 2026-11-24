@@ -47,6 +47,16 @@ pub struct Deny {
     pub reason: String,
 }
 
+impl Deny {
+    /// Its step by hand, since `why` also keeps token-max from blocking it.
+    pub fn by_hand(self, why: &str) -> Definition {
+        Definition::Manual {
+            step: self.step,
+            reason: format!("{}, and {why}", self.reason),
+        }
+    }
+}
+
 /// Versions measured by loading each kind of server under a name entry: a plugin's
 /// server from 2.1.182 and an `--mcp-config` one from 2.1.83, while a project's
 /// `.mcp.json` and `managed-mcp.json` already matched in 2.1.0, the oldest tried. Before

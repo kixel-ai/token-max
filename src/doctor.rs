@@ -322,9 +322,15 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
                 });
                 if unused && matches!(how, How::Edit(_)) {
                     let versions = claude_versions(report, &ids);
+                    let whole = ends_at(&c.name, c.details.iter().map(|d| d.name.as_str()));
                     removal = crate::mcp::definitions(&c.name, control, &members)
                         .into_iter()
-                        .map(|d| gate(d, &versions))
+                        .map(|d| match d {
+                            Definition::Deny(deny) if !whole => {
+                                deny.by_hand("its tools' names do not show where its name ends")
+                            }
+                            d => gate(d, &versions),
+                        })
                         .collect();
                 }
                 how
@@ -350,6 +356,17 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
         group,
         removal,
     }
+}
+
+/// Whether a tool family's recorded `tools` end its name at `server`. The family's name
+/// stops at its tools' first `__`, so a tool holding another may belong to a longer name,
+/// such as `mcp__docs__v2__read` to `docs__v2`.
+fn ends_at<'a>(server: &str, mut tools: impl Iterator<Item = &'a str>) -> bool {
+    let family = format!("mcp__{server}__");
+    !tools.any(|tool| {
+        tool.strip_prefix(&family)
+            .is_some_and(|tool| tool.contains("__"))
+    })
 }
 
 /// The Claude Code each profile in `ids` last recorded a request from, for those with any.
@@ -384,13 +401,9 @@ fn gate(definition: Definition, versions: &[Option<&str>]) -> Definition {
         .map_or("an unrecorded Claude Code".to_string(), |v| {
             format!("Claude Code {v}")
         });
-    Definition::Manual {
-        step: deny.step,
-        reason: format!(
-            "{}, and its latest sessions ran {ran}, before 2.{minor}.{patch}, where a deniedMcpServers entry blocks just this server by name",
-            deny.reason
-        ),
-    }
+    deny.by_hand(&format!(
+        "its latest sessions ran {ran}, before 2.{minor}.{patch}, where a deniedMcpServers entry blocks just this server by name"
+    ))
 }
 
 /// The group a feature's change joins: its kind and why it is offered, as its verdict says.
@@ -2487,10 +2500,7 @@ impl Owner {
                                 denials.push(d.name.clone());
                                 continue;
                             }
-                            Err(reason) => Definition::Manual {
-                                step: d.step.clone(),
-                                reason: format!("{}, and {reason}", d.reason),
-                            },
+                            Err(reason) => d.clone().by_hand(&reason),
                         }
                     }
                     Definition::Entry(entry) => {
@@ -5300,6 +5310,16 @@ mod tests {
             Definition::Manual { .. }
         ));
         assert!(matches!(gate(blocked("p"), &[]), Definition::Manual { .. }));
+
+        // A tool family whose tools may belong to a longer name is not denied by its own.
+        assert!(ends_at(
+            "docs",
+            ["mcp__docs__read", "mcp__docs__write", "discovery"].into_iter()
+        ));
+        assert!(!ends_at(
+            "docs",
+            ["mcp__docs__read", "mcp__docs__v2__read"].into_iter()
+        ));
 
         // A name the file denies already is not offered again, one name twice is offered
         // once, and a denylist that is not a list leaves it by hand.

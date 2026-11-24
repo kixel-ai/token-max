@@ -9774,7 +9774,11 @@ mod tests {
         let cards = |lines: Vec<SubagentCost>| {
             let mut report = synthetic();
             report.subagents = lines;
+            // Only the subagent cards; the synthetic report's other lines have their own.
             advice(&report, ReportOptions::default())
+                .into_iter()
+                .filter(|i| i.name.contains("subagent"))
+                .collect::<Vec<_>>()
         };
         assert_eq!(cards(vec![line(Harness::Codex, "explorer", "gpt-5")]), []);
         assert_eq!(

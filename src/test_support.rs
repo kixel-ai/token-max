@@ -325,6 +325,7 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
         idle: None,
         speed: None,
         bash: None,
+        turn_end: None,
         effort: None,
         advisor: None,
         speed_directories: None,

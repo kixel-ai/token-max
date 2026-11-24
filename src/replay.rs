@@ -990,6 +990,18 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         crate::t3::constrain(&mut check.base, &scan.profiles);
     }
     let window_refs: Vec<_> = windows.iter().collect();
+    let mut turn_ends = crate::turn_end::turn_end_checks(&crate::turn_end::TurnEndOptions {
+        scan: &scan,
+        catalog,
+        summaries: &compactions,
+        estimates: &estimates,
+        windows: &window_refs,
+        since,
+        now,
+    });
+    for check in &mut turn_ends {
+        crate::t3::constrain(&mut check.base, &scan.profiles);
+    }
     let idle = idle_checks(&IdleOptions {
         scan: &scan,
         catalog,
@@ -1066,6 +1078,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         .into_iter()
         .map(CheckResult::Ttl)
         .chain(windows.into_iter().map(CheckResult::Compaction))
+        .chain(turn_ends.into_iter().map(CheckResult::TurnEnd))
         .chain(idle.into_iter().map(CheckResult::Idle))
         .chain(t3_idle.into_iter().map(CheckResult::T3Idle))
         .chain(keepalive.into_iter().map(CheckResult::Keepalive))
@@ -1289,6 +1302,7 @@ mod tests {
                 pre_tokens: None,
                 post_tokens: None,
                 duration_ms: None,
+                usable_window: None,
                 tool: None,
                 t3: None,
                 pricing: None,

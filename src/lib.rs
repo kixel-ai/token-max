@@ -40,6 +40,7 @@ mod subagents;
 mod t3;
 mod terminal;
 mod totals;
+mod turn_end;
 mod unreadable;
 mod upgrade;
 mod version;

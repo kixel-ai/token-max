@@ -261,6 +261,8 @@ fn date(text: &str) -> &str {
 enum Setting<'a> {
     Ttl(Ttl),
     Window(i64),
+    /// A percentage of the context window, zero when off.
+    Percent(i64),
     Idle(bool),
     T3Idle(crate::model::T3IdleMode),
     Speed(&'a str),
@@ -347,6 +349,13 @@ fn common(result: &CheckResult) -> Common<'_> {
             &c.base,
             &c.usage_estimates,
             |n| Setting::Window(*n),
+        ),
+        CheckResult::TurnEnd(c) => base(
+            "turn-end-compaction",
+            "all",
+            &c.base,
+            &c.usage_estimates,
+            |n| Setting::Percent(*n),
         ),
         CheckResult::Idle(c) => base(
             "idle-compaction",
@@ -571,7 +580,7 @@ fn plan_note(
                 "https://code.claude.com/docs/en/costs#background-token-usage",
             ))
         }
-        CheckResult::Compaction(_) | CheckResult::Keepalive(_)
+        CheckResult::Compaction(_) | CheckResult::Keepalive(_) | CheckResult::TurnEnd(_)
             if harness == Some(Harness::Codex) =>
         {
             Some((
@@ -708,6 +717,8 @@ fn setting(value: Option<Setting<'_>>) -> String {
         None => "unknown".into(),
         Some(Setting::Ttl(t)) => t.as_str().into(),
         Some(Setting::Window(n)) => format!("{n} tokens"),
+        Some(Setting::Percent(0)) => "off".into(),
+        Some(Setting::Percent(n)) => format!("{n}%"),
         Some(Setting::Idle(b)) => b.to_string(),
         Some(Setting::T3Idle(mode)) => mode.as_str().into(),
         Some(Setting::Speed(s)) => s.into(),
@@ -725,6 +736,8 @@ fn setting_value(value: Option<Setting<'_>>) -> String {
         Some(Setting::Speed("standard")) => "off".into(),
         Some(Setting::Speed(s)) => s.into(),
         Some(Setting::Window(n)) => format!("{} tokens", count(n)),
+        Some(Setting::Percent(0)) => "off".into(),
+        Some(Setting::Percent(n)) => format!("{n}%"),
         Some(Setting::Ttl(t)) => t.as_str().into(),
         Some(Setting::Keepalive(s) | Setting::Effort(s)) => s.into(),
     }
@@ -1826,9 +1839,14 @@ fn details(report: &Report, out: &mut Out<'_>) {
 /// Why the subagent lines never recommend a change.
 const SUBAGENT_EVIDENCE: &str = "Subagent lines are evidence, not recommendations: a cheaper model or lower effort trades capability, and the main agent's extra work after a weaker subagent cannot be attributed, so no saving is claimed. A lower effort changes the output tokens, so its cost cannot be measured.";
 
+/// Claude Code's subagent page, which gives the built-in Explore's tools but not its prompt.
+const CLAUDE_SUBAGENT_DOCS: &str = "https://code.claude.com/docs/en/sub-agents#built-in-subagents";
+
 /// Anthropic's tip for Claude's built-in Explore subagent when it ran off Haiku, beside what
-/// it cost and what the same tokens would cost on the cheapest model; None otherwise.
-fn explore_warning(c: &SubagentCost) -> Option<String> {
+/// it cost and what the same tokens would cost on the cheapest model; None otherwise. The
+/// agent file it advises is a step by hand: it replaces the built-in's system prompt, which
+/// Anthropic doesn't publish, so no file token-max writes would explore the same way.
+fn explore_item(c: &SubagentCost, profile: &str, out: &Out<'_>) -> Option<Item> {
     if c.harness != Harness::Claude
         || c.kind != "Explore"
         || !c.built_in
@@ -1837,12 +1855,64 @@ fn explore_warning(c: &SubagentCost) -> Option<String> {
     {
         return None;
     }
-    Some(format!(
+    let r = &c.replacement;
+    let list = |files: &[String]| {
+        let files: Vec<String> = files.iter().map(|f| out.home(f)).collect();
+        files.join(" and ")
+    };
+    let mut text = format!(
         "Ran on {} and cost {}. {} Anthropic's model guide notes that the built-in Explore runs on the session's model, and suggests a user agent named Explore with model: haiku to keep exploration cheap.",
         shares(&c.models, c.requests),
         figure(c.estimate),
         reprice_text(c)
-    ))
+    );
+    if !r.present.is_empty() {
+        let (verb, them) = match r.present.len() {
+            1 => ("replaces", "it"),
+            _ => ("replace", "them"),
+        };
+        text += &format!(
+            " {} now {verb} the built-in, so later runs there follow {them}.",
+            list(&r.present)
+        );
+    }
+    if r.forced {
+        // The step still covers the runs where no forced model applies.
+        let (scope, whom) = if r.missing.is_empty() {
+            ("", "")
+        } else {
+            (" for some runs", " to them")
+        };
+        text += &format!(
+            " CLAUDE_CODE_SUBAGENT_MODEL_FORCE is set{scope}, which drops an agent file's model, so the tip does not apply{whom} while it is."
+        );
+    }
+    // Nothing left to do once every run has its replacement; nothing a file can do under force.
+    let quiet = r.missing.is_empty() && !r.forced;
+    let how = (!r.missing.is_empty()).then(|| How::Manual {
+        // The built-in's documented restriction and its start without CLAUDE.md.
+        step: format!(
+            "add a new .md agent file to {} with the frontmatter name: Explore; description: when to use it; model: haiku; disallowedTools: Write, Edit; omitClaudeMd: true; and a system prompt of your own below it",
+            list(&r.missing)
+        ),
+        reason: "the file replaces the built-in Explore's system prompt, which Anthropic doesn't publish".into(),
+    });
+    Some(Item {
+        value: if how.is_some() {
+            format!("inherit {} haiku", out.arrow)
+        } else {
+            String::new()
+        },
+        what: "The model Claude Code's built-in Explore subagent, which searches and reads code for the main session, runs on.".into(),
+        how,
+        quiet,
+        ..guidance(
+            subagent_name(c),
+            profile,
+            text,
+            &[CLAUDE_MODEL_GUIDE, CLAUDE_SUBAGENT_DOCS],
+        )
+    })
 }
 
 /// A subagent type by harness: a Claude agent type, a Codex role or other Codex subagent.
@@ -2449,6 +2519,37 @@ fn card(result: &CheckResult, action: Option<Action>, out: &mut Out<'_>) {
                 "Recorded cache categories held constant; Claude cache-switch effects excluded. API-price premium, which a plan can count differently (see Plan). Work held constant; latency value excluded.",
             );
         }
+        CheckResult::TurnEnd(c) => {
+            for u in &c.usable {
+                out.field(
+                    "Usable window",
+                    &format!(
+                        "{}: {} tokens",
+                        u.model.as_deref().map_or_else(|| "unknown".into(), display),
+                        u.tokens
+                    ),
+                );
+            }
+            out.field(
+                "Auto-compact limit replayed with it",
+                &match c.window {
+                    Some(w) if c.window_offered => {
+                        format!("{w} tokens, which the auto-compact window line recommends")
+                    }
+                    Some(w) => format!("{w} tokens"),
+                    None => "none set".into(),
+                },
+            );
+            out.field("Current-threshold baseline cost", &money(&c.baseline_cost));
+            let suggested = c
+                .scenarios
+                .iter()
+                .find(|s| Some(s.window) == c.base.recommended);
+            out.field(
+                "Suggested-threshold cost",
+                &suggested.map_or_else(|| "unknown".into(), |s| money(&s.cost)),
+            );
+        }
         CheckResult::Compaction(c) => {
             let models: Vec<String> = c
                 .models
@@ -2519,7 +2620,7 @@ fn card(result: &CheckResult, action: Option<Action>, out: &mut Out<'_>) {
         "Limits",
         &format!(
             "{}Fixed-behavior replay with current settings applied to history; monthly values extrapolate the comparison window. Full assumptions and uncertainty: --details.",
-            if r.check == "compaction-window" {
+            if matches!(r.check, "compaction-window" | "turn-end-compaction") {
                 "Earlier compaction loses detail and can add re-reads or changed work. "
             } else {
                 ""
@@ -2727,6 +2828,41 @@ fn card(result: &CheckResult, action: Option<Action>, out: &mut Out<'_>) {
                 &s.current_estimate.premium,
             );
         }
+        CheckResult::TurnEnd(c) => {
+            out.cost("Current-threshold baseline", &c.baseline_cost);
+            for scenario in &c.scenarios {
+                out.field(
+                    "Candidate threshold",
+                    &format!(
+                        "{}; {} affected requests; {} added compactions",
+                        setting(Some(Setting::Percent(scenario.window))),
+                        scenario.affected_requests,
+                        scenario.added.len()
+                    ),
+                );
+                out.cost("Candidate full cost", &scenario.cost);
+                out.cost(
+                    "Candidate baseline comparison",
+                    &scenario.baseline_comparison_cost,
+                );
+                out.cost("Candidate comparison", &scenario.comparison_cost);
+                out.field(
+                    "Candidate net saving vs baseline",
+                    &scenario
+                        .savings_usd
+                        .map_or_else(|| "unknown".into(), |v| approx_usd(v, scenario.margin)),
+                );
+                out.field(
+                    "Candidate sensitivity",
+                    &format!(
+                        "larger observed summary/prefix net saving {}; cold summary net saving {}; extra re-read break-even {}",
+                        estimate(scenario.sensitivity.larger_summary_savings_usd),
+                        estimate(scenario.sensitivity.cold_summary_savings_usd),
+                        estimate(scenario.sensitivity.reread_break_even_usd)
+                    ),
+                );
+            }
+        }
         CheckResult::Compaction(c) => {
             out.cost("Current-window baseline", &c.baseline_cost);
             out.cost("Existing summaries", &c.observed_summary_cost);
@@ -2824,6 +2960,7 @@ fn card(result: &CheckResult, action: Option<Action>, out: &mut Out<'_>) {
         CheckResult::Ttl(t) => out.witnesses(&t.cache_evidence),
         CheckResult::Compaction(c) => out.witnesses(&c.cache_evidence),
         CheckResult::T3Idle(_)
+        | CheckResult::TurnEnd(_)
         | CheckResult::Idle(_)
         | CheckResult::Speed(_)
         | CheckResult::Background(_)
@@ -2890,7 +3027,7 @@ fn reason(result: &CheckResult, r: &Common<'_>) -> String {
     if r.action == Action::Advisory {
         return "Conditional replay winner; current effective setting or applicability is unresolved.".into();
     }
-    if r.check == "compaction-window" {
+    if matches!(r.check, "compaction-window" | "turn-end-compaction") {
         "Lowest estimated aggregate net cost, including added summaries and resumed-prefix charges; existing boundaries retained."
     } else {
         "Lowest estimated aggregate cache cost under the stated replay assumptions."
@@ -2917,6 +3054,7 @@ fn setting_name(result: &CheckResult) -> String {
             }
         }
         CheckResult::T3Idle(_) => "T3 idle compaction".into(),
+        CheckResult::TurnEnd(_) => "Turn-end compaction".into(),
         CheckResult::Idle(_) => "Idle compaction".into(),
         CheckResult::Speed(_) => "Fast mode".into(),
         CheckResult::Keepalive(_) => "Keepalive pings".into(),
@@ -3183,6 +3321,7 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
                 None => "No request a different window would change has recorded usage to compare windows.".into(),
             }
         }
+        CheckResult::TurnEnd(c) => turn_end_unresolved(c),
         CheckResult::T3Idle(c) => t3_idle_unresolved(c, r),
         CheckResult::Idle(i) => {
             let a = &i.after_recommendations;
@@ -3213,6 +3352,57 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
         | CheckResult::Keepalive(_)
         | CheckResult::Memory(_)
         | CheckResult::Effort(_) => "No verdict could be reached.".into(),
+    }
+}
+
+/// One plain sentence on why a turn-end compaction line has no verdict.
+fn turn_end_unresolved(c: &crate::model::TurnEndCheck) -> String {
+    if c.usable.is_empty() {
+        return "No transcript records how much of the context window Codex could use, so a threshold has nothing to be a percentage of.".into();
+    }
+    let acting: Vec<&crate::model::WindowScenario> = c
+        .scenarios
+        .iter()
+        .filter(|s| Some(s.window) != c.base.current)
+        .filter(|s| s.affected_requests > 0 || !s.added.is_empty())
+        .collect();
+    if acting.is_empty() {
+        let unknown = c
+            .scenarios
+            .iter()
+            .flat_map(|s| &s.comparison_cost.unknown)
+            .find(|u| u.contains("compaction summary"));
+        let undecided = [
+            crate::compaction::TURN_END_UNKNOWN,
+            crate::compaction::BUILT_IN_UNKNOWN,
+        ]
+        .into_iter()
+        .find(|reason| {
+            c.scenarios
+                .iter()
+                .flat_map(|s| &s.comparison_cost.unknown)
+                .any(|u| u.contains(reason))
+        });
+        return if unknown.is_some() {
+            "Too few recorded compactions to model a summary at a turn's end.".into()
+        } else if let Some(reason) = undecided {
+            capitalize(reason) + "."
+        } else if c.scenarios.len() < 2 {
+            "No lower threshold can be replayed.".into()
+        } else {
+            "No recorded turn ended with enough context to compact at a candidate threshold.".into()
+        };
+    }
+    if acting.iter().any(|s| s.savings_usd == Some(0.0)) {
+        return "The best threshold and the current one cost the same on replay, so neither is cheaper.".into();
+    }
+    match acting
+        .iter()
+        .find(|s| s.savings_usd.is_none())
+        .and_then(|s| s.comparison_cost.unknown.first())
+    {
+        Some(reason) => capitalize(reason) + ".",
+        None => "No threshold could be priced against the current one.".into(),
     }
 }
 
@@ -4565,8 +4755,10 @@ fn bash_item(cap: &BashCap, profile: &str, how: Option<How>, out: &Out<'_>) -> I
 /// A comparison with no requests is not a verdict, whatever the tie-break said. Window
 /// coverage counts only changed parts, so zero there can still be a keep.
 fn check_action(result: &CheckResult, r: &Common<'_>) -> Action {
-    let empty =
-        matches!(result, CheckResult::Ttl(_) | CheckResult::Compaction(_)) && r.requests == 0;
+    let empty = matches!(
+        result,
+        CheckResult::Ttl(_) | CheckResult::Compaction(_) | CheckResult::TurnEnd(_)
+    ) && r.requests == 0;
     if empty { Action::Advisory } else { r.action }
 }
 
@@ -4667,6 +4859,7 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
             }
         };
         if matches!(result, CheckResult::Compaction(c) if c.unset)
+            || matches!(result, CheckResult::TurnEnd(c) if c.unset)
             || answered_main_ttl(result, &r, &out).is_some()
         {
             current += " (default)";
@@ -5099,6 +5292,7 @@ fn summary(
         };
         row.value = current.clone();
         if matches!(result, CheckResult::Compaction(c) if c.unset)
+            || matches!(result, CheckResult::TurnEnd(c) if c.unset)
             || answered_main_ttl(result, r, out).is_some()
         {
             row.value += " (default)";
@@ -5203,6 +5397,41 @@ fn summary(
                     _ => unknown(),
                 };
                 text
+            }
+            CheckResult::TurnEnd(c) => {
+                let after = match c.window {
+                    Some(window) if c.window_offered => format!(
+                        " under the {} auto-compact limit the Auto-compact window line recommends",
+                        tokens(window)
+                    ),
+                    Some(window) => format!(" under the {} auto-compact limit", tokens(window)),
+                    None => String::new(),
+                };
+                // The two edits are offered apart, so say what this one's figure rests on.
+                let assumes = if c.window_offered {
+                    " The saving assumes that limit is set too."
+                } else {
+                    ""
+                };
+                match mark {
+                    Mark::Change => {
+                        let added = c
+                            .scenarios
+                            .iter()
+                            .find(|s| r.recommended == Some(Setting::Percent(s.window)))
+                            .map_or(0, |s| s.added.len());
+                        format!(
+                            "Replayed{after}, assuming the same sessions{}, net of {} added summar{}.{assumes} Detail lost to summaries is not measured. {set_in}",
+                            coverage_note(r, MEASURED),
+                            count(added as u64),
+                            if added == 1 { "y" } else { "ies" }
+                        )
+                    }
+                    Mark::Keep => format!(
+                        "No other threshold was cheaper, replayed{after} assuming the same sessions. {set_in}"
+                    ),
+                    _ => unknown(),
+                }
             }
             CheckResult::Idle(_) => {
                 let on = |s: Option<Setting<'_>>| s == Some(Setting::Idle(true));
@@ -5963,14 +6192,7 @@ fn summary(
         row.profile = tag(&c.profiles, &switch, out);
         row.costs(c.estimate, false, &spend);
         row.evidence = subagent_line(c, out);
-        if let Some(text) = explore_warning(c) {
-            vibes.push(guidance(
-                subagent_name(c),
-                &row.profile,
-                text,
-                &[CLAUDE_MODEL_GUIDE],
-            ));
-        }
+        vibes.extend(explore_item(c, &row.profile, out));
         // The setting, without why it is the one.
         row.setting = out
             .home_in(&c.model_setting)
@@ -6454,6 +6676,8 @@ mod tests {
     const NOV1: Millis = 1_793_491_200_000;
     const DAY_MS: Millis = 86_400_000;
     const ROOT: &str = "/synthetic/home/.claude";
+    /// The user agent directory where a file would replace the built-in Explore in [`ROOT`].
+    const ROOT_AGENTS: &str = "/synthetic/home/.claude/agents";
 
     fn cost(total: Option<f64>, known: f64) -> Cost {
         Cost {
@@ -9250,6 +9474,10 @@ mod tests {
             }),
             model_setting: "model: in /synthetic/.claude/agents/Explore.md".into(),
             effort_setting: "effort: in /synthetic/.claude/agents/Explore.md".into(),
+            replacement: Replacement {
+                missing: vec![ROOT_AGENTS.into()],
+                ..Replacement::default()
+            },
         });
         let summary = text(&report, None, true);
         let first = |text: &str| {
@@ -9282,8 +9510,18 @@ mod tests {
             card.text,
             "Ran on claude-opus-5-5 (90%), claude-haiku-4-5 (10%) and cost ~$2.20 ± $0.30. On claude-haiku-5-5 the same recorded tokens would cost $0.50, assuming the same turns. Anthropic's model guide notes that the built-in Explore runs on the session's model, and suggests a user agent named Explore with model: haiku to keep exploration cheap."
         );
-        assert_eq!(card.sources, [CLAUDE_MODEL_GUIDE]);
-        assert_eq!((card.how.as_ref(), card.quiet), (None, false));
+        assert_eq!(card.sources, [CLAUDE_MODEL_GUIDE, CLAUDE_SUBAGENT_DOCS]);
+        assert_eq!(card.value, "inherit -> haiku");
+        assert!(!card.quiet);
+        // The file replaces a system prompt Anthropic doesn't publish, so it is never written.
+        let Some(How::Manual { step, reason }) = &card.how else {
+            panic!("{:?}", card.how)
+        };
+        assert_eq!(
+            step,
+            "add a new .md agent file to /synthetic/home/.claude/agents with the frontmatter name: Explore; description: when to use it; model: haiku; disallowedTools: Write, Edit; omitClaudeMd: true; and a system prompt of your own below it"
+        );
+        assert!(reason.contains("doesn't publish"), "{reason}");
         let details = text(&report, None, true);
         assert!(
             details.contains("Same tokens on claude-haiku-5-5: $0.50"),
@@ -9567,7 +9805,7 @@ mod tests {
     }
 
     #[test]
-    fn only_an_explore_subagent_off_haiku_warns() {
+    fn only_the_built_in_explore_off_haiku_gets_an_agent_file_step_by_hand() {
         let line = |harness, kind: &str, model: &str| SubagentCost {
             harness,
             profiles: vec!["profile".into()],
@@ -9591,30 +9829,107 @@ mod tests {
             reprice_estimate: None,
             model_setting: String::new(),
             effort_setting: String::new(),
+            replacement: Replacement {
+                missing: vec![ROOT_AGENTS.into()],
+                ..Replacement::default()
+            },
         };
+        let cards = |lines: Vec<SubagentCost>| {
+            let mut report = synthetic();
+            report.subagents = lines;
+            advice(&report, ReportOptions::default())
+        };
+        assert_eq!(cards(vec![line(Harness::Codex, "explorer", "gpt-5")]), []);
         assert_eq!(
-            explore_warning(&line(Harness::Codex, "explorer", "gpt-5")),
-            None
+            cards(vec![line(Harness::Claude, "log-reader", "claude-opus-5-5")]),
+            []
         );
         assert_eq!(
-            explore_warning(&line(Harness::Claude, "log-reader", "claude-opus-5-5")),
-            None
-        );
-        let explore =
-            explore_warning(&line(Harness::Claude, "Explore", "claude-opus-5-5")).unwrap();
-        assert!(
-            explore.starts_with("Ran on claude-opus-5-5 and cost an unknown amount."),
-            "{explore}"
-        );
-        assert!(explore.contains("user agent named Explore with model: haiku"));
-        assert_eq!(
-            explore_warning(&line(Harness::Claude, "Explore", "claude-haiku-5-5")),
-            None
+            cards(vec![line(Harness::Claude, "Explore", "claude-haiku-5-5")]),
+            []
         );
         // An agent file named Explore replaces the built-in, which the guide describes.
         let mut custom = line(Harness::Claude, "Explore", "claude-opus-5-5");
         custom.built_in = false;
-        assert_eq!(explore_warning(&custom), None);
+        assert_eq!(cards(vec![custom]), []);
+        let explore = cards(vec![line(Harness::Claude, "Explore", "claude-opus-5-5")]);
+        assert_eq!(explore.len(), 1);
+        assert!(
+            explore[0]
+                .text
+                .starts_with("Ran on claude-opus-5-5 and cost an unknown amount."),
+            "{explore:?}"
+        );
+        assert!(
+            explore[0]
+                .text
+                .contains("user agent named Explore with model: haiku")
+        );
+        // Each directory still missing a file is named; the files there now are said, not asked for.
+        let (missing, project) = (
+            "/synthetic/home/.claude-work/agents",
+            "/synthetic/project/.claude/agents/Explore.md",
+        );
+        let mut partial = line(Harness::Claude, "Explore", "claude-opus-5-5");
+        partial.replacement = Replacement {
+            missing: vec![ROOT_AGENTS.into(), missing.into()],
+            present: vec![project.into()],
+            forced: false,
+        };
+        let card = &cards(vec![partial.clone()])[0];
+        let Some(How::Manual { step, .. }) = &card.how else {
+            panic!("{card:?}")
+        };
+        assert!(
+            step.starts_with(&format!(
+                "add a new .md agent file to {ROOT_AGENTS} and {missing} with the frontmatter name: Explore;"
+            )),
+            "{step}"
+        );
+        assert!(
+            card.text.ends_with(&format!(
+                " {project} now replaces the built-in, so later runs there follow it."
+            )),
+            "{}",
+            card.text
+        );
+        assert!(!card.quiet);
+        // Once every run has its file there is nothing left to do.
+        partial.replacement.missing.clear();
+        let card = &cards(vec![partial.clone()])[0];
+        assert_eq!(
+            (card.quiet, card.how.as_ref(), card.value.as_str()),
+            (true, None, "")
+        );
+        // A forced subagent model drops the file's model, so no file is asked for there.
+        let mut forced = line(Harness::Claude, "Explore", "claude-opus-5-5");
+        forced.replacement = Replacement {
+            forced: true,
+            ..Replacement::default()
+        };
+        let card = &cards(vec![forced.clone()])[0];
+        assert_eq!(
+            (card.quiet, card.how.as_ref(), card.value.as_str()),
+            (false, None, "")
+        );
+        assert!(
+            card.text.ends_with(
+                " CLAUDE_CODE_SUBAGENT_MODEL_FORCE is set, which drops an agent file's model, so the tip does not apply while it is."
+            ),
+            "{}",
+            card.text
+        );
+        // Force in one scope leaves the step for the runs where a file would work.
+        forced.replacement.missing = vec![ROOT_AGENTS.into()];
+        let card = &cards(vec![forced])[0];
+        assert!(matches!(card.how, Some(How::Manual { .. })), "{card:?}");
+        assert_eq!(card.value, "inherit -> haiku");
+        assert!(
+            card.text
+                .contains("is set for some runs, which drops an agent file's model, so the tip does not apply to them while it is."),
+            "{}",
+            card.text
+        );
     }
 
     #[test]

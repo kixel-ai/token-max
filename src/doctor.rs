@@ -921,16 +921,25 @@ pub(crate) fn window_change(
     let Some(reowned) = reowned.filter(|_| c.base.current != Some(window)) else {
         return window_how(c, window, profile);
     };
-    match reown(reowned, profile) {
-        How::Edit(patch) if !reowned.unkept.is_empty() => How::Manual {
+    let how = reown(reowned, profile);
+    if reowned.unkept.is_empty() {
+        return how;
+    }
+    let unkept = format!(
+        "changing this window removes {}, and {}",
+        crate::controls::PERCENT_KEY,
+        reowned.unkept.join("; ")
+    );
+    match how {
+        How::Edit(patch) => How::Manual {
             step: steps(&patch),
-            reason: format!(
-                "changing this window removes {}, and {}",
-                crate::controls::PERCENT_KEY,
-                reowned.unkept.join("; ")
-            ),
+            reason: unkept,
         },
-        how => how,
+        // A step already by hand still warns that it moves another model's trigger.
+        How::Manual { step, reason } => How::Manual {
+            step,
+            reason: format!("{reason}; {unkept}"),
+        },
     }
 }
 

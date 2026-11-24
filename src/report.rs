@@ -8416,7 +8416,7 @@ mod tests {
         // The shell's override is left by hand, naming every step.
         let mut shell = beside.clone();
         shell.insert(2, change(key, None));
-        let How::Manual { step, reason } = how(shared.clone(), plan(shell)) else {
+        let How::Manual { step, reason } = how(shared.clone(), plan(shell.clone())) else {
             panic!("expected a step by hand");
         };
         assert!(
@@ -8426,6 +8426,33 @@ mod tests {
         assert!(step.contains("set \"modelSettings\""), "{step}");
         assert!(step.contains(&format!("remove env.{key}")), "{step}");
         assert!(step.ends_with(&format!("; remove {key}")), "{step}");
+
+        // A plan that can't keep another model's trigger says so, by hand as well.
+        let haiku = "claude-haiku-5-5: it would compact at 150000 instead of 75000";
+        let How::Manual {
+            step: unkept_step,
+            reason,
+        } = how(
+            shared.clone(),
+            Reowned {
+                changes: shell,
+                unkept: vec![haiku.into()],
+            },
+        )
+        else {
+            panic!("expected a step by hand");
+        };
+        assert_eq!(unkept_step, step);
+        assert!(
+            reason.starts_with(&format!("the {key} environment variable sets it")),
+            "{reason}"
+        );
+        assert!(
+            reason.ends_with(&format!(
+                "; changing this window removes {key}, and {haiku}"
+            )),
+            "{reason}"
+        );
 
         // A model whose trigger a project file owns is pinned there by hand.
         let project = "/synthetic/project/.claude/settings.json:modelSettings.claude-haiku-5-5.autoCompactWindow";

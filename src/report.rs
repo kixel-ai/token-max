@@ -536,10 +536,9 @@ struct SubagentLine<'a> {
     lead: &'a Profile,
     /// The profile tag the card's name carries.
     profile: String,
-    /// The Claude Code the line's profiles last ran, for those with a recorded request.
-    versions: Vec<Option<&'a str>>,
-    /// Whether the line covers more than one profile.
-    shared: bool,
+    /// The Claude Code each of the line's profiles last ran, by the name a card gives the
+    /// profile, empty when the line covers one; for those with a recorded request.
+    versions: Vec<(String, Option<&'a str>)>,
 }
 
 /// The default subagent effort as `vibes` shows it: the level and the model it pairs with,
@@ -559,26 +558,37 @@ fn subagent_item(line: &SubagentLine<'_>, out: &Out<'_>) -> Option<Item> {
         "Subagents default to {level} on {model} when neither the call nor the agent's definition names an effort. Set in {}.",
         out.home(&effort.owner)
     );
+    if let Some(why) = &p.agents.unresolved {
+        let _ = write!(
+            text,
+            " {}, so a run may not have used these settings.",
+            capitalize(why)
+        );
+    }
     let (minor, patch) = SUBAGENT_EFFORT_SINCE;
     // A profile's latest Claude Code before the variable arrived runs subagents at the
     // main session's effort, whatever it says.
-    let ignored = match p.harness {
+    let ignored: Vec<(&str, &str)> = match p.harness {
         Harness::Claude => line
             .versions
             .iter()
-            .flatten()
-            .find(|v| !crate::version::claude_at_least(Some(v), minor, patch)),
-        Harness::Codex => None,
+            .filter_map(|(name, v)| Some((name.as_str(), (*v)?)))
+            .filter(|(_, v)| !crate::version::claude_at_least(Some(v), minor, patch))
+            .collect(),
+        Harness::Codex => vec![],
     };
-    if let Some(version) = ignored {
-        let ran = if line.shared {
-            "One of these profiles' latest sessions ran"
-        } else {
-            "The latest session ran"
-        };
+    if !ignored.is_empty() {
+        let ran: Vec<String> = ignored
+            .iter()
+            .map(|(name, version)| match name {
+                &"" => format!("The latest session ran Claude Code {version}"),
+                name => format!("{name}'s latest session ran Claude Code {version}"),
+            })
+            .collect();
         let _ = write!(
             text,
-            " {ran} Claude Code {version}, which ignores CLAUDE_CODE_SUBAGENT_EFFORT: it arrived in 2.{minor}.{patch}, so its subagents run at the main session's effort. Upgrade Claude Code to 2.{minor}.{patch} or later for the setting to apply."
+            " {}, which ignores CLAUDE_CODE_SUBAGENT_EFFORT: it arrived in 2.{minor}.{patch}, so its subagents run at the main session's effort. Upgrade Claude Code to 2.{minor}.{patch} or later for the setting to apply.",
+            ran.join("; ")
         );
     }
     let guidance = past_high(level, p.harness);
@@ -603,10 +613,10 @@ fn subagent_item(line: &SubagentLine<'_>, out: &Out<'_>) -> Option<Item> {
             OPENAI_REASONING.into(),
         ],
     };
-    if ignored.is_some() {
+    if !ignored.is_empty() {
         sources.push(CLAUDE_CHANGELOG.into());
     }
-    let quiet = how.is_none() && ignored.is_none();
+    let quiet = how.is_none() && ignored.is_empty();
     Some(Item {
         name: tagged("Subagent default".into(), &line.profile),
         value: if guidance.is_some() {
@@ -6450,8 +6460,21 @@ fn summary(
             let line = SubagentLine {
                 lead: members[0],
                 profile,
-                versions: crate::doctor::claude_versions(report, &refs),
-                shared: members.len() > 1,
+                versions: refs
+                    .iter()
+                    .filter_map(|id| {
+                        let version = crate::doctor::claude_versions(report, &[id]).pop()?;
+                        // One profile's card names no profile.
+                        let name = match members.len() {
+                            1 => String::new(),
+                            _ => tags
+                                .get(id)
+                                .cloned()
+                                .unwrap_or_else(|| out.short_profile(id)),
+                        };
+                        Some((name, version))
+                    })
+                    .collect(),
             };
             vibes.extend(subagent_item(&line, out));
         }
@@ -9335,6 +9358,42 @@ mod tests {
         assert_eq!(
             patch.edits[0].path,
             ["agents", "default_subagent_reasoning_effort"]
+        );
+
+        // Profiles sharing the setting and model get one card, naming each that runs a
+        // Claude Code too old to read it.
+        let mut report = synthetic();
+        report.checks.clear();
+        report.context.clear();
+        let mut other = crate::test_support::make_profile("other", ROOT);
+        other.root = format!("{ROOT}/other");
+        report.scan.profiles.push(other);
+        for p in &mut report.scan.profiles {
+            p.agents.effort = Some(Owned {
+                value: "medium".into(),
+                owner: variable.clone(),
+            });
+        }
+        for r in &mut report.scan.requests {
+            r.version = Some("2.1.316".into());
+        }
+        let mut old = report.scan.requests[0].clone();
+        old.id = "other-request".into();
+        old.profiles = vec!["other".into()].into();
+        old.version = Some("2.1.315".into());
+        report.scan.requests.push(old);
+        let cards: Vec<Item> = advice(&report, ReportOptions::default())
+            .into_iter()
+            .filter(|i| i.name.starts_with("Subagent default"))
+            .collect();
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert!(
+            cards[0]
+                .text
+                .contains("other's latest session ran Claude Code 2.1.315")
+                && !cards[0].text.contains("ran Claude Code 2.1.316"),
+            "{}",
+            cards[0].text
         );
 
         // Profiles sharing the setting but not the subagent model get a card each, named by

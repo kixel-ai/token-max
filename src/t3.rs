@@ -68,6 +68,15 @@ const ENVIRONMENT: &[&str] = &[
     "BASH_DEFAULT_TIMEOUT_MS",
 ];
 
+/// The variables only subagent discovery reads, whose secret value leaves just the subagent
+/// controls unresolved.
+pub(crate) const SUBAGENT_ENVIRONMENT: &[&str] = &[
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+    "CLAUDE_CODE_SUBAGENT_EFFORT",
+    "CLAUDE_CODE_SUBAGENT_MODEL_FORCE",
+    "CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP",
+];
+
 /// The profile id of a T3 instance, which a removed instance keeps for its retained history.
 pub(crate) fn profile_key(state: &str, instance: &str) -> String {
     format!("t3:{state}:{instance}")
@@ -679,6 +688,14 @@ pub(crate) fn discover(
                                 own_environment.push(entry.name.clone());
                             }
                             env.insert(entry.name, value);
+                        }
+                        // A secret subagent variable leaves only the subagent controls
+                        // unresolved, which their discovery reads from the owned name.
+                        None if SUBAGENT_ENVIRONMENT.contains(&entry.name.as_str()) => {
+                            env.remove(&entry.name);
+                            if !own_environment.contains(&entry.name) {
+                                own_environment.push(entry.name.clone());
+                            }
                         }
                         None => {
                             env.remove(&entry.name);
@@ -3044,6 +3061,44 @@ mod tests {
                 .any(|t| t.settings_unresolved)
         );
         assert!(!format!("{scan:?}").contains("PRIVATE_HOME"));
+    }
+    #[test]
+    fn an_instances_subagent_variables_are_its_own_and_a_secret_one_leaves_only_them_unresolved() {
+        let w = Workspace::new();
+        native(&w);
+        state(
+            &w,
+            json!({"providerInstances":{"claudeAgent":{"driver":"claudeAgent","environment":[
+                {"name":"CLAUDE_CODE_SUBAGENT_EFFORT","value":"max"},
+                {"name":"CLAUDE_CODE_SUBAGENT_MODEL","value":"PRIVATE_MODEL","sensitive":true}
+            ]}}}),
+        );
+        let scan = scan(&w.scan_options()).unwrap();
+        let p = scan
+            .profiles
+            .iter()
+            .find(|p| p.t3.as_ref().is_some_and(|t| t.instance == "claudeAgent"))
+            .expect("the instance's profile");
+        assert!(!p.t3.as_ref().unwrap().settings_unresolved);
+        let effort = p.agents.effort.as_ref().expect("the instance's effort");
+        assert_eq!(effort.value, "max");
+        assert!(
+            effort
+                .owner
+                .ends_with("settings.json:providerInstances.claudeAgent.environment.CLAUDE_CODE_SUBAGENT_EFFORT"),
+            "{}",
+            effort.owner
+        );
+        assert!(p.agents.model.is_none());
+        assert!(
+            p.agents
+                .unresolved
+                .as_deref()
+                .is_some_and(|why| why.contains("CLAUDE_CODE_SUBAGENT_MODEL")),
+            "{:?}",
+            p.agents.unresolved
+        );
+        assert!(!format!("{scan:?}").contains("PRIVATE_MODEL"));
     }
     #[test]
     fn claude_exact_sdk_items_link_idle_runs_without_exporting_text() {

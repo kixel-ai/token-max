@@ -412,6 +412,23 @@ fn claude_controls(
 /// environment, which otherwise reads as an exported variable.
 fn t3_owned(controls: &mut AgentControls, t3: &crate::model::T3Instance) {
     let file = join(&[&t3.state, "settings.json"]);
+    // An entry the instance sets with no readable value, such as a secret.
+    let secret: Vec<&str> = t3
+        .environment
+        .iter()
+        .map(String::as_str)
+        .filter(|key| {
+            crate::t3::SUBAGENT_ENVIRONMENT.contains(key)
+                && t3.env.as_ref().is_some_and(|env| !env.contains_key(*key))
+        })
+        .collect();
+    if !secret.is_empty() && controls.unresolved.is_none() {
+        controls.unresolved = Some(format!(
+            "T3 instance {} sets {} with a value token-max cannot read",
+            t3.instance,
+            secret.join(", ")
+        ));
+    }
     for owned in [&mut controls.model, &mut controls.effort]
         .into_iter()
         .flatten()

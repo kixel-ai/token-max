@@ -4241,8 +4241,6 @@ struct Membership {
     /// Its own change, which another line making the same edit shares.
     fix: usize,
     section: crate::doctor::Section,
-    /// The profile its change names, when several profiles were read; empty otherwise.
-    profile: String,
     /// What the section's kind of change does.
     what: String,
 }
@@ -4669,7 +4667,13 @@ fn section_row(members: &[Row], out: &Out<'_>) -> Row {
     row.value = crate::doctor::section_value(
         changes.iter().map(|r| {
             let m = r.section.as_ref().expect("filtered on a section");
-            (&m.section, m.profile.as_str(), r.value.as_str())
+            // The member row's own tag, which names its profile as the walk card does.
+            let tag = r.profile.strip_prefix('[').unwrap_or(&r.profile);
+            (
+                &m.section,
+                tag.strip_suffix(']').unwrap_or(tag),
+                r.value.as_str(),
+            )
         }),
         out.arrow,
     );
@@ -5726,7 +5730,6 @@ fn sectioned(rows: &mut [Row], fixes: &[crate::doctor::Fix], out: &Out<'_>) {
             id,
             fix,
             section: section.clone(),
-            profile: fixes[fix].profile.clone(),
             what: crate::doctor::section_what(section, &row.what),
         });
     }
@@ -12303,6 +12306,37 @@ mod tests {
         assert!(
             details.contains(&format!("What: {}", crate::descriptions::CACHE_TTLS)),
             "{details}"
+        );
+    }
+
+    #[test]
+    fn a_ttl_section_across_profiles_names_each_profile_in_its_row() {
+        let mut report = synthetic();
+        let other = make_profile("other", "/synthetic/other");
+        report.scan.profiles.push(other);
+        let main = report
+            .checks
+            .iter()
+            .find_map(|c| match c {
+                CheckResult::Ttl(t) if t.bucket == Bucket::Main => Some(t.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let mut copy = main.clone();
+        copy.base.profile = "other".into();
+        copy.base.profiles = vec!["other".into()];
+        copy.base.owner = "/synthetic/other/settings.json:promptCacheTtl".into();
+        report.checks.push(CheckResult::Ttl(copy));
+        let plain = text(&report, None, false);
+        let row = plain
+            .lines()
+            .find(|l| l.contains("Prompt cache TTL"))
+            .expect("a TTL section row");
+        assert!(
+            row.contains(
+                "main (/synthetic/home/.claude/settings.json) 5m -> 1h, main (/synthetic/other/settings.json) 5m -> 1h"
+            ),
+            "{plain}"
         );
     }
 }

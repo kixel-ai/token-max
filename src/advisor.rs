@@ -38,17 +38,21 @@ const FLAG_OFF: [(&str, bool); 5] = [
 
 /// Resolve the advisor from `scopes`, lowest precedence first, and the terminal `env`.
 /// `user_file` is where an advisor would be set when no scope sets one. A value that is no
-/// model name is shown as set and blocked, since only the advisor card reads it.
+/// model name Claude Code recognizes is shown as set and blocked, by its kind alone, since it
+/// could be anything, a pasted credential included, and only the advisor card reads it.
 pub fn control(scopes: &[SettingsScope], env: &Env, user_file: &str) -> AdvisorControl {
     // A null outranks the files below it, as settings merge.
     let (model, owner, invalid) = match crate::effort::highest(scopes, KEY) {
         Some((Value::Null, file)) => (None, format!("{file}:{KEY}"), false),
-        Some((Value::String(m), file)) => (
-            Some(m.trim().to_string()).filter(|m| !m.is_empty()),
-            format!("{file}:{KEY}"),
-            false,
-        ),
-        // Only its type is shown, since the value could be anything, a credential included.
+        Some((Value::String(m), file)) => match m.trim() {
+            "" => (None, format!("{file}:{KEY}"), false),
+            m if recognized(m) => (Some(m.to_string()), format!("{file}:{KEY}"), false),
+            _ => (
+                Some("an unknown name".into()),
+                format!("{file}:{KEY}"),
+                true,
+            ),
+        },
         Some((value, file)) => {
             let kind = match value {
                 Value::Bool(_) => "a boolean",
@@ -76,7 +80,7 @@ pub fn control(scopes: &[SettingsScope], env: &Env, user_file: &str) -> AdvisorC
     };
     let flagless = FLAGLESS.iter().any(|key| on(key));
     let blocked = if invalid {
-        Some(format!("{KEY} is not a model name"))
+        Some(format!("{KEY} is no model name Claude Code recognizes"))
     } else if on("CLAUDE_CODE_DISABLE_ADVISOR_TOOL") {
         Some(format!(
             "{} turns the advisor tool off",
@@ -137,6 +141,13 @@ fn parse(id: &str) -> Option<(&str, (u32, u32))> {
         .and_then(|n| n.parse().ok())
         .unwrap_or(0);
     Some((family, (major, minor)))
+}
+
+/// Whether `name` is an alias or a Claude model ID of a family that can advise.
+fn recognized(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let family = |f: &str| ["fable", "opus", "sonnet", "haiku"].contains(&f);
+    family(&name) || parse(&name).is_some_and(|(f, _)| family(f))
 }
 
 /// Whether Claude Code pairs `main`, a canonical model ID, with `advisor`, by its pairing
@@ -263,7 +274,10 @@ mod tests {
         let a = resolve(json!({"advisorModel": false}), json!({}), &[]);
         assert_eq!(
             (a.model.as_deref(), a.blocked.as_deref()),
-            (Some("a boolean"), Some("advisorModel is not a model name"))
+            (
+                Some("a boolean"),
+                Some("advisorModel is no model name Claude Code recognizes")
+            )
         );
         let a = resolve(
             json!({"advisorModel": {"key": "sk-secret"}}),
@@ -271,6 +285,14 @@ mod tests {
             &[],
         );
         assert_eq!(a.model.as_deref(), Some("an object"));
+        // So is a string naming no model, which could be a pasted credential.
+        let a = resolve(json!({"advisorModel": "sk-ant-secret"}), json!({}), &[]);
+        assert_eq!(a.model.as_deref(), Some("an unknown name"));
+        assert!(a.blocked.is_some());
+        for name in ["Opus", "claude-sonnet-5-5", "claude-haiku-5-5-20260101"] {
+            let a = resolve(json!({"advisorModel": name}), json!({}), &[]);
+            assert_eq!((a.model.as_deref(), a.blocked), (Some(name), None));
+        }
     }
 
     #[test]

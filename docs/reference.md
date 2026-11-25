@@ -1735,7 +1735,9 @@ pass the advisor tool on intact, and a Fable advisor needs Fable access and,
 on plans that bill Fable to usage credits, the consent `/model fable` asks
 for; the card says both. An `advisorModel` already set gets a card that
 advises nothing, unless one of those stops it loading, its value is no model
-name (the card names only its type, never the value), the main model takes no
+name Claude Code recognizes (an alias, or a Claude model ID of a family that
+can advise; the card names only its kind, never the value, which could be a
+pasted credential), the main model takes no
 advisor, or Claude Code's [pairing table](https://code.claude.com/docs/en/advisor#choose-an-advisor-model)
 rejects the pair; then it says so and offers no edit. The table is checked for
 a full model ID such as `claude-sonnet-5-5`. An alias such as `opus` resolves
@@ -1744,7 +1746,7 @@ model, which takes no other family, judges one.
 
 T3 Code picks each thread's main model, so T3 instances get no card; when one
 reads the same settings file, the card says each of its threads whose model
-takes the advisor would use it, unless the instance's launch arguments, secret
+and provider take the advisor would use it, unless the instance's launch arguments, secret
 environment or machine policy, which token-max can't resolve, override that
 file. `doctor` has no advisor line. An advisor call
 whose iteration records no service tier leaves its request with no price of its

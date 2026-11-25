@@ -4762,7 +4762,7 @@ fn advisor_item(p: &Profile, profile: &str, out: &Out<'_>) -> Item {
                 if !t3.is_empty() {
                     let _ = write!(
                         text,
-                        " T3 Code threads read {} too, and T3 picks each thread's main model, so each thread whose model takes this advisor would use it",
+                        " T3 Code threads read {} too, and T3 picks each thread's main model, so each thread whose model and provider take this advisor would use it",
                         p.settings_file
                     );
                     if t3.iter().any(|t| t.settings_unresolved) {

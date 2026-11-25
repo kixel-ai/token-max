@@ -10,7 +10,7 @@ use std::io::{self, BufRead, Write};
 use serde::{Deserialize, Serialize};
 
 use crate::doctor::{
-    Answer, Card, Change, Event, Fix, How, Offers, Owner, Selection, Standing, Style,
+    Answer, Card, Change, Event, Fix, How, Kind, Offers, Owner, Section, Selection, Standing, Style,
 };
 use crate::model::Harness;
 use crate::report::Origin;
@@ -108,7 +108,14 @@ pub fn fixes(items: &[Item]) -> Vec<Fix> {
             evidence: String::new(),
             how: item.how.clone()?,
             origins: vec![origin],
-            group: None,
+            // Each item names its own setting and profile, so none shares a question.
+            section: Section {
+                kind: Kind::Setting,
+                label: item.name.clone(),
+                member: item.name.clone(),
+                location: None,
+            },
+            profile: String::new(),
             removal: vec![],
         })
     };

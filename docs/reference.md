@@ -106,22 +106,34 @@ same scan, with nothing read or asked again, and with its own confirm before
 anything more is written. Without a terminal, the report ends with one line
 naming `token-max vibes`.
 
-A tool, skill or MCP server's change joins a group of its kind and reason, such
-as never-used skills or MCP servers over $1 per use, whatever it saves. The
-reasons are never used, no use recorded where the window cannot rule one out,
-over `--max-cost-per-use` per use, and a redundant copy of a Codex catalog
-skill whose most-used copy stays. Each reason is its own group, so a yes to
-never-used features never also removes one in use. A group is one question
-ranked by its combined saving, which names every member and takes `y` for all,
-`n` for none, `q` to quit or `s` to split it and answer each member, as
-`git add -p` splits a hunk; a group of one is asked as that change. Features whose
-savings were not measured, such as Codex catalog skills, are grouped the same
-way after the measured questions. A group saving under $1/mo in total,
-including a lone small change such as a check, is not asked: one dim line says
-how many changes were left out, and the list after the walk shows them among
-those not accepted.
+Each change joins a section, which the walk asks as one question and the
+report lists as one row. A tool, skill or MCP server's change joins the
+section of its kind and reason, across every profile, such as never-used
+skills or MCP servers over $1 per use, whatever it saves. The reasons are
+never used, no use recorded where the window cannot rule one out, over
+`--max-cost-per-use` per use, and a redundant copy of a Codex catalog skill
+whose most-used copy stays. Each reason is its own section, so a yes to
+never-used features never also removes one in use, and so is each offered
+value: skills set to typed only and skills turned off are two sections. The
+main-agent and subagent prompt cache TTLs are one section, whose value names
+each change, such as `main 5m -> 1h, subagent 1h -> 5m`. Any other setting,
+such as auto memory, is a section of its own across profiles.
 
-Each question takes `y`, `n` or `q`, and a group also `s`; anything else asks
+A section is one question ranked by its combined saving. Its card names how
+many changes it holds and the largest few, such as `dataviz, code-review, run
+and 16 more`, and takes `y` for all, `n` for none, `q` to quit or `s` to split
+it and answer each member, as `git add -p` splits a hunk; a section of one is
+asked as that change. A member's card names its settings file or profile when
+several profiles were read. Features whose savings were not measured, such as
+Codex catalog skills, form sections of their own after the measured questions.
+A section saving under $1/mo in total, including a lone small change such as
+a check, is not asked: one dim line says how many changes were left out, and
+the list after the walk shows them among those not accepted. `vibes`' card
+that says the walk skips a change too small to ask, such as auto memory's,
+judges its section's total, not the one change's, leaving out a member whose
+file refuses its edit, which the walk lists as a step by hand.
+
+Each question takes `y`, `n` or `q`, and a section also `s`; anything else asks
 again. An answer only selects: after each yes, a running total sums the
 accepted changes' own savings, in dollars and as a percent of this host's
 spend, and says that overlapping changes may save less, since each saving holds
@@ -136,7 +148,9 @@ unaccepted.
 The report follows, its list grouped: the accepted changes first with the
 total, then the ones not accepted, then the steps to take by hand, such as a
 change something else would override, each saying why, then every other line,
-each group ranked as the report ranks it. Then the confirm shows how each settings file would change, as
+each group ranked as the report ranks it. A section split in the walk shows
+its accepted members as one row and the rest as another, and each step by
+hand keeps its own line. Then the confirm shows how each settings file would change, as
 a diff with a line of context around each change, removed lines in red and
 added ones in green. Values that may be secrets show as `••••` (`****`
 without Unicode), keeping their keys: each variable or header of an MCP server
@@ -258,7 +272,8 @@ name holds another `__` after the server's, the Claude Code is older, or
 `deniedMcpServers` is not a list, the walk names
 the step to take by hand instead: remove it from `.mcp.json`, uninstall the
 plugin, disconnect the connector at claude.ai, or remove it where it is
-configured. `disableClaudeAiConnectors` is never offered, since it turns off
+configured. Where only the Claude Code is older, the step also offers
+[upgrading it](#harness-upgrades). `disableClaudeAiConnectors` is never offered, since it turns off
 every connector, including ones added later.
 
 A server whose name holds `__` or ends in `_`, known from its MCP
@@ -285,13 +300,15 @@ so the removal survives sessions already running, which keep the server until
 they restart.
 
 Without a terminal, `doctor` changes nothing: each change's line ends with its
-edit and file, or its step by hand.
+edit and file, or its step by hand. A section's row names the settings its
+members change, such as `skillOverrides.*`, and `--details` lists each member
+with its edit.
 
 ### On SSH hosts
 
 With `--ssh`, the walk offers every host's changes in one list, biggest saving
 first across hosts. A card for another host's change, or any card when the run
-covers several hosts, names its host under `Host`, and a group only gathers one
+covers several hosts, names its host under `Host`, and a section only gathers one
 host's changes. Each host's last question offers to remove its servers that are
 off already. The running total sums the accepted changes of every host, as a
 percent of the hosts' spend together. Each host's report follows the walk,
@@ -478,7 +495,9 @@ setting or feature, its current value (and the value to change to, for a
 change), what it saves per 30 days or costs over the window, that figure's
 share of this host's spend, the profile when several were read, and the
 setting that changes it. For a change `doctor` offers,
-that last column is the exact edit and file, or the step to take by hand.
+that last column is the exact edit and file, or the step to take by hand; a
+section's row names the settings its members' edits change, such as
+`skillOverrides.*`, and `--details` shows each member's exact edit.
 
 Every line is measured: replayed or priced from your own transcripts at public
 API prices, or marked unknown where they can't price it. No verdict rests on
@@ -495,8 +514,15 @@ measured after the rest. A feature turned off saves what it cost, assuming
 nothing else changes. **Everything else** follows, ranked by what it costs,
 biggest first, with lines whose cost is unknown or that have no figure after.
 When several profiles were read, each line also names the settings file that
-owns it, or the profile when no file does (see [Profiles](#profiles)).
-The headline counts both kinds of change. The line under it sums what they
+owns it, or the profile when no file does (see [Profiles](#profiles)); a
+section's row names every file its members' lines name.
+Changes the walk would ask as one question, a [section](#applying-changes), share one
+row: its heading, how many changes it holds and the value they move to, such
+as `19 -> typed only`, what they save together with its `~` and margin, and the
+strongest member's verdict. A saving that holds only under one default, such
+as an unset main-agent cache TTL's, stays apart, such as `saves ~$12/mo + up
+to $30/mo`. `--details` lists each member under its section's row. A change
+only taken by hand keeps its own row. The headline counts both kinds of change. The line under it sums what they
 save together, as the walk's running total would if every change were
 accepted, such as "Together, these changes save about $40/mo, 9% of this
 host's spend; overlapping changes may save less", since each saving holds
@@ -586,6 +612,44 @@ including those no longer sent.
 
 A run with no histories or no requests in the selected window gives a next step;
 no applicable changes does not imply complete visibility or optimal settings.
+
+### Harness upgrades
+
+Some settings need a newer Claude Code or Codex than the profile's latest
+session ran: the cache TTLs Claude Code 2.1.242, the idle compaction toggle
+2.1.290 (2.1.314 without the server flag that earlier versions needed), a
+per-model compaction window 2.1.288 (2.1.304 for a `k` or `m` suffix), a
+`deniedMcpServers` entry 2.1.0 to 2.1.330 by the server's kind,
+`CLAUDE_CODE_SUBAGENT_EFFORT` 2.1.316, and Codex's turn-end compaction
+threshold 0.156.0. When the version is the only thing
+holding a verdict back, its line keeps its unknown mark and exit code, and the
+line under it says which version the setting needs, which version the latest
+session ran, and to upgrade. `vibes`' window cap and
+subagent default cards and a step by hand to block an MCP server say so too. token-max never upgrades a
+harness itself. A version the session didn't record, or one that isn't plain
+digits, still holds the setting back but advises no upgrade and names no
+command, since that release may already meet it: a `doctor` line then gets no
+upgrade line, and a card or step by hand that explains the wait calls it "an
+unrecorded version" or "a version token-max cannot read".
+
+Every request on a settings file counts toward whether its setting applies,
+but only Claude Code's interactive clients (`cli`, `claude-vscode` and
+`ssh-remote`, main agent or subagent) say which version to upgrade: an Agent
+SDK app, remote session or MCP client on the same file pins its own Claude
+Code, which `claude update` doesn't reach. Such a client holds the line back
+without advising an upgrade, and while its own latest version is also too old
+the line advises none at all, since upgrading the interactive install alone
+would still leave it held back. The idle compaction toggle, which only an
+interactive client runs, is judged by interactive requests alone. A T3
+instance's own requests and every Codex request count.
+
+It names an upgrade command only when it knows how the harness was installed:
+`claude update` when Claude Code's state file records a native install
+(`"installMethod": "native"`). An npm, Nix or Homebrew install, Codex, and a
+T3 instance, which runs the binary its settings name or `claude` or `codex`
+on its own PATH, get the version alone. A version gate that explains a past
+request, such as which model a built-in Explore ran on, uses that request's
+own version and advises nothing.
 
 ## Savings against the defaults
 
@@ -771,9 +835,9 @@ Every line says in one sentence what its setting or feature does, such as
 "Lets Claude publish an HTML or Markdown file to claude.ai as an artifact: a
 private, interactive page you can share" for the Artifact tool that
 `enableArtifact` turns off. `--details` prints it under the line as `What:`,
-and the walk opens each change with it. A grouped question opens with what its
+and the walk opens each change with it. A section's question opens with what its
 kind of feature is, such as what skills are, and each member's own sentence
-shows when you split the group. The default report keeps each line to one
+shows when you split the section. The default report keeps each line to one
 line.
 
 Checked settings, built-in Claude Code tools, subagent types and the other
@@ -1613,8 +1677,9 @@ is left alone; the [subagent lines](#subagent-models) show it. At or below
 Claude Code reads `CLAUDE_CODE_SUBAGENT_EFFORT` from 2.1.316
 ([changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md)).
 When a profile's latest request ran an older Claude Code, the card says the
-variable is ignored and advises upgrading; past `high` it still offers the
-change to `high`, which applies once Claude Code is upgraded. Profiles that
+variable is ignored and, under the [harness upgrade](#harness-upgrades) rules,
+advises upgrading; past `high` it still offers the change to `high`, which
+applies once Claude Code is upgraded. Profiles that
 share the setting but pair it with different subagent models get a card each.
 Only the profile's own settings and environment, or a T3 instance's, are
 read; a project's settings that set the variable are not.
@@ -1646,6 +1711,15 @@ the file is not read. Codex records its AGENTS.md text without a path, so its
 sessions are read from the directory alone. A session with neither, because
 its directory is gone or unrecorded, counts as without one, and the card
 names how many did.
+
+A session counts for the line whose profile ran it. When a T3 instance shares
+native Claude Code's history, a session T3 settled to the instance counts for
+the instance's line, not the native one. A session whose owner T3 could not
+settle counts when every candidate owner is on the line, such as native Claude
+Code and an instance sharing its `settings.json`; otherwise, including when T3
+names an owner outside the home, the card leaves it out and says how many it
+left out. So does a session whose turns T3 matched to profiles on different
+lines, so no session counts on two.
 
 Where the advice doesn't hold, the card advises nothing: memory already off,
 or too few sessions in a repository, where memory may be the only place a fact

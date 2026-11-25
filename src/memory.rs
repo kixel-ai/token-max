@@ -134,7 +134,12 @@ fn check(
             }
         }
     }
-    let places = places(line, &mine, &scan.exposure.project_files);
+    let places = places(
+        line,
+        profile.harness,
+        &scan.requests,
+        &scan.exposure.project_files,
+    );
     let on = control.value;
     // Unknown when a setting the scan cannot resolve, such as a Codex --profile
     // selection, could change it.
@@ -415,6 +420,7 @@ fn check(
             .into(),
             uncertainty,
             sources: SOURCES.map(String::from).into(),
+            upgrade: None,
         },
         harness: profile.harness,
         off: control.off.clone(),
@@ -436,24 +442,46 @@ fn check(
 /// Where the line's main sessions ran, each at its latest request's directory: in a
 /// repository with a project instruction file when its transcript recorded loading one at or
 /// above that directory, of the files `loaded` holds for it, or its directory holds one now;
-/// unknown when neither settles it.
+/// unknown when neither settles it. A session is the line's when every profile its main
+/// requests, of all of the harness's `requests`, name is on it, so none counts on two lines.
 fn places(
     line: &crate::rows::Group<'_>,
-    mine: &[&Request],
+    harness: Harness,
+    requests: &[Request],
     loaded: &crate::collections::IndexMap<crate::model::Text, crate::collections::IndexSet<String>>,
 ) -> SessionPlaces {
-    let mut latest: HashMap<&str, &Request> = HashMap::default();
-    for r in mine.iter().filter(|r| r.agent == Agent::Main) {
-        let seen = latest.entry(&r.session).or_insert(r);
-        if r.time >= seen.time {
-            *seen = r;
+    // Each session's latest request, whether all its requests' owners are on the line, and
+    // whether any is.
+    let mut latest: HashMap<&str, (&Request, bool, bool)> = HashMap::default();
+    for r in requests
+        .iter()
+        .filter(|r| r.harness == harness && r.agent == Agent::Main)
+    {
+        // T3 names an owner outside this home: a candidate no line holds.
+        let outside = r
+            .issues
+            .iter()
+            .any(|i| i.starts_with(crate::t3::UNSETTLED) && i.contains(crate::t3::OUTSIDE));
+        let here = !outside && r.profiles.iter().all(|p| line.ids.contains(p));
+        let seen = latest.entry(&r.session).or_insert((r, true, false));
+        seen.1 &= here;
+        seen.2 |= line.covers(&r.profiles);
+        if r.time >= seen.0.time {
+            seen.0 = r;
         }
     }
-    let mut places = SessionPlaces {
-        sessions: latest.len() as u64,
-        ..SessionPlaces::default()
-    };
-    for (session, r) in latest {
+    let mut places = SessionPlaces::default();
+    for (session, (r, here, touches)) in latest {
+        if !touches {
+            continue;
+        }
+        // A session T3 settled, or left open, between this line and another is left out,
+        // and counted as such.
+        if !here {
+            places.unsettled += 1;
+            continue;
+        }
+        places.sessions += 1;
         // A file loaded from where the session ran last, not from where it ran before.
         let recorded = r.cwd.as_deref().is_some_and(|cwd| {
             loaded
@@ -670,7 +698,6 @@ mod tests {
             // A subagent's requests are no session of their own.
             request("subagent", 1, Some("/repo"), Agent::Subagent),
         ];
-        let mine: Vec<&Request> = requests.iter().collect();
         let loaded = [
             ("recorded", "/gone/AGENTS.md"),
             // Loaded where it ran before, then resumed in a plain directory.
@@ -680,13 +707,14 @@ mod tests {
         .map(|(session, file)| (session.into(), [file.to_string()].into_iter().collect()))
         .collect();
         let line = crate::rows::Group::one(&profile);
-        let p = places(&line, &mine, &loaded);
+        let p = places(&line, Harness::Claude, &requests, &loaded);
         assert_eq!(
             p,
             SessionPlaces {
                 sessions: 5,
                 instructed: 2,
                 unknown: 2,
+                unsettled: 0,
             }
         );
         // Two of five is not most, though three are unknown or known to be in one.
@@ -695,7 +723,8 @@ mod tests {
             SessionPlaces {
                 sessions: 4,
                 instructed: 3,
-                unknown: 1
+                unknown: 1,
+                unsettled: 0,
             }
             .most()
         );
@@ -703,11 +732,89 @@ mod tests {
             !SessionPlaces {
                 sessions: 4,
                 instructed: 2,
-                unknown: 0
+                unknown: 0,
+                unsettled: 0,
             }
             .most()
         );
         assert!(!SessionPlaces::default().most());
+    }
+
+    #[test]
+    fn sessions_count_for_the_line_t3_settled_or_whose_candidates_it_holds() {
+        // Native Claude Code and one T3 instance share the line's settings file; another
+        // instance shares the native history but not the line.
+        let mut native = crate::test_support::make_profile("native", "/home/.claude");
+        native.memory = Some(crate::model::MemoryControl {
+            value: true,
+            owner: String::new(),
+            off: String::new(),
+            off_file: None,
+            directory: None,
+            unresolved: None,
+            overrides: vec![],
+            stored: false,
+            instructed: [("/repo".to_string(), Some(true))].into_iter().collect(),
+        });
+        let mine_t3 = crate::test_support::make_profile("t3-mine", "/home/.claude");
+        let line = crate::rows::Group {
+            lead: &native,
+            ids: vec!["native".into(), "t3-mine".into()],
+            members: vec![&native, &mine_t3],
+        };
+        let request = |session: &str, time: Millis, owners: &[&str], issue: Option<&str>| {
+            let mut r = crate::test_support::make_request();
+            r.time = time;
+            r.session = session.into();
+            r.cwd = Some("/repo".into());
+            r.agent = Agent::Main;
+            r.profiles = owners
+                .iter()
+                .map(|o| o.to_string())
+                .collect::<Vec<_>>()
+                .into();
+            if let Some(cause) = issue {
+                r.issues = vec![format!("{}: {cause}", crate::t3::UNSETTLED).into()];
+            }
+            r
+        };
+        let open = Some("synthetic");
+        let outside = format!("synthetic{}", crate::t3::OUTSIDE);
+        let requests = [
+            request("settled", 1, &["native"], None),
+            // T3 settled it to the other instance: not this line's.
+            request("shared", 1, &["t3-other"], None),
+            // Unsettled, but every candidate is on the line.
+            request("candidates", 1, &["native", "t3-mine"], open),
+            // Unsettled, and the other instance may have run it.
+            request("either", 1, &["native", "t3-other"], open),
+            // One T3 marked unsettled with a single candidate on the line still counts.
+            request("single", 1, &["native"], open),
+            // Its candidates here are on the line, but T3 names another owner outside.
+            request("elsewhere", 1, &["native", "t3-mine"], Some(&outside)),
+            // Handed to the other instance: it spans lines, so neither counts it.
+            request("handed", 1, &["native"], None),
+            request("handed", 2, &["t3-other"], None),
+            // An earlier turn T3 matched to the other instance: the session spans lines.
+            request("split", 1, &["t3-other"], None),
+            request("split", 2, &["native"], None),
+            // Another harness's session of the same name is no session of this line's.
+            {
+                let mut r = request("settled", 3, &["t3-other"], None);
+                r.harness = Harness::Codex;
+                r
+            },
+        ];
+        let p = places(&line, Harness::Claude, &requests, &Default::default());
+        assert_eq!(
+            p,
+            SessionPlaces {
+                sessions: 3,
+                instructed: 3,
+                unknown: 0,
+                unsettled: 4,
+            }
+        );
     }
 
     #[test]

@@ -232,6 +232,14 @@ impl Harness {
             Harness::Codex => "codex",
         }
     }
+
+    /// The product's name, as people call it.
+    pub fn product(self) -> &'static str {
+        match self {
+            Harness::Claude => "Claude Code",
+            Harness::Codex => "Codex",
+        }
+    }
 }
 
 /// A documented Claude cache lifetime.
@@ -1069,6 +1077,9 @@ pub struct Profile {
     /// Claude Code's own state file for this root, such as `~/.claude.json`, which holds
     /// its user- and local-scope MCP servers; none for Codex.
     pub claude_config: Option<String>,
+    /// The command that upgrades the harness, when its state file names an install method
+    /// that has one, such as a native Claude Code's `claude update`.
+    pub updater: Option<&'static str>,
     /// Codex's system `config.toml`, below the user's file, which can declare an MCP server
     /// that the user's table turns off; none for Claude.
     pub codex_system_config: Option<String>,
@@ -1718,6 +1729,9 @@ pub struct CheckBase<V> {
     pub assumptions: Vec<String>,
     pub uncertainty: Vec<String>,
     pub sources: Vec<String>,
+    /// The upgrade that alone would let the line apply its verdict to the next session,
+    /// when only the harness version holds it back.
+    pub upgrade: Option<crate::version::Upgrade>,
 }
 
 impl<V> CheckBase<V> {
@@ -1753,6 +1767,7 @@ impl<V> CheckBase<V> {
                 "no request in the window uses this setting, so nothing measures it; select a window that holds requests to compare it".into(),
             ],
             sources: vec![],
+            upgrade: None,
         }
     }
 }
@@ -2106,6 +2121,9 @@ pub struct SessionPlaces {
     pub instructed: u64,
     /// Those that recorded loading none and ran where no directory remains to read.
     pub unknown: u64,
+    /// Sessions left out of `sessions`: some profile their requests name, or an owner T3
+    /// names outside this home, is off the line.
+    pub unsettled: u64,
 }
 
 impl SessionPlaces {

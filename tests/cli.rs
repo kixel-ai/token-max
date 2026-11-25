@@ -2067,6 +2067,34 @@ mod unix {
             assert_eq!(releases.downloads(), before);
             assert_eq!(names(&locked), ["token-max"]);
         }
+        // A binary in crabx's cache is crabx's: no question, no probe, the same bytes. The cache
+        // is moved and symlinked back, so the binary resolves to a path naming no crabx.
+        let cache = w.home.join(if cfg!(target_os = "macos") {
+            "Library/Caches"
+        } else {
+            ".cache"
+        });
+        let moved = w.home.join("moved");
+        let entry = "v1/x86_64-unknown-linux-musl/author/token-max/0.1.0/bin";
+        std::fs::create_dir_all(moved.join(entry)).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        std::os::unix::fs::symlink(&moved, cache.join("crabx")).unwrap();
+        let bin = cache.join("crabx").join(entry).join("token-max");
+        std::fs::hard_link(BIN, &bin).unwrap();
+        let mut c = command_at(&bin, &w, &doctor);
+        c.env("TOKEN_MAX_RELEASES", &releases.url);
+        let (status, stdout, stderr) = typed(&mut c, b"s\nq\nn\n");
+        assert_eq!(status, code, "{stderr}");
+        let (before_opening, _) = stdout.split_once(&opening).expect(&stdout);
+        assert_eq!(
+            words(before_opening),
+            format!(
+                "token-max v99.0.0 is out; this is v{ours}, and its advice may be out of date. crabx manages this binary: an unpinned crabx token-max picks up the new release on its own, and a pinned one stays on its version."
+            )
+        );
+        assert_eq!(releases.downloads(), before);
+        assert_eq!(std::fs::read(&bin).unwrap(), std::fs::read(BIN).unwrap());
+        assert_eq!(names(bin.parent().unwrap()), ["token-max"]);
     }
 
     fn signal(pid: u32, signal: libc::c_int) {

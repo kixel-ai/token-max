@@ -127,6 +127,8 @@ pub struct Paths {
     /// `$CARGO_HOME`, or `~/.cargo`, whose `bin` holds what `cargo install` and
     /// `cargo binstall` put there.
     pub cargo: Option<PathBuf>,
+    /// crabx's cache, which keeps each version crabx verified.
+    pub crabx: Option<PathBuf>,
 }
 
 impl Paths {
@@ -137,7 +139,22 @@ impl Paths {
             .filter(|home| !home.is_empty())
             .map(PathBuf::from)
             .or_else(|| std::env::home_dir().map(|home| home.join(".cargo")));
-        Ok(Self { exe, cargo })
+        // `crabx` under the user cache directory, found as crabx's `dirs::cache_dir` finds it.
+        let home = std::env::home_dir();
+        let cache = if cfg!(windows) {
+            std::env::var_os("LOCALAPPDATA")
+                .filter(|dir| !dir.is_empty())
+                .map(PathBuf::from)
+        } else if cfg!(target_os = "macos") {
+            home.map(|home| home.join("Library/Caches"))
+        } else {
+            std::env::var_os("XDG_CACHE_HOME")
+                .map(PathBuf::from)
+                .filter(|dir| dir.is_absolute())
+                .or_else(|| home.map(|home| home.join(".cache")))
+        };
+        let crabx = cache.map(|dir| dir.join("crabx"));
+        Ok(Self { exe, cargo, crabx })
     }
 
     /// How the binary here can be upgraded.
@@ -157,8 +174,14 @@ impl Paths {
         }
         // crabx keeps each version it verified under `<cache dir>/crabx/v1/`, and an unpinned
         // `crabx token-max` moves to a new release on its own schedule, so saying when would
-        // be a guess.
-        if self.exe.ancestors().any(|dir| dir.ends_with("crabx/v1")) {
+        // be a guess. The cache root is resolved, as `exe` is, so a symlinked cache still
+        // matches; any `crabx/v<n>` on the path also matches, so a later cache format, or a
+        // cache directory crabx found differently, still keeps its binary. A false match
+        // only withholds the offer.
+        let crabx = self.crabx.map(|root| root.canonicalize().unwrap_or(root));
+        if crabx.is_some_and(|root| self.exe.starts_with(root))
+            || self.exe.ancestors().any(crabx_cache_format)
+        {
             return Install::Manager(
                 "crabx manages this binary: an unpinned crabx token-max picks up the new release \
                  on its own, and a pinned one stays on its version.",
@@ -183,6 +206,14 @@ impl Paths {
             target,
         }
     }
+}
+
+/// Whether `dir` is a crabx cache format's directory, `crabx/v<n>`.
+fn crabx_cache_format(dir: &Path) -> bool {
+    let version = dir.file_name().and_then(|name| name.to_str());
+    let version = version.and_then(|name| name.strip_prefix('v'));
+    version.is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        && dir.parent().and_then(Path::file_name) == Some("crabx".as_ref())
 }
 
 /// Check that this user can create a file beside `exe`, as staging a release there does, or
@@ -433,27 +464,41 @@ mod tests {
         let paths = |exe: &str, cargo: Option<&str>| Paths {
             exe: exe.into(),
             cargo: cargo.map(PathBuf::from),
+            crabx: Some("/home/u/.cache/crabx".into()),
         };
         assert!(matches!(
             paths("/nix/store/abc-token-max/bin/token-max", None).install(),
-            Install::Manager(command) if command.starts_with("Upgrade with nix run ")
+            Install::Manager(advice) if advice.starts_with("Upgrade with nix run ")
         ));
         // Paths that don't exist stay as given, so these compare without a filesystem.
         assert!(matches!(
             paths("/home/u/.cargo/bin/token-max", Some("/home/u/.cargo")).install(),
-            Install::Manager(command) if command.contains("cargo install --locked token-max")
+            Install::Manager(advice) if advice.contains("cargo install --locked token-max")
         ));
         // The run scripts' cache keeps each release under its tag's name.
         assert!(matches!(
             paths("/home/u/.cache/token-max/run/token-max-v0.0.1-x86_64-unknown-linux-musl", None).install(),
             // slash ok: a URL
-            Install::Manager(command) if command.contains("max.kixel.me/run.")
+            Install::Manager(advice) if advice.contains("max.kixel.me/run.")
         ));
-        // crabx's cache keeps each version it verified, pinned or not.
-        assert!(matches!(
-            paths("/home/u/.cache/crabx/v1/x86_64-unknown-linux-musl/author/token-max/0.1.0/bin/token-max", None).install(),
-            Install::Manager(command) if command.starts_with("crabx manages this binary")
-        ));
+        // crabx's cache keeps each version it verified, pinned or not, in any cache format,
+        // and through a symlinked cache, which resolves to anywhere.
+        for exe in [
+            "/home/u/.cache/crabx/v1/x86_64-unknown-linux-musl/author/token-max/0.1.0/bin/token-max",
+            "/srv/cache/crabx/v12/x86_64-unknown-linux-musl/author/token-max/0.1.0/bin/token-max",
+            "/home/u/.cache/crabx/elsewhere/token-max",
+        ] {
+            assert!(
+                matches!(
+                    paths(exe, None).install(),
+                    Install::Manager(advice) if advice.starts_with("crabx manages this binary")
+                ),
+                "{exe}"
+            );
+        }
+        for dir in ["crabx/v", "crabx/v1a", "crabx/1", "crabx-v1/v1", "v1"] {
+            assert!(!crabx_cache_format(Path::new(dir)), "{dir}");
+        }
         let Some(target) = TARGET else {
             let elsewhere = paths("/home/u/.local/bin/token-max", None).install();
             assert!(matches!(elsewhere, Install::Reinstall(_)));

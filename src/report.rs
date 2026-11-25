@@ -5072,51 +5072,87 @@ fn kind_row(members: &[Row], out: &Out<'_>) -> Row {
     let unknown = members
         .iter()
         .any(|r| r.cost.is_none() && matches!(r.amount, Some(("costs", _))));
-    let costs: Vec<(Estimate, bool)> = members.iter().filter_map(|r| r.cost).collect();
+    // Lines of one name, such as one setting in two profiles, can price the same shared
+    // requests, so only the largest of them counts, as a lower bound; different features add.
+    let mut named: IndexMap<&str, Vec<(f64, Option<Margin>, bool)>> = IndexMap::default();
+    for r in members {
+        let figure = match (r.cost, r.saving) {
+            (Some((e, lower)), _) => (e.usd, e.margin, lower),
+            (None, Some(usd)) => (usd, r.margin, false),
+            (None, None) => continue,
+        };
+        named.entry(r.name.as_str()).or_default().push(figure);
+    }
+    let (mut usd, mut margin, mut at_least) = (0.0, None, unknown);
+    for figures in named.values() {
+        let (most, more, lower) = figures
+            .iter()
+            .copied()
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+            .expect("a name has a figure");
+        usd += most;
+        margin = Margin::plus(margin, more);
+        at_least |= lower || figures.len() > 1;
+    }
+    let costs = members.iter().any(|r| r.cost.is_some());
     let verbs: IndexSet<&str> = members
         .iter()
         .filter_map(|r| r.amount.as_ref().map(|(verb, _)| *verb))
         .collect();
-    if let Some(&(first, _)) = costs.first() {
-        let (cost, at_least) =
-            costs[1..]
-                .iter()
-                .fold((first, unknown), |(sum, at_least), (e, lower)| {
-                    let usd = sum.usd + e.usd;
-                    let margin = Margin::plus(sum.margin, e.margin);
-                    (Estimate { usd, margin }, at_least || *lower)
-                });
-        let at_least = at_least || costs[0].1;
-        row.costs(Some(cost), at_least, &out.spend);
+    if costs {
+        row.costs(Some(Estimate { usd, margin }), at_least, &out.spend);
     } else if unknown {
         row.costs(None, false, &out.spend);
-    } else if let ([verb], true) = (
+    } else if let (["saves"], true) = (
         verbs.iter().copied().collect::<Vec<_>>().as_slice(),
         members
             .iter()
             .all(|r| r.amount.is_none() || r.saving.is_some()),
     ) {
-        // Kept settings that each save against their default, such as one TTL across
-        // profiles, save together what they save apart.
-        let (usd, margin) = members
-            .iter()
-            .filter_map(|r| r.saving.map(|usd| (usd, r.margin)))
-            .fold((0.0, None), |(sum, margin), (usd, more)| {
-                (sum + usd, Margin::plus(margin, more))
-            });
+        // Kept settings that each save against their default, such as one TTL in profiles
+        // with histories apart, save together what they save apart.
+        let verb = if at_least { AT_LEAST } else { "saves" };
         row.saves(verb, Some(usd), margin, &out.spend);
+    }
+    // Each harness upgrade that alone would let a member's verdict apply, naming its line.
+    let upgrades: IndexSet<String> = members
+        .iter()
+        .filter_map(|r| {
+            let upgrade = r.upgrade.as_ref()?;
+            Some(match r.base_tag.as_str() {
+                "" => upgrade.clone(),
+                tag => format!("{tag} {upgrade}"),
+            })
+        })
+        .collect();
+    if !upgrades.is_empty() {
+        row.upgrade = Some(upgrades.into_iter().collect::<Vec<_>>().join(" "));
     }
     // A line summing a setting across many profiles names the first few; --details names
     // the rest on their own lines.
-    let tags: IndexSet<&str> = members.iter().map(|r| r.base_tag.as_str()).collect();
-    row.profile = joined_tags(tags.iter().copied().take(KIND_TAGS));
-    if tags.len() > KIND_TAGS {
-        row.profile = format!(
-            "{} and {} more]",
-            row.profile.trim_end_matches(']'),
-            tags.len() - KIND_TAGS
-        );
-    }
+    let tags: IndexSet<&str> = members
+        .iter()
+        .flat_map(|r| {
+            r.base_tag
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .split(", ")
+        })
+        .filter(|t| !t.is_empty())
+        .collect();
+    row.profile = match tags.len() {
+        0 => String::new(),
+        n => {
+            let first: Vec<&str> = tags.iter().copied().take(KIND_TAGS).collect();
+            let more = n.saturating_sub(KIND_TAGS);
+            let more = if more > 0 {
+                format!(" and {more} more")
+            } else {
+                String::new()
+            };
+            format!("[{}{more}]", first.join(", "))
+        }
+    };
     // A placeholder such as "unknown" adds nothing beside a setting, nor does a setting
     // another one goes on from.
     let keys: IndexSet<&str> = members.iter().map(|r| r.key.as_str()).collect();
@@ -7399,9 +7435,8 @@ fn summary(
         row.profile = tag(&c.profiles, &switch, out);
         row.location = skill_location(c, out);
         row.value = "on".into();
-        if c.estimated_usd.is_some() {
-            row.costs(c.estimate(), false, &spend);
-        }
+        // Still sent, so what it costs is unknown rather than nothing.
+        row.costs(c.estimate(), false, &spend);
         let uses = uses(c);
         let mut text = not_enough(&match c.estimated_usd {
             None => format!("None of its requests could be priced; {uses}."),
@@ -9606,7 +9641,7 @@ mod tests {
             ),
             (
                 "keep",
-                "Tools 1 kept, 1 unknown costs $40 3%",
+                "Tools 1 kept, 1 unknown costs at least $40 3%",
                 "/synthetic/home/.claude/settings.json:permissions.deny, enableWorkflows"
             )
         );
@@ -9756,7 +9791,7 @@ mod tests {
             "Replayed at 5m and 1h, assuming the same sessions; 1h costs less than 5m. Set in /synthetic/home/.claude/settings.json:promptCacheTtl.",
         );
         has(
-            "Workflow tool on",
+            "Workflow tool on costs unknown",
             "unknown",
             "Not enough evidence: none of its requests could be priced; never used. Turn off: \"enableWorkflows\": false.",
         );
@@ -13726,7 +13761,9 @@ mod tests {
             row.key = key.into();
             row
         };
-        // A kept setting that saves against its default in each profile saves the sum.
+        // Kept lines that save against their defaults save the sum, but two of one name, such
+        // as one setting in two profiles, can price the same shared requests: only the
+        // larger counts, as a lower bound.
         let mut saving = vec![
             member(Mark::Keep, "a", "a:service_tier"),
             member(Mark::Keep, "b", "b:service_tier"),
@@ -13735,7 +13772,18 @@ mod tests {
         saving[1].saves("saves", Some(3.0), None, &out.spend);
         let row = kind_row(&saving, &out);
         assert_eq!(row.value, "2 kept");
-        assert_eq!(row.amount, Some(("saves", "$5/mo".into())));
+        assert_eq!(row.amount, Some((AT_LEAST, "$3/mo".into())));
+        saving[1].name = "Fast mode (other)".into();
+        assert_eq!(
+            kind_row(&saving, &out).amount,
+            Some(("saves", "$5/mo".into()))
+        );
+        // A member's upgrade stays beside the line, naming its profile.
+        saving[1].upgrade = Some("upgrade to 2.1".into());
+        assert_eq!(
+            kind_row(&saving, &out).upgrade.as_deref(),
+            Some("[b] upgrade to 2.1")
+        );
         // A member whose cost is unknown leaves the sum a lower bound; a placeholder setting
         // goes beside a named one, and past the first few the rest are counted.
         let mut costly = vec![
@@ -13756,6 +13804,9 @@ mod tests {
         assert_eq!(row.value, "1 kept, 3 unknown, 1 info");
         assert_eq!(row.amount, Some(("costs", "at least $4".into())));
         assert_eq!(row.profile, "[a, b, c and 2 more]");
+        // A tag naming several files counts each once.
+        costly[1].base_tag = "[a, f]".into();
+        assert_eq!(kind_row(&costly, &out).profile, "[a, f, c and 2 more]");
         assert_eq!(row.setting, "a:service_tier; c:fastMode and 2 more");
     }
 

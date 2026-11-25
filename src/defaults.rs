@@ -391,7 +391,9 @@ pub fn switch_kind(control: &Control) -> Option<crate::model::ContextKind> {
     let path: Vec<&str> = control.path.iter().map(String::as_str).collect();
     match (path.as_slice(), &control.value) {
         (["enableArtifact" | "enableWorkflows"], _) => Some(ContextKind::Tool),
-        (["syncClaudeAiSkills"] | ["features", "apps"], _) => None,
+        (["syncClaudeAiSkills"], _) => None,
+        // Its piece is an MCP server's, so both its lines list with the servers.
+        (["features", "apps"], _) => Some(ContextKind::McpServer),
         (["mcp_servers", _, "disabled_tools"], ControlValue::Text(_)) => Some(ContextKind::McpTool),
         (["mcp_servers", ..] | ["projects", _, "disabledMcpServers"], _) => {
             Some(ContextKind::McpServer)

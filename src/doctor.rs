@@ -1450,14 +1450,10 @@ fn keys(harness: Harness, edits: &[Edit]) -> Vec<String> {
                 .to_string(),
         }
     };
-    // A member reads as its name: a string, or the one string an entry holds, such as a
-    // denied server's `serverName`.
+    // A string member reads as its text; any other keeps its shape, such as a denied server's
+    // `{"serverName": ...}`, so a person adding it by hand adds what the setting expects.
     let member = |m: &Value| match m {
         Value::String(s) => s.clone(),
-        Value::Object(o) if o.len() == 1 => match o.values().next() {
-            Some(Value::String(s)) => s.clone(),
-            _ => value(m),
-        },
         _ => value(m),
     };
     let count = |n: usize| {
@@ -2742,6 +2738,10 @@ impl Selection {
                 .find(|(t, _, _)| wrote && *t == target)
                 .map(|(_, edits, removals)| (edits, removals))
         };
+        // An entry is removed when its target lost its key, under whichever name for the file
+        // the removal used, such as another profile's symlink.
+        let removed =
+            |removals: &Vec<Entry>, entry: &Entry| removals.iter().any(|r| r.path == entry.path);
         // An accepted change's own removals and blocks, and the cleanup of servers off
         // already; a declined change's are moot.
         for (index, offer) in offers.offers.iter().enumerate() {
@@ -2761,13 +2761,13 @@ impl Selection {
                 }
             }
             for (target, entry) in &offer.entries {
-                if !written(*target).is_some_and(|(_, removals)| removals.contains(entry)) {
+                if !written(*target).is_some_and(|(_, removals)| removed(removals, entry)) {
                     remaining.remove(entry, style);
                 }
             }
         }
         for (target, entry) in &offers.cleanup {
-            if !written(*target).is_some_and(|(_, removals)| removals.contains(entry)) {
+            if !written(*target).is_some_and(|(_, removals)| removed(removals, entry)) {
                 remaining.remove(entry, style);
             }
         }
@@ -4691,7 +4691,7 @@ mod tests {
                         r#"skillOverrides.{a, b} = "off" (2)"#.into(),
                         // Top-level settings share no parent, so they stay apart.
                         "fastMode = false".into(),
-                        "deniedMcpServers += docs".into(),
+                        r#"deniedMcpServers += {"serverName":"docs"}"#.into(),
                         "autoMemoryEnabled = false".into(),
                         "remove old".into(),
                     ]
@@ -4853,7 +4853,7 @@ mod tests {
             [
                 vec![
                     "permissions.deny += mcp__B".to_string(),
-                    "deniedMcpServers += Gmail".into()
+                    r#"deniedMcpServers += {"serverName":"Gmail"}"#.into()
                 ],
                 vec!["remove [mcp_servers.off]".into()],
             ]
@@ -4864,12 +4864,38 @@ mod tests {
             [
                 vec![
                     "permissions.deny += mcp__A, mcp__B (2)".to_string(),
-                    "deniedMcpServers += Gmail".into()
+                    r#"deniedMcpServers += {"serverName":"Gmail"}"#.into()
                 ],
                 vec!["remove mcpServers.A".into()],
                 vec!["remove [mcp_servers.off]".into()],
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_removal_written_through_one_symlink_is_not_left_under_another() {
+        let w = Workspace::new();
+        let config = w.codex.join("config.toml");
+        let link = w.home.join("linked.toml");
+        std::fs::write(&config, "[mcp_servers.off]\nenabled = false\n").unwrap();
+        std::os::unix::fs::symlink(&config, &link).unwrap();
+        let turned_off = [&config, &link]
+            .map(|f| Definition::Entry(entry(f, Harness::Codex, &["mcp_servers", "off"])));
+        let owner = Owner::new(vec![], turned_off.to_vec(), None, 0.0);
+        let mut selection = Selection::default();
+        selection
+            .apply(owner.offers(), Event::Cleanup { entry: 0 })
+            .unwrap();
+        let left = |wrote| {
+            selection
+                .unwritten(owner.offers(), wrote, &style(&w))
+                .files(false)
+                .count()
+        };
+        // One file under two names: removing the table under one removes it under both.
+        assert_eq!(left(true), 0);
+        assert_eq!(left(false), 2);
     }
 
     /// What became of the change named `name`.

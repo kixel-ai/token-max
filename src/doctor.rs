@@ -108,19 +108,37 @@ pub enum Kind {
 }
 
 impl Fix {
-    /// Whether `other` joins this change's section: the same kind, reason and heading, the
-    /// same offered effect and, for a setting, the same verdict, and measured or not alike. The cache TTLs may move to different
-    /// values, which the section names each.
-    pub(crate) fn joins(&self, other: &Fix) -> bool {
-        let (a, b) = (&self.section, &other.section);
-        a.kind == b.kind
-            && a.label == b.label
-            && (a.kind == Kind::CacheTtl || target(&self.value) == target(&other.value))
+    /// What this change's section has in common: the same kind, reason and heading, the same
+    /// offered effect and, for a setting, the same verdict, and measured or not alike. The
+    /// cache TTLs may move to different values, which the section names each. Changes on
+    /// several hosts with the same joint are one section.
+    pub(crate) fn joint(&self) -> Joint {
+        let s = &self.section;
+        Joint {
+            kind: s.kind,
+            label: s.label.clone(),
+            target: (s.kind != Kind::CacheTtl).then(|| target(&self.value).to_string()),
             // A setting recommended off, such as never-used auto memory, is asked apart from
             // one only worth considering, such as auto memory used at a high cost.
-            && (a.kind != Kind::Setting || self.suggested == other.suggested)
-            && self.saving.is_some() == other.saving.is_some()
+            suggested: (s.kind == Kind::Setting).then_some(self.suggested),
+            measured: self.saving.is_some(),
+        }
     }
+
+    /// Whether `other` joins this change's section.
+    pub(crate) fn joins(&self, other: &Fix) -> bool {
+        self.joint() == other.joint()
+    }
+}
+
+/// What the changes of one section share, on any host; see [`Fix::joint`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Joint {
+    pub(crate) kind: Kind,
+    pub(crate) label: String,
+    pub(crate) target: Option<String>,
+    pub(crate) suggested: Option<bool>,
+    pub(crate) measured: bool,
 }
 
 /// The value a change offers, such as "off" in "on -> off".
@@ -1469,7 +1487,7 @@ const CLEANUP: &str = "MCP servers that are off";
 
 /// The settings-file edits and steps by hand left to make, which a report or walk lists once,
 /// at its end: each file's edits, then the steps.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Remaining {
     /// The SSH destination whose these are, which names the steps; none for this host's.
     host: Option<String>,
@@ -1479,7 +1497,7 @@ pub struct Remaining {
 }
 
 /// One file's edits left to make.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 struct Unmade {
     /// As shown, such as `devbox:~/.claude/settings.json`.
     file: String,
@@ -2300,7 +2318,6 @@ pub struct Plan {
     files: Vec<Pending>,
     /// What became of each change, by the report lines it came from.
     choices: Vec<(Origin, Choice)>,
-    total: Total,
 }
 
 impl Plan {
@@ -2316,12 +2333,6 @@ impl Plan {
             .filter(|(_, c)| *c == Choice::Accepted)
             .map(|(o, _)| *o)
             .collect()
-    }
-
-    /// The accepted changes' summed saving after `label`, such as "Accepted"; empty when
-    /// nothing was accepted.
-    pub fn total(&self, label: &str) -> String {
-        self.total.text(label, THIS_HOST)
     }
 }
 
@@ -2557,10 +2568,10 @@ impl Total {
     }
 }
 
-/// What every change in `fixes` saves together, as the line under the report's headline,
-/// counted from the defaults in a `--defaults` report; empty when there is none.
-pub fn total(fixes: &[Fix], defaults: bool) -> String {
-    let total = Total::of(fixes);
+/// What the changes of `total` save together, as the line under the report's headline,
+/// each percent of the spend of `whose`, counted from the defaults in a `--defaults` report;
+/// empty when there is none.
+pub fn total(total: &Total, defaults: bool, whose: &str) -> String {
     let lead = if defaults {
         "From the defaults, these"
     } else {
@@ -2575,7 +2586,7 @@ pub fn total(fixes: &[Fix], defaults: bool) -> String {
             "No change's saving was measured.".into()
         }
     } else {
-        format!("{lead} changes save {}.", total.amount(THIS_HOST))
+        format!("{lead} changes save {}.", total.amount(whose))
     }
 }
 
@@ -3047,6 +3058,14 @@ impl Selection {
         remaining
     }
 
+    /// What became of each change on the host whose changes are `offers`, by the report
+    /// lines it came from: each answer, then each step by hand.
+    pub fn choices(&self, offers: &Offers) -> Vec<(Origin, Choice)> {
+        let mut choices = self.choices.clone();
+        choices.extend(offers.steps.iter().cloned());
+        choices
+    }
+
     /// What the walk came to on the host whose changes are `offers`.
     pub fn summary(&self, offers: &Offers) -> Summary {
         Summary {
@@ -3400,13 +3419,8 @@ impl Owner {
                 .apply(&self.offers, *event)
                 .map_err(|e| ScanError::new(format!("{e}; no settings were changed")))?;
         }
-        let Selection {
-            accepted,
-            mut choices,
-            total,
-            ..
-        } = selection;
-        choices.extend(self.offers.steps.iter().cloned());
+        let choices = selection.choices(&self.offers);
+        let Selection { accepted, .. } = selection;
         let files = accepted
             .into_iter()
             .map(|(index, edits, removals)| {
@@ -3421,11 +3435,7 @@ impl Owner {
                 }
             })
             .collect();
-        Ok(Plan {
-            files,
-            choices,
-            total,
-        })
+        Ok(Plan { files, choices })
     }
 }
 
@@ -3445,9 +3455,12 @@ struct Member<'a> {
     offer: &'a Offer,
 }
 
-/// One question of the walk: a change, or a section of one host's changes.
+/// One question of the walk: a change, or a section of changes on any host.
 struct Question<'a> {
     members: Vec<Member<'a>>,
+    /// Every host's spend every 30 days together, which a walk of several hosts' percents
+    /// are of; None for one host's, whose changes carry their own.
+    monthly: Option<f64>,
 }
 
 impl Question<'_> {
@@ -3457,7 +3470,20 @@ impl Question<'_> {
         for member in &self.members {
             total.add(&member.offer.fix);
         }
+        if let Some(monthly) = self.monthly {
+            total.set_share(monthly);
+        }
         total
+    }
+
+    /// A member's change as its card shows it, its share of every host's spend together in a
+    /// walk of several hosts.
+    fn fix(&self, member: &Member<'_>) -> Fix {
+        let mut fix = member.offer.fix.clone();
+        if let Some(monthly) = self.monthly {
+            fix.share = fix.saving.filter(|_| monthly > 0.0).map(|usd| usd / monthly);
+        }
+        fix
     }
 
     /// What the members save every 30 days, a saving that depends on a default included;
@@ -3491,17 +3517,29 @@ impl Question<'_> {
     }
 
     /// A section as the walk offers it, its counter `counter`: what its kind of change is,
-    /// then how many members and the largest of them by name. Each member says what it does
-    /// when the person splits the section.
-    fn card(&self, counter: &str, host: Option<&str>, style: &Style) -> String {
-        let fixes: Vec<&Fix> = self.members.iter().map(|m| &m.offer.fix).collect();
-        let first = fixes[0];
+    /// then how many members and the largest of them by name, on `hosts` when the walk
+    /// covers another host than this one. Each member says what it does when the person
+    /// splits the section.
+    fn card(&self, counter: &str, hosts: &[Walking<'_>], style: &Style) -> String {
+        let fixes: Vec<(&Fix, Option<&str>)> = self
+            .members
+            .iter()
+            .map(|m| (&m.offer.fix, hosts[m.host].label))
+            .collect();
+        let first = fixes[0].0;
         let mut rows = vec![];
-        if let Some(host) = host {
-            rows.push(("Host", host.to_string()));
+        let labels: IndexSet<&str> = self
+            .members
+            .iter()
+            .filter_map(|m| hosts[m.host].label)
+            .collect();
+        if !labels.is_empty() {
+            let name = if labels.len() == 1 { "Host" } else { "Hosts" };
+            rows.push((name, labels.into_iter().collect::<Vec<_>>().join(", ")));
         }
         rows.push(("What", section_what(&first.section, &first.what)));
         rows.push(("Which", which(&fixes, style)));
+        let fixes: Vec<&Fix> = fixes.into_iter().map(|(f, _)| f).collect();
         let value = section_value(
             fixes
                 .iter()
@@ -3524,11 +3562,15 @@ impl Question<'_> {
 const NAMED: usize = 3;
 
 /// A section's members by name, largest saving first: every one when there are few, else
-/// the largest few and how many more, such as "dataviz, code-review, run and 16 more".
-fn which(fixes: &[&Fix], style: &Style) -> String {
+/// the largest few and how many more, such as "dataviz, code-review, run and 16 more". Each
+/// comes with the host it is on, None for this host or a walk of this host alone.
+fn which(fixes: &[(&Fix, Option<&str>)], style: &Style) -> String {
     let mut fixes = fixes.to_vec();
+    // Members on several hosts name their host when two share a name.
+    let hosts: IndexSet<Option<&str>> = fixes.iter().map(|(_, h)| *h).collect();
+    let spans = hosts.len() > 1;
     // A stable sort keeps the report's order among equal and unmeasured savings.
-    fixes.sort_by(|a, b| match (a.saving, b.saving) {
+    fixes.sort_by(|(a, _), (b, _)| match (a.saving, b.saving) {
         (Some(a), Some(b)) => b.total_cmp(&a),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
@@ -3536,20 +3578,26 @@ fn which(fixes: &[&Fix], style: &Style) -> String {
     });
     let names: Vec<String> = fixes
         .iter()
-        .map(|f| {
+        .map(|&(f, host)| {
             let s = &f.section;
             // A name two members share, such as a duplicate skill's, is followed by its
             // location when the copies' locations differ, and by its profile when the
             // location alone repeats, as two profiles' copies of one skill do; a setting's
-            // name is its profile.
-            let peers = |same: &dyn Fn(&Fix) -> bool| fixes.iter().filter(|o| same(o)).count() > 1;
+            // name is its profile. Members on several hosts compare within their own.
+            let peers = |same: &dyn Fn(&Fix) -> bool| {
+                fixes
+                    .iter()
+                    .filter(|(o, h)| *h == host && same(o))
+                    .count()
+                    > 1
+            };
             let shared = peers(&|o| o.section.member == s.member);
             let placed =
                 !peers(&|o| o.section.member == s.member && o.section.location == s.location);
-            let moved = fixes
-                .iter()
-                .any(|o| o.section.member == s.member && o.section.location != s.location);
-            match (&s.location, s.kind, f.profile.as_str()) {
+            let moved = fixes.iter().any(|(o, h)| {
+                *h == host && o.section.member == s.member && o.section.location != s.location
+            });
+            let name = match (&s.location, s.kind, f.profile.as_str()) {
                 (Some(at), Kind::Feature(..), profile) if shared && moved => {
                     if placed || profile.is_empty() {
                         format!("{} ({})", s.member, style.path(at))
@@ -3557,10 +3605,21 @@ fn which(fixes: &[&Fix], style: &Style) -> String {
                         format!("{} ({}, {profile})", s.member, style.path(at))
                     }
                 }
+                (_, Kind::Setting, "") if spans => String::new(),
                 (_, _, "") => s.member.clone(),
                 (_, Kind::Setting, profile) => profile.to_string(),
                 (_, _, profile) if shared => format!("{} ({profile})", s.member),
                 _ => s.member.clone(),
+            };
+            // A member another host also has names its own host.
+            let elsewhere = fixes
+                .iter()
+                .any(|(o, h)| *h != host && o.section.member == s.member);
+            let host = host.unwrap_or("this host");
+            match (name.is_empty(), spans && elsewhere) {
+                (true, _) => host.to_string(),
+                (false, true) => format!("{name} on {host}"),
+                (false, false) => name,
             }
         })
         .collect();
@@ -3608,20 +3667,12 @@ impl Walk<'_, '_> {
 
     /// The accepted changes' summed saving across hosts after `label`.
     fn total(&self, label: &str) -> String {
-        if let [host] = self.hosts {
-            let whose = host
-                .label
-                .map_or(THIS_HOST.to_string(), |l| format!("{l}'s"));
-            return self.selections[0].total.text(label, &whose);
-        }
-        let mut total = Total::default();
-        let mut monthly = 0.0;
-        for (host, selection) in self.hosts.iter().zip(&self.selections) {
-            total.merge(&selection.total);
-            monthly += host.offers.monthly;
-        }
-        total.set_share(monthly);
-        total.text(label, "these hosts'")
+        let hosts: Vec<(&Selection, &Offers)> = self
+            .selections
+            .iter()
+            .zip(self.hosts.iter().map(|h| h.offers))
+            .collect();
+        accepted(&hosts, label)
     }
 
     /// Record `answer` to `member`, printing the running total after a yes; whether the walk
@@ -3674,16 +3725,19 @@ impl Walk<'_, '_> {
                 "They stay"
             };
             text += &style.line(&format!("{stays} configured; token-max can also:"));
-            for (_, _, entry) in &entries {
-                let place = format!("remove {} in {}", entry.text(), style.path(&entry.file));
+            // Each file named as the confirm names it, after its host under --ssh.
+            for (member, _, entry) in &entries {
+                let theirs = self.hosts[member.host].style;
+                let place = format!("remove {} in {}", entry.text(), theirs.file(&entry.file));
                 text += &style.raw(&place, MARGIN + 2, DIM);
             }
             for (member, _, name) in &denials {
-                let file = &self.hosts[member.host].offers.files[member.offer.target];
+                let host = &self.hosts[member.host];
+                let file = &host.offers.files[member.offer.target];
                 let block = format!(
                     "add {} to deniedMcpServers in {}",
                     serde_json::json!({ "serverName": name }),
-                    style.path(file)
+                    host.style.file(file)
                 );
                 text += &style.raw(&block, MARGIN + 2, DIM);
             }
@@ -3694,15 +3748,19 @@ impl Walk<'_, '_> {
             }
         }
         for member in members {
-            // A section's step names its server.
+            // A section's step names its server, and its host when the walk covers several.
             let it = match members.len() {
                 2.. => member.offer.fix.section.member.as_str(),
                 _ => "it",
             };
+            let host = &self.hosts[member.host];
+            let on = host
+                .label
+                .map_or_else(String::new, |label| format!(" on {label}"));
             for (step, reason) in &member.offer.manual {
                 text += &style.line(&home_in(
-                    &format!("To remove {it} by hand, since {reason}: {step}."),
-                    style.home.as_deref(),
+                    &format!("To remove {it}{on} by hand, since {reason}: {step}."),
+                    host.style.home.as_deref(),
                 ));
             }
         }
@@ -3734,26 +3792,32 @@ impl Walk<'_, '_> {
         Ok(answer != Answer::Quit)
     }
 
-    /// A host's last question: remove the configuration of MCP servers that are off already,
-    /// all at once or, split, one at a time; whether the walk goes on.
+    /// The last question: remove the configuration of MCP servers that are off already,
+    /// `cleanups` by host and entry, all at once or, split, one at a time; whether the walk
+    /// goes on.
     fn ask_cleanup(
         &mut self,
-        host: usize,
+        cleanups: &[(usize, usize)],
         counter: &str,
         input: &mut impl BufRead,
         output: &mut impl Write,
     ) -> io::Result<bool> {
-        let Walking {
-            label,
-            offers,
-            style,
-        } = self.hosts[host];
-        let cleanup = &offers.cleanup;
-        let place = |entry: &Entry| format!("{} in {}", entry.text(), style.path(&entry.file));
-        let card = |counter: String, name: &str, why: &str, places: Vec<String>| {
+        let entry = |(host, index): (usize, usize)| &self.hosts[host].offers.cleanup[index].1;
+        // Each named as the confirm names its file, after its host under --ssh.
+        let place = |at: (usize, usize)| {
+            let style = self.hosts[at.0].style;
+            format!("{} in {}", entry(at).text(), style.file(&entry(at).file))
+        };
+        let labels: IndexSet<&str> = cleanups
+            .iter()
+            .filter_map(|(h, _)| self.hosts[*h].label)
+            .collect();
+        let style = self.hosts[cleanups[0].0].style;
+        let card = |counter: String, name: &str, why: &str, places: Vec<String>, hosts: &[&str]| {
             let mut rows = vec![];
-            if let Some(label) = label {
-                rows.push(("Host", label.to_string()));
+            if !hosts.is_empty() {
+                let label = if hosts.len() == 1 { "Host" } else { "Hosts" };
+                rows.push((label, hosts.join(", ")));
             }
             if !why.is_empty() {
                 rows.push(("Why", why.to_string()));
@@ -3769,45 +3833,50 @@ impl Walk<'_, '_> {
                 rows,
             })
         };
+        let host_of = |at: (usize, usize)| self.hosts[at.0].label.into_iter().collect::<Vec<_>>();
         let why = "Their tools are off already, so no session uses this configuration.";
-        let size = cleanup.len();
-        if let [(_, entry)] = cleanup.as_slice() {
-            let name = format!("MCP server {}", entry.server);
+        let size = cleanups.len();
+        if let [at] = cleanups {
+            let name = format!("MCP server {}", entry(*at).server);
             let text = card(
                 format!("[{counter}]"),
                 &name,
                 &why.replace("Their tools are", "Its tools are"),
-                vec![place(entry)],
+                vec![place(*at)],
+                &host_of(*at),
             );
             write!(output, "\n{text}")?;
             let answer = answer(&style.prompt("Remove it?", false), input, output)?;
             if answer == Answer::Yes {
-                self.record(host, Event::Cleanup { entry: 0 });
+                self.record(at.0, Event::Cleanup { entry: at.1 });
             }
             return Ok(answer != Answer::Quit);
         }
-        let places = cleanup.iter().map(|(_, e)| place(e)).collect();
+        let places = cleanups.iter().map(|at| place(*at)).collect();
+        let labels: Vec<&str> = labels.into_iter().collect();
         let text = card(
             format!("[{counter}]"),
             "Turned-off MCP servers",
             why,
             places,
+            &labels,
         );
         write!(output, "\n{text}")?;
         let prompt = style.prompt(&format!("Remove all {size}?"), true);
         match answer(&prompt, input, output)? {
             Answer::Split => {
-                for (i, (_, entry)) in cleanup.iter().enumerate() {
-                    let name = format!("MCP server {}", entry.server);
+                for (i, at) in cleanups.iter().enumerate() {
+                    let name = format!("MCP server {}", entry(*at).server);
                     let text = card(
                         format!("[{counter}, {}/{size}]", i + 1),
                         &name,
                         "",
-                        vec![place(entry)],
+                        vec![place(*at)],
+                        &host_of(*at),
                     );
                     write!(output, "\n{text}")?;
                     match answer(&style.prompt("Remove it?", false), input, output)? {
-                        Answer::Yes => self.record(host, Event::Cleanup { entry: i }),
+                        Answer::Yes => self.record(at.0, Event::Cleanup { entry: at.1 }),
                         Answer::Quit => return Ok(false),
                         _ => {}
                     }
@@ -3815,14 +3884,30 @@ impl Walk<'_, '_> {
                 Ok(true)
             }
             Answer::Yes => {
-                for entry in 0..size {
-                    self.record(host, Event::Cleanup { entry });
+                for at in cleanups {
+                    self.record(at.0, Event::Cleanup { entry: at.1 });
                 }
                 Ok(true)
             }
             other => Ok(other != Answer::Quit),
         }
     }
+}
+
+/// What the changes `hosts` accepted save together after `label`, such as "Accepted", each
+/// percent of every host's spend together; empty when nothing was accepted.
+pub fn accepted(hosts: &[(&Selection, &Offers)], label: &str) -> String {
+    if let [(selection, _)] = hosts {
+        return selection.total.text(label, THIS_HOST);
+    }
+    let mut total = Total::default();
+    let mut monthly = 0.0;
+    for (selection, offers) in hosts {
+        total.merge(&selection.total);
+        monthly += offers.monthly;
+    }
+    total.set_share(monthly);
+    total.text(label, "these hosts'")
 }
 
 /// Walk through each host's changes, biggest saving first across hosts, and return what the
@@ -3838,24 +3923,30 @@ pub fn ask(
     input: &mut impl BufRead,
     output: &mut impl Write,
 ) -> io::Result<Vec<Selection>> {
-    // A change joins the others of its host's section, whatever it saves, measured apart from
-    // unmeasured; the person can split a section to answer each.
+    // A change joins the others of its section on any host, whatever it saves, measured apart
+    // from unmeasured; the person can split a section to answer each.
+    let monthly = (hosts.len() > 1).then(|| hosts.iter().map(|h| h.offers.monthly).sum());
     let mut questions: Vec<Question> = vec![];
     for (host, walking) in hosts.iter().enumerate() {
         for (index, offer) in walking.offers.offers.iter().enumerate() {
             let fix = &offer.fix;
-            let joins = |q: &Question| {
-                let first = &q.members[0];
-                first.host == host && first.offer.fix.joins(fix)
-            };
+            let joins = |q: &Question| q.members[0].offer.fix.joins(fix);
             let member = Member { host, index, offer };
             match questions.iter_mut().find(|q| joins(q)) {
                 Some(question) => question.members.push(member),
                 None => questions.push(Question {
                     members: vec![member],
+                    monthly,
                 }),
             }
         }
+    }
+    // A section spanning hosts lists its members by saving, as each host's report does.
+    for question in &mut questions {
+        question.members.sort_by(|a, b| {
+            let (a, b) = (a.offer.fix.saving, b.offer.fix.saving);
+            b.unwrap_or(0.0).total_cmp(&a.unwrap_or(0.0))
+        });
     }
     // Biggest saving first, then those whose saving was not measured, in the report's order.
     questions.sort_by(|a, b| match (a.usd(), b.usd()) {
@@ -3866,16 +3957,16 @@ pub fn ask(
     });
     let (questions, skipped): (Vec<_>, Vec<_>) =
         questions.into_iter().partition(|q| q.together().asked());
-    let cleanups: Vec<usize> = (0..hosts.len())
-        .filter(|h| !hosts[*h].offers.cleanup.is_empty())
+    // Every host's servers that are off already, as one last question.
+    let cleanups: Vec<(usize, usize)> = hosts
+        .iter()
+        .enumerate()
+        .flat_map(|(h, w)| (0..w.offers.cleanup.len()).map(move |e| (h, e)))
         .collect();
-    let count = questions.len() + cleanups.len();
+    let count = questions.len() + usize::from(!cleanups.is_empty());
     if count > 0 {
-        let asked: usize = questions.iter().map(|q| q.members.len()).sum::<usize>()
-            + cleanups
-                .iter()
-                .map(|h| hosts[*h].offers.cleanup.len())
-                .sum::<usize>();
+        let asked: usize =
+            questions.iter().map(|q| q.members.len()).sum::<usize>() + cleanups.len();
         let about = if asked == count {
             String::new()
         } else {
@@ -3909,7 +4000,7 @@ pub fn ask(
                 output,
                 "\n{}",
                 style.entry(
-                    &member.offer.fix,
+                    &question.fix(member),
                     &format!("[{}/{count}]", n + 1),
                     host.label
                 )
@@ -3924,7 +4015,7 @@ pub fn ask(
         write!(
             output,
             "\n{}",
-            question.card(&format!("[{}/{count}]", n + 1), host.label, style)
+            question.card(&format!("[{}/{count}]", n + 1), hosts, style)
         )?;
         let size = question.members.len();
         let prompt = style.prompt(&format!("Accept all {size}?"), true);
@@ -3936,10 +4027,11 @@ pub fn ask(
                         continue;
                     }
                     let counter = format!("[{}/{count}, {}/{size}]", n + 1, i + 1);
+                    let host = &hosts[member.host];
                     write!(
                         output,
                         "\n{}",
-                        style.entry(&member.offer.fix, &counter, host.label)
+                        host.style.entry(&question.fix(member), &counter, host.label)
                     )?;
                     let answer = answer(&style.prompt("Accept?", false), input, output)?;
                     going = walk.take(member, answer, output)?;
@@ -3963,12 +4055,8 @@ pub fn ask(
         }
     }
     // Removing servers that are off saves nothing, so it is asked after every saving.
-    for (i, host) in cleanups.iter().enumerate() {
-        if !going {
-            break;
-        }
-        let n = questions.len() + i + 1;
-        going = walk.ask_cleanup(*host, &format!("{n}/{count}"), input, output)?;
+    if going && !cleanups.is_empty() {
+        walk.ask_cleanup(&cleanups, &format!("{count}/{count}"), input, output)?;
     }
     for walking in hosts {
         for (step, reason) in &walking.offers.cleanup_by_hand {
@@ -5316,6 +5404,7 @@ mod tests {
         Ok(Asked {
             plan: owner.plan(selections[0].events()).unwrap(),
             summary: selections[0].summary(owner.offers()),
+            total: super::accepted(&[(&selections[0], owner.offers())], "Accepted"),
         })
     }
 
@@ -5323,6 +5412,8 @@ mod tests {
     struct Asked {
         plan: Plan,
         summary: Summary,
+        /// What the accepted changes save together, as the report after the walk says.
+        total: String,
     }
 
     impl std::ops::Deref for Asked {
@@ -5729,7 +5820,7 @@ mod tests {
             "by hand, since the X environment variable sets it: set X=1 where it is exported"
         );
         assert_eq!(
-            plan.total("Accepted"),
+            plan.total,
             "Accepted: about $20/mo, 20% of this host's spend; overlapping changes may save less."
         );
         // The confirm shows each file's diff, names each file, and asks again until it gets
@@ -5898,7 +5989,7 @@ mod tests {
             assert_eq!(got, want.as_ref(), "{name}");
         }
         assert_eq!(
-            plan.total("Accepted"),
+            plan.total,
             "Accepted: about $57/mo, 57% of this host's spend, plus 1 change whose saving was not measured; overlapping changes may save less."
         );
         // A quit at a group leaves it and the rest unaccepted.
@@ -5917,6 +6008,112 @@ mod tests {
         assert_eq!(
             finish(&plan, &[], &style(&w)),
             "\n  Nothing was accepted, so nothing was written.\n"
+        );
+    }
+
+    #[test]
+    fn a_section_spanning_hosts_is_asked_once_and_split_names_each_hosts_members() {
+        // Each host alone saves under $1 in the section, so only together is it asked.
+        let here = Workspace::new();
+        let there = Workspace::new();
+        let skill = |w: &Workspace, name: &str, usd: f64| Fix {
+            saving: Some(usd),
+            share: Some(usd / 100.0),
+            section: Section {
+                kind: Kind::Feature(ContextKind::Skill, Reason::Unused),
+                label: "Never-used skills".into(),
+                member: name.into(),
+                location: None,
+            },
+            ..change(
+                name,
+                &w.claude.join("settings.json"),
+                Harness::Claude,
+                vec![edit(&format!("skillOverrides.{name}"), "off", false)],
+            )
+        };
+        let owners = [
+            Owner::new(
+                vec![skill(&here, "dataviz", 0.6), skill(&here, "run", 0.2)],
+                vec![],
+                style(&here).home,
+                100.0,
+            ),
+            Owner::new(
+                vec![skill(&there, "dataviz", 0.5)],
+                vec![],
+                style(&there).home,
+                100.0,
+            ),
+        ];
+        let styles = [
+            style(&here),
+            Style {
+                host: Some("devbox".into()),
+                ..style(&there)
+            },
+        ];
+        let hosts = [
+            Walking {
+                label: Some("this host"),
+                offers: owners[0].offers(),
+                style: &styles[0],
+            },
+            Walking {
+                label: Some("devbox"),
+                offers: owners[1].offers(),
+                style: &styles[1],
+            },
+        ];
+        let mut printed = vec![];
+        let selections =
+            super::ask(&hosts, &styles[0], &mut "s\ny\ny\nn\n".as_bytes(), &mut printed).unwrap();
+        let printed = String::from_utf8(printed).unwrap();
+        let heads: Vec<&str> = printed
+            .lines()
+            .filter_map(|l| l.strip_prefix("  ").filter(|l| l.starts_with('[')))
+            .collect();
+        // Percents are of both hosts' spend together, $200 every 30 days.
+        assert_eq!(
+            heads,
+            [
+                "[1/1] Never-used skills  saves $1.30/mo  1%",
+                "[1/1, 1/3] dataviz  saves $0.60/mo  <1%",
+                "[1/1, 2/3] dataviz  saves $0.50/mo  <1%",
+                "[1/1, 3/3] run  saves $0.20/mo  <1%",
+            ],
+            "{printed}"
+        );
+        assert!(printed.contains("\n        Hosts  this host, devbox\n"), "{printed}");
+        assert!(
+            printed.contains("\n        Which  dataviz on this host, dataviz on devbox, run.\n"),
+            "{printed}"
+        );
+        // Split, each member names its own host.
+        assert!(
+            printed.contains(
+                "[1/1, 2/3] dataviz  saves $0.50/mo  <1%\n             on -> off  Recommended\n             Host  devbox\n"
+            ),
+            "{printed}"
+        );
+        // Each host gets the answers to its own members.
+        let accepted = |host: usize| {
+            owners[host]
+                .plan(selections[host].events())
+                .unwrap()
+                .accepted()
+                .len()
+        };
+        assert_eq!((accepted(0), accepted(1)), (1, 1));
+        assert_eq!(
+            super::accepted(
+                &[
+                    (&selections[0], owners[0].offers()),
+                    (&selections[1], owners[1].offers())
+                ],
+                "Accepted"
+            ),
+            "Accepted: about $1.10/mo, 1% of these hosts' spend; overlapping changes may save less."
         );
     }
 
@@ -6129,7 +6326,7 @@ mod tests {
         assert_eq!(choice(&plan, "A"), &Choice::Accepted);
         assert_eq!(choice(&plan, "B"), &Choice::Accepted);
         assert_eq!(
-            plan.total("Accepted"),
+            plan.total,
             "Accepted: about $10/mo, 10% of this host's spend."
         );
     }

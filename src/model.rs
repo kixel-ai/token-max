@@ -1635,7 +1635,7 @@ pub enum Action {
 }
 
 /// A dollar figure, extrapolated from the items that could be priced when some could not.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Estimate {
     pub usd: f64,
     /// How far an extrapolated figure may be off; None when every item was priced.

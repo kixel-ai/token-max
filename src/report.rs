@@ -1016,7 +1016,7 @@ struct Out<'a> {
 }
 
 /// This host's spend over the report's window, the base of every percent.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Spend {
     /// The total, extrapolated over unpriced requests, plus `floor`.
     pub(crate) usd: f64,
@@ -1029,6 +1029,9 @@ pub(crate) struct Spend {
     pub(crate) partial: bool,
     since: Option<Millis>,
     until: Millis,
+    /// What hosts joined spend every 30 days, each at its own window's rate; None for one
+    /// host, whose window gives its rate.
+    rate: Option<f64>,
 }
 
 /// Where a report's window starts: the scan's billing window, else its first request.
@@ -1051,7 +1054,23 @@ impl Spend {
             partial,
             since: window_start(&report.scan),
             until: generated_at(report),
+            rate: None,
         }
+    }
+
+    /// Another host's spend added to this one. Hosts are separate samples, so their margins
+    /// combine in quadrature; the window spans both.
+    fn merge(&mut self, other: &Spend) {
+        self.rate = Some(self.monthly() + other.monthly());
+        self.usd += other.usd;
+        self.margin = Margin::independent(self.margin, other.margin);
+        self.floor += other.floor;
+        self.partial |= other.partial;
+        self.since = match (self.since, other.since) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        self.until = self.until.max(other.until);
     }
 
     /// The total as the title writes it, such as "~$9,392 ± $4.72", "at least $120", or
@@ -1062,7 +1081,8 @@ impl Spend {
 
     /// What this host spends every 30 days at the window's rate.
     pub(crate) fn monthly(&self) -> f64 {
-        monthly(self.usd, self.since, Some(self.until))
+        self.rate
+            .unwrap_or_else(|| monthly(self.usd, self.since, Some(self.until)))
     }
 
     /// The share of this host's spend that `usd`, spent within the window, makes.
@@ -1390,24 +1410,7 @@ pub fn totals_section(
     hosts: usize,
     options: ReportOptions<'_>,
 ) -> String {
-    let spent = spend_text(totals.spend, totals.margin, totals.floor, totals.partial);
-    let name = format!("token-max: total over {hosts} hosts");
-    let read = format!(
-        "  {} requests and {} tokens in {}, {spent} at API prices",
-        count(totals.requests),
-        count(totals.tokens),
-        plural(totals.sessions, "session")
-    );
-    let mut text = wrap_spans(
-        &[(&name, BOLD), (&read, DIM)],
-        WrapOptions {
-            width: options.width,
-            indent: 0,
-            continuation: Some(cells(&name) + 2),
-        },
-        options.color,
-    );
-    text.push('\n');
+    let mut text = totals_title(totals, hosts, options);
     let saving = totals.savings.text("Changes offered", "these hosts'");
     let credit = totals.credit("these hosts'").unwrap_or_default();
     let note = opening_note(&credit, totals.partial);
@@ -1426,6 +1429,33 @@ pub fn totals_section(
         ));
         text.push('\n');
     }
+    text
+}
+
+/// The title of a report of several hosts: how many, and what they read and spent.
+fn totals_title(
+    totals: &crate::totals::Totals,
+    hosts: usize,
+    options: ReportOptions<'_>,
+) -> String {
+    let spent = spend_text(totals.spend, totals.margin, totals.floor, totals.partial);
+    let name = format!("token-max: total over {hosts} hosts");
+    let read = format!(
+        "  {} requests and {} tokens in {}, {spent} at API prices",
+        count(totals.requests),
+        count(totals.tokens),
+        plural(totals.sessions, "session")
+    );
+    let mut text = wrap_spans(
+        &[(&name, BOLD), (&read, DIM)],
+        WrapOptions {
+            width: options.width,
+            indent: 0,
+            continuation: Some(cells(&name) + 2),
+        },
+        options.color,
+    );
+    text.push('\n');
     text
 }
 
@@ -1455,10 +1485,23 @@ pub fn format_report<'a>(
     options: ReportOptions<'a>,
 ) -> Listing {
     let mut out = Out::new(report, options);
-    let (title, head, rows, vibes, credit) = summary(report, fixes, &mut out);
+    let Summary {
+        title,
+        notes,
+        head,
+        rows,
+        vibes,
+        guidance,
+        credit,
+    } = summary(report, fixes, &mut out);
     if options.details {
         details(report, &mut out);
     }
+    // In a report of several hosts, each host's percents are of its own spend until joined.
+    let whose = match options.host {
+        Some(host) if host.name != "this host" => format!("{}'s", host.name),
+        _ => "this host's".into(),
+    };
     // Files are named as the walk's confirm names them, after their host under --ssh.
     let style = crate::doctor::Style {
         color: options.color,
@@ -1473,18 +1516,22 @@ pub fn format_report<'a>(
     let remaining = crate::doctor::Remaining::of(fixes, &style);
     Listing {
         title,
+        notes,
         head,
         rows,
         vibes,
-        tail: out.text,
+        guidance,
+        evidence: out.text,
         options: ReportOptions {
             host: None,
             ..options
         },
+        whose,
         home: out.home,
         spend: out.spend,
         credit,
-        remaining,
+        remaining: vec![remaining],
+        hosts: vec![],
     }
 }
 
@@ -1509,6 +1556,7 @@ pub(crate) fn closing(
             partial: false,
             since: None,
             until: 0,
+            rate: None,
         },
     };
     for (file, lines) in remaining.files(options.details) {
@@ -1557,25 +1605,52 @@ pub(crate) fn advice(report: &Report, options: ReportOptions<'_>) -> Vec<Item> {
 }
 
 /// A rendered report whose list of lines can be printed again once `doctor`'s walk has
-/// sorted its changes into those accepted, declined and left by hand.
+/// sorted its changes into those accepted, declined and left by hand. A destination sends
+/// its own, and [`Listing::join`] makes one report of every host's.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Listing {
     /// The one-line header naming what was read.
     title: String,
-    /// Everything between the header and the list.
-    head: String,
+    /// What `--details` says before the headline, or that no history was found.
+    notes: String,
+    head: Head,
     rows: Vec<Row>,
     /// The advice the transcripts cannot price, which `vibes` shows and this report leaves out.
+    #[serde(skip)]
     pub vibes: Vec<Item>,
-    /// Everything after the list.
-    tail: String,
+    /// What `--details` says between the list and the footer.
+    guidance: String,
+    /// The evidence `--details` prints after the footer.
+    evidence: String,
+    /// How it prints, which the host printing it sets.
+    #[serde(skip)]
     options: ReportOptions<'static>,
+    /// Whose spend its percents are of, such as "this host's".
+    whose: String,
     home: Option<String>,
     spend: Spend,
     /// What the settings its lines name save against the defaults; None under `--defaults`.
     credit: Option<crate::defaults::Credit>,
-    /// The edits and steps its changes name, which the report without a terminal ends with.
-    remaining: crate::doctor::Remaining,
+    /// The edits and steps its changes name, by host, which the report without a terminal
+    /// ends with.
+    remaining: Vec<crate::doctor::Remaining>,
+    /// Each host's own title, notes, guidance and evidence, in a report of several hosts.
+    #[serde(skip)]
+    hosts: Vec<Notes>,
 }
+
+/// What one host of a report of several says apart from the joined list.
+#[derive(Debug)]
+struct Notes {
+    title: String,
+    notes: String,
+    guidance: String,
+    evidence: String,
+}
+
+/// A change's answer in `doctor`'s walk, by the host whose line it is (None for this host's)
+/// and its line there.
+pub type Chosen = (Option<String>, Origin, Choice);
 
 /// What became of a change in `doctor`'s walk, for the list printed after it.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1591,12 +1666,12 @@ pub enum Choice {
 impl Listing {
     /// The report as printed without a terminal, ending with the edits its changes name.
     pub fn text(&self) -> String {
-        format!(
-            "{}{}{}",
-            self.title,
-            self.with_list(None),
-            closing(&self.remaining, "EDITS", self.options)
-        )
+        let closing: String = self
+            .remaining
+            .iter()
+            .map(|r| closing(r, "EDITS", self.options))
+            .collect();
+        format!("{}{}{closing}", self.title, self.with_list(None))
     }
 
     /// The one-line header naming what was read, which the walk prints before its questions.
@@ -1613,8 +1688,74 @@ impl Listing {
     /// The report without its header, with its changes grouped by `choices`: the accepted
     /// first, ending with `total`, then the declined, then the steps by hand, then every
     /// other line.
-    pub fn review(&self, choices: &[(Origin, Choice)], total: &str) -> String {
+    pub fn review(&self, choices: &[Chosen], total: &str) -> String {
         self.with_list(Some(Review { choices, total }))
+    }
+
+    /// One report of every host's `listings`, this host's first, each with the SSH
+    /// destination it came from: sections span hosts, each summing every host's members,
+    /// and each line names its host. `totals` are every host's added up, which open it, and
+    /// `options` say how it prints here. A destination's text is escaped, as its own.
+    pub fn join(
+        listings: Vec<(Option<String>, Listing)>,
+        totals: &crate::totals::Totals,
+        options: ReportOptions<'static>,
+    ) -> Listing {
+        let count = listings.len();
+        let mut joined = Listing {
+            title: totals_title(totals, count, options),
+            notes: String::new(),
+            head: Head::default(),
+            rows: vec![],
+            vibes: vec![],
+            guidance: String::new(),
+            evidence: String::new(),
+            options,
+            whose: "these hosts'".into(),
+            home: None,
+            spend: Spend::default(),
+            credit: totals.credit.clone(),
+            remaining: vec![],
+            hosts: vec![],
+        };
+        // A change's own index, apart across hosts, so two hosts' changes never read as one.
+        let mut fixes = 0;
+        for (index, (host, listing)) in listings.into_iter().enumerate() {
+            let escape = |text: String| match &host {
+                Some(_) => crate::safe::remote_text(&text, options.color),
+                None => text,
+            };
+            if index == 0 {
+                joined.head = listing.head.clone();
+                joined.home = listing.home.clone();
+                joined.spend = listing.spend;
+            } else {
+                joined.head.merge(&listing.head);
+                joined.spend.merge(&listing.spend);
+            }
+            let offset = fixes;
+            for mut row in listing.rows {
+                if let Some(m) = &mut row.section {
+                    m.fix += offset;
+                    fixes = fixes.max(m.fix + 1);
+                }
+                hosted(&mut row, host.as_deref());
+                joined.rows.push(row);
+            }
+            joined.remaining.extend(listing.remaining);
+            joined.hosts.push(Notes {
+                title: escape(listing.title),
+                notes: escape(listing.notes),
+                guidance: escape(listing.guidance),
+                evidence: escape(listing.evidence),
+            });
+        }
+        // Every percent is of the hosts' spend together.
+        joined.head.savings.set_share(joined.spend.monthly());
+        for row in &mut joined.rows {
+            row.reshare(&joined.spend);
+        }
+        joined
     }
 
     fn with_list(&self, review: Option<Review<'_>>) -> String {
@@ -1627,8 +1768,122 @@ impl Listing {
             removed: crate::collections::HashMap::default(),
             spend: self.spend,
         };
+        out.text.push_str(&self.notes);
+        // The headline follows the title directly unless --details put notes between them.
+        if !out.text.is_empty() {
+            out.blank();
+        }
+        self.head(&mut out);
         rows_section(&self.rows, review, &mut out);
-        format!("{}{}{}", self.head, out.text, self.tail)
+        out.text.push_str(&self.guidance);
+        self.footer(&mut out);
+        out.text.push_str(&self.evidence);
+        // Each host's own notes follow, under its title, where it has any to show.
+        for host in &self.hosts {
+            if !(self.options.details || !host.notes.is_empty()) {
+                continue;
+            }
+            out.blank();
+            out.text.push_str(&host.title);
+            out.text.push_str(&host.notes);
+            out.text.push_str(&host.guidance);
+            out.text.push_str(&host.evidence);
+        }
+        out.text
+    }
+
+    /// What follows the title: the headline, what the changes save together and the
+    /// settings against the defaults, then what was left out or assumed and the legend.
+    fn head(&self, out: &mut Out<'_>) {
+        let head = &self.head;
+        let whose = self.whose.as_str();
+        let changes = self.rows.iter().filter(|r| r.mark == Mark::Change).count();
+        let considered = self.rows.iter().filter(|r| r.mark == Mark::Consider).count();
+        let headline = headline(changes, considered);
+        let headline: Vec<(&str, &str)> = headline.iter().map(|(t, s)| (t.as_str(), *s)).collect();
+        out.spans(&headline, 0, None);
+        // Every setting is at its default already, so what the changes save from there
+        // replaces the comparison with the defaults.
+        let together = crate::doctor::total(&head.savings, head.defaults, whose);
+        if !together.is_empty() {
+            out.line(&together, 0, PLAIN);
+        }
+        if let Some(credit) = &self.credit {
+            out.line(&credit.text(self.spend.monthly(), whose), 0, PLAIN);
+        }
+        let left = head.left.text();
+        // A blank line sets the notes and legend apart, when any follow.
+        if out.options.details || out.options.color || head.tilde || !left.is_empty() {
+            out.blank();
+        }
+        if out.options.details {
+            let spend = self.spend;
+            let spent = spend.text();
+            // With a profile that priced nothing, the base is only what could be priced, so a share can read high.
+            let base = if !spend.partial && spend.margin.is_some() {
+                format!(
+                    "{whose} spend over the window, {spent}, extrapolated from the requests that could be priced"
+                )
+            } else if !spend.partial {
+                format!("{whose} spend over the window, {spent}")
+            } else {
+                format!(
+                    "{whose} spend over the window, {spent}, since a profile that priced none of its requests adds only what could be priced, so a line's true share may be smaller"
+                )
+            };
+            out.line(
+                &format!(
+                    "Savings are per 30 days at the window's rate, and costs are totals over the window; each percent is of {base}.{} A tool, skill, MCP server or auto memory that was never used is recommended off, and one that cost more than {} per use (--max-cost-per-use) is worth considering off.",
+                    if head.tilde {
+                        format!(" {TILDE}")
+                    } else {
+                        String::new()
+                    },
+                    about(head.max_cost_per_use_usd)
+                ),
+                0,
+                DIM,
+            );
+            if head.background {
+                out.line("Background estimates apply current files to history; historical settings and unrecorded launch overrides remain unknown.", 0, DIM);
+            }
+        } else {
+            if !left.is_empty() {
+                out.line(&left, 0, DIM);
+            }
+            if head.tilde {
+                out.line(TILDE, 0, DIM);
+            }
+        }
+        if out.options.color {
+            out.legend();
+        }
+    }
+
+    /// The lines closing the list: what a feature's saving assumes, the prices, and what a
+    /// sum of savings may count twice.
+    fn footer(&self, out: &mut Out<'_>) {
+        if self.head.features {
+            out.line(
+                "A feature's saving is what it cost, assuming nothing else changes when it is removed; cache writes and compaction can shift.",
+                0,
+                DIM,
+            );
+        }
+        out.blank();
+        out.line(&self.head.prices, 0, DIM);
+        out.line(
+            "Each line compares one setting with everything else unchanged, so a sum of savings may count the same requests twice.",
+            0,
+            DIM,
+        );
+        if !out.options.details {
+            out.line(
+                "--details shows the evidence, assumptions and sources behind each line.",
+                0,
+                DIM,
+            );
+        }
     }
 
     /// What a report line's setting or feature does, in one sentence.
@@ -1672,7 +1927,7 @@ impl Listing {
 /// How the list groups changes after `doctor`'s walk.
 #[derive(Clone, Copy)]
 struct Review<'a> {
-    choices: &'a [(Origin, Choice)],
+    choices: &'a [Chosen],
     /// The accepted changes' summed saving, labeled, printed after them.
     total: &'a str,
 }
@@ -2376,7 +2631,7 @@ fn fable_row(u: &FableUse) -> Row {
         "What Fable models cost each week, which a Claude plan may limit apart from other models."
             .into(),
     );
-    row.sources = vec![CLAUDE_PRICING];
+    row.sources = vec![CLAUDE_PRICING.into()];
     let caveats = fable_caveats(u);
     if u.requests == 0 {
         row.evidence =
@@ -2446,7 +2701,7 @@ fn inbound_row(u: &InboundUse, out: &Out<'_>) -> Row {
         "Lets your other Claude Code sessions message this one; a message to an idle session starts a turn that resends the whole conversation.".into(),
     );
     row.value = inbound_value(&u.control);
-    row.sources = INBOUND_SOURCES.to_vec();
+    row.sources = INBOUND_SOURCES.iter().map(|s| s.to_string()).collect();
     let c = &u.control;
     row.setting = format!("{}:crossSessionInbound", out.home(&c.file));
     let mut parts = vec![];
@@ -4347,7 +4602,9 @@ fn first_profile(c: &ContextCost) -> &str {
 }
 
 /// A line's verdict, in the order lines are listed within a section.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 enum Mark {
     /// A recommended change, which exits 1.
     Change,
@@ -4395,7 +4652,7 @@ const FIGURE_CELLS: usize = 10;
 
 /// One setting or feature: one line naming its verdict, value, figure and setting, with
 /// its evidence on a second line under `--details`.
-#[derive(Clone)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Row {
     mark: Mark,
     name: String,
@@ -4404,6 +4661,7 @@ struct Row {
     /// The current value, and the recommended one after an arrow for a change.
     value: String,
     /// What it saves per 30 days or costs over the window, as a verb and a figure.
+    #[serde(deserialize_with = "amount")]
     amount: Option<(&'static str, String)>,
     /// That figure's share of this host's spend, which ranks the line.
     share: Option<f64>,
@@ -4413,7 +4671,7 @@ struct Row {
     setting: String,
     evidence: String,
     /// The pages the evidence cites, such as a plan's billing rule.
-    sources: Vec<&'static str>,
+    sources: Vec<String>,
     /// Where it was found, shown only when another line would read the same.
     location: Option<String>,
     /// What sets the line apart from another of the same setting and tag, coarsest first:
@@ -4439,14 +4697,33 @@ struct Row {
     key: String,
     /// The harness upgrade that alone would let its verdict apply.
     upgrade: Option<String>,
+    /// The SSH destination whose line it is, in a report of several hosts; None for this
+    /// host's.
+    host: Option<String>,
+}
+
+/// A row's amount read back from another host, its verb one this build prints.
+fn amount<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<(&'static str, String)>, D::Error> {
+    use serde::Deserialize;
+    const KNOWN: [&str; 5] = ["saves", UP_TO, AT_LEAST, "costs", "saving"];
+    let Some((verb, figure)) = Option::<(String, String)>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    let verb = KNOWN
+        .into_iter()
+        .find(|k| *k == verb)
+        .ok_or_else(|| serde::de::Error::custom("unknown amount verb"))?;
+    Ok(Some((verb, figure)))
 }
 
 /// A change's place in its section: the changes `doctor` offers as one question, which the
 /// list shows as one row.
-#[derive(Clone)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Membership {
-    /// The first change of the section, which names it.
-    id: usize,
+    /// What the section's changes share, on any host.
+    joint: crate::doctor::Joint,
     /// Its own change, which another line making the same edit shares.
     fix: usize,
     section: crate::doctor::Section,
@@ -4478,7 +4755,18 @@ impl Row {
             section: None,
             key: String::new(),
             upgrade: None,
+            host: None,
         }
+    }
+
+    /// Its share again, of `spend`: what it costs of the spend over the window, or what it
+    /// saves of the spend every 30 days.
+    fn reshare(&mut self, spend: &Spend) {
+        self.share = match (self.cost, self.saving) {
+            (Some((cost, _)), _) => spend.share(cost.usd),
+            (None, Some(usd)) => spend.of_month(usd),
+            (None, None) => None,
+        };
     }
 
     /// A change the report recommends or suggests, which leads the list.
@@ -4593,7 +4881,10 @@ fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
     let choice = |row: &Row| {
         let choices = review?.choices;
         let origin = row.origin?;
-        choices.iter().find(|(o, _)| *o == origin).map(|(_, c)| c)
+        choices
+            .iter()
+            .find(|(h, o, _)| *o == origin && *h == row.host)
+            .map(|(_, _, c)| c)
     };
     // Name where a line was found only when two lines of one profile would read the same.
     let mut seen = crate::collections::HashMap::<(String, String), usize>::default();
@@ -4797,7 +5088,9 @@ fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
         }
     }
     // Sources cite the guidance the evidence quotes, so they come with it.
-    let sources: IndexSet<&str> = all().flat_map(|r| r.sources.clone()).collect();
+    let sources: IndexSet<&str> = all()
+        .flat_map(|r| r.sources.iter().map(String::as_str))
+        .collect();
     if out.options.details && !sources.is_empty() {
         let sources: Vec<&str> = sources.into_iter().collect();
         out.blank();
@@ -4819,17 +5112,18 @@ struct Entry {
 /// as one row, the rest as they are.
 fn entries(rows: Vec<&Row>, joined: bool, out: &Out<'_>) -> Vec<Entry> {
     let mut sections: Vec<Vec<Row>> = vec![];
-    let mut at = crate::collections::HashMap::<usize, usize>::default();
-    for row in rows {
+    // Each section's place in `sections`, by what its changes share.
+    let mut at: Vec<(&crate::doctor::Joint, usize)> = vec![];
+    for row in &rows {
         match row.section.as_ref().filter(|_| joined) {
-            Some(m) => match at.get(&m.id) {
-                Some(&i) => sections[i].push(row.clone()),
+            Some(m) => match at.iter().find(|(j, _)| **j == m.joint) {
+                Some(&(_, i)) => sections[i].push((*row).clone()),
                 None => {
-                    at.insert(m.id, sections.len());
-                    sections.push(vec![row.clone()]);
+                    at.push((&m.joint, sections.len()));
+                    sections.push(vec![(*row).clone()]);
                 }
             },
-            None => sections.push(vec![row.clone()]),
+            None => sections.push(vec![(*row).clone()]),
         }
     }
     let mut entries: Vec<Entry> = vec![];
@@ -4997,6 +5291,34 @@ fn one_file(tag: &str) -> Option<&str> {
     tag.strip_prefix('[')
         .and_then(|t| t.strip_suffix(']'))
         .filter(|f| !f.contains(", ") && !f.contains(": "))
+}
+
+/// `row` as a report of several hosts lists it, naming the SSH destination `host` whose line
+/// it is, or this host when None: its tag names files and profiles there as `scp` does, such
+/// as `[devbox:~/.claude/settings.json]`, and a line with no tag names its host.
+fn hosted(row: &mut Row, host: Option<&str>) {
+    let Some(host) = host else {
+        if row.profile.is_empty() {
+            row.profile = "[this host]".into();
+        }
+        return;
+    };
+    // The setting names its file as this tag does, which the tag then names instead.
+    if let Some(file) = one_file(&row.profile) {
+        row.setting = in_file(&row.setting, file);
+        if let Some(key) = row.key.strip_prefix(file).and_then(|k| k.strip_prefix(':')) {
+            row.key = format!("{host}:{file}:{key}");
+        }
+    }
+    if !row.key.is_empty() && !row.key.starts_with(&format!("{host}:")) {
+        row.key = format!("{host}:{}", row.key);
+    }
+    row.profile = match row.profile.strip_prefix('[') {
+        Some(tag) => format!("[{host}:{tag}"),
+        None if row.profile.is_empty() => format!("[{host}]"),
+        None => format!("[{host}:{}]", row.profile),
+    };
+    row.host = Some(host.to_string());
 }
 
 /// A setting in `file`, named without it, as a line tagged with that file names it.
@@ -6148,6 +6470,7 @@ pub(crate) fn context_tally(context: &[ContextCost], scan: &Scan, now: Millis) -
         partial: false,
         since: window_start(scan),
         until: now,
+        rate: None,
     };
     setting_rows(context)
         .filter(|c| piece_mark(c, &scan.profiles).is_some())
@@ -6209,13 +6532,8 @@ fn sectioned(rows: &mut [Row], fixes: &[crate::doctor::Fix], out: &Out<'_>) {
                 paths.into_iter().collect::<Vec<_>>().join(", ")
             );
         }
-        let id = fixes
-            .iter()
-            .enumerate()
-            .position(|(i, f)| offered[i] && f.joins(&fixes[fix]))
-            .expect("a change joins its own section");
         row.section = Some(Membership {
-            id,
+            joint: fixes[fix].joint(),
             fix,
             section: section.clone(),
             what: crate::doctor::section_what(section, &row.what),
@@ -6322,56 +6640,117 @@ fn preamble(report: &Report, conditional: u64, out: &mut Out<'_>) {
     }
 }
 
-/// The short report's one line counting what was left out or assumed, pointing to
-/// `--details` for why; empty when nothing was. `conditional` counts the requests priced at
-/// an assumed service tier.
-fn left_out(report: &Report, conditional: u64) -> String {
-    let coverage = &report.scan.coverage;
-    let t3 = report.scan.t3.iter().filter(|s| s.status == "selected");
-    let unsupported: u64 = t3.clone().map(|s| s.unsupported).sum();
-    let missing: u64 = t3.clone().map(|s| s.missing).sum();
-    let policy = t3
-        .filter(|s| s.exclusions.iter().any(|e| e == crate::t3::POLICY_GAP))
-        .count() as u64;
-    let counts = [
-        (policy, "T3 state", " with unread machine policy"),
-        (unsupported, "unsupported T3 instance", ""),
-        (missing, "T3 instance", " with a missing history home"),
-        (coverage.t3_unattributed, "unattributed T3 request", ""),
-        (coverage.t3_removed, "removed T3 request", ""),
-        (coverage.missing_usage, "request", " with no usage"),
-        (coverage.skipped_lines, "unreadable line", ""),
-        (conditional, "request", " at an assumed service tier"),
-    ];
-    let parts: Vec<String> = counts
-        .iter()
-        .filter(|(n, ..)| *n > 0)
-        .map(|(n, noun, rest)| format!("{}{rest}", plural(*n, noun)))
-        .collect();
-    if parts.is_empty() {
-        return String::new();
+/// What a report left out or assumed, counted for its one line; hosts add theirs up.
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+struct LeftOut {
+    policy: u64,
+    unsupported: u64,
+    missing: u64,
+    unattributed: u64,
+    removed: u64,
+    no_usage: u64,
+    unreadable: u64,
+    /// Requests priced at an assumed service tier.
+    conditional: u64,
+}
+
+impl LeftOut {
+    /// What `report` left out or assumed; `conditional` counts the requests priced at an
+    /// assumed service tier.
+    fn of(report: &Report, conditional: u64) -> Self {
+        let coverage = &report.scan.coverage;
+        let t3 = report.scan.t3.iter().filter(|s| s.status == "selected");
+        LeftOut {
+            policy: t3
+                .clone()
+                .filter(|s| s.exclusions.iter().any(|e| e == crate::t3::POLICY_GAP))
+                .count() as u64,
+            unsupported: t3.clone().map(|s| s.unsupported).sum(),
+            missing: t3.map(|s| s.missing).sum(),
+            unattributed: coverage.t3_unattributed,
+            removed: coverage.t3_removed,
+            no_usage: coverage.missing_usage,
+            unreadable: coverage.skipped_lines,
+            conditional,
+        }
     }
-    format!(
-        "Left out or assumed: {}. --details says why.",
-        parts.join(", ")
-    )
+
+    /// Another host's counts added to these.
+    fn merge(&mut self, other: &LeftOut) {
+        self.policy += other.policy;
+        self.unsupported += other.unsupported;
+        self.missing += other.missing;
+        self.unattributed += other.unattributed;
+        self.removed += other.removed;
+        self.no_usage += other.no_usage;
+        self.unreadable += other.unreadable;
+        self.conditional += other.conditional;
+    }
+
+    /// The short report's one line counting them, pointing to `--details` for why; empty
+    /// when nothing was left out or assumed.
+    fn text(&self) -> String {
+        let counts = [
+            (self.policy, "T3 state", " with unread machine policy"),
+            (self.unsupported, "unsupported T3 instance", ""),
+            (self.missing, "T3 instance", " with a missing history home"),
+            (self.unattributed, "unattributed T3 request", ""),
+            (self.removed, "removed T3 request", ""),
+            (self.no_usage, "request", " with no usage"),
+            (self.unreadable, "unreadable line", ""),
+            (self.conditional, "request", " at an assumed service tier"),
+        ];
+        let parts: Vec<String> = counts
+            .iter()
+            .filter(|(n, ..)| *n > 0)
+            .map(|(n, noun, rest)| format!("{}{rest}", plural(*n, noun)))
+            .collect();
+        if parts.is_empty() {
+            return String::new();
+        }
+        format!(
+            "Left out or assumed: {}. --details says why.",
+            parts.join(", ")
+        )
+    }
+}
+
+/// What a report says around its list, kept as figures so a report of several hosts sums
+/// every host's.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+struct Head {
+    /// Every setting is pretended at its default (`--defaults`).
+    defaults: bool,
+    /// What the changes save together.
+    savings: crate::doctor::Total,
+    /// Whether some figure carries a ~, which a line explains.
+    tilde: bool,
+    left: LeftOut,
+    /// Whether a line is a background estimate, which `--details` explains.
+    background: bool,
+    max_cost_per_use_usd: f64,
+    /// Whether a feature's saving is what it cost, which the footer says.
+    features: bool,
+    /// The footer's line naming the prices, such as "Prices: fetched from ...".
+    prices: String,
+}
+
+impl Head {
+    /// Another host's head added to this one, whose prices every host shares.
+    fn merge(&mut self, other: &Head) {
+        self.savings.merge(&other.savings);
+        self.tilde |= other.tilde;
+        self.left.merge(&other.left);
+        self.background |= other.background;
+        self.features |= other.features;
+    }
 }
 
 /// The report: what was read, then every setting and feature on one line, the changes
 /// first, with each line's evidence under `--details`.
-/// Returns the text before the list, the list's rows, its advice and what the settings save
-/// against the defaults; what follows them stays in `out`.
-fn summary(
-    report: &Report,
-    fixes: &[crate::doctor::Fix],
-    out: &mut Out<'_>,
-) -> (
-    String,
-    String,
-    Vec<Row>,
-    Vec<Item>,
-    Option<crate::defaults::Credit>,
-) {
+/// Returns the title and the parts of the report around its list; the details that follow
+/// the list stay in `out`.
+fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> Summary {
     let arrow = out.arrow;
     let coverage = &report.scan.coverage;
     let spend = out.spend;
@@ -6565,7 +6944,7 @@ fn summary(
         }
         let official = match plan_note(result, r, out) {
             Some((note, source)) => {
-                row.sources.push(source);
+                row.sources.push(source.into());
                 format!("{} ", capitalize(note))
             }
             None => String::new(),
@@ -7532,7 +7911,7 @@ fn summary(
         );
         let notes: IndexSet<&str> = loading.iter().flat_map(|g| g.notes.clone()).collect();
         row.evidence = notes.into_iter().collect::<Vec<_>>().join(" ");
-        row.sources = loading.iter().filter_map(|g| g.source).collect();
+        row.sources = loading.iter().filter_map(|g| g.source).map(Into::into).collect();
         row.setting = loading
             .iter()
             .filter_map(|g| g.setting)
@@ -7811,31 +8190,9 @@ fn summary(
         rows.push(row);
     }
 
-    // The headline follows the title directly unless --details put notes between them.
-    if !out.text.is_empty() {
-        out.blank();
-    }
-    let changes = rows.iter().filter(|r| r.mark == Mark::Change).count();
-    let considered = rows.iter().filter(|r| r.mark == Mark::Consider).count();
-    let headline = headline(changes, considered);
-    let headline: Vec<(&str, &str)> = headline.iter().map(|(t, s)| (t.as_str(), *s)).collect();
-    out.spans(&headline, 0, None);
-    // In a report of several hosts, each section's percents are of its own host's spend.
-    let host = match out.options.host {
-        Some(host) if host.name != "this host" => format!("{}'s", host.name),
-        _ => "this host's".into(),
-    };
-    // Every setting is at its default already, so what the changes save from there replaces
-    // the comparison with the defaults.
-    let together = crate::doctor::total(fixes, report.scan.defaults);
-    if !together.is_empty() {
-        out.line(&together, 0, PLAIN);
-    }
+    let notes = std::mem::take(&mut out.text);
     let credit = (!report.scan.defaults)
         .then(|| crate::defaults::Credit::of(rows.iter().filter_map(|r| r.baseline.as_ref())));
-    if let Some(credit) = &credit {
-        out.line(&credit.text(spend.monthly(), &host), 0, PLAIN);
-    }
     // Said once, for every figure extrapolated over requests that could not be priced.
     // The details print many more estimates, so check what they render rather than list them,
     // unwrapped so no figure splits across lines.
@@ -7856,52 +8213,6 @@ fn summary(
             .iter()
             .any(|r| r.margin.is_some() || r.baseline.as_ref().is_some_and(|b| b.margin.is_some()))
         || detailed;
-    let left = left_out(report, conditional);
-    // A blank line sets the notes and legend apart, when any follow.
-    if out.options.details || out.options.color || tilde || !left.is_empty() {
-        out.blank();
-    }
-    if out.options.details {
-        // With a profile that priced nothing, the base is only what could be priced, so a share can read high.
-        let base = if !spend.partial && spend.margin.is_some() {
-            format!(
-                "{host} spend over the window, {spent}, extrapolated from the requests that could be priced"
-            )
-        } else if !spend.partial {
-            format!("{host} spend over the window, {spent}")
-        } else {
-            format!(
-                "{host} spend over the window, {spent}, since a profile that priced none of its requests adds only what could be priced, so a line's true share may be smaller"
-            )
-        };
-        out.line(
-            &format!(
-                "Savings are per 30 days at the window's rate, and costs are totals over the window; each percent is of {base}.{} A tool, skill, MCP server or auto memory that was never used is recommended off, and one that cost more than {} per use (--max-cost-per-use) is worth considering off.",
-                if tilde { format!(" {TILDE}") } else { String::new() },
-                about(report.max_cost_per_use_usd)
-            ),
-            0,
-            DIM,
-        );
-        if report
-            .checks
-            .iter()
-            .any(|c| matches!(c, CheckResult::Background(_)))
-        {
-            out.line("Background estimates apply current files to history; historical settings and unrecorded launch overrides remain unknown.", 0, DIM);
-        }
-    } else {
-        if !left.is_empty() {
-            out.line(&left, 0, DIM);
-        }
-        if tilde {
-            out.line(TILDE, 0, DIM);
-        }
-    }
-    if out.options.color {
-        out.legend();
-    }
-    let head = std::mem::take(&mut out.text);
     if out.options.details {
         if !report.subagents.is_empty() {
             out.blank();
@@ -7909,22 +8220,25 @@ fn summary(
         }
         catalog_guidance(report, out);
     }
-    if spend.since.is_some_and(|s| spend.until > s) && !pieces.is_empty() {
-        out.line(
-            "A feature's saving is what it cost, assuming nothing else changes when it is removed; cache writes and compaction can shift.",
-            0,
-            DIM,
-        );
-    }
-    out.blank();
+    let guidance = std::mem::take(&mut out.text);
     let fetched = report
         .prices
         .fetched_at
         .as_deref()
         .filter(|f| !f.is_empty())
         .map_or_else(String::new, |f| format!(" ({})", date(f)));
-    out.line(
-        &format!(
+    let head = Head {
+        defaults: report.scan.defaults,
+        savings: crate::doctor::Total::of(fixes),
+        tilde,
+        left: LeftOut::of(report, conditional),
+        background: report
+            .checks
+            .iter()
+            .any(|c| matches!(c, CheckResult::Background(_))),
+        max_cost_per_use_usd: report.max_cost_per_use_usd,
+        features: spend.since.is_some_and(|s| spend.until > s) && !pieces.is_empty(),
+        prices: format!(
             "Prices: {} from {}{fetched}.",
             if report.prices.offline {
                 "cached"
@@ -7933,23 +8247,28 @@ fn summary(
             },
             out.home(&report.prices.source)
         ),
-        0,
-        DIM,
-    );
-    out.line(
-        "Each line compares one setting with everything else unchanged, so a sum of savings may count the same requests twice.",
-        0,
-        DIM,
-    );
-    if !out.options.details {
-        out.line(
-            "--details shows the evidence, assumptions and sources behind each line.",
-            0,
-            DIM,
-        );
-    }
+    };
     sectioned(&mut rows, fixes, out);
-    (title, head, rows, vibes, credit)
+    Summary {
+        title,
+        notes,
+        head,
+        rows,
+        vibes,
+        guidance,
+        credit,
+    }
+}
+
+/// A report's parts around its list, as [`summary`] finds them.
+struct Summary {
+    title: String,
+    notes: String,
+    head: Head,
+    rows: Vec<Row>,
+    vibes: Vec<Item>,
+    guidance: String,
+    credit: Option<crate::defaults::Credit>,
 }
 
 /// What every piece of context cost, including pieces no longer sent.
@@ -8175,7 +8494,7 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::model::*;
     use crate::reader::scan;
@@ -8573,6 +8892,13 @@ mod tests {
     }
 
     /// A report exercising every check kind and context verdict, with one profile.
+    /// The synthetic report's listing, as a host sends it.
+    pub(crate) fn listing() -> Listing {
+        let report = synthetic();
+        let fixes = crate::doctor::fixes(&report, false);
+        format_report(&report, &fixes, ReportOptions::default())
+    }
+
     fn synthetic() -> Report {
         let profile = make_profile("profile", ROOT);
         let requests: Vec<Request> = [(0, 12_345), (1, 150_000), (2, 180_499), (3, 499)]
@@ -11003,6 +11329,7 @@ mod tests {
                 partial: false,
                 since: Some(0),
                 until: 30 * DAY as Millis,
+                rate: None,
             },
         };
         let file = |harness, name: &str, bytes, lines| {
@@ -12805,6 +13132,7 @@ mod tests {
             partial: false,
             since: Some(0),
             until: 30 * DAY as Millis,
+            rate: None,
         };
         assert_eq!(spend.share(10.0), Some(10.0 / 300.0));
         assert_eq!(spend.of_month(10.0), Some(10.0 / 300.0));
@@ -12857,6 +13185,7 @@ mod tests {
             partial,
             since: None,
             until: 0,
+            rate: None,
         };
         assert_eq!(spend(100.0, None, 0.0, false).text(), "$100");
         assert_eq!(
@@ -13593,7 +13922,16 @@ mod tests {
                 &out.spend,
             );
             row.section = Some(Membership {
-                id: 0,
+                joint: crate::doctor::Joint {
+                    kind: crate::doctor::Kind::Feature(
+                        ContextKind::Skill,
+                        crate::doctor::Reason::Duplicate,
+                    ),
+                    label: "Duplicate copies of skills".into(),
+                    target: Some("off".into()),
+                    suggested: None,
+                    measured: false,
+                },
                 fix,
                 section: crate::doctor::Section {
                     kind: crate::doctor::Kind::Feature(

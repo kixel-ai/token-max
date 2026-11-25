@@ -10,7 +10,7 @@ use crate::report::{approx, monthly, tokens};
 use serde::{Deserialize, Serialize};
 
 /// A setting whose current value differs from its default, and what that saves.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Baseline {
     /// The default as a line shows it, such as `5m` or `on`.
     pub default: String,
@@ -20,7 +20,7 @@ pub struct Baseline {
 }
 
 /// What a current value saves every 30 days against its default; negative when it costs more.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Saving {
     /// Replayed like the line's own comparison.
     Saves(f64),

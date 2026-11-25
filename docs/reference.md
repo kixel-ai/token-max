@@ -832,9 +832,10 @@ priced the scan the counts become the header's own. Each SSH host's totals
 join them as its report arrives. The line `doctor` clears shows the header's
 figures, or the total across hosts. Under `vibes --ssh` the destinations send
 no usage, so the line counts this host alone and says so. On a narrow
-terminal the line drops the least useful figures first: the bytes read, the
-tokens, the sessions, the time left to read, then the requests; the spend goes
-last.
+terminal the line keeps the most useful figures that fit: the spend, the
+requests, the time left to read, the sessions, the tokens, then the bytes read.
+A figure too wide for the room left is skipped, and narrower ones after it
+still show.
 
 On a terminal, `doctor` opens with its name, says it is about to scan this
 host's transcripts, and lists each profile root it found with its transcript

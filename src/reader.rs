@@ -2351,8 +2351,11 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     );
     // T3 can move a shared request to another profile, which changes the group its spend is
     // extrapolated in, so count the window once more as the header will, with prices that
-    // may have loaded since the last count.
-    if let Some(reading) = &options.reading {
+    // may have loaded since the last count. Without T3 the last count stands unless prices
+    // loaded since.
+    if let Some(reading) = &options.reading
+        && (has_t3 || !t3.is_empty() || (reading.catalog.get().is_some() && !reading.priced()))
+    {
         let split = requests.partition_point(|r| since.is_some_and(|since| r.time < since));
         crate::tally::recount(reading, &mut requests[split..], &subagents);
     }

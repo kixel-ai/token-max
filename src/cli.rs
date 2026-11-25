@@ -506,31 +506,39 @@ fn figures(counts: &Counts) -> Vec<Piece> {
     pieces
 }
 
-/// The pieces that fit in `room` cells after `used`, each after two spaces, dropping the
-/// least kept first, with `whose` they are before the first count; and the cells left over.
-fn fit(mut pieces: Vec<Piece>, whose: Option<&str>, used: usize, room: usize) -> (String, usize) {
+/// The pieces that fit in `room` cells after `used`, each after two spaces, taking the most
+/// kept first and skipping any too wide for what is left, with `whose` they are before the
+/// first count; and the cells left over.
+fn fit(pieces: Vec<Piece>, whose: Option<&str>, used: usize, room: usize) -> (String, usize) {
     let label = whose.map_or_else(String::new, |whose| format!("{whose}: "));
-    let width = |pieces: &[Piece]| -> usize {
-        let label = match pieces.iter().any(|p| p.count) {
+    let width = |taken: &[bool]| -> usize {
+        let shown = || {
+            pieces
+                .iter()
+                .zip(taken)
+                .filter(|(_, t)| **t)
+                .map(|(p, _)| p)
+        };
+        let label = match shown().any(|p| p.count) {
             true => crate::terminal::cells(&label),
             false => 0,
         };
-        let texts: usize = pieces
-            .iter()
-            .map(|p| 2 + crate::terminal::cells(&p.text))
-            .sum();
+        let texts: usize = shown().map(|p| 2 + crate::terminal::cells(&p.text)).sum();
         label + texts
     };
-    while used + width(&pieces) > room {
-        let Some(least) = (0..pieces.len()).min_by_key(|&at| pieces[at].keep) else {
-            break;
-        };
-        pieces.remove(least);
+    let mut order: Vec<usize> = (0..pieces.len()).collect();
+    order.sort_by_key(|&at| std::cmp::Reverse(pieces[at].keep));
+    let mut taken = vec![false; pieces.len()];
+    for at in order {
+        taken[at] = true;
+        if used + width(&taken) > room {
+            taken[at] = false;
+        }
     }
-    let left = room.saturating_sub(used + width(&pieces));
+    let left = room.saturating_sub(used + width(&taken));
     let mut text = String::new();
     let mut labeled = false;
-    for p in &pieces {
+    for (p, _) in pieces.iter().zip(&taken).filter(|(_, t)| **t) {
         text.push_str("  ");
         if p.count && !labeled {
             text.push_str(&label);
@@ -2681,7 +2689,8 @@ mod tests {
                 "░".repeat(13)
             )
         );
-        // Sizes go first, then the track narrows, then tokens, sessions and the estimate go.
+        // Sizes go first, then the track narrows, then the most useful figures that fit stay:
+        // at 79 cells the estimate and sessions don't, but the narrower tokens still do.
         let narrowed = [
             (
                 119,
@@ -2689,7 +2698,7 @@ mod tests {
             ),
             (
                 79,
-                "token-max: Reading █████████▍░░░░░░░░░░░  45%  78,786 requests  ~$4,081 ± $2.04",
+                "token-max: Reading ███▌░░░░  45%  78,786 requests  1.9B tokens  ~$4,081 ± $2.04",
             ),
             (
                 59,
@@ -2720,6 +2729,15 @@ mod tests {
         assert_eq!(
             bar(&progress, figures(&counts), Some("this host"), look, 70).0,
             "token-max: Reading ████████░░░░░░░░░░  45%  this host: ~$4,081 ± $2.04"
+        );
+        // A spend too wide for the row is skipped, and the counts that fit still show.
+        let mut partial = counts;
+        if let Some(spend) = &mut partial.spend {
+            spend.partial = true;
+        }
+        assert_eq!(
+            reading(&partial, 79),
+            "token-max: Reading ████████▌░░░░░░░░░░  45%  ~13s left to read  78,786 requests"
         );
         // Before prices load, the counts show without a spend.
         counts.spend = None;

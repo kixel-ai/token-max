@@ -335,7 +335,6 @@ fn checkout(dir: &str) -> Option<String> {
     main_checkout(root).ok()
 }
 
-/// `dir`, or its nearest ancestor that is still a directory.
 /// `dir` by its real path, from its nearest existing ancestor's, so two spellings of one
 /// directory match before it exists; a relative one stays as given.
 fn real(dir: &str) -> String {
@@ -345,7 +344,7 @@ fn real(dir: &str) -> String {
         .flatten()
         .and_then(|at| Some((at, realpath(at).ok()?)));
     match base {
-        Some((at, base)) => match dir[at.len()..].trim_start_matches(['/', '\\']) {
+        Some((at, base)) => match dir[at.len()..].trim_matches(std::path::is_separator) {
             "" => base,
             rest => join(&[&base, rest]),
         },
@@ -353,6 +352,7 @@ fn real(dir: &str) -> String {
     }
 }
 
+/// `dir`, or its nearest ancestor that is still a directory.
 fn nearest(dir: &str) -> Option<&str> {
     let mut at = dir;
     while !Path::new(at).is_dir() {
@@ -528,7 +528,8 @@ pub fn lsp_use(scan: &Scan, since: Option<Millis>, now: Millis) -> Vec<LspUse> {
     let parents = parents(scan);
     let touched = touches(scan, &parents, since, now);
     // Each plugins directory by its real path, so profiles reaching one through a link share
-    // a card; read here rather than in discovery, which the `sessions` export runs too.
+    // a card and its registry is read from the directory the card names; resolved here
+    // rather than in discovery, which the `sessions` export runs too.
     let dirs: HashMap<&str, Option<String>> = claude
         .iter()
         .map(|p| {
@@ -579,7 +580,7 @@ pub fn lsp_use(scan: &Scan, since: Option<Millis>, now: Millis) -> Vec<LspUse> {
             sessions.extend(by_language.values().flat_map(|s| s.keys().copied()));
             let lead = line.lead;
             let plugins = lead.plugins.as_ref().expect("filtered on its plugins");
-            let read = read(plugins);
+            let read = read(plugins, dirs[lead.id.as_str()].as_deref());
             let languages = match &read {
                 Err(_) => vec![],
                 Ok(installs) => {
@@ -623,12 +624,12 @@ pub fn lsp_use(scan: &Scan, since: Option<Millis>, now: Millis) -> Vec<LspUse> {
         .collect()
 }
 
-/// The official plugins a profile's plugins directory records, once its settings' entries
-/// are known to be ones Claude Code would write.
-fn read(plugins: &Plugins) -> Result<IndexMap<String, Install>, Unread> {
-    let dir = plugins.dir.as_ref().ok_or(Unread::Secret)?;
+/// The official plugins the resolved plugins directory `dir` records, once the profile's
+/// settings' entries are known to be ones Claude Code would write.
+fn read(plugins: &Plugins, dir: Option<&str>) -> Result<IndexMap<String, Install>, Unread> {
+    let dir = dir.ok_or(Unread::Secret)?;
     if !Path::new(dir).is_absolute() {
-        return Err(Unread::Relative(dir.clone()));
+        return Err(Unread::Relative(dir.into()));
     }
     plugins.user.as_ref().map_err(Clone::clone)?;
     plugins.managed.as_ref().map_err(Clone::clone)?;
@@ -1156,8 +1157,28 @@ mod tests {
             join(&[&target, "plugins"])
         );
         assert_eq!(real(".plugin-cache"), ".plugin-cache");
+        // A missing parent's `..` collapses as Claude Code's path join does, and the registry
+        // is read from this path too.
+        assert_eq!(
+            real(&join(&[&target, "missing"]).replace("missing", "missing/../plugins")),
+            join(&[&target, "plugins"])
+        );
+        // A trailing separator names the same directory.
+        assert_eq!(
+            real(&format!(
+                "{}{}",
+                join(&[&target, "plugins"]),
+                std::path::MAIN_SEPARATOR
+            )),
+            join(&[&target, "plugins"])
+        );
         #[cfg(unix)]
         {
+            // On Unix a backslash is part of the name, not a separator.
+            assert_eq!(
+                real(&format!("{target}/\\plugins")),
+                format!("{target}/\\plugins")
+            );
             let link = join(&[&root, "link"]);
             std::os::unix::fs::symlink(&target, &link).unwrap();
             assert_eq!(

@@ -314,8 +314,10 @@ pub fn claude_effort(
         }
         control.picked = Some(Box::new(picked));
     }
+    // Claude Platform on AWS and on Google Cloud take Anthropic's own model IDs.
     control.provider = crate::controls::claude_provider(&environment)
         .map(|p| p.pricing)
+        .filter(|p| *p != "anthropic")
         .map(String::from);
     Ok(control)
 }

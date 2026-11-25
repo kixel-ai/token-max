@@ -385,15 +385,14 @@ fn provider(r: &Request, profiles: &[Profile]) -> Option<Text> {
         .iter()
         .filter(|p| r.profiles.contains(&p.id))
         .collect();
-    let first = sharing.first();
-    if let Some(first) = first
-        && sharing.iter().all(|p| p.provider == first.provider)
-        && let Some(provider) = &first.provider
-    {
-        return Some(provider.as_str().into());
-    }
-    (r.harness == Harness::Claude && sharing.iter().all(|p| p.provider.is_none()))
-        .then(|| "anthropic".into())
+    let Some(first) = sharing.first() else {
+        return (r.harness == Harness::Claude).then(|| "anthropic".into());
+    };
+    sharing
+        .iter()
+        .all(|p| p.catalog() == first.catalog())
+        .then(|| first.catalog().map(Into::into))
+        .flatten()
 }
 
 /// The session `session` counts in: the one that spawned it, when it is a subagent's.
@@ -574,6 +573,16 @@ mod tests {
         assert_eq!(
             provider(&r, &[profile(Some("bedrock"))]).as_deref(),
             Some("bedrock")
+        );
+        // Anthropic's API and Claude Platform on AWS share a catalog, so a history both read
+        // is still priced.
+        assert_eq!(
+            provider(&r, &[profile(None), profile(Some("anthropic"))]).as_deref(),
+            Some("anthropic")
+        );
+        assert_eq!(
+            provider(&r, &[profile(None), profile(Some("bedrock"))]),
+            None
         );
         r.harness = Harness::Codex;
         assert_eq!(provider(&r, &[]), None);

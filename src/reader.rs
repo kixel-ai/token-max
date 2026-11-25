@@ -2087,13 +2087,17 @@ fn sharing<'a>(all: &'a [Profile], ids: &[String]) -> Vec<&'a Profile> {
     all.iter().filter(|p| ids.contains(&p.id)).collect()
 }
 
-/// The single provider these profiles agree on, if they agree.
+/// The single provider these profiles agree on, if they agree, or else the price catalog they
+/// share, such as Anthropic's API and Claude Platform on AWS.
 fn agreed(profiles: &[&Profile]) -> Option<Option<String>> {
     let first = profiles.first()?;
+    if profiles.iter().all(|p| p.provider == first.provider) {
+        return Some(first.provider.clone());
+    }
     profiles
         .iter()
-        .all(|p| p.provider == first.provider)
-        .then(|| first.provider.clone())
+        .all(|p| p.catalog() == first.catalog())
+        .then(|| first.catalog().map(String::from))
 }
 
 pub(crate) fn now() -> Millis {

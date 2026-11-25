@@ -340,6 +340,7 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
         background_requests: IndexMap::default(),
         memory: None,
         inbound: None,
+        plugins: None,
         t3: None,
     }
 }

@@ -42,8 +42,7 @@ Decision prompts, chosen options marked ✅:
   so 0.1.0 and the README's demo show the credit up front, and the live
   counters ship after it (rejected: gate on all three; gate on none). The
   site's demo runs `doctor --defaults`, which has no credit to show.
-- The 69s after reading: ✅ its own [quest](/quest/m1/scan-speed.md)
-  (rejected: drop it).
+- The 69s after reading: ✅ its own quest (rejected: drop it).
 
 The line is shared by `doctor` and `vibes` and stays on interactive terminals
 only, as now. `vibes` gets the reading counts, for this host only under

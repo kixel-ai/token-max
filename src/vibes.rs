@@ -533,7 +533,7 @@ mod tests {
                         ..card(&format!("{name}, asked"))
                     })),
                 }),
-                ..card(name)
+                ..cap(&w, name, &["A"], "1")
             }
         };
         let (mut here, mut there) = (
@@ -543,6 +543,8 @@ mod tests {
         // Alone, neither host's section is asked, so each keeps its own card.
         joined(&mut [&mut here]);
         assert_eq!(here[0].name, "here");
+        // The walk's offers come from the cards before the join, as the coordinator builds them.
+        let owner = Owner::new(fixes(&here), vec![], style(&w).home.clone(), 100.0);
         // Together they save $1.10, which the walk asks once across both hosts.
         joined(&mut [&mut here, &mut there]);
         assert_eq!(
@@ -550,6 +552,20 @@ mod tests {
             ["here, asked", "other", "there, asked"]
         );
         assert!(here[0].quiet && there[0].quiet);
+        // The asked card is quiet, so the edit of the card it replaced is neither shown nor
+        // written.
+        let style = style(&w);
+        let hosts = [Host {
+            label: None,
+            items: &here,
+            offers: Some(owner.offers()),
+            style: &style,
+        }];
+        let mut output = vec![];
+        let selections = ask(&hosts, &style, &mut "y\ny\n".as_bytes(), &mut output).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(selections[0].events().is_empty(), "{output}");
+        assert!(!output.contains("settings.json"), "{output}");
         // Joining again, as after a walk reads its advice anew, keeps them as they are.
         joined(&mut [&mut here, &mut there]);
         assert_eq!(here[0].name, "here, asked");

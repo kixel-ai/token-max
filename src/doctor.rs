@@ -3547,10 +3547,10 @@ impl Question<'_> {
     /// covers another host than this one. Each member says what it does when the person
     /// splits the section.
     fn card(&self, counter: &str, hosts: &[Walking<'_>], style: &Style) -> String {
-        let fixes: Vec<(&Fix, Option<&str>)> = self
+        let fixes: Vec<(&Fix, Option<&str>, &Style)> = self
             .members
             .iter()
-            .map(|m| (&m.offer.fix, hosts[m.host].label))
+            .map(|m| (&m.offer.fix, hosts[m.host].label, hosts[m.host].style))
             .collect();
         let first = fixes[0].0;
         let mut rows = vec![];
@@ -3564,8 +3564,8 @@ impl Question<'_> {
             rows.push((name, labels.into_iter().collect::<Vec<_>>().join(", ")));
         }
         rows.push(("What", section_what(&first.section, &first.what)));
-        rows.push(("Which", which(&fixes, style)));
-        let fixes: Vec<&Fix> = fixes.into_iter().map(|(f, _)| f).collect();
+        rows.push(("Which", which(&fixes)));
+        let fixes: Vec<&Fix> = fixes.into_iter().map(|(f, ..)| f).collect();
         let value = section_value(
             fixes
                 .iter()
@@ -3589,14 +3589,15 @@ const NAMED: usize = 3;
 
 /// A section's members by name, largest saving first: every one when there are few, else
 /// the largest few and how many more, such as "dataviz, code-review, run and 16 more". Each
-/// comes with the host it is on, None for this host or a walk of this host alone.
-fn which(fixes: &[(&Fix, Option<&str>)], style: &Style) -> String {
+/// comes with the host it is on, None for this host or a walk of this host alone, and that
+/// host's style, which prints its locations from its own home.
+fn which(fixes: &[(&Fix, Option<&str>, &Style)]) -> String {
     let mut fixes = fixes.to_vec();
     // Members on several hosts name their host when two share a name.
-    let hosts: IndexSet<Option<&str>> = fixes.iter().map(|(_, h)| *h).collect();
+    let hosts: IndexSet<Option<&str>> = fixes.iter().map(|(_, h, _)| *h).collect();
     let spans = hosts.len() > 1;
     // A stable sort keeps the report's order among equal and unmeasured savings.
-    fixes.sort_by(|(a, _), (b, _)| match (a.saving, b.saving) {
+    fixes.sort_by(|(a, ..), (b, ..)| match (a.saving, b.saving) {
         (Some(a), Some(b)) => b.total_cmp(&a),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
@@ -3604,19 +3605,23 @@ fn which(fixes: &[(&Fix, Option<&str>)], style: &Style) -> String {
     });
     let names: Vec<String> = fixes
         .iter()
-        .map(|&(f, host)| {
+        .map(|&(f, host, style)| {
             let s = &f.section;
             // A name two members share, such as a duplicate skill's, is followed by its
             // location when the copies' locations differ, and by its profile when the
             // location alone repeats, as two profiles' copies of one skill do; a setting's
             // name is its profile. Members on several hosts compare within their own.
             let peers = |same: &dyn Fn(&Fix) -> bool| {
-                fixes.iter().filter(|(o, h)| *h == host && same(o)).count() > 1
+                fixes
+                    .iter()
+                    .filter(|(o, h, _)| *h == host && same(o))
+                    .count()
+                    > 1
             };
             let shared = peers(&|o| o.section.member == s.member);
             let placed =
                 !peers(&|o| o.section.member == s.member && o.section.location == s.location);
-            let moved = fixes.iter().any(|(o, h)| {
+            let moved = fixes.iter().any(|(o, h, _)| {
                 *h == host && o.section.member == s.member && o.section.location != s.location
             });
             let name = match (&s.location, s.kind, f.profile.as_str()) {
@@ -3636,7 +3641,7 @@ fn which(fixes: &[(&Fix, Option<&str>)], style: &Style) -> String {
             // A member another host also has names its own host.
             let elsewhere = fixes
                 .iter()
-                .any(|(o, h)| *h != host && o.section.member == s.member);
+                .any(|(o, h, _)| *h != host && o.section.member == s.member);
             let host = host.unwrap_or("this host");
             match (name.is_empty(), spans && elsewhere) {
                 (true, _) => host.to_string(),
@@ -6031,6 +6036,47 @@ mod tests {
         assert_eq!(
             finish(&plan, &[], &style(&w)),
             "\n  Nothing was accepted, so nothing was written.\n"
+        );
+    }
+
+    #[test]
+    fn a_members_location_reads_from_its_own_hosts_home() {
+        let w = Workspace::new();
+        let skill = |at: &str, usd: f64| Fix {
+            saving: Some(usd),
+            section: Section {
+                kind: Kind::Feature(ContextKind::Skill, Reason::Unused),
+                label: "Never-used skills".into(),
+                member: "dataviz".into(),
+                location: Some(at.into()),
+            },
+            ..change(
+                "dataviz",
+                &w.claude.join("settings.json"),
+                Harness::Claude,
+                vec![],
+            )
+        };
+        let home = |home: &str, host: Option<&str>| Style {
+            home: Some(home.into()),
+            host: host.map(Into::into),
+            ..style(&w)
+        };
+        let (here, there) = (home("/srv/shared", None), home("/home/dev", Some("devbox")));
+        let (local, a, b) = (
+            skill("/srv/shared/x/SKILL.md", 0.9),
+            skill("/srv/shared/a/SKILL.md", 0.5),
+            skill("/home/dev/b/SKILL.md", 0.4),
+        );
+        // The first member is on this host, whose home is not devbox's.
+        assert_eq!(
+            which(&[
+                (&local, None, &here),
+                (&a, Some("devbox"), &there),
+                (&b, Some("devbox"), &there),
+            ]),
+            // slash ok: home_path keeps the location's own separators after `~`.
+            "dataviz on this host, dataviz (/srv/shared/a/SKILL.md) on devbox, dataviz (~/b/SKILL.md) on devbox."
         );
     }
 

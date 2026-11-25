@@ -1838,9 +1838,17 @@ impl Listing {
                     "{whose} spend over the window, {spent}, since a profile that priced none of its requests adds only what could be priced, so a line's true share may be smaller"
                 )
             };
+            // Joined hosts' windows can differ, so a saving's percent is of the sum of each
+            // host's own 30-day rate rather than of the window's total.
+            let rated = spend.rate.map_or_else(String::new, |rate| {
+                format!(
+                    " A saving's percent is instead of {whose} spend every 30 days, each at its own window's rate, {}.",
+                    about(rate)
+                )
+            });
             out.line(
                 &format!(
-                    "Savings are per 30 days at the window's rate, and costs are totals over the window; each percent is of {base}.{} A tool, skill, MCP server or auto memory that was never used is recommended off, and one that cost more than {} per use (--max-cost-per-use) is worth considering off.",
+                    "Savings are per 30 days at the window's rate, and costs are totals over the window; each percent is of {base}.{rated}{} A tool, skill, MCP server or auto memory that was never used is recommended off, and one that cost more than {} per use (--max-cost-per-use) is worth considering off.",
                     if head.tilde {
                         format!(" {TILDE}")
                     } else {
@@ -5584,8 +5592,20 @@ fn hosted(row: &mut Row, host: Option<&str>) {
     if !row.key.is_empty() && !row.key.starts_with(&format!("{host}:")) {
         row.key = format!("{host}:{}", row.key);
     }
-    row.profile = match row.profile.strip_prefix('[') {
-        Some(tag) => format!("[{host}:{tag}"),
+    // Each file or profile the tag lists is on that host, so a summary line that splits
+    // tags apart never takes two hosts' entries for one.
+    row.profile = match row
+        .profile
+        .strip_prefix('[')
+        .and_then(|t| t.strip_suffix(']'))
+    {
+        Some(tag) => format!(
+            "[{}]",
+            tag.split(", ")
+                .map(|t| format!("{host}:{t}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         None if row.profile.is_empty() => format!("[{host}]"),
         None => format!("[{host}:{}]", row.profile),
     };
@@ -7780,6 +7800,11 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
                         Some(usd) if usd <= 0.0 => {}
                         usd => row.costs(check_estimate(usd, r), false, &spend),
                     }
+                }
+                // A scope whose setting is unresolved may be on for the requests it covers, at
+                // a cost not measured, which leaves a line summing it a lower bound.
+                CheckResult::Background(_) if r.current.is_none() && r.requests > 0 => {
+                    row.costs(None, false, &spend);
                 }
                 // Codex extraction and consolidation, or reads nothing priced, are left out.
                 CheckResult::Memory(m) => match r.savings_usd {
@@ -14493,6 +14518,42 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_background_line_summing_an_unresolved_scope_costs_at_least_the_rest() {
+        let mut report = synthetic_report();
+        report
+            .checks
+            .retain(|c| !matches!(c, CheckResult::Background(_)));
+        // A kept scope's cost is within --max-cost-per-use, so it sits in EVERYTHING ELSE.
+        let scope = |action: Action, current: Option<bool>, usd: Option<f64>, directory: &str| {
+            let mut base = check_base(action, current, None);
+            base.owner = format!("{ROOT}/settings.json:promptSuggestionEnabled");
+            base.savings_usd = usd;
+            base.monthly_savings_usd = usd;
+            CheckResult::Background(BackgroundCheck {
+                base,
+                feature: BackgroundFeature::PromptSuggestions,
+                directories: vec![Some(directory.into())],
+                reason: "synthetic".into(),
+                scope: None,
+                off: "\"promptSuggestionEnabled\": false".into(),
+                off_file: Some(format!("{ROOT}/settings.json")),
+                generations: None,
+                cost: cost(None, 0.0),
+                cost_estimate: None,
+                lost_warming: cost(None, 0.0),
+                lost_estimate: None,
+            })
+        };
+        report.checks.extend([
+            scope(Action::Keep, Some(true), Some(4.0), "/synthetic/home/a"),
+            scope(Action::Advisory, None, None, "/synthetic/home/b"),
+        ]);
+        let text = text(&report, None, false);
+        let line = report_line(&text, "Prompt suggestions");
+        assert!(line.head.contains(" costs at least $4 "), "{text}");
+    }
+
+    #[test]
     fn one_setting_resolved_apart_for_groups_of_directories_gets_a_line_that_names_each() {
         let mut report = synthetic_report();
         let group = |scope: Option<&str>, directories: &[Option<&str>]| {
@@ -14848,6 +14909,32 @@ pub(crate) mod tests {
         saved.saves("saves", Some(4.0), None, &out.spend);
         let row = section_row(&[member(0, 2.0), saved], &out);
         assert_eq!(row.amount, Some(("saves", "$4/mo".into())));
+    }
+
+    #[test]
+    fn a_remote_tag_names_its_host_on_every_file_so_hosts_never_merge() {
+        let report = synthetic();
+        let out = Out::new(&report, ReportOptions::default());
+        let rows: Vec<Row> = ["devbox", "laptop"]
+            .into_iter()
+            .map(|host| {
+                let mut row = Row::new(Mark::Info, "Fast mode".into(), String::new());
+                row.group = Some("Fast mode".into());
+                row.profile = "[~/a/settings.json, ~/b/settings.json]".into();
+                hosted(&mut row, Some(host));
+                row.base_tag.clone_from(&row.profile);
+                row
+            })
+            .collect();
+        assert_eq!(
+            rows[0].profile,
+            "[devbox:~/a/settings.json, devbox:~/b/settings.json]"
+        );
+        // Four files on two hosts, none taken for another.
+        assert_eq!(
+            kind_row(&rows, &out).profile,
+            "[devbox:~/a/settings.json, devbox:~/b/settings.json, laptop:~/a/settings.json and 1 more]"
+        );
     }
 
     #[test]

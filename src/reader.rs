@@ -7,8 +7,8 @@ use crate::collections::{HashMap, HashSet, IndexMap, IndexSet};
 use std::fs::File;
 use std::hash::BuildHasher;
 use std::io::{ErrorKind, Read};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
@@ -26,10 +26,13 @@ use crate::model::{
     Profiles, Request, RequestEvidence, RequestMeta, RequestedSpeed, Scan, ScanCoverage, Settings,
     ShellCall, Snapshot, StructuralEvent, Subagent, Text, Usage,
 };
+use crate::prices::Catalog;
 use crate::safe::{
     MAX_SAFE_INTEGER, ScanError, count, digest, id, identity, iso, label, object, timestamp, truthy,
 };
 use crate::sessions::{Record, Sessions};
+use crate::tally::{Basis, Tally};
+use crate::totals::Counts;
 use crate::unreadable::ToolIds;
 
 /// Select a time window and local roots.
@@ -54,14 +57,23 @@ pub enum Reach {
     Window,
 }
 
-/// How far a scan has read its transcripts, which another thread may watch.
+/// How far a scan has read its transcripts and what it has counted, which another thread may
+/// watch; a scan given one also counts as it reads.
 #[derive(Debug, Default)]
 pub struct Reading {
     /// Bytes in every transcript the scan reads; zero until it knows which those are.
     pub total: AtomicU64,
     /// Bytes in the transcripts read so far.
     pub read: AtomicU64,
+    /// What the requests read so far count to, as the report's header would count them,
+    /// until the analysis replaces it with the header's own; None until the scan counts.
+    pub counts: Mutex<Option<Counts>>,
+    /// Public prices once they load, which the scan prices what it has read with.
+    pub catalog: OnceLock<Catalog>,
 }
+
+/// Records read between updates of a [`Reading`]'s counts.
+const COUNT_EVERY: u64 = 1024;
 
 /// Bytes read per system call; lines longer than this are assembled across chunks.
 const CHUNK: usize = 1 << 20;
@@ -889,6 +901,8 @@ struct Link {
 struct Requests {
     list: Vec<Request>,
     ids: HashMap<Text, usize>,
+    /// What the list counts to so far, when a progress line shows it.
+    tally: Option<Tally>,
 }
 
 /// Each event's position by id without a second copy of the id: a position is found by the
@@ -1057,6 +1071,28 @@ impl Reader {
                 self.subagents.insert(subagent.session.clone(), subagent);
             }
         }
+    }
+
+    /// Bring `reading`'s counts up to date with the requests read so far.
+    fn count(&mut self, reading: &Reading, profiles: &[Profile]) {
+        let Some(tally) = &mut self.requests.tally else {
+            return;
+        };
+        let counts = tally.count(
+            &mut self.requests.list,
+            &mut self.legacy,
+            &Basis {
+                since: self.since,
+                modern: &self.modern_totals,
+                subagents: &self.subagents,
+                profiles,
+                catalog: reading.catalog.get(),
+            },
+        );
+        *reading
+            .counts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(counts);
     }
 
     fn add(&mut self, mut r: Request) {
@@ -1656,11 +1692,15 @@ impl Reader {
             let total = nested(p, "thread_token_usage");
             if !total.is_empty() {
                 let total = usage_of(total, Harness::Codex)?;
-                self.modern_totals.insert(format!(
+                let total = format!(
                     "{}:{}",
                     context.session,
                     serde_json::to_string(&total).expect("usage serializes")
-                ));
+                );
+                if let Some(tally) = &mut self.requests.tally {
+                    tally.supersede(&total);
+                }
+                self.modern_totals.insert(total);
             }
             self.add(r);
         } else if kind == Some("event_msg") && payload_kind == Some("token_count") {
@@ -1864,10 +1904,16 @@ impl Reader {
 fn add(requests: &mut Requests, strings: &mut Interner, r: Request) -> Option<Text> {
     let Some(&index) = requests.ids.get(&r.id) else {
         let answered = r.reference.clone();
+        if let Some(tally) = &mut requests.tally {
+            tally.touch(requests.list.len());
+        }
         requests.ids.insert(r.id.clone(), requests.list.len());
         requests.list.push(r);
         return answered;
     };
+    if let Some(tally) = &mut requests.tally {
+        tally.touch(index);
+    }
     let Request {
         evidence,
         time,
@@ -2002,6 +2048,10 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     if let Some(reading) = &options.reading {
         reading.total.store(0, Ordering::Relaxed);
         reading.read.store(0, Ordering::Relaxed);
+        *reading
+            .counts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
     }
     let snapshot_started_at = iso(now());
     let Discovery {
@@ -2026,7 +2076,10 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         since,
         exposure: ExposureCollector::new(since),
         strings: Interner::default(),
-        requests: Requests::default(),
+        requests: Requests {
+            tally: options.reading.as_ref().map(|_| Tally::default()),
+            ..Requests::default()
+        },
         events: vec![],
         event_ids: EventIndex::default(),
         compact_parents: HashMap::default(),
@@ -2042,6 +2095,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     reader.exposure.roots(&profiles);
     // Bytes in the transcripts already read.
     let mut finished = 0;
+    let mut consumed: u64 = 0;
     for snapshot in &mut snapshots {
         // Records update the snapshot's counters while records are consumed against its metadata.
         let view = snapshot.clone();
@@ -2061,6 +2115,10 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
             if let Some(reading) = &options.reading {
                 let read = finished + records.position;
                 reading.read.store(read, Ordering::Relaxed);
+                consumed += 1;
+                if consumed.is_multiple_of(COUNT_EVERY) {
+                    reader.count(reading, &profiles);
+                }
             }
         }
         snapshot.unreadable.finish(&ids, snapshot.skipped_lines);
@@ -2069,6 +2127,11 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
             reading.read.store(finished, Ordering::Relaxed);
         }
     }
+    // What reading leaves to settle, the analysis settles with the header's own counts.
+    if let Some(reading) = &options.reading {
+        reader.count(reading, &profiles);
+    }
+    reader.requests.tally = None;
     let Reader {
         exposure,
         mut strings,
@@ -2114,6 +2177,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     let Requests {
         list: mut requests,
         ids,
+        ..
     } = requests;
     drop(ids);
     let mut ref_to_request: HashMap<Text, Text> = HashMap::default();
@@ -2505,6 +2569,110 @@ mod tests {
         .unwrap();
         let progress = |n: &AtomicU64| n.load(Ordering::Relaxed);
         assert_eq!((progress(&reading.total), progress(&reading.read)), (0, 0));
+    }
+
+    /// What a scan counts as it reads, against what the header counts once the scan is
+    /// analyzed: across streamed chunks, profiles sharing a history, a subagent's session
+    /// and the window, priced at prices that loaded before reading.
+    #[test]
+    fn the_counts_read_so_far_end_on_the_headers() {
+        use crate::replay::{AnalyzeOptions, analyze};
+        let w = Workspace::new();
+        let projects = w.claude.join("projects/project");
+        w.fixture(projects.join("main.jsonl"), "claude.jsonl");
+        w.fixture(w.codex.join("sessions/main.jsonl"), "codex.jsonl");
+        write(
+            projects.join("parent.jsonl"),
+            jsonl(&[assistant("parent", "parent-message")]),
+        );
+        write(
+            projects.join("parent/subagents/agent-a.jsonl"),
+            jsonl(&[assistant("parent", "child-message")]),
+        );
+        write(
+            projects.join("parent/subagents/agent-a.meta.json"),
+            json!({ "agentType": "Explore" }).to_string(),
+        );
+        let mut old = assistant("old", "old-message");
+        old["timestamp"] = json!("2026-10-01T00:00:00Z");
+        write(projects.join("old.jsonl"), jsonl(&[old]));
+        // A fork whose legacy counter comes before the modern record that supersedes it.
+        let codex = std::fs::read_to_string(crate::test_support::fixture_path("codex.jsonl"))
+            .unwrap()
+            .replace("thread-a", "thread-b");
+        let mut lines: Vec<&str> = codex.lines().collect();
+        lines.swap(4, 5);
+        write(w.codex.join("sessions/copy.jsonl"), lines.join("\n") + "\n");
+        // A legacy session, which only counters record.
+        let counter = |minute: u32, total: i64| {
+            let u = json!({ "input_tokens": total, "cached_input_tokens": 0, "output_tokens": 1 });
+            json!({
+                "type": "event_msg",
+                "timestamp": format!("2026-11-01T00:0{minute}:00Z"),
+                "payload": { "type": "token_count", "info": { "total_token_usage": u, "last_token_usage": u } },
+            })
+        };
+        write(
+            w.codex.join("sessions/legacy.jsonl"),
+            jsonl(&[
+                json!({
+                    "type": "session_meta",
+                    "timestamp": "2026-11-01T00:00:00Z",
+                    "payload": { "id": "legacy", "source": "cli", "model_provider": "openai" },
+                }),
+                json!({
+                    "type": "turn_context",
+                    "timestamp": "2026-11-01T00:00:00Z",
+                    "payload": { "model": "gpt-6.1-sol" },
+                }),
+                counter(1, 100),
+                counter(2, 300),
+            ]),
+        );
+        #[cfg(unix)]
+        {
+            let alternate = w.home.join(".claude-work");
+            std::fs::create_dir(&alternate).unwrap();
+            std::os::unix::fs::symlink(w.claude.join("projects"), alternate.join("projects"))
+                .unwrap();
+        }
+        let since = timestamp(&json!("2026-10-15T00:00:00Z"));
+        let reading = Arc::new(Reading::default());
+        let catalog = crate::test_support::prices();
+        reading.catalog.set(catalog.clone()).unwrap();
+        let data = scan(&ScanOptions {
+            since,
+            reading: Some(reading.clone()),
+            ..options(&w)
+        })
+        .unwrap();
+        let counts = || reading.counts.lock().unwrap().unwrap();
+        let read = counts();
+        let report = analyze(AnalyzeOptions {
+            scan: data,
+            catalog: &catalog,
+            since,
+            now: timestamp(&json!("2026-11-02T00:00:00Z")).unwrap(),
+            max_cost_per_use_usd: 1.0,
+            reading: Some(&reading),
+        })
+        .unwrap();
+        let settled = counts();
+        assert_eq!(
+            settled,
+            crate::totals::Totals::new(&report, &[], None).counts()
+        );
+        // Two Claude requests, one streamed in chunks, a subagent's in its parent's session,
+        // Codex's once across its copy, and two legacy counters; the old one is before the
+        // window.
+        assert_eq!((settled.requests, settled.sessions), (7, 4));
+        assert_eq!(
+            (read.requests, read.tokens, read.sessions),
+            (settled.requests, settled.tokens, settled.sessions)
+        );
+        let spend = |c: Counts| c.spend.map(|s| s.text());
+        assert!(spend(settled).is_some());
+        assert_eq!(spend(read), spend(settled));
     }
 
     #[test]

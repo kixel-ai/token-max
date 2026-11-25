@@ -3699,6 +3699,7 @@ mod tests {
             since: None,
             now: (now * MINUTE as f64) as Millis,
             max_cost_per_use_usd: 1.0,
+            reading: None,
         })
         .unwrap()
     }

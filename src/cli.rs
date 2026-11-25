@@ -27,7 +27,7 @@ use crate::safe::{ScanError, display};
 use crate::sessions::{Session, export};
 use crate::ssh::{self, Reply, Scope};
 use crate::terminal::{WrapOptions, wrap_text};
-use crate::totals::Totals;
+use crate::totals::{Counts, Totals};
 use crate::upgrade::{self, Check, Install};
 use crate::vibes::{self, Item};
 use crate::wire::{Format, Job, Paid, Request};
@@ -273,19 +273,65 @@ struct Meter {
     ticker: Option<thread::JoinHandle<()>>,
 }
 
-/// What the progress line shows: the current phase and when it began, and how far the local
-/// scan has read.
+/// What the progress line shows: the current phase and when it began, how far the local scan
+/// has read, and what the hosts count to.
 struct Shown {
     phase: Mutex<(&'static str, Instant)>,
     reading: Arc<Reading>,
+    /// Each host's counts by its index, this host's first, once its report is rendered.
+    hosts: Mutex<Vec<Option<Counts>>>,
+    /// Whose the counts are when other hosts' are left out, such as "this host".
+    whose: Option<&'static str>,
     look: Look,
 }
 
+impl Shown {
+    /// What the hosts count to so far: this host's from its scan until its report settles
+    /// them, then added to each other host's in the order the report's total adds them.
+    fn counts(&self) -> Option<Counts> {
+        let hosts = self.hosts.lock().unwrap_or_else(PoisonError::into_inner);
+        let here = hosts.first().copied().flatten().or_else(|| {
+            *self
+                .reading
+                .counts
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+        });
+        let mut sum: Option<Counts> = None;
+        for counts in here.iter().chain(hosts.iter().skip(1).flatten()) {
+            match &mut sum {
+                Some(sum) => sum.merge(counts),
+                None => sum = Some(*counts),
+            }
+        }
+        sum
+    }
+
+    /// Count host `index`'s settled `counts`, this host's at 0.
+    fn settle(&self, index: usize, counts: Counts) {
+        let mut hosts = self.hosts.lock().unwrap_or_else(PoisonError::into_inner);
+        if hosts.len() <= index {
+            hosts.resize(index + 1, None);
+        }
+        hosts[index] = Some(counts);
+    }
+
+    /// The figures that follow the phase on the line.
+    fn figures(&self) -> Vec<Piece> {
+        self.counts()
+            .map(|counts| figures(&counts, self.whose))
+            .unwrap_or_default()
+    }
+}
+
 impl Meter {
-    fn start(look: Look, reading: Arc<Reading>) -> Self {
+    /// Start the line; `whose` names the counts when they leave other hosts out.
+    fn start(look: Look, reading: Arc<Reading>, whose: Option<&'static str>) -> Self {
         let shared = Arc::new(Shown {
             phase: Mutex::new(("", Instant::now())),
             reading,
+            hosts: Mutex::new(vec![]),
+            whose,
             look,
         });
         let (stop, stopped) = mpsc::channel::<()>();
@@ -306,6 +352,7 @@ impl Meter {
                     }
                     let total = shared.reading.total.load(Ordering::Relaxed);
                     let read = shared.reading.read.load(Ordering::Relaxed);
+                    let figures = shared.figures();
                     // The local scan may still be reading after the phase moves on, as
                     // when SSH hosts' prices or reports arrive first.
                     let (line, plain) = if read < total {
@@ -315,14 +362,15 @@ impl Meter {
                             total,
                             elapsed: began.elapsed(),
                         };
-                        bar(&progress, shared.look, progress_room())
+                        bar(&progress, figures, shared.look, progress_room())
                     } else {
                         // A phase that began under the bar is timed from when reading ended.
                         let since = match total {
                             0 => since,
                             _ => since.max(*read_end.get_or_insert_with(Instant::now)),
                         };
-                        let line = busy(name, since.elapsed(), tick, shared.look.unicode);
+                        let head = busy(name, since.elapsed(), tick, shared.look.unicode);
+                        let line = with(head, figures, progress_room());
                         (line.clone(), line)
                     };
                     show_progress(&line, &plain);
@@ -349,8 +397,15 @@ impl Meter {
         if reading.read.load(Ordering::Relaxed) < reading.total.load(Ordering::Relaxed) {
             return;
         }
-        let line = busy(phase, Duration::ZERO, 0, self.shared.look.unicode);
+        let head = busy(phase, Duration::ZERO, 0, self.shared.look.unicode);
+        let line = with(head, self.shared.figures(), progress_room());
         show_progress(&line, &line);
+    }
+
+    /// Count host `index`'s settled `counts`, this host's at 0, in place of what its scan
+    /// counted.
+    fn settle(&self, index: usize, counts: Counts) {
+        self.shared.settle(index, counts);
     }
 }
 
@@ -380,6 +435,67 @@ fn busy(phase: &str, elapsed: Duration, tick: usize, unicode: bool) -> String {
     line
 }
 
+/// A figure on the progress line, and how long it stays as the row narrows: the lowest
+/// `keep` is dropped first.
+struct Piece {
+    text: String,
+    keep: u8,
+}
+
+/// The counts as the line shows them, with `whose` they are before the first: requests and
+/// sessions as the report's header writes them, tokens short, and the spend once priced.
+fn figures(counts: &Counts, whose: Option<&str>) -> Vec<Piece> {
+    let whose = whose.map_or_else(String::new, |whose| format!("{whose}: "));
+    let requests = crate::report::plural(counts.requests, "request");
+    let mut pieces = vec![
+        Piece {
+            text: format!("{whose}{requests}"),
+            keep: 5,
+        },
+        Piece {
+            text: crate::report::plural(counts.sessions, "session"),
+            keep: 3,
+        },
+        Piece {
+            text: format!("{} tokens", crate::report::short(counts.tokens)),
+            keep: 2,
+        },
+    ];
+    if let Some(spend) = &counts.spend {
+        pieces.push(Piece {
+            text: spend.text(),
+            keep: 6,
+        });
+    }
+    pieces
+}
+
+/// The pieces that fit in `room` cells after `used`, each after two spaces, dropping the
+/// least kept first; and the cells left over.
+fn fit(mut pieces: Vec<Piece>, used: usize, room: usize) -> (String, usize) {
+    let width = |pieces: &[Piece]| -> usize {
+        pieces
+            .iter()
+            .map(|p| 2 + crate::terminal::cells(&p.text))
+            .sum()
+    };
+    while used + width(&pieces) > room {
+        let Some(least) = (0..pieces.len()).min_by_key(|&at| pieces[at].keep) else {
+            break;
+        };
+        pieces.remove(least);
+    }
+    let left = room.saturating_sub(used + width(&pieces));
+    let text = pieces.iter().map(|p| format!("  {}", p.text)).collect();
+    (text, left)
+}
+
+/// `head` followed by the `figures` that fit in `room` cells.
+fn with(head: String, figures: Vec<Piece>, room: usize) -> String {
+    let (tail, _) = fit(figures, crate::terminal::cells(&head), room);
+    head + &tail
+}
+
 /// The widest and narrowest the reading bar's track gets.
 const TRACK_CELLS: (usize, usize) = (24, 8);
 
@@ -390,32 +506,41 @@ struct Progress {
     elapsed: Duration,
 }
 
-/// The reading bar, its track narrowed to fit `room` cells: how much is read, and when the
-/// rest should be, from the rate so far. Returns the line and its text without color.
-fn bar(progress: &Progress, look: Look, room: usize) -> (String, String) {
+/// The reading bar and `figures` after it, fitted to `room` cells: how much is read, and when
+/// the rest should be, from the rate so far. What doesn't fit beside the narrowest track is
+/// dropped, least useful first, and the track widens into what is left. Returns the line and
+/// its text without color.
+fn bar(progress: &Progress, figures: Vec<Piece>, look: Look, room: usize) -> (String, String) {
     let Progress {
         read,
         total,
         elapsed,
     } = *progress;
     let fraction = read as f64 / total as f64;
-    let mut rest = format!(
-        " {:>3.0}%  {} of {}",
-        (fraction * 100.0).floor(),
-        crate::report::size(read),
-        crate::report::size(total)
-    );
+    let percent = format!(" {:>3.0}%", (fraction * 100.0).floor());
+    let mut pieces = vec![Piece {
+        text: format!(
+            "{} of {}",
+            crate::report::size(read),
+            crate::report::size(total)
+        ),
+        keep: 1,
+    }];
     // A rate needs a second of reading, and a few percent, to mean anything.
     if elapsed >= Duration::from_secs(1) && fraction >= 0.02 {
         let left = elapsed.as_secs_f64() * (1.0 - fraction) / fraction;
-        rest.push_str(&format!("  ~{} left to read", duration(left)));
+        pieces.push(Piece {
+            text: format!("~{} left to read", duration(left)),
+            keep: 4,
+        });
     }
+    pieces.extend(figures);
     let lead = "token-max: Reading ";
     let (open, close) = if look.unicode { ("", "") } else { ("[", "]") };
-    let used = crate::terminal::cells(lead) + open.len() + close.len() + rest.len();
-    let track = room
-        .saturating_sub(used)
-        .clamp(TRACK_CELLS.1, TRACK_CELLS.0);
+    let used = crate::terminal::cells(lead) + open.len() + close.len() + percent.len();
+    let (rest, left) = fit(pieces, used + TRACK_CELLS.1, room);
+    let track = (TRACK_CELLS.1 + left).min(TRACK_CELLS.0);
+    let rest = percent + &rest;
     // Eighths of a cell, so the bar moves smoothly on a Unicode terminal.
     let eighths = (fraction * (track * 8) as f64) as usize;
     let (full, part) = (eighths / 8, eighths % 8);
@@ -929,6 +1054,8 @@ pub struct Render<'a> {
     pub format: &'a Format,
     /// The host's home directory, which its report shows as `~`.
     pub home: Option<&'a str>,
+    /// Where the report header's counts go once priced, for a progress line.
+    pub reading: Option<&'a Reading>,
 }
 
 /// One host's printed report and whether it recommends a change; all a destination sends.
@@ -965,6 +1092,7 @@ pub fn render(scan: Scan, options: Render<'_>) -> Result<Rendered, ScanError> {
         since: options.since,
         now: options.now,
         max_cost_per_use_usd: options.max_cost_per_use_usd,
+        reading: options.reading,
     })?;
     let change = report
         .checks
@@ -1272,6 +1400,9 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
         ask,
     } = run;
     let reading = Arc::new(Reading::default());
+    // A destination's `vibes` sends no usage, so the line counts only this host's.
+    let whose = (!destinations.is_empty() && matches!(job, Job::Report { vibes: true, .. }))
+        .then_some("this host");
     let scope = match job {
         Job::Report { .. } => Scope::Report { defaults },
         Job::Sessions => Scope::Sessions,
@@ -1299,9 +1430,14 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
     {
         // Prices load beside the scans and questions, so whichever fails first stops the run.
         let sender = sender.clone();
+        // The progress line's counts price what the local scan has read once prices load.
+        let counting = progress.map(|_| reading.clone());
         thread::spawn(move || {
             let catalog = panic::catch_unwind(|| load_prices(&prices))
                 .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));
+            if let (Some(reading), Ok(catalog)) = (&counting, &catalog) {
+                let _ = reading.catalog.set(catalog.clone());
+            }
             let _ = sender.send(Arrival::Prices(catalog));
         });
     }
@@ -1364,7 +1500,8 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
             discovery,
             since,
             reach: scope.reach(),
-            reading: Some(reading.clone()),
+            // Counting costs the scan time, so only a progress line has it count.
+            reading: progress.map(|_| reading.clone()),
         };
         let job = move || {
             panic::catch_unwind(|| scan(&options))
@@ -1388,7 +1525,7 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
                     .then_some(progress)
                     .flatten()
                     .map(|look| {
-                        let meter = Meter::start(look, reading.clone());
+                        let meter = Meter::start(look, reading.clone(), whose);
                         meter.phase("Connecting to SSH hosts");
                         meter
                     });
@@ -1416,7 +1553,7 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
             .map_err(|_| stop(terminal_failed()))?;
     }
     drop(payments);
-    let meter = progress.map(|look| Meter::start(look, reading.clone()));
+    let meter = progress.map(|look| Meter::start(look, reading.clone(), whose));
     let phase = |message: &'static str| {
         if let Some(meter) = &meter {
             meter.phase(message);
@@ -1475,12 +1612,24 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
                                 max_cost_per_use_usd: *max_cost_per_use_usd,
                                 format,
                                 home: home.as_deref(),
+                                reading: meter.as_ref().map(|_| &*reading),
                             },
                         )?)),
                         Job::Sessions => Reply::Sessions(export(&scan, catalog)?),
                     },
                     Scanned::Remote(reply) => reply,
                 });
+                // The line ends on what the report's header or total counts.
+                let totals = match &replies[index] {
+                    Some(Reply::Here(rendered)) => Some(&rendered.printed.totals),
+                    Some(Reply::Report(printed) | Reply::Walk { printed, .. }) => {
+                        Some(&printed.totals)
+                    }
+                    _ => None,
+                };
+                if let (Some(meter), Some(totals)) = (&meter, totals) {
+                    meter.settle(index, totals.counts());
+                }
             }
         }
         Ok(())
@@ -2371,7 +2520,7 @@ mod tests {
                 total,
                 elapsed,
             };
-            bar(&progress, look, room)
+            bar(&progress, vec![], look, room)
         };
         // 1/64 of 24 cells is 3/8 of the first one.
         let (line, text) = at(1, 64, second, unicode, 200);
@@ -2420,6 +2569,127 @@ mod tests {
         assert_eq!(duration(59.0), "59s");
         assert_eq!(duration(59.5), "1m 00s");
         assert_eq!(duration(125.0), "2m 05s");
+        use crate::report::short;
+        assert_eq!(short(999), "999");
+        assert_eq!(short(999_499), "999k");
+        assert_eq!(short(999_500), "1.0M");
+        assert_eq!(short(9_949_999_999), "9.9B");
+        assert_eq!(short(12_000_000_000_000), "12T");
+    }
+
+    #[test]
+    fn the_line_counts_beside_its_phase_dropping_the_least_useful_figure_to_fit() {
+        use crate::model::Margin;
+        use crate::totals::Spent;
+        let look = Look {
+            color: false,
+            unicode: true,
+        };
+        let mut counts = Counts {
+            requests: 78_786,
+            tokens: 1_912_345_678,
+            sessions: 1_798,
+            spend: Some(Spent {
+                usd: 4_081.2,
+                margin: Some(Margin::Usd(2.04)),
+                ..Spent::default()
+            }),
+        };
+        let progress = Progress {
+            read: 4_500_000_000,
+            total: 10_000_000_000,
+            elapsed: Duration::from_secs(10),
+        };
+        let reading = |counts: &Counts, room| bar(&progress, figures(counts, None), look, room).0;
+        assert_eq!(
+            reading(&counts, 200),
+            format!(
+                "token-max: Reading {}▊{}  45%  4.5 GB of 10 GB  ~13s left to read  78,786 requests  1,798 sessions  1.9B tokens  ~$4,081 ± $2.04",
+                "█".repeat(10),
+                "░".repeat(13)
+            )
+        );
+        // Sizes go first, then the track narrows, then tokens, sessions and the estimate go.
+        let narrowed = [
+            (
+                119,
+                "token-max: Reading █████▊░░░░░░░  45%  ~13s left to read  78,786 requests  1,798 sessions  1.9B tokens  ~$4,081 ± $2.04",
+            ),
+            (
+                79,
+                "token-max: Reading █████████▍░░░░░░░░░░░  45%  78,786 requests  ~$4,081 ± $2.04",
+            ),
+            (
+                59,
+                "token-max: Reading ████████░░░░░░░░░░  45%  ~$4,081 ± $2.04",
+            ),
+        ];
+        for (room, line) in narrowed {
+            assert_eq!(reading(&counts, room), line);
+            assert!(crate::terminal::cells(line) <= room);
+        }
+        let checking = busy("Checking settings", Duration::from_secs(12), 3, true);
+        let after =
+            |counts: &Counts, whose, room| with(checking.clone(), figures(counts, whose), room);
+        assert_eq!(
+            after(&counts, None, 79),
+            "token-max: Checking settings... ⠸ 12s  78,786 requests  ~$4,081 ± $2.04"
+        );
+        // Under `vibes --ssh` the counts are this host's alone.
+        assert_eq!(
+            after(&counts, Some("this host"), 200),
+            "token-max: Checking settings... ⠸ 12s  this host: 78,786 requests  1,798 sessions  1.9B tokens  ~$4,081 ± $2.04"
+        );
+        // Before prices load, the counts show without a spend.
+        counts.spend = None;
+        assert_eq!(
+            after(&counts, None, 200),
+            "token-max: Checking settings... ⠸ 12s  78,786 requests  1,798 sessions  1.9B tokens"
+        );
+    }
+
+    /// The line counts this host as its scan reads, then ends on the hosts' total as the
+    /// report adds it, whichever order their results arrive in.
+    #[test]
+    fn the_counts_end_on_the_hosts_total() {
+        use crate::model::Margin;
+        let host = |requests, spend, margin| Totals {
+            requests,
+            tokens: requests * 1000,
+            sessions: requests / 10,
+            spend,
+            margin: Some(Margin::Usd(margin)),
+            ..Totals::default()
+        };
+        let (here, there) = (host(700, 41.3, 0.7), host(300, 12.1, 2.4));
+        let shown = Shown {
+            phase: Mutex::new(("", Instant::now())),
+            reading: Arc::new(Reading::default()),
+            hosts: Mutex::new(vec![]),
+            whose: None,
+            look: Look {
+                color: false,
+                unicode: false,
+            },
+        };
+        assert_eq!(shown.counts(), None);
+        let read = Counts {
+            requests: 650,
+            ..Counts::default()
+        };
+        *shown.reading.counts.lock().unwrap() = Some(read);
+        assert_eq!(shown.counts(), Some(read));
+        // A destination's total joins what this host has read so far, which has no spend
+        // until prices load.
+        shown.settle(1, there.counts());
+        let mut joined = read;
+        joined.merge(&there.counts());
+        assert_eq!(shown.counts(), Some(joined));
+        assert_eq!(joined.spend, None);
+        shown.settle(0, here.counts());
+        let mut total = here.clone();
+        total.merge(&there);
+        assert_eq!(shown.counts(), Some(total.counts()));
     }
 
     #[test]

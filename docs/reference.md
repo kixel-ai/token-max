@@ -819,6 +819,23 @@ found, with the time left to read them at the rate so far; the analysis after
 reading has no measured fraction, so its phases show only a spinner and how
 long each has run.
 
+Beside the bar and each phase after it, the line counts the requests,
+sessions, tokens and API-price spend read so far, as the report's header
+counts them: requests once across profiles that share a history and across a
+response's streamed chunks, only those in the window, and each subagent in the
+session that spawned it. The spend appears once public prices load, at first
+pricing everything already read, and is extrapolated per profile and marked
+`~` as the header's is. Some figures only settle after reading, such as a
+request record no response answers, a request T3 moves to another profile, or
+an unpriced request known to cost more than the rest, so once the analysis has
+priced the scan the counts become the header's own, and each SSH host's totals
+join them as its report arrives. The line `doctor` clears shows the header's
+figures, or the total across hosts. Under `vibes --ssh` the destinations send
+no usage, so the line counts this host alone and says so. On a narrow
+terminal the line drops the least useful figures first: the bytes read, the
+tokens, the sessions, the time left to read, then the requests; the spend goes
+last.
+
 On a terminal, `doctor` opens with its name, says it is about to scan this
 host's transcripts, and lists each profile root it found with its transcript
 files and their size, then the SSH destinations it adds, or how to add one with

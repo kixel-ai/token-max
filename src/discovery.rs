@@ -2815,6 +2815,12 @@ pub(crate) fn profile(
         }
     });
     let claude_config = claude.then(|| claude_config(&options.home, &canonical, explicit));
+    // Claude Code rewrites its state file while it runs, so one that doesn't parse now
+    // leaves the install unknown, as a missing one does, rather than failing the scan.
+    let updater = claude_config
+        .as_ref()
+        .and_then(|state| self::settings(state, Harness::Claude).ok())
+        .and_then(|state| updater(&state));
     let mut profile = Profile {
         id: identity(key),
         harness,
@@ -2850,6 +2856,7 @@ pub(crate) fn profile(
         outranking_files: vec![],
         ttl_directories: IndexMap::default(),
         claude_config,
+        updater,
         codex_system_config: (!claude).then(|| system_file.to_string()),
         switched_off: switched_off(harness, &user),
         pretended_on: vec![],
@@ -2862,6 +2869,13 @@ pub(crate) fn profile(
     let file = profile.settings_file.clone();
     options.pretend_on(harness, &mut profile.pretended_on, &file)?;
     Ok(profile)
+}
+
+/// The command that upgrades Claude Code, as its state file's `installMethod` names it:
+/// only a native install's is known, since a package manager's, such as npm's, Nix's or
+/// Homebrew's, may not be the one that installed it.
+fn updater(state: &Map<String, Value>) -> Option<&'static str> {
+    (state.get("installMethod")?.as_str()? == "native").then_some("claude update")
 }
 
 /// Claude Code's state file for a canonical root: `.claude.json` inside a root the shell's
@@ -3448,6 +3462,26 @@ mod tests {
             state(env(&[("CLAUDE_CONFIG_DIR", &native_path(&w.claude))])),
             join(&[&root, ".claude.json"])
         );
+    }
+
+    #[test]
+    fn only_a_native_install_names_its_update_command() {
+        let w = Workspace::new();
+        let updater = || claude(&discover(&options(&w)).unwrap()).updater;
+        assert_eq!(updater(), None);
+        for (method, expected) in [
+            ("native", Some("claude update")),
+            ("global", None),
+            ("unknown", None),
+        ] {
+            write(
+                w.home.join(".claude.json"),
+                &format!(r#"{{"installMethod": "{method}"}}"#),
+            );
+            assert_eq!(updater(), expected, "{method}");
+        }
+        write(w.home.join(".claude.json"), "{");
+        assert_eq!(updater(), None);
     }
 
     // Current environment overrides are scoped to the active config root.

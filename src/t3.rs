@@ -100,6 +100,8 @@ pub(crate) fn constrain<T>(base: &mut CheckBase<T>, profiles: &[Profile]) {
         base.recommended = None;
         base.savings_usd = None;
         base.monthly_savings_usd = None;
+        // Upgrading would not give the instance an active setting either.
+        base.upgrade = None;
         base.uncertainty.push(UNOWNED.into());
     }
 }

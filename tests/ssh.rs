@@ -1868,6 +1868,8 @@ fn each_destination_prices_its_main_ttl_by_the_answer_given_for_it() {
         let section = flat(section(&output, host));
         assert!(section.contains(line), "{host}: {section}");
     }
+    // Every setting is its default, so neither the total nor any host compares with them.
+    assert!(!output.contains("Compared with defaults"), "{output}");
 }
 
 #[test]

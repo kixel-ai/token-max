@@ -404,7 +404,7 @@ fn gate(
     let needs = Needs::claude(minor, patch);
     // With no recorded session, the version is unrecorded.
     let upgrade = match versions.first() {
-        Some(_) => needs.upgrade(versions.iter().copied()),
+        Some(_) => needs.unmet(versions.iter().copied()),
         None => Some(Upgrade {
             needs,
             ran: None,
@@ -416,10 +416,7 @@ fn gate(
         return Definition::Deny(deny);
     };
     // Only an old interactive install is worth upgrading; an SDK app pins its own.
-    let advice = match versions.first() {
-        Some(_) => needs.advice(members, requests),
-        None => Some(upgrade.clone()),
-    };
+    let advice = needs.advice(members, requests);
     let what = "blocking just this server by name with a deniedMcpServers entry";
     let Some(upgrade) = advice else {
         return deny.by_hand(&upgrade.why(what));
@@ -5716,10 +5713,8 @@ mod tests {
         ) else {
             panic!("an older Claude Code is a step by hand")
         };
-        assert_eq!(
-            step,
-            r#"uninstall the plugin, or upgrade Claude Code and add {"serverName":"p"} to deniedMcpServers in s.json"#
-        );
+        // The unrecorded version may already match it, so no upgrade is advised.
+        assert_eq!(step, "uninstall the plugin");
         assert_eq!(
             reason,
             "a plugin adds it, and blocking just this server by name with a deniedMcpServers entry needs Claude Code 2.1.182 or later, but its latest session ran 2.1.90"
@@ -5741,7 +5736,7 @@ mod tests {
             "{step}"
         );
         // The reason names the version that failed, even when another was recorded, and
-        // names no command for an install it doesn't know.
+        // advises no upgrade for a version it doesn't know.
         let Definition::Manual { step, reason } = gate(
             blocked("p"),
             &both,
@@ -5750,7 +5745,7 @@ mod tests {
         ) else {
             panic!("an unrecorded Claude Code is a step by hand")
         };
-        assert!(step.contains(", or upgrade Claude Code and add "), "{step}");
+        assert_eq!(step, "uninstall the plugin");
         assert!(
             reason.ends_with("but its latest session ran an unrecorded version"),
             "{reason}"

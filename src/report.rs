@@ -582,14 +582,25 @@ fn subagent_item(line: &SubagentLine<'_>, out: &Out<'_>) -> Option<Item> {
     // session's effort, whatever it says.
     let ignored = match p.harness {
         Harness::Claude => {
-            SUBAGENT_EFFORT_SINCE.upgrade(crate::version::latest(&line.members, line.requests))
+            SUBAGENT_EFFORT_SINCE.unmet(crate::version::latest(&line.members, line.requests))
         }
         Harness::Codex => None,
     };
     if let Some(ignored) = &ignored {
+        // An unrecorded or unreadable version may already read the variable.
+        let run = if ignored
+            .ran
+            .as_deref()
+            .and_then(crate::version::plain)
+            .is_some()
+        {
+            "run"
+        } else {
+            "may run"
+        };
         let _ = write!(
             text,
-            " {}, so its subagents run at the main session's effort.",
+            " {}, so its subagents {run} at the main session's effort.",
             capitalize(&ignored.why("CLAUDE_CODE_SUBAGENT_EFFORT"))
         );
         // Only an old interactive install is worth upgrading; an SDK app pins its own.
@@ -9578,6 +9589,33 @@ mod tests {
             c.text
         );
         assert!(c.sources.iter().any(|s| s == CLAUDE_CHANGELOG));
+        // An unrecorded version may already read the variable, so it advises no upgrade.
+        {
+            let mut report = synthetic();
+            report.checks.clear();
+            report.context.clear();
+            report.scan.profiles[0].updater = Some("claude update");
+            report.scan.profiles[0].agents.effort = Some(Owned {
+                value: "medium".into(),
+                owner: variable.clone(),
+            });
+            for r in &mut report.scan.requests {
+                r.client = Some("cli".into());
+                r.version = None;
+            }
+            let c = advice(&report, ReportOptions::default())
+                .into_iter()
+                .find(|i| i.name == "Subagent default")
+                .expect("a card");
+            assert!(
+                c.text.contains(
+                    "CLAUDE_CODE_SUBAGENT_EFFORT needs Claude Code 2.1.316 or later, but its latest session ran an unrecorded version, so its subagents may run at the main session's effort."
+                ),
+                "{}",
+                c.text
+            );
+            assert!(!c.text.contains("claude update"), "{}", c.text);
+        }
         // An Agent SDK app pins its own Claude Code, so an old one names no upgrade, and
         // neither does an interactive install while an SDK app on the file is also too old.
         for sdk in ["2.1.315", "2.1.400"] {

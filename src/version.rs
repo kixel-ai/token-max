@@ -112,9 +112,10 @@ impl Needs {
             .is_some_and(|v| v >= (self.major(), self.minor, self.patch))
     }
 
-    /// Advice to upgrade, from the first of `latest`, each profile's latest session, that ran
-    /// before this version; None when every one meets it.
-    pub fn upgrade<'a>(
+    /// Why a setting waits on this version, from the first of `latest`, each profile's latest
+    /// session, that ran before it; None when every one meets it. An unrecorded or unreadable
+    /// version counts as too old, since nothing shows the setting applies.
+    pub fn unmet<'a>(
         self,
         latest: impl IntoIterator<Item = (&'a Profile, Option<&'a str>)>,
     ) -> Option<Upgrade> {
@@ -143,6 +144,20 @@ impl Needs {
             command,
             several: installs.len() > 1,
         })
+    }
+
+    /// Advice to upgrade, as [`Needs::unmet`] words it, when every version too old for this one
+    /// is a recorded release: an unrecorded or unreadable one may already meet it, so it never
+    /// advises an upgrade or names a command.
+    pub fn upgrade<'a>(
+        self,
+        latest: impl IntoIterator<Item = (&'a Profile, Option<&'a str>)>,
+    ) -> Option<Upgrade> {
+        let latest: Vec<(&Profile, Option<&str>)> = latest.into_iter().collect();
+        if latest.iter().any(|(_, v)| v.and_then(plain).is_none()) {
+            return None;
+        }
+        self.unmet(latest)
     }
 
     /// Advice to upgrade the interactive installs of `members`, when they are the only clients
@@ -320,7 +335,7 @@ mod tests {
         let mut t3 = make_t3_profile("t3", "/c");
         t3.t3.as_mut().unwrap().enabled = false;
         let mut check = make_ttl_check("t3", Bucket::Main, Action::Advisory, Ttl::OneHour);
-        check.base.upgrade = Needs::claude(1, 242).upgrade([(&t3, None)]);
+        check.base.upgrade = Needs::claude(1, 242).upgrade([(&t3, Some("2.1.100"))]);
         assert!(check.base.upgrade.is_some());
         crate::t3::constrain(&mut check.base, &[t3]);
         assert_eq!(check.base.upgrade, None);
@@ -381,15 +396,26 @@ mod tests {
         );
         // A T3 instance runs its own binary, and an unknown install names no command.
         for profile in [&t3, &plain] {
-            let u = needs.upgrade([(profile, None)]).unwrap();
+            let u = needs.upgrade([(profile, Some("2.1.100"))]).unwrap();
             assert_eq!(u.step(), "upgrade Claude Code");
-            assert_eq!(
-                u.why("this"),
-                "this needs Claude Code 2.1.242 or later, but its latest session ran an unrecorded version"
-            );
         }
+        // An unrecorded or unreadable version holds the setting back, but may already meet
+        // it, so no gate advises an upgrade, even beside a recorded old one.
+        for ran in [None, Some("2.1.400-beta")] {
+            for latest in [
+                vec![(&native, ran)],
+                vec![(&native, Some("2.1.100")), (&plain, ran)],
+            ] {
+                assert!(needs.unmet(latest.clone()).is_some(), "{ran:?}");
+                assert_eq!(needs.upgrade(latest), None, "{ran:?}");
+            }
+        }
+        assert_eq!(
+            needs.unmet([(&native, None)]).unwrap().why("this"),
+            "this needs Claude Code 2.1.242 or later, but its latest session ran an unrecorded version"
+        );
         let codex = Needs::codex(156, 0)
-            .upgrade([(&plain, Some("0.150.0-alpha"))])
+            .unmet([(&plain, Some("0.150.0-alpha"))])
             .unwrap();
         assert_eq!(
             codex.why("this"),

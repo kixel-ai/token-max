@@ -683,7 +683,7 @@ fn ttl_check(
     };
     // Each source's current client must honor the setting, since one file sets it for all.
     let versions = crate::version::latest(&group.members, requests.iter().copied());
-    let upgrade = TTL_CONTROLS.upgrade(versions.iter().copied());
+    let upgrade = TTL_CONTROLS.unmet(versions.iter().copied());
     let supported = !versions.is_empty() && upgrade.is_none();
     // An unset main TTL varies with billing, so pinning the replay's winner is a change either way.
     let pinnable = current.value.is_none() && current.reason == TTL_BILLING_UNKNOWN;

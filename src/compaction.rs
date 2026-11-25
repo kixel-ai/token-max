@@ -2187,7 +2187,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 .filter(|_| settled);
             let needs = Needs::claude(1, control.minimum_claude_patch.unwrap_or(288));
             let upgrade = if claude {
-                needs.upgrade(versions.iter().copied())
+                needs.unmet(versions.iter().copied())
             } else {
                 None
             };
@@ -6118,7 +6118,14 @@ mod tests {
             }
             let c = check(&old);
             assert_eq!(c.base.action, Action::Advisory);
-            assert_eq!(c.base.upgrade.unwrap().ran.as_deref(), Some("3.unverified"));
+            // An unreadable version holds the window back but may already meet it.
+            assert_eq!(c.base.upgrade, None);
+            assert_eq!(
+                c.unsettable.as_deref(),
+                Some(
+                    "this window control needs Claude Code 2.1.288 or later, but its latest session ran a version token-max cannot read"
+                )
+            );
             let mut unsupported = data(4);
             unsupported.requests[2].parts[0].model = Some("unknown-model".into());
             assert!(check(&unsupported).scenarios[0].margin.is_some());

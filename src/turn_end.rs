@@ -333,10 +333,11 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
         .filter(|_| settled);
     // Each profile's next session runs its latest install, and one file sets it for all.
     let versions = crate::version::latest(&group.members, requests.iter().copied());
-    let upgrade = TURN_END.upgrade(versions.iter().copied());
-    let supported = !versions.is_empty() && upgrade.is_none();
+    let supported = !versions.is_empty() && TURN_END.unmet(versions.iter().copied()).is_none();
     let applicable = control.unresolved.is_none() && supported;
-    let upgrade = upgrade.filter(|_| control.unresolved.is_none());
+    let upgrade = TURN_END
+        .upgrade(versions.iter().copied())
+        .filter(|_| control.unresolved.is_none());
     let savings = winning
         .and_then(|w| w.savings_usd)
         .or(recommended.map(|_| 0.0))

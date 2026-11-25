@@ -2260,13 +2260,13 @@ fn profile_checks<'a>(
                 .copied()
                 .filter(|r| scopes.control(scopes.scope(r)).owner == owner),
         );
-        let upgrade = needs.upgrade(versions);
+        let applicable = needs.unmet(versions.iter().copied()).is_none();
         let unlocked = c.resolved
             && c.value.is_some()
             && client(recent) == Client::Supported
             && after.applicable;
-        let applicable = unlocked && upgrade.is_none();
-        let upgrade = upgrade.filter(|_| unlocked);
+        let applicable = unlocked && applicable;
+        let upgrade = needs.upgrade(versions).filter(|_| unlocked);
         let savings = match (delta, c.value) {
             (Some(delta), Some(_)) => Some(if winner == c.value { 0.0 } else { delta.abs() }),
             _ => None,

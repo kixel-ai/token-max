@@ -1743,7 +1743,9 @@ rejects the pair; then it says so and offers no edit. The table is checked for
 a full model ID such as `claude-sonnet-5-5`, in any case and with or without a
 `[1m]` or `[2m]` suffix, as Claude Code reads it. An alias such as `opus` resolves
 to a version that changes with Claude Code releases, so only a Fable main
-model, which takes no other family, judges one.
+model, which takes no other family, judges one. The card doesn't yet read an
+`availableModels` allowlist, which can disable a set advisor or block the one
+it suggests.
 
 T3 Code picks each thread's main model, so T3 instances get no card; when an
 enabled one reads the same settings file, the card says each of its threads whose model

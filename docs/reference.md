@@ -1653,8 +1653,8 @@ the instance's line, not the native one. A session whose owner T3 could not
 settle counts when every candidate owner is on the line, such as native Claude
 Code and an instance sharing its `settings.json`; otherwise, including when T3
 names an owner outside the home, the card leaves it out and says how many it
-left out. A session's latest main request decides whose it is, so no session
-counts on two lines.
+left out. So does a session whose turns T3 matched to profiles on different
+lines, so no session counts on two.
 
 Where the advice doesn't hold, the card advises nothing: memory already off,
 or too few sessions in a repository, where memory may be the only place a fact

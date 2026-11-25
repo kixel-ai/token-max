@@ -441,39 +441,42 @@ fn check(
 /// Where the line's main sessions ran, each at its latest request's directory: in a
 /// repository with a project instruction file when its transcript recorded loading one at or
 /// above that directory, of the files `loaded` holds for it, or its directory holds one now;
-/// unknown when neither settles it. That latest request, of all of the harness's `requests`,
-/// also decides whose the session is, so no session counts on two lines.
+/// unknown when neither settles it. A session is the line's when every profile its main
+/// requests, of all of the harness's `requests`, name is on it, so none counts on two lines.
 fn places(
     line: &crate::rows::Group<'_>,
     harness: Harness,
     requests: &[Request],
     loaded: &crate::collections::IndexMap<crate::model::Text, crate::collections::IndexSet<String>>,
 ) -> SessionPlaces {
-    let mut latest: HashMap<&str, &Request> = HashMap::default();
+    // Each session's latest request, whether all its requests' owners are on the line, and
+    // whether any is.
+    let mut latest: HashMap<&str, (&Request, bool, bool)> = HashMap::default();
     for r in requests
         .iter()
         .filter(|r| r.harness == harness && r.agent == Agent::Main)
     {
-        let seen = latest.entry(&r.session).or_insert(r);
-        if r.time >= seen.time {
-            *seen = r;
+        // T3 names an owner outside this home: a candidate no line holds.
+        let outside = r
+            .issues
+            .iter()
+            .any(|i| i.starts_with(crate::t3::UNSETTLED) && i.contains(crate::t3::OUTSIDE));
+        let here = !outside && r.profiles.iter().all(|p| line.ids.contains(p));
+        let seen = latest.entry(&r.session).or_insert((r, true, false));
+        seen.1 &= here;
+        seen.2 |= line.covers(&r.profiles);
+        if r.time >= seen.0.time {
+            seen.0 = r;
         }
     }
     let mut places = SessionPlaces::default();
-    for (session, r) in latest {
-        if !line.covers(&r.profiles) {
+    for (session, (r, here, touches)) in latest {
+        if !touches {
             continue;
         }
-        // T3 settled an owner on the line, or could not settle one but every candidate,
-        // including any T3 names outside this home, is on it; a session another line may
-        // have run is left out, and counted as such.
-        let open = r
-            .issues
-            .iter()
-            .find(|i| i.starts_with(crate::t3::UNSETTLED));
-        if open.is_some_and(|i| {
-            i.contains(crate::t3::OUTSIDE) || !r.profiles.iter().all(|p| line.ids.contains(p))
-        }) {
+        // A session T3 settled, or left open, between this line and another is left out,
+        // and counted as such.
+        if !here {
             places.unsettled += 1;
             continue;
         }
@@ -788,9 +791,12 @@ mod tests {
             request("single", 1, &["native"], open),
             // Its candidates here are on the line, but T3 names another owner outside.
             request("elsewhere", 1, &["native", "t3-mine"], Some(&outside)),
-            // Its latest request is the other instance's, so it counts on that line alone.
+            // Handed to the other instance: it spans lines, so neither counts it.
             request("handed", 1, &["native"], None),
             request("handed", 2, &["t3-other"], None),
+            // An earlier turn T3 matched to the other instance: the session spans lines.
+            request("split", 1, &["t3-other"], None),
+            request("split", 2, &["native"], None),
             // Another harness's session of the same name is no session of this line's.
             {
                 let mut r = request("settled", 3, &["t3-other"], None);
@@ -805,7 +811,7 @@ mod tests {
                 sessions: 3,
                 instructed: 3,
                 unknown: 0,
-                unsettled: 2,
+                unsettled: 4,
             }
         );
     }

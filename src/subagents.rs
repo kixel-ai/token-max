@@ -718,6 +718,20 @@ fn definition<'a>(controls: &'a AgentControls, kind: &str) -> Option<&'a AgentDe
         .max_by_key(|d| d.project.as_ref().map_or(0, String::len))
 }
 
+/// The controls that decide a subagent's model, without its effort.
+fn model_controls(controls: &AgentControls) -> AgentControls {
+    AgentControls {
+        effort: None,
+        effort_unresolved: None,
+        directories: controls
+            .directories
+            .iter()
+            .map(|(cwd, c)| (cwd.clone(), model_controls(c)))
+            .collect(),
+        ..controls.clone()
+    }
+}
+
 /// The controls a run in `cwd` used: its directory's, else the profile's.
 fn scoped<'a>(controls: &'a AgentControls, cwd: Option<&str>) -> &'a AgentControls {
     cwd.and_then(|cwd| controls.directories.get(cwd))
@@ -1076,7 +1090,8 @@ fn settings_text(
         for text in [&mut texts.0, &mut texts.1] {
             *text += &format!("; unresolved: {reason}");
         }
-    } else if let Some(reason) = &controls.effort_unresolved {
+    }
+    if let Some(reason) = &controls.effort_unresolved {
         texts.1 += &format!("; unresolved: {reason}");
     }
     texts
@@ -1184,9 +1199,11 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
             .iter()
             .filter(|p| profiles.contains(&p.id))
             .collect();
-        let shared = owners
-            .first()
-            .filter(|first| owners.iter().all(|p| p.agents == first.agents));
+        // Profiles that differ only in effort still agree on every run's model.
+        let shared = owners.first().filter(|first| {
+            let first = model_controls(&first.agents);
+            owners.iter().all(|p| model_controls(&p.agents) == first)
+        });
         let mut runs: IndexMap<&str, Vec<&Request>> = IndexMap::default();
         for r in &requests {
             runs.entry(&*r.session).or_default().push(r);
@@ -1385,6 +1402,28 @@ mod tests {
             "/state/settings.json:providerInstances.agent.environment.CLAUDE_CODE_SUBAGENT_EFFORT"
         );
         assert_eq!(controls.model.unwrap().owner, "CLAUDE_CODE_SUBAGENT_MODEL");
+        // When the model and effort are both secret, the effort text names both entries.
+        t3.environment = vec![
+            "CLAUDE_CODE_SUBAGENT_EFFORT".into(),
+            "CLAUDE_CODE_SUBAGENT_MODEL".into(),
+        ];
+        // A key the instance sets that its readable environment lacks is a secret.
+        t3.env = Some(Default::default());
+        let mut secret = AgentControls::default();
+        t3_owned(&mut secret, &t3);
+        let profile = crate::test_support::make_t3_profile("agent", "/root");
+        let (model, effort) = settings_text(&profile, &secret, "Explore", false, false);
+        assert!(
+            model.contains("sets CLAUDE_CODE_SUBAGENT_MODEL with"),
+            "{model}"
+        );
+        assert!(
+            !model.contains("sets CLAUDE_CODE_SUBAGENT_EFFORT"),
+            "{model}"
+        );
+        for key in ["CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CODE_SUBAGENT_EFFORT"] {
+            assert!(effort.contains(&format!("sets {key} with")), "{effort}");
+        }
     }
 
     fn spawn(kind: &str) -> Subagent {
@@ -1725,7 +1764,7 @@ mod tests {
         let lines = subagent_costs(
             &scan(
                 vec![
-                    main,
+                    main.clone(),
                     child("a", "child", "claude-opus-5-5", Some("medium")),
                     child("b", "child", "claude-opus-5-5", None),
                     child("c", "fetch", "claude-haiku-5-5", Some("low")),
@@ -1762,6 +1801,35 @@ mod tests {
         );
         assert!(explore.model_setting.contains("omitClaudeMd: true"));
         assert_eq!(lines[1].sources[0].source, ModelSource::Unknown);
+        // Profiles sharing the history that differ only in effort, such as a T3 instance's
+        // secret effort, keep the model's attribution; a different model setting doesn't.
+        let mut shared = scan(
+            vec![
+                main.clone(),
+                child("a", "child", "claude-opus-5-5", Some("medium")),
+            ],
+            vec![spawn("Explore")],
+        );
+        for r in &mut shared.requests {
+            r.profiles = vec!["profile".into(), "t3".into()].into();
+        }
+        let mut t3 = make_profile("t3", "/home/.claude-t3");
+        t3.agents.effort_unresolved = Some("T3 instance t3 sets a secret".into());
+        t3.agents.unresolved = Some("T3 instance t3 sets another secret".into());
+        shared.profiles.push(t3);
+        shared.profiles[0].agents.effort = Some(Owned {
+            value: "max".into(),
+            owner: "CLAUDE_CODE_SUBAGENT_EFFORT".into(),
+        });
+        let source = |scan: &Scan| subagent_costs(scan, &prices())[0].sources[0].source;
+        assert_eq!(source(&shared), ModelSource::Unknown);
+        shared.profiles[1].agents.unresolved = None;
+        assert_eq!(source(&shared), ModelSource::Inherited);
+        shared.profiles[1].agents.model = Some(Owned {
+            value: "claude-haiku-5-5".into(),
+            owner: "CLAUDE_CODE_SUBAGENT_MODEL".into(),
+        });
+        assert_eq!(source(&shared), ModelSource::Unknown);
         // Already on the cheapest model: nothing to reprice.
         assert_eq!(lines[2].reprice, None);
         // With no agent file of its name, an unflagged run is the built-in; an unrecorded

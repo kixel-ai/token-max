@@ -2228,7 +2228,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     crate::subagents::discover(&options.discovery, &mut profiles, &requests, &earlier)?;
     // T3's database is read by the sessions the transcripts name, so only after them.
     if let Some(reading) = &options.reading
-        && t3.iter().any(|state| state.status == "selected")
+        && crate::t3::reads_database(&t3)
     {
         reading.step(Some("Reading T3 Code's database"));
     }

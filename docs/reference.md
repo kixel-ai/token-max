@@ -817,7 +817,9 @@ phase in turn and clears itself before the report. While this host's
 transcripts are read it is a bar of the bytes read out of the total discovery
 found, with the time left to read them at the rate so far; the analysis after
 reading has no measured fraction, so its phases show only a spinner and how
-long each has run.
+long each has run. Reading T3 Code's database, which follows the transcripts,
+holds the line as the bar does, so under `--ssh` it shows over a later phase
+until it ends.
 
 On a terminal, `doctor` opens with its name, says it is about to scan this
 host's transcripts, and lists each profile root it found with its transcript

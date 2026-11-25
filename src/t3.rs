@@ -1213,29 +1213,38 @@ const ITEM_THREAD: &str = "SELECT t.provider_thread_id, pt.driver, pt.provider_i
 const FIRST_ITEM: &str = "SELECT updated_at FROM orchestration_v2_projection_turn_items
  WHERE rowid=(SELECT min(rowid) FROM orchestration_v2_projection_turn_items
   WHERE turn_item_id>=?1 AND turn_item_id<?2)";
-// A provider turn's attempt, whose earliest running selection `Selections` finds.
-const ATTEMPT: &str = "SELECT a.thread_id, a.run_id, a.attempt_id
- FROM orchestration_v2_projection_provider_turns t
+// A provider turn and its run attempt, which `ATTEMPT` and `TURN` both join.
+macro_rules! turn_attempt {
+    () => {
+        " FROM orchestration_v2_projection_provider_turns t
  LEFT JOIN orchestration_v2_projection_run_attempts a ON a.attempt_id=t.run_attempt_id
    AND a.thread_id=t.thread_id AND a.provider_thread_id=t.provider_thread_id
- WHERE t.provider_turn_id=?1";
-// Each run selection one thread recorded, in order. The text casts compare as the run and
-// attempt id columns would.
-const SELECTIONS: &str = "SELECT sequence, CAST(json_extract(payload_json,'$.id') AS TEXT),
- CAST(json_extract(payload_json,'$.activeAttemptId') AS TEXT),
+ WHERE t.provider_turn_id=?1"
+    };
+}
+// A provider turn's attempt, whose earliest running selection `Selections` finds.
+const ATTEMPT: &str = concat!(
+    "SELECT a.thread_id, a.run_id, a.attempt_id",
+    turn_attempt!()
+);
+// Each run selection one thread recorded, in order. Ids that are not JSON strings never
+// match a run or attempt, so no nested value leaves SQLite.
+const SELECTIONS: &str = "SELECT sequence,
+ CASE WHEN json_type(payload_json,'$.id')='text' THEN json_extract(payload_json,'$.id') END,
+ CASE WHEN json_type(payload_json,'$.activeAttemptId')='text'
+   THEN json_extract(payload_json,'$.activeAttemptId') END,
  json_extract(payload_json,'$.status')='running'
  FROM orchestration_events
  WHERE aggregate_kind='thread' AND application_event_version=2 AND stream_id=?1
    AND event_type='run.updated'
  ORDER BY sequence";
 // Native identities and the earliest running selection, `?2`, are the join.
-const TURN: &str = "WITH matched AS (
+const TURN: &str = concat!(
+    "WITH matched AS (
  SELECT t.*, a.attempt_id, a.run_id, a.provider_instance_id,
- json_extract(a.payload_json,'$.nativeThreadId') AS native_session
- FROM orchestration_v2_projection_provider_turns t
- LEFT JOIN orchestration_v2_projection_run_attempts a ON a.attempt_id=t.run_attempt_id
-   AND a.thread_id=t.thread_id AND a.provider_thread_id=t.provider_thread_id
- WHERE t.provider_turn_id=?1)
+ json_extract(a.payload_json,'$.nativeThreadId') AS native_session",
+    turn_attempt!(),
+    ")
  SELECT m.native_session, m.provider_instance_id, m.thread_id, m.run_id, m.attempt_id,
  m.provider_turn_id, m.status, m.started_at, m.completed_at,
  json_extract(m.payload_json,'$.tokenUsage.updatedAt'),
@@ -1259,7 +1268,8 @@ const TURN: &str = "WITH matched AS (
  FROM matched m
  LEFT JOIN orchestration_events e ON e.sequence=?2
  LEFT JOIN orchestration_v2_projection_runs r ON r.run_id=m.run_id AND r.thread_id=m.thread_id
- LEFT JOIN orchestration_v2_projection_messages msg ON msg.message_id=json_extract(r.payload_json,'$.userMessageId') AND msg.thread_id=m.thread_id";
+ LEFT JOIN orchestration_v2_projection_messages msg ON msg.message_id=json_extract(r.payload_json,'$.userMessageId') AND msg.thread_id=m.thread_id",
+);
 
 /// The longest SQLite value the adapter reads, bounding what a T3 database can make it hold.
 const VALUE_BOUND: i32 = 1_048_576;
@@ -1640,7 +1650,13 @@ fn metadata(
     let mut provider_turns = tx.prepare(PROVIDER_TURNS)?;
     let mut turn_item_rows = tx.prepare(TURN_ITEM_ROWS)?;
     let mut thread_item_ids = tx.prepare(THREAD_ITEM_IDS)?;
-    // Each thread's Claude item keys by row, read once for all of its provider turns.
+    // Each thread's Claude item keys by row, read once for all of its provider turns. Only
+    // keys a selected request names are kept, so the map grows with the selected history.
+    let claude: HashSet<&str> = wanted
+        .iter()
+        .filter(|((driver, _), _)| *driver == "claudeAgent")
+        .flat_map(|(_, natives)| natives.iter().copied())
+        .collect();
     let mut item_keys: HashMap<String, HashMap<i64, String>> = HashMap::default();
     for (key, list) in &threads {
         let found = refs.entry(key).or_default();
@@ -1663,7 +1679,9 @@ fn metadata(
                         let mut keys = HashMap::default();
                         let mut items = thread_item_ids.query([&thread])?;
                         while let Some(item) = items.next()? {
-                            if let Some(native) = text_column(item, 1).and_then(|i| item_key(&i)) {
+                            if let Some(native) = text_column(item, 1).and_then(|i| item_key(&i))
+                                && claude.contains(native.as_str())
+                            {
                                 keys.insert(item.get(0)?, native);
                             }
                         }
@@ -1891,6 +1909,13 @@ fn shared(owned: &mut HashMap<String, Profiles>, owner: &str) -> Profiles {
     let profiles = Profiles::from([owner.to_string()]);
     owned.insert(owner.to_string(), profiles.clone());
     profiles
+}
+
+/// Whether `enrich` reads a database: only a selected state's existing `statev2.sqlite`.
+pub(crate) fn reads_database(states: &[T3State]) -> bool {
+    states
+        .iter()
+        .any(|s| s.status == "selected" && Path::new(&s.path).join("statev2.sqlite").is_file())
 }
 
 /// Freeze optional projection metadata in one read-only WAL transaction, then close it before analysis.
@@ -2640,7 +2665,15 @@ mod tests {
         let db = db(&root);
         seed(&db, "codex", "codex");
         let before = fs::read(root.join("statev2.sqlite")).unwrap();
-        let scan = scan(&w.scan_options()).unwrap();
+        let reading = std::sync::Arc::new(crate::reader::Reading::default());
+        let scan = scan(&crate::reader::ScanOptions {
+            reading: Some(reading.clone()),
+            ..w.scan_options()
+        })
+        .unwrap();
+        // The database step leaves the progress line once the read is done.
+        assert!(reads_database(&scan.t3));
+        assert!(reading.step.lock().unwrap().is_none());
         assert_eq!(scan.requests.len(), 1);
         let r = &scan.requests[0];
         assert_eq!(r.parts[0].tier, None);
@@ -4216,6 +4249,8 @@ mod tests {
             &"x".repeat(2_000_000),
         );
         item(&database, "reasoning", "msg_1%3Athinking%3A1", "");
+        // An item naming the turn from another thread is not the turn's.
+        database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES(?1,'elsewhere','turn','assistant_message','completed','{}','2026-01-01T00:00:00Z',NULL,0)",[format!("{ITEM_PREFIX}stray-uuid")]).unwrap();
         let request = NativeRequest {
             id: "assistant",
             root: "opaque-session",
@@ -4242,13 +4277,18 @@ mod tests {
             native_turns: vec!["assistant-uuid"],
             ..request
         };
+        let stray = NativeRequest {
+            id: "stray",
+            native_turns: vec!["stray-uuid"],
+            ..request
+        };
         database
             .set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, 1_048_576)
             .unwrap();
         let tx = database.transaction().unwrap();
         let data = metadata(
             &tx,
-            &[&request, &tool, &thinking, &other],
+            &[&request, &tool, &thinking, &other, &stray],
             "2026-01-01T00:00:20Z",
             None,
         )
@@ -4258,6 +4298,7 @@ mod tests {
             assert!(data.turns[id].joined.is_some(), "{id}");
         }
         assert_eq!(data.turns["other"].count, 0);
+        assert_eq!(data.turns["stray"].count, 0);
         tx.rollback().unwrap();
         let writer = Connection::open(root.join("statev2.sqlite")).unwrap();
         writer
@@ -4288,6 +4329,12 @@ mod tests {
         event(5, "other", run("c", "c1", "running"));
         event(6, "thread", json!({"large":"x".repeat(2_000_000)}));
         event(7, "thread", run("c", "c1", "running"));
+        // A nested id never leaves SQLite, so it cannot match its JSON text.
+        event(
+            8,
+            "other",
+            json!({"id":{"text":"a"},"activeAttemptId":"a1","status":"running"}),
+        );
         database
             .set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, VALUE_BOUND)
             .unwrap();
@@ -4303,6 +4350,8 @@ mod tests {
         let selections = Selections::read(&mut query, "other");
         assert_eq!(selections.first("c", "c1").unwrap(), Some(5));
         assert_eq!(selections.first("a", "a1").unwrap(), None);
+        assert_eq!(selections.first(r#"{"text":"a"}"#, "a1").unwrap(), None);
+        assert_eq!(selections.first.len(), 1);
     }
 
     #[test]

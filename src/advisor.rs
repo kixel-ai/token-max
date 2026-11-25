@@ -791,6 +791,8 @@ mod tests {
             ambiguous_requests: 0,
             unresolved: IndexMap::default(),
             removed: IndexMap::from_iter([("gone".into(), 1)]),
+            unsupported: 0,
+            missing: 0,
             instances: Default::default(),
             text_generation: None,
         });

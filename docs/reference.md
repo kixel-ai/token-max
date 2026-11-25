@@ -272,7 +272,8 @@ name holds another `__` after the server's, the Claude Code is older, or
 `deniedMcpServers` is not a list, the walk names
 the step to take by hand instead: remove it from `.mcp.json`, uninstall the
 plugin, disconnect the connector at claude.ai, or remove it where it is
-configured. `disableClaudeAiConnectors` is never offered, since it turns off
+configured. Where only the Claude Code is older, the step also offers
+[upgrading it](#harness-upgrades). `disableClaudeAiConnectors` is never offered, since it turns off
 every connector, including ones added later.
 
 A server whose name holds `__` or ends in `_`, known from its MCP
@@ -611,6 +612,44 @@ including those no longer sent.
 
 A run with no histories or no requests in the selected window gives a next step;
 no applicable changes does not imply complete visibility or optimal settings.
+
+### Harness upgrades
+
+Some settings need a newer Claude Code or Codex than the profile's latest
+session ran: the cache TTLs Claude Code 2.1.242, the idle compaction toggle
+2.1.290 (2.1.314 without the server flag that earlier versions needed), a
+per-model compaction window 2.1.288 (2.1.304 for a `k` or `m` suffix), a
+`deniedMcpServers` entry 2.1.0 to 2.1.330 by the server's kind,
+`CLAUDE_CODE_SUBAGENT_EFFORT` 2.1.316, and Codex's turn-end compaction
+threshold 0.156.0. When the version is the only thing
+holding a verdict back, its line keeps its unknown mark and exit code, and the
+line under it says which version the setting needs, which version the latest
+session ran, and to upgrade. `vibes`' window cap and
+subagent default cards and a step by hand to block an MCP server say so too. token-max never upgrades a
+harness itself. A version the session didn't record, or one that isn't plain
+digits, still holds the setting back but advises no upgrade and names no
+command, since that release may already meet it: a `doctor` line then gets no
+upgrade line, and a card or step by hand that explains the wait calls it "an
+unrecorded version" or "a version token-max cannot read".
+
+Every request on a settings file counts toward whether its setting applies,
+but only Claude Code's interactive clients (`cli`, `claude-vscode` and
+`ssh-remote`, main agent or subagent) say which version to upgrade: an Agent
+SDK app, remote session or MCP client on the same file pins its own Claude
+Code, which `claude update` doesn't reach. Such a client holds the line back
+without advising an upgrade, and while its own latest version is also too old
+the line advises none at all, since upgrading the interactive install alone
+would still leave it held back. The idle compaction toggle, which only an
+interactive client runs, is judged by interactive requests alone. A T3
+instance's own requests and every Codex request count.
+
+It names an upgrade command only when it knows how the harness was installed:
+`claude update` when Claude Code's state file records a native install
+(`"installMethod": "native"`). An npm, Nix or Homebrew install, Codex, and a
+T3 instance, which runs the binary its settings name or `claude` or `codex`
+on its own PATH, get the version alone. A version gate that explains a past
+request, such as which model a built-in Explore ran on, uses that request's
+own version and advises nothing.
 
 ## Savings against the defaults
 
@@ -1638,8 +1677,9 @@ is left alone; the [subagent lines](#subagent-models) show it. At or below
 Claude Code reads `CLAUDE_CODE_SUBAGENT_EFFORT` from 2.1.316
 ([changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md)).
 When a profile's latest request ran an older Claude Code, the card says the
-variable is ignored and advises upgrading; past `high` it still offers the
-change to `high`, which applies once Claude Code is upgraded. Profiles that
+variable is ignored and, under the [harness upgrade](#harness-upgrades) rules,
+advises upgrading; past `high` it still offers the change to `high`, which
+applies once Claude Code is upgraded. Profiles that
 share the setting but pair it with different subagent models get a card each.
 Only the profile's own settings and environment, or a T3 instance's, are
 read; a project's settings that set the variable are not.

@@ -307,6 +307,7 @@ struct Common<'a> {
     uncertainty: &'a [String],
     sources: &'a [String],
     usage_estimates: &'a [UsageEstimate],
+    upgrade: Option<&'a crate::version::Upgrade>,
 }
 
 fn base<'a, V>(
@@ -341,6 +342,7 @@ fn base<'a, V>(
         uncertainty: &b.uncertainty,
         sources: &b.sources,
         usage_estimates,
+        upgrade: b.upgrade.as_ref(),
     }
 }
 
@@ -531,8 +533,8 @@ fn default_item(e: &EffortCheck, profile: &str, how: Option<How>, out: &Out<'_>)
     })
 }
 
-/// The first Claude Code that reads `CLAUDE_CODE_SUBAGENT_EFFORT`, as `(minor, patch)` of 2.x.
-const SUBAGENT_EFFORT_SINCE: (u64, u64) = (1, 316);
+/// The first Claude Code that reads `CLAUDE_CODE_SUBAGENT_EFFORT`.
+const SUBAGENT_EFFORT_SINCE: crate::version::Needs = crate::version::Needs::claude(1, 316);
 
 /// The level the maintainer picks for a default subagent effort past `high`, which every
 /// model that takes effort accepts.
@@ -546,9 +548,9 @@ struct SubagentLine<'a> {
     lead: &'a Profile,
     /// The profile tag the card's name carries.
     profile: String,
-    /// The Claude Code each of the line's profiles last ran, by the name a card gives the
-    /// profile, empty when the line covers one; for those with a recorded request.
-    versions: Vec<(String, Option<&'a str>)>,
+    /// Every profile the line covers, the lead included.
+    members: Vec<&'a Profile>,
+    requests: &'a [crate::model::Request],
 }
 
 /// The default subagent effort as `vibes` shows it: the level and the model it pairs with,
@@ -576,31 +578,39 @@ fn subagent_item(line: &SubagentLine<'_>, out: &Out<'_>) -> Option<Item> {
             capitalize(why)
         );
     }
-    let (minor, patch) = SUBAGENT_EFFORT_SINCE;
-    // A profile's latest Claude Code before the variable arrived runs subagents at the
-    // main session's effort, whatever it says.
-    let ignored: Vec<(&str, &str)> = match p.harness {
-        Harness::Claude => line
-            .versions
-            .iter()
-            .filter_map(|(name, v)| Some((name.as_str(), (*v)?)))
-            .filter(|(_, v)| !crate::version::claude_at_least(Some(v), minor, patch))
-            .collect(),
-        Harness::Codex => vec![],
+    // A profile whose latest Claude Code predates the variable runs subagents at the main
+    // session's effort, whatever it says.
+    let ignored = match p.harness {
+        Harness::Claude => {
+            SUBAGENT_EFFORT_SINCE.unmet(crate::version::latest(&line.members, line.requests))
+        }
+        Harness::Codex => None,
     };
-    if !ignored.is_empty() {
-        let ran: Vec<String> = ignored
-            .iter()
-            .map(|(name, version)| match name {
-                &"" => format!("The latest session ran Claude Code {version}"),
-                name => format!("{name}'s latest session ran Claude Code {version}"),
-            })
-            .collect();
+    if let Some(ignored) = &ignored {
+        // An unrecorded or unreadable version may already read the variable.
+        let run = if ignored
+            .ran
+            .as_deref()
+            .and_then(crate::version::plain)
+            .is_some()
+        {
+            "run"
+        } else {
+            "may run"
+        };
         let _ = write!(
             text,
-            " {}, which ignores CLAUDE_CODE_SUBAGENT_EFFORT: it arrived in 2.{minor}.{patch}, so its subagents run at the main session's effort. Upgrade Claude Code to 2.{minor}.{patch} or later for the setting to apply.",
-            ran.join("; ")
+            " {}, so its subagents {run} at the main session's effort.",
+            capitalize(&ignored.why("CLAUDE_CODE_SUBAGENT_EFFORT"))
         );
+        // Only an old interactive install is worth upgrading; an SDK app pins its own.
+        if let Some(advice) = SUBAGENT_EFFORT_SINCE.advice(&line.members, line.requests) {
+            let _ = write!(
+                text,
+                " {} for the setting to apply.",
+                capitalize(&advice.step())
+            );
+        }
     }
     let guidance = past_high(level, p.harness);
     if let Some(guidance) = &guidance {
@@ -624,10 +634,10 @@ fn subagent_item(line: &SubagentLine<'_>, out: &Out<'_>) -> Option<Item> {
             OPENAI_REASONING.into(),
         ],
     };
-    if !ignored.is_empty() {
+    if ignored.is_some() {
         sources.push(CLAUDE_CHANGELOG.into());
     }
-    let quiet = how.is_none() && ignored.is_empty();
+    let quiet = how.is_none() && ignored.is_none();
     Some(Item {
         name: tagged("Subagent default".into(), &line.profile),
         value: if guidance.is_some() {
@@ -3459,6 +3469,27 @@ fn keepalive_unresolved(k: &KeepaliveCheck, r: &Common<'_>) -> String {
     }
 }
 
+/// A verdict only an older harness holds back: the upgrade that would let it apply, then
+/// what the replay favors.
+fn held_back(r: &Common<'_>) -> Option<(String, String)> {
+    let upgrade = r.upgrade?;
+    let favors = match r.recommended? {
+        recommended if Some(recommended) == r.current => "the current value".to_string(),
+        recommended => setting_value(Some(recommended)),
+    };
+    Some((
+        format!(
+            "{}: {}.",
+            capitalize(&upgrade.why("this setting")),
+            upgrade.step()
+        ),
+        format!(
+            "The replay favors {favors}, which applies once {} is upgraded.",
+            upgrade.needs.harness.product()
+        ),
+    ))
+}
+
 /// One plain sentence on why a check could not reach a verdict.
 fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
     if r.uncertainty.iter().any(|s| s == TIER_SENSITIVITY) {
@@ -4334,6 +4365,8 @@ struct Row {
     /// The settings `doctor`'s edit for it changes, any part naming this line alone starred,
     /// such as `~/.claude/settings.json:skillOverrides.*`, which its section's row names.
     key: String,
+    /// The harness upgrade that alone would let its verdict apply.
+    upgrade: Option<String>,
 }
 
 /// A change's place in its section: the changes `doctor` offers as one question, which the
@@ -4372,6 +4405,7 @@ impl Row {
             baseline: None,
             section: None,
             key: String::new(),
+            upgrade: None,
         }
     }
 
@@ -4668,6 +4702,9 @@ fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
         out.spans(&spans, nested, Some(nested + indent));
         if let Some(baseline) = &row.baseline {
             out.line(&baseline.text(), nested + indent, DIM);
+        }
+        if let Some(upgrade) = &row.upgrade {
+            out.line(upgrade, nested + indent, PLAIN);
         }
         if out.options.details {
             out.line(&format!("What: {}", row.what), nested + indent, PLAIN);
@@ -5471,10 +5508,25 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
     item.value = format!("{} {} {}", tokens(window), out.arrow, tokens(cap));
     item.quiet = false;
     item.how = Some(match &c.unsettable {
-        // As the line would, the change goes by hand where no edit is known to hold.
-        Some(reason) => crate::doctor::window_by_hand(c, c.capped.as_ref(), cap, profile, reason),
+        // As the line would, the change goes by hand where no edit is known to hold, after
+        // any upgrade the window control needs.
+        Some(reason) => match (
+            crate::doctor::window_by_hand(c, c.capped.as_ref(), cap, profile, reason),
+            &c.base.upgrade,
+        ) {
+            (How::Manual { step, reason }, Some(upgrade)) => How::Manual {
+                step: format!("{}, then {step}", upgrade.step()),
+                reason,
+            },
+            (how, _) => how,
+        },
         None => crate::doctor::window_change(c, c.capped.as_ref(), cap, profile),
     });
+    // A disabled or unresolved T3 instance has no active setting to change.
+    if c.base.uncertainty.iter().any(|u| u == crate::t3::UNOWNED) {
+        item.how = None;
+        item.text += " The T3 instance is disabled or the file that owns this setting for it is unresolved, so there is nothing to change.";
+    }
     item
 }
 
@@ -6315,10 +6367,15 @@ fn summary(
             None => String::new(),
         };
         let set_in = format!("{official}Set in {}.", out.home(r.owner));
+        let held = held_back(r);
+        row.upgrade = held.as_ref().map(|(upgrade, _)| upgrade.clone());
         let unknown = || {
             format!(
                 "{}{}{} {set_in}",
-                not_enough(&unresolved(result, r)),
+                held.as_ref().map_or_else(
+                    || not_enough(&unresolved(result, r)),
+                    |(_, favors)| favors.clone()
+                ),
                 context_sizes(report, result, r.profile),
                 context_rot(report, result)
             )
@@ -6927,7 +6984,6 @@ fn summary(
         let split = by_model.len() > 1;
         for members in by_model.into_values() {
             let ids: Vec<String> = members.iter().map(|p| p.id.clone()).collect();
-            let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
             let profile = if split {
                 tag(&ids, &|_| String::new(), out)
             } else {
@@ -6936,21 +6992,8 @@ fn summary(
             let line = SubagentLine {
                 lead: members[0],
                 profile,
-                versions: refs
-                    .iter()
-                    .filter_map(|id| {
-                        let version = crate::doctor::claude_versions(report, &[id]).pop()?;
-                        // One profile's card names no profile.
-                        let name = match members.len() {
-                            1 => String::new(),
-                            _ => tags
-                                .get(id)
-                                .cloned()
-                                .unwrap_or_else(|| out.short_profile(id)),
-                        };
-                        Some((name, version))
-                    })
-                    .collect(),
+                members,
+                requests: &report.scan.requests,
             };
             vibes.extend(subagent_item(&line, out));
         }
@@ -7995,6 +8038,7 @@ mod tests {
             assumptions: vec!["synthetic assumption".into()],
             uncertainty: vec!["synthetic uncertainty".into()],
             sources: vec!["https://example.invalid/source".into()],
+            upgrade: None,
         }
     }
 
@@ -9811,9 +9855,14 @@ mod tests {
         use serde_json::json;
         let file = format!("{ROOT}/settings.json");
         let variable = format!("{file}:env.CLAUDE_CODE_SUBAGENT_EFFORT");
-        // The card for a subagent effort set by `owner`, with the latest request on `version`.
+        // The card for a subagent effort set by `owner`, with the latest request on `version`
+        // from a native install's interactive client.
         let card = |harness: Harness, level: Option<&str>, owner: &str, version: &str| {
             let mut report = synthetic();
+            report.scan.profiles[0].updater = Some("claude update");
+            for r in &mut report.scan.requests {
+                r.client = Some("cli".into());
+            }
             report.checks.clear();
             report.context.clear();
             let p = &mut report.scan.profiles[0];
@@ -9849,7 +9898,7 @@ mod tests {
             "{text}"
         );
         assert!(text.contains(CLAUDE_MODEL_GUIDE), "{text}");
-        assert!(!text.contains("ignores"), "{text}");
+        assert!(!text.contains("needs Claude Code"), "{text}");
         let Some(How::Edit(patch)) = c.how else {
             panic!("expected an edit: {:?}", c.how)
         };
@@ -9884,16 +9933,88 @@ mod tests {
         let c = card(Harness::Claude, Some("medium"), &variable, "2.1.315").expect("a card");
         assert!(!c.quiet && c.how.is_none(), "{:?}", c.how);
         assert!(
-            c.text
-                .contains("The latest session ran Claude Code 2.1.315, which ignores")
-                && c.text.contains("Upgrade Claude Code to 2.1.316 or later"),
+            c.text.contains(
+                "CLAUDE_CODE_SUBAGENT_EFFORT needs Claude Code 2.1.316 or later, but its latest session ran 2.1.315, so its subagents run at the main session's effort. Upgrade Claude Code with `claude update` for the setting to apply."
+            ),
             "{}",
             c.text
         );
         assert!(c.sources.iter().any(|s| s == CLAUDE_CHANGELOG));
+        // An unrecorded version may already read the variable, so it advises no upgrade.
+        {
+            let mut report = synthetic();
+            report.checks.clear();
+            report.context.clear();
+            report.scan.profiles[0].updater = Some("claude update");
+            report.scan.profiles[0].agents.effort = Some(Owned {
+                value: "medium".into(),
+                owner: variable.clone(),
+            });
+            for r in &mut report.scan.requests {
+                r.client = Some("cli".into());
+                r.version = None;
+            }
+            let c = advice(&report, ReportOptions::default())
+                .into_iter()
+                .find(|i| i.name == "Subagent default")
+                .expect("a card");
+            assert!(
+                c.text.contains(
+                    "CLAUDE_CODE_SUBAGENT_EFFORT needs Claude Code 2.1.316 or later, but its latest session ran an unrecorded version, so its subagents may run at the main session's effort."
+                ),
+                "{}",
+                c.text
+            );
+            assert!(!c.text.contains("claude update"), "{}", c.text);
+        }
+        // An Agent SDK app pins its own Claude Code, so an old one names no upgrade, and
+        // neither does an interactive install while an SDK app on the file is also too old.
+        for sdk in ["2.1.315", "2.1.400"] {
+            let mut report = synthetic();
+            report.checks.clear();
+            report.context.clear();
+            report.scan.profiles[0].updater = Some("claude update");
+            report.scan.profiles[0].agents.effort = Some(Owned {
+                value: "medium".into(),
+                owner: variable.clone(),
+            });
+            for r in &mut report.scan.requests {
+                r.version = Some(sdk.into());
+            }
+            let mut cli = report.scan.requests[0].clone();
+            cli.id = "cli-request".into();
+            cli.client = Some("cli".into());
+            cli.version = Some("2.1.315".into());
+            cli.time = report
+                .scan
+                .requests
+                .iter()
+                .map(|r| r.time)
+                .max()
+                .expect("requests")
+                + 1;
+            report.scan.requests.push(cli);
+            let c = advice(&report, ReportOptions::default())
+                .into_iter()
+                .find(|i| i.name == "Subagent default")
+                .expect("a card");
+            assert!(
+                c.text
+                    .contains("so its subagents run at the main session's effort")
+            );
+            assert_eq!(
+                c.text.contains("Upgrade Claude Code with `claude update`"),
+                sdk == "2.1.400",
+                "{sdk}: {}",
+                c.text
+            );
+        }
         // Past high, the edit stays on offer beside the upgrade.
         let c = card(Harness::Claude, Some("max"), &variable, "2.1.300").expect("a card");
-        assert!(c.text.contains("ignores") && c.text.contains("prone to overthinking"));
+        assert!(
+            c.text.contains("needs Claude Code 2.1.316")
+                && c.text.contains("prone to overthinking")
+        );
         assert!(matches!(c.how, Some(How::Edit(_))), "{:?}", c.how);
 
         // A T3 instance's own environment entry is a step by hand naming its list.
@@ -9916,7 +10037,7 @@ mod tests {
         let c = card(Harness::Codex, Some("xhigh"), &toml, "0.1.0").expect("a card");
         let text = said(&c);
         assert!(text.contains("OpenAI's reasoning guide"), "{text}");
-        assert!(!text.contains("ignores"), "{text}");
+        assert!(!text.contains("needs Claude Code"), "{text}");
         let Some(How::Edit(patch)) = c.how else {
             panic!("expected an edit: {:?}", c.how)
         };
@@ -9925,8 +10046,8 @@ mod tests {
             ["agents", "default_subagent_reasoning_effort"]
         );
 
-        // Profiles sharing the setting and model get one card, naming each that runs a
-        // Claude Code too old to read it.
+        // Profiles sharing the setting and model get one card, naming the version of one
+        // that runs a Claude Code too old to read it.
         let mut report = synthetic();
         report.checks.clear();
         report.context.clear();
@@ -9953,10 +10074,7 @@ mod tests {
             .collect();
         assert_eq!(cards.len(), 1, "{cards:?}");
         assert!(
-            cards[0]
-                .text
-                .contains("other's latest session ran Claude Code 2.1.315")
-                && !cards[0].text.contains("ran Claude Code 2.1.316"),
+            cards[0].text.contains("but its latest session ran 2.1.315"),
             "{}",
             cards[0].text
         );

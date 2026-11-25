@@ -26,6 +26,7 @@ use crate::report::{
 };
 use crate::safe::{ScanError, terminal_text};
 use crate::terminal::{BOLD, DIM, GREEN, RED, WrapOptions, YELLOW, wrap_spans};
+use crate::version::{Needs, Upgrade};
 
 /// Whose spend a share is of, for a host's own changes.
 const THIS_HOST: &str = "this host's";
@@ -382,8 +383,7 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
             Some(control) => {
                 let how = switch(&members, control.into(), report.scan.defaults);
                 let unused = section.kind == Kind::Feature(ContextKind::McpServer, Reason::Unused);
-                if unused && matches!(how, How::Edit(_)) {
-                    let versions = claude_versions(report, &ids);
+                if let (true, How::Edit(patch)) = (unused, &how) {
                     let whole = ends_at(&c.name, c.details.iter().map(|d| d.name.as_str()));
                     let own = holds_its_tools(&c.name);
                     removal = crate::mcp::definitions(&c.name, control, &members)
@@ -397,7 +397,7 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
                             Definition::Deny(deny) if !whole => {
                                 deny.by_hand("its tools' names do not show where its name ends")
                             }
-                            d => gate(d, &versions),
+                            d => gate(d, &members, &report.scan.requests, &patch.file),
                         })
                         .collect();
                 }
@@ -450,43 +450,48 @@ fn holds_its_tools(server: &str) -> bool {
     !server.contains("__") && !server.ends_with('_')
 }
 
-/// The Claude Code each profile in `ids` last recorded a request from, for those with any.
-pub(crate) fn claude_versions<'r>(report: &'r Report, ids: &[&str]) -> Vec<Option<&'r str>> {
-    ids.iter()
-        .filter_map(|id| {
-            let mut requests = report.scan.requests.iter().rev();
-            let last = requests.find(|r| r.profiles.iter().any(|p| p == id))?;
-            Some(last.version.as_deref())
-        })
-        .collect()
-}
-
-/// A `deniedMcpServers` entry where every profile's latest Claude Code matches it by name,
-/// else its step by hand.
-fn gate(definition: Definition, versions: &[Option<&str>]) -> Definition {
+/// A `deniedMcpServers` entry where the latest Claude Code of every one of `members` matches
+/// it by name, else its step by hand, or an upgrade and the entry to add to `file` after it.
+fn gate(
+    definition: Definition,
+    members: &[&Profile],
+    requests: &[crate::model::Request],
+    file: &str,
+) -> Definition {
     let Definition::Deny(deny) = definition else {
         return definition;
     };
+    let versions = crate::version::latest(members, requests);
     let (minor, patch) = deny.since;
-    if !versions.is_empty()
-        && versions
-            .iter()
-            .all(|v| crate::version::claude_at_least(*v, minor, patch))
-    {
+    let needs = Needs::claude(minor, patch);
+    // With no recorded session, the version is unrecorded.
+    let upgrade = match versions.first() {
+        Some(_) => needs.unmet(versions.iter().copied()),
+        None => Some(Upgrade {
+            needs,
+            ran: None,
+            command: None,
+            several: false,
+        }),
+    };
+    let Some(upgrade) = upgrade else {
         return Definition::Deny(deny);
-    }
-    // The first version that fails the check, which may be unrecorded.
-    let ran = versions
-        .iter()
-        .find(|v| !crate::version::claude_at_least(**v, minor, patch))
-        .copied()
-        .flatten()
-        .map_or("an unrecorded Claude Code".to_string(), |v| {
-            format!("Claude Code {v}")
-        });
-    deny.by_hand(&format!(
-        "its latest sessions ran {ran}, before 2.{minor}.{patch}, where a deniedMcpServers entry blocks just this server by name"
-    ))
+    };
+    // Only an old interactive install is worth upgrading; an SDK app pins its own.
+    let advice = needs.advice(members, requests);
+    let what = "blocking just this server by name with a deniedMcpServers entry";
+    let Some(upgrade) = advice else {
+        return deny.by_hand(&upgrade.why(what));
+    };
+    let why = upgrade.why(what);
+    // A rerun would not offer the entry, since the walk's switch already turned it off.
+    let step = format!(
+        "{}, or {} and add {} to deniedMcpServers in {file}",
+        deny.step,
+        upgrade.step(),
+        serde_json::json!({ "serverName": deny.name })
+    );
+    crate::mcp::Deny { step, ..deny }.by_hand(&why)
 }
 
 /// The section a line's change joins: a feature's kind and why it is offered, as its verdict
@@ -2395,10 +2400,6 @@ pub fn opening(found: &[Found], destinations: &[String], style: &Style) -> Strin
     if found.is_empty() {
         out.push_str(&style.dim("No transcripts found on this host."));
     }
-    let name = |harness| match harness {
-        Harness::Claude => "Claude Code",
-        Harness::Codex => "Codex",
-    };
     let roots: Vec<String> = found
         .iter()
         .map(|f| home_in(&f.root, style.home.as_deref()))
@@ -2411,7 +2412,7 @@ pub fn opening(found: &[Found], destinations: &[String], style: &Style) -> Strin
     let widest = |column: &[String]| column.iter().map(|c| crate::terminal::cells(c)).max();
     let name_cells = found
         .iter()
-        .map(|f| name(f.harness).len())
+        .map(|f| f.harness.product().len())
         .max()
         .unwrap_or(0);
     let root_cells = widest(&roots).unwrap_or(0);
@@ -2424,7 +2425,7 @@ pub fn opening(found: &[Found], destinations: &[String], style: &Style) -> Strin
     // A table wider than the terminal puts each root's figures on the line below it.
     let stacked = style.width.is_some_and(|w| table > w);
     for (((f, root), files), bytes) in found.iter().zip(&roots).zip(&counts).zip(&sizes) {
-        let lead = format!("{:<name_cells$}  {}", name(f.harness), root);
+        let lead = format!("{:<name_cells$}  {}", f.harness.product(), root);
         let noun = if f.files == 1 {
             "transcript "
         } else {
@@ -6001,34 +6002,113 @@ mod tests {
                 reason: "a plugin adds it".into(),
             })
         };
+        let mut native = crate::test_support::make_profile("native", "/n");
+        native.updater = Some("claude update");
+        let other = crate::test_support::make_profile("other", "/o");
+        // Each (profile, client, version) is one request, in time order.
+        let ran = |sent: &[(&str, &str, Option<&str>)]| -> Vec<crate::model::Request> {
+            sent.iter()
+                .enumerate()
+                .map(|(i, &(profile, client, version))| {
+                    let mut r = crate::test_support::make_request();
+                    r.time = i as i64;
+                    r.profiles = vec![profile.into()].into();
+                    r.client = Some(client.into());
+                    r.version = version.map(Into::into);
+                    r
+                })
+                .collect()
+        };
+        let both = [&native, &other];
         // Every profile's latest Claude Code must match it by name.
-        let new = [Some("2.1.182"), Some("2.1.331")];
-        assert_eq!(gate(blocked("p"), &new), blocked("p"));
-        let Definition::Manual { step, reason } =
-            gate(blocked("p"), &[Some("2.1.331"), Some("2.1.90"), None])
-        else {
+        let new = ran(&[
+            ("native", "cli", Some("2.1.182")),
+            ("other", "cli", Some("2.1.331")),
+        ]);
+        assert_eq!(gate(blocked("p"), &both, &new, "s.json"), blocked("p"));
+        let Definition::Manual { step, reason } = gate(
+            blocked("p"),
+            &both,
+            &ran(&[("native", "cli", Some("2.1.90")), ("other", "cli", None)]),
+            "s.json",
+        ) else {
             panic!("an older Claude Code is a step by hand")
+        };
+        // The unrecorded version may already match it, so no upgrade is advised.
+        assert_eq!(step, "uninstall the plugin");
+        assert_eq!(
+            reason,
+            "a plugin adds it, and blocking just this server by name with a deniedMcpServers entry needs Claude Code 2.1.182 or later, but its latest session ran 2.1.90"
+        );
+        // A command is named only when it reaches every install that is too old.
+        let Definition::Manual { step, .. } = gate(
+            blocked("p"),
+            &[&other, &native],
+            &ran(&[
+                ("other", "cli", Some("2.1.331")),
+                ("native", "cli", Some("2.1.90")),
+            ]),
+            "s.json",
+        ) else {
+            panic!("an older Claude Code is a step by hand")
+        };
+        assert!(
+            step.contains("upgrade Claude Code with `claude update` and add"),
+            "{step}"
+        );
+        // The reason names the version that failed, even when another was recorded, and
+        // advises no upgrade for a version it doesn't know.
+        let Definition::Manual { step, reason } = gate(
+            blocked("p"),
+            &both,
+            &ran(&[("native", "cli", Some("2.1.331")), ("other", "cli", None)]),
+            "s.json",
+        ) else {
+            panic!("an unrecorded Claude Code is a step by hand")
         };
         assert_eq!(step, "uninstall the plugin");
         assert!(
-            reason.starts_with(
-                "a plugin adds it, and its latest sessions ran Claude Code 2.1.90, before 2.1.182"
-            ),
-            "{reason}"
-        );
-        // The reason names the version that failed, even when another was recorded.
-        let Definition::Manual { reason, .. } = gate(blocked("p"), &[Some("2.1.331"), None]) else {
-            panic!("an unrecorded Claude Code is a step by hand")
-        };
-        assert!(
-            reason.contains("ran an unrecorded Claude Code, before"),
+            reason.ends_with("but its latest session ran an unrecorded version"),
             "{reason}"
         );
         assert!(matches!(
-            gate(blocked("p"), &[None]),
+            gate(blocked("p"), &both, &[], "s.json"),
             Definition::Manual { .. }
         ));
-        assert!(matches!(gate(blocked("p"), &[]), Definition::Manual { .. }));
+        // An Agent SDK app pinned to an old Claude Code on the same file holds the entry back,
+        // and names no upgrade, both when the interactive install already matches it and when
+        // it is old too, since upgrading the install alone would still hold the entry back.
+        for cli in ["2.1.331", "2.1.90"] {
+            let Definition::Manual { step, reason } = gate(
+                blocked("p"),
+                &[&native],
+                &ran(&[
+                    ("native", "cli", Some(cli)),
+                    ("native", "sdk-ts", Some("2.1.90")),
+                ]),
+                "s.json",
+            ) else {
+                panic!("an older SDK's Claude Code is a step by hand")
+            };
+            assert_eq!(step, "uninstall the plugin");
+            assert!(
+                reason.ends_with("but its latest session ran 2.1.90"),
+                "{reason}"
+            );
+        }
+        // When only the interactive install is old, upgrading it unlocks the entry.
+        let Definition::Manual { step, .. } = gate(
+            blocked("p"),
+            &[&native],
+            &ran(&[
+                ("native", "sdk-ts", Some("2.1.331")),
+                ("native", "cli", Some("2.1.90")),
+            ]),
+            "s.json",
+        ) else {
+            panic!("an older Claude Code is a step by hand")
+        };
+        assert!(step.contains("with `claude update` and add"), "{step}");
 
         // A tool family whose tools may belong to a longer name is not denied by its own.
         assert!(ends_at(

@@ -363,6 +363,15 @@ Use `--offline` for that cache, `--price-cache FILE` to choose its location, or
 A failed price fetch fails the run; offline use is explicit. Cached prices include
 their file timestamp, so an old catalog remains visible.
 
+A Claude request that records no provider is priced at the catalog of the
+provider its profile sends requests to: Amazon Bedrock's for Bedrock or its
+Mantle endpoint, the cloud's own for Google Cloud's Agent Platform or
+Microsoft Foundry, and Anthropic's otherwise, including Claude Platform on AWS
+and Claude Models on Google Cloud. That provider is read from the profile's
+settings file and the shell, not from project settings, so a project whose
+settings choose a different provider, or turn the profile's off, is still
+priced at the profile's catalog.
+
 ## Plans and API prices
 
 token-max is written for people on a Claude or ChatGPT plan. No provider

@@ -383,6 +383,7 @@ fn claude_controls(
     scopes: &[SettingsScope],
     env: &Env,
     definitions: Vec<AgentDefinition>,
+    t3: Option<&crate::model::T3Instance>,
 ) -> AgentControls {
     let environment = scoped_environment(scopes, env);
     let owned = |key: &str| {
@@ -394,7 +395,7 @@ fn claude_controls(
             },
         )
     };
-    AgentControls {
+    let mut controls = AgentControls {
         model: owned("CLAUDE_CODE_SUBAGENT_MODEL"),
         effort: owned("CLAUDE_CODE_SUBAGENT_EFFORT"),
         force: enabled(environment.values.get("CLAUDE_CODE_SUBAGENT_MODEL_FORCE")),
@@ -405,28 +406,29 @@ fn claude_controls(
         ),
         definitions,
         ..AgentControls::default()
+    };
+    if let Some(t3) = t3 {
+        t3_owned(&mut controls, t3, &environment.owners);
     }
+    controls
 }
 
 /// Name the T3 settings entry that sets a subagent variable from the instance's own
 /// environment, which otherwise reads as an exported variable.
-fn t3_owned(controls: &mut AgentControls, t3: &crate::model::T3Instance) {
+fn t3_owned(
+    controls: &mut AgentControls,
+    t3: &crate::model::T3Instance,
+    owners: &HashMap<String, String>,
+) {
     let file = join(&[&t3.state, "settings.json"]);
     // An entry the instance sets with no readable value, such as a secret or one under
-    // settings that don't resolve, unless a settings file's `env`, which wins, sets it too.
+    // settings that don't resolve, unless a settings file's `env`, which wins, sets it too,
+    // even to `inherit` or empty. The merged environment owns every key it can read.
     let (effort, secret): (Vec<&str>, Vec<&str>) = t3
         .environment
         .iter()
         .map(String::as_str)
-        .filter(|key| {
-            crate::t3::SUBAGENT_ENVIRONMENT.contains(key)
-                && t3.env.as_ref().is_none_or(|env| !env.contains_key(*key))
-                && !match *key {
-                    "CLAUDE_CODE_SUBAGENT_EFFORT" => controls.effort.is_some(),
-                    "CLAUDE_CODE_SUBAGENT_MODEL" => controls.model.is_some(),
-                    _ => false,
-                }
-        })
+        .filter(|key| crate::t3::SUBAGENT_ENVIRONMENT.contains(key) && !owners.contains_key(*key))
         .partition(|key| *key == "CLAUDE_CODE_SUBAGENT_EFFORT");
     let unreadable = |keys: &[&str]| match t3.env {
         Some(_) => format!(
@@ -513,11 +515,12 @@ pub fn discover(
                     file: managed_file,
                 };
                 let own = claude_definitions(&join(&[&profile.root, "agents"]), None)?;
-                let mut agents =
-                    claude_controls(&[user_scope, managed_scope], local_env, own.clone());
-                if let Some(t3) = &profile.t3 {
-                    t3_owned(&mut agents, t3);
-                }
+                let agents = claude_controls(
+                    &[user_scope, managed_scope],
+                    local_env,
+                    own.clone(),
+                    profile.t3.as_ref(),
+                );
                 for cwd in existing {
                     let [project_file, legacy_file, local_file] =
                         crate::discovery::claude_project_files(&cwd, options)?;
@@ -551,10 +554,8 @@ pub fn discover(
                         }
                         definitions.extend(project_agents[&dir].iter().cloned());
                     }
-                    let mut scoped = claude_controls(&scopes, local_env, definitions);
-                    if let Some(t3) = &profile.t3 {
-                        t3_owned(&mut scoped, t3);
-                    }
+                    let scoped =
+                        claude_controls(&scopes, local_env, definitions, profile.t3.as_ref());
                     if scoped != agents {
                         scoped_dirs.insert(cwd, scoped);
                     }
@@ -1387,25 +1388,25 @@ mod tests {
     use super::*;
     use crate::model::{CacheContext, ExposureScan, ScanCoverage};
     use crate::test_support::{Workspace, make_profile, make_request, prices};
+    use serde_json::Map;
 
     #[test]
     fn a_t3_instances_own_variable_names_its_settings_entry() {
         let profile = crate::test_support::make_t3_profile("agent", "/root");
-        let mut t3 = profile.t3.expect("a T3 instance");
+        let mut t3 = profile.t3.clone().expect("a T3 instance");
         t3.environment = vec!["CLAUDE_CODE_SUBAGENT_EFFORT".into()];
-        let owned = |owner: &str| {
-            Some(Owned {
-                value: "max".into(),
-                owner: owner.into(),
-            })
-        };
-        let mut controls = AgentControls {
-            effort: owned("CLAUDE_CODE_SUBAGENT_EFFORT"),
-            // Inherited from the shell T3 started from, which its settings don't own.
-            model: owned("CLAUDE_CODE_SUBAGENT_MODEL"),
-            ..AgentControls::default()
-        };
-        t3_owned(&mut controls, &t3);
+        // The shell T3 started from sets the model, which its settings don't own.
+        let env: Env = [
+            ("CLAUDE_CODE_SUBAGENT_EFFORT", "max"),
+            ("CLAUDE_CODE_SUBAGENT_MODEL", "sonnet"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.into(), v.into()))
+        .collect();
+        let none = Map::new();
+        let file = "/root/settings.json";
+        let scope = |config| [SettingsScope { config, file }];
+        let controls = claude_controls(&scope(&none), &env, vec![], Some(&t3));
         assert_eq!(
             controls.effort.unwrap().owner,
             format!(
@@ -1414,19 +1415,18 @@ mod tests {
             )
         );
         assert_eq!(controls.model.unwrap().owner, "CLAUDE_CODE_SUBAGENT_MODEL");
-        // When the model and effort are both secret, the effort text names both entries.
-        t3.environment = vec![
-            "CLAUDE_CODE_SUBAGENT_EFFORT".into(),
-            "CLAUDE_CODE_SUBAGENT_MODEL".into(),
-        ];
-        // A key the instance sets that its readable environment lacks is a secret.
-        t3.env = Some(Default::default());
-        let mut secret = AgentControls::default();
-        t3_owned(&mut secret, &t3);
-        let profile = crate::test_support::make_t3_profile("agent", "/root");
+        // A key the instance sets that its readable environment lacks is a secret. When the
+        // model and effort are both secret, the effort text names both entries.
+        t3.environment = crate::t3::SUBAGENT_ENVIRONMENT
+            .iter()
+            .map(|k| (*k).into())
+            .collect();
+        t3.env = Some(Env::default());
+        let empty = Env::default();
+        let secret = claude_controls(&scope(&none), &empty, vec![], Some(&t3));
         let (model, effort) = settings_text(&profile, &secret, "Explore", false, false);
         assert!(
-            model.contains("sets CLAUDE_CODE_SUBAGENT_MODEL with"),
+            model.contains("sets CLAUDE_CODE_SUBAGENT_MODEL, CLAUDE_CODE_SUBAGENT_MODEL_FORCE"),
             "{model}"
         );
         assert!(
@@ -1434,25 +1434,34 @@ mod tests {
             "{model}"
         );
         for key in ["CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CODE_SUBAGENT_EFFORT"] {
-            assert!(effort.contains(&format!("sets {key} with")), "{effort}");
+            assert!(effort.contains(key), "{effort}");
         }
-        // A settings file's `env` overrides the secret, so the effort it sets is known.
-        let mut overridden = AgentControls {
-            effort: owned("/root/settings.json:env.CLAUDE_CODE_SUBAGENT_EFFORT"),
-            ..AgentControls::default()
-        };
-        t3_owned(&mut overridden, &t3);
-        assert_eq!(overridden.effort_unresolved, None);
-        assert!(overridden.unresolved.is_some());
-        // Settings that don't resolve leave the instance's own entries unread.
-        t3.env = None;
-        let mut unread = AgentControls::default();
-        t3_owned(&mut unread, &t3);
-        assert!(
-            unread
-                .effort_unresolved
-                .is_some_and(|why| why.contains("do not resolve"))
-        );
+        // A settings file's `env` wins over every secret it sets, even to `inherit`, empty
+        // or a disabled flag, whether or not the instance's own settings resolve.
+        let overrides: Map<String, Value> = serde_json::from_value(serde_json::json!({"env": {
+            "CLAUDE_CODE_SUBAGENT_EFFORT": "high",
+            "CLAUDE_CODE_SUBAGENT_MODEL": "inherit",
+            "CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "",
+            "CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP": "0",
+        }}))
+        .unwrap();
+        for env in [Some(Env::default()), None] {
+            t3.env = env;
+            let overridden = claude_controls(&scope(&overrides), &empty, vec![], Some(&t3));
+            assert_eq!(overridden.effort_unresolved, None);
+            assert_eq!(overridden.unresolved, None);
+        }
+        // One the settings file leaves unset stays unread.
+        let mut partial = overrides.clone();
+        partial["env"]
+            .as_object_mut()
+            .unwrap()
+            .remove("CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP");
+        let unread = claude_controls(&scope(&partial), &empty, vec![], Some(&t3));
+        assert_eq!(unread.effort_unresolved, None);
+        assert!(unread.unresolved.is_some_and(|why| why.contains(
+            "sets CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP, but its settings do not resolve"
+        )));
     }
 
     fn spawn(kind: &str) -> Subagent {

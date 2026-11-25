@@ -9,7 +9,7 @@ use std::hash::BuildHasher;
 use std::io::{ErrorKind, Read};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -82,8 +82,34 @@ impl Reading {
     }
 }
 
-/// Records read between updates of a [`Reading`]'s counts.
-const COUNT_EVERY: u64 = 1024;
+/// When the scan next brings a [`Reading`]'s counts up to date: as often as the line redraws,
+/// but never so often that counting, whose cost grows with what was read, takes more than a
+/// small share of the scan.
+struct Pace {
+    next: Instant,
+}
+
+impl Pace {
+    /// The progress line's redraw interval.
+    const EVERY: Duration = Duration::from_millis(100);
+    /// The time spent reading for each unit of time spent counting, at least.
+    const READ_PER_COUNT: u32 = 9;
+
+    fn new(now: Instant) -> Self {
+        Self {
+            next: now + Self::EVERY,
+        }
+    }
+
+    fn due(&self, now: Instant) -> bool {
+        now >= self.next
+    }
+
+    /// Schedule the next count after one that ran from `started` to `now`.
+    fn counted(&mut self, started: Instant, now: Instant) {
+        self.next = now + Self::EVERY.max((now - started) * Self::READ_PER_COUNT);
+    }
+}
 
 /// Bytes read per system call; lines longer than this are assembled across chunks.
 const CHUNK: usize = 1 << 20;
@@ -2105,7 +2131,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     reader.exposure.roots(&profiles);
     // Bytes in the transcripts already read.
     let mut finished = 0;
-    let mut consumed: u64 = 0;
+    let mut pace = Pace::new(Instant::now());
     for snapshot in &mut snapshots {
         // Records update the snapshot's counters while records are consumed against its metadata.
         let view = snapshot.clone();
@@ -2125,9 +2151,10 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
             if let Some(reading) = &options.reading {
                 let read = finished + records.position;
                 reading.read.store(read, Ordering::Relaxed);
-                consumed += 1;
-                if consumed.is_multiple_of(COUNT_EVERY) {
+                let now = Instant::now();
+                if pace.due(now) {
                     reader.count(reading, &profiles);
+                    pace.counted(now, Instant::now());
                 }
             }
         }
@@ -2609,6 +2636,23 @@ mod tests {
         .unwrap();
         let progress = |n: &AtomicU64| n.load(Ordering::Relaxed);
         assert_eq!((progress(&reading.total), progress(&reading.read)), (0, 0));
+    }
+
+    #[test]
+    fn counting_waits_for_the_redraw_and_stays_a_small_share_of_the_scan() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut pace = Pace::new(start);
+        assert!(!pace.due(at(99)));
+        assert!(pace.due(at(100)));
+        // A quick count waits only for the next redraw.
+        pace.counted(at(100), at(101));
+        assert!(!pace.due(at(200)));
+        assert!(pace.due(at(201)));
+        // A slow one waits nine times as long as it took.
+        pace.counted(at(201), at(251));
+        assert!(!pace.due(at(700)));
+        assert!(pace.due(at(701)));
     }
 
     /// What a scan counts as it reads, against what the header counts once the scan is

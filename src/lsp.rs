@@ -338,11 +338,14 @@ fn checkout(dir: &str) -> Option<String> {
 /// `dir` by its real path, from its nearest existing ancestor's, so two spellings of one
 /// directory match before it exists; a relative one stays as given.
 fn real(dir: &str) -> String {
-    let base = Path::new(dir)
-        .is_absolute()
-        .then(|| nearest(dir))
-        .flatten()
-        .and_then(|at| Some((at, realpath(at).ok()?)));
+    if !Path::new(dir).is_absolute() {
+        return dir.into();
+    }
+    // `..` climbs the path as spelled, before any link is followed, as Claude Code's path
+    // join reads it.
+    let dir = join(&[dir]);
+    let dir = dir.as_str();
+    let base = nearest(dir).and_then(|at| Some((at, realpath(at).ok()?)));
     match base {
         Some((at, base)) => match dir[at.len()..].trim_matches(std::path::is_separator) {
             "" => base,
@@ -1186,6 +1189,14 @@ mod tests {
                 join(&[&target, "plugins"])
             );
             assert_eq!(real(&link), target);
+            // Not the link target's parent's `plugins`.
+            let inner = join(&[&root, "a", "link"]);
+            fs::create_dir_all(join(&[&root, "a"])).unwrap();
+            std::os::unix::fs::symlink(&target, &inner).unwrap();
+            assert_eq!(
+                real(&format!("{inner}/../plugins")),
+                join(&[&root, "a", "plugins"])
+            );
         }
     }
 

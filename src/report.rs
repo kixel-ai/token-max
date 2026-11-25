@@ -6662,11 +6662,17 @@ fn summary(
     }
     for u in &report.lsp {
         let mut profile = tag(&u.profiles, &switch, out);
+        // This card's settings file, also when named another way, such as through a link.
+        let settings = crate::discovery::realpath(&u.settings_file).ok();
+        let same = |file: &str| {
+            file == u.settings_file
+                || settings.is_some() && crate::discovery::realpath(file).ok() == settings
+        };
         // Profiles that share a settings file but not a plugins directory get a card each.
         if report
             .lsp
             .iter()
-            .any(|o| o.settings_file == u.settings_file && o.plugins_dir != u.plugins_dir)
+            .any(|o| same(&o.settings_file) && o.plugins_dir != u.plugins_dir)
         {
             let dir = u
                 .plugins_dir
@@ -6685,11 +6691,6 @@ fn summary(
         // A `doctor` line denying the LSP tool in this card's settings leaves the plugin only
         // its diagnostics, so the card reads as denied once the walk writes it. The file may
         // be written through another name for it, such as a link.
-        let settings = crate::discovery::realpath(&u.settings_file).ok();
-        let same = |file: &str| {
-            file == u.settings_file
-                || settings.is_some() && crate::discovery::realpath(file).ok() == settings
-        };
         let denies: Vec<Origin> = fixes
             .iter()
             .filter(|f| {

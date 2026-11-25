@@ -143,11 +143,24 @@ fn parse(id: &str) -> Option<(&str, (u32, u32))> {
     Some((family, (major, minor)))
 }
 
+/// An advisor name as Claude Code resolves it: lowercased, without a `[1m]` or `[2m]`
+/// context-window suffix, which it drops before checking the advisor.
+fn normalize(name: &str) -> String {
+    let name = name.trim().to_ascii_lowercase();
+    match name
+        .strip_suffix("[1m]")
+        .or_else(|| name.strip_suffix("[2m]"))
+    {
+        Some(base) => base.to_string(),
+        None => name,
+    }
+}
+
 /// Whether `name` is, in full, an alias or a Claude model ID of a family that can advise:
 /// `claude-<family>-<major>`, then an optional one- or two-digit minor and an optional
-/// eight-digit date.
+/// eight-digit date, in any case and with an optional context-window suffix.
 fn recognized(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
+    let name = normalize(name);
     let family = |f: &str| ["fable", "opus", "sonnet", "haiku"].contains(&f);
     if family(&name) {
         return true;
@@ -176,13 +189,14 @@ fn recognized(name: &str) -> bool {
 /// so only Fable's rule, which takes no other family, judges one.
 pub(crate) fn accepts(main: &str, advisor: &str) -> Option<bool> {
     let (family, version) = parse(main)?;
+    let advisor = normalize(advisor);
     if family == "fable" {
-        if advisor.eq_ignore_ascii_case("fable") {
+        if advisor == "fable" {
             return Some(true);
         }
-        return Some(matches!(parse(advisor), Some(("fable", a)) if a >= version));
+        return Some(matches!(parse(&advisor), Some(("fable", a)) if a >= version));
     }
-    let (advisor, at) = parse(advisor)?;
+    let (advisor, at) = parse(&advisor)?;
     // The oldest version of each family the main model takes as its advisor, by row.
     let minimum = |opus, sonnet, haiku| match advisor {
         "fable" => Some((0, 0)),
@@ -313,6 +327,7 @@ mod tests {
             "claude-opus-5-5sk-ant-secret",
             "claude-opus-5-5-sk",
             "claude-opus-x",
+            "claude-opus-5-5[3m]",
         ] {
             let a = resolve(json!({"advisorModel": name}), json!({}), &[]);
             assert_eq!(a.model.as_deref(), Some("an unknown name"), "{name}");
@@ -323,6 +338,11 @@ mod tests {
             "claude-sonnet-5-5",
             "claude-sonnet-5-20260101",
             "claude-haiku-5-5-20260101",
+            // Claude Code lowercases a name and drops a context-window suffix.
+            "Claude-Fable-5-2",
+            "claude-opus-5-5[1m]",
+            "Opus[1M]",
+            "claude-sonnet-5-5[2m]",
         ] {
             let a = resolve(json!({"advisorModel": name}), json!({}), &[]);
             assert_eq!((a.model.as_deref(), a.blocked), (Some(name), None));
@@ -410,6 +430,11 @@ mod tests {
             ("claude-fable-5", "claude-fable-5-1", Some(true)),
             ("claude-fable-5-2", "opus", Some(false)),
             ("claude-fable-5-2", "claude-opus-5-5", Some(false)),
+            // In any case, and with a context-window suffix, as Claude Code reads it.
+            ("claude-fable-5-2", "Claude-Fable-5-2", Some(true)),
+            ("claude-fable-5-2", "Fable[1m]", Some(true)),
+            ("claude-fable-5-2", "claude-fable-5-1[1M]", Some(false)),
+            ("claude-opus-5-5", "Claude-Opus-5[1m]", Some(true)),
             // Each other row's oldest accepted version per family, and Haiku 4.5 advising none.
             ("claude-haiku-4-5", "claude-sonnet-4-6", Some(true)),
             ("claude-haiku-4-5", "claude-haiku-4-5", Some(false)),

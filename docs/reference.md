@@ -1740,12 +1740,13 @@ can advise; the card names only its kind, never the value, which could be a
 pasted credential), the main model takes no
 advisor, or Claude Code's [pairing table](https://code.claude.com/docs/en/advisor#choose-an-advisor-model)
 rejects the pair; then it says so and offers no edit. The table is checked for
-a full model ID such as `claude-sonnet-5-5`. An alias such as `opus` resolves
+a full model ID such as `claude-sonnet-5-5`, in any case and with or without a
+`[1m]` or `[2m]` suffix, as Claude Code reads it. An alias such as `opus` resolves
 to a version that changes with Claude Code releases, so only a Fable main
 model, which takes no other family, judges one.
 
-T3 Code picks each thread's main model, so T3 instances get no card; when one
-reads the same settings file, the card says each of its threads whose model
+T3 Code picks each thread's main model, so T3 instances get no card; when an
+enabled one reads the same settings file, the card says each of its threads whose model
 and provider take the advisor would use it, unless the instance's launch arguments, secret
 environment or machine policy, which token-max can't resolve, override that
 file. `doctor` has no advisor line. An advisor call

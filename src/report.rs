@@ -4749,7 +4749,8 @@ fn advisor_item(p: &Profile, profile: &str, out: &Out<'_>) -> Item {
                 if pick == "fable" {
                     text += " A Fable advisor needs Fable access, and on plans that bill Fable to usage credits, the one-time consent /model fable asks for; until then Claude Code sends requests without it.";
                 }
-                // T3's threads read the same file under a main model T3 picks per thread.
+                // T3's enabled instances read the same file under a main model T3 picks per
+                // thread; a disabled one runs no threads.
                 let t3: Vec<_> = out
                     .profiles
                     .values()
@@ -4758,6 +4759,7 @@ fn advisor_item(p: &Profile, profile: &str, out: &Out<'_>) -> Item {
                             && crate::discovery::same_file(&o.settings_file, &p.settings_file)
                     })
                     .filter_map(|o| o.t3.as_ref())
+                    .filter(|t| t.enabled)
                     .collect();
                 if !t3.is_empty() {
                     let _ = write!(
@@ -10703,6 +10705,9 @@ mod tests {
             "{}",
             c.text
         );
+        // A disabled instance runs no threads.
+        report.scan.profiles[1].t3.as_mut().unwrap().enabled = false;
+        assert!(!card(&report).text.contains("T3 Code threads"));
     }
 
     #[test]

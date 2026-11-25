@@ -827,7 +827,8 @@ pub(crate) fn default_how(control: &EffortControl, profile: &Profile) -> Option<
             }
             None => format!("set {setting} to {model}"),
         };
-        changes.push((owner, edit, step));
+        // The setting as a by-hand reason names it, without the null-model note.
+        changes.push((named, edit, step));
     }
     if target.level.as_deref() != Some(effort) {
         let owner = target.owner.as_str();
@@ -6241,10 +6242,14 @@ mod tests {
             Some("claude-fable-5-2"),
         )
         .unwrap();
-        let Some(How::Manual { step, .. }) = default_how(&control, &claude) else {
+        let Some(How::Manual { step, reason }) = default_how(&control, &claude) else {
             panic!("a null model above the user file is changed by hand")
         };
         assert!(step.contains("/repo/.claude/settings.json:model"), "{step}");
+        assert_eq!(
+            reason,
+            format!("/repo/.claude/settings.json:model sets it; token-max edits only {file}")
+        );
         // An invalid level in the pick's own row is fixed by hand before the switch.
         std::fs::write(
             &file,

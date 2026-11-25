@@ -32,4 +32,3 @@ release, where the upgrade offer reaches 0.1.0's users.
 ## Required
 
 - [Advisor card](/quest/m1/vibes/advisor.md) - a vibes card shipped in 0.1.0
-- [crabx upgrade guard](/quest/m1/crabx-upgrade.md) - 0.1.0 is the first release with the upgrade offer, so it must leave crabx's cache alone

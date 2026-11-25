@@ -1352,6 +1352,25 @@ fn without_a_terminal_a_newer_release_or_a_failed_check_is_one_line_on_stderr() 
             )
         )
     );
+    // A binary in crabx's cache is crabx's to move to a new release.
+    let crabx = w
+        .home
+        .join(".cache/crabx/v1/x86_64-unknown-linux-musl/author/token-max/0.1.0/bin");
+    std::fs::create_dir_all(&crabx).unwrap();
+    let bin = crabx.join(format!("token-max{}", std::env::consts::EXE_SUFFIX));
+    std::fs::hard_link(BIN, &bin).unwrap();
+    let mut c = command_at(&bin, &w, &doctor);
+    c.env("TOKEN_MAX_RELEASES", &releases.url);
+    assert_eq!(
+        run(&mut c),
+        (
+            1,
+            report.clone(),
+            format!(
+                "{stale} crabx manages this binary: an unpinned crabx token-max picks up the new release on its own, and a pinned one stays on its version.\n"
+            )
+        )
+    );
     // A run without a terminal never probes the directory, which writes beside the binary, so
     // even one this user cannot write only hears that a terminal run upgrades.
     #[cfg(unix)]
@@ -2048,6 +2067,37 @@ mod unix {
             assert_eq!(releases.downloads(), before);
             assert_eq!(names(&locked), ["token-max"]);
         }
+        // A binary in crabx's cache is crabx's: no question, no probe, the same bytes. Its entry
+        // is moved and symlinked back, so the binary resolves to a path naming no crabx.
+        let moved = w.home.join("moved");
+        std::fs::create_dir_all(moved.join("bin")).unwrap();
+        std::fs::write(
+            moved.join("record.json"),
+            r#"{"version":"0.1.0","bins":["token-max"],"source":"crates.io"}"#,
+        )
+        .unwrap();
+        let versions = w
+            .home
+            .join(".cache/crabx/v1/x86_64-unknown-linux-musl/author/token-max");
+        std::fs::create_dir_all(&versions).unwrap();
+        std::os::unix::fs::symlink(&moved, versions.join("0.1.0")).unwrap();
+        let bin = versions.join("0.1.0/bin/token-max");
+        std::fs::hard_link(BIN, &bin).unwrap();
+        let mut c = command_at(&bin, &w, &doctor);
+        c.env("TOKEN_MAX_RELEASES", &releases.url);
+        // Enough answers to finish even if it asks, which then fails below instead of hanging.
+        let (status, stdout, stderr) = typed(&mut c, b"s\nq\nn\ns\nq\nn\n");
+        assert_eq!(status, code, "{stderr}");
+        let (before_opening, _) = stdout.split_once(&opening).expect(&stdout);
+        assert_eq!(
+            words(before_opening),
+            format!(
+                "token-max v99.0.0 is out; this is v{ours}, and its advice may be out of date. crabx manages this binary: an unpinned crabx token-max picks up the new release on its own, and a pinned one stays on its version."
+            )
+        );
+        assert_eq!(releases.downloads(), before);
+        assert_eq!(std::fs::read(&bin).unwrap(), std::fs::read(BIN).unwrap());
+        assert_eq!(names(bin.parent().unwrap()), ["token-max"]);
     }
 
     fn signal(pid: u32, signal: libc::c_int) {

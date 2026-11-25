@@ -256,8 +256,9 @@ pub fn compaction_charges(scan: &mut Scan, catalog: &Catalog) -> Vec<CompactionC
         ];
         if let Some(i) = linked {
             let r = all.get_mut(i);
+            // A summary request's advisor call is still the advisor's, at its own model.
             if !has_compaction(r) {
-                for p in &mut r.parts {
+                for p in r.parts.iter_mut().filter(|p| p.kind != PartKind::Advisor) {
                     p.kind = PartKind::Compaction;
                 }
             }
@@ -1797,6 +1798,21 @@ mod tests {
         assert_eq!(total(&result.fixed_cost), None);
         assert_eq!(total(&result.cost.one_hour), None);
         assert!(result.base.savings_usd.unwrap() > 0.0);
+    }
+
+    #[test]
+    fn a_linked_summary_request_keeps_its_advisor_call() {
+        let mut summary = make_request();
+        summary.id = "summary".into();
+        let mut advisor = summary.parts[0].clone();
+        advisor.kind = PartKind::Advisor;
+        summary.parts.push(advisor);
+        let mut event = boundary("boundary", &summary.session, summary.time + 1);
+        event.request = Some(summary.id.clone());
+        let mut scan = data(vec![summary], vec![event]);
+        compaction_charges(&mut scan, &prices());
+        let kinds: Vec<_> = scan.requests[0].parts.iter().map(|p| p.kind).collect();
+        assert_eq!(kinds, [PartKind::Compaction, PartKind::Advisor]);
     }
 
     #[test]

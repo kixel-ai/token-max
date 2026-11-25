@@ -1966,6 +1966,12 @@ impl Reader {
 
 /// Merge a request into its earlier copy; `r` shares the interner's strings. Returns the
 /// reference the stored request newly answers.
+/// Whether two snapshots' parts at one position are the same part: one kind, and one model
+/// unless either snapshot omits it.
+fn same_part(a: &BillingPart, b: &BillingPart) -> bool {
+    a.kind == b.kind && (a.model == b.model || a.model.is_none() || b.model.is_none())
+}
+
 fn add(requests: &mut Requests, strings: &mut Interner, r: Request) -> Option<Text> {
     let Some(&index) = requests.ids.get(&r.id) else {
         let answered = r.reference.clone();
@@ -2050,10 +2056,8 @@ fn add(requests: &mut Requests, strings: &mut Interner, r: Request) -> Option<Te
             && end_time >= previous.end_time)
     {
         for (index, p) in parts.iter_mut().enumerate() {
-            // A later snapshot that omits a model the earlier one recorded is the same part.
             if let Some(old) = previous.parts.get(index)
-                && old.kind == p.kind
-                && (old.model == p.model || p.model.is_none())
+                && same_part(old, p)
             {
                 if p.model.is_none() {
                     p.model = old.model.clone();
@@ -2073,7 +2077,7 @@ fn add(requests: &mut Requests, strings: &mut Interner, r: Request) -> Option<Te
         // An older snapshot read after a newer one still fills what the newer omitted: a
         // model, a counter or a tier.
         for (old, new) in previous.parts.iter_mut().zip(&parts) {
-            if old.kind == new.kind && (old.model == new.model || old.model.is_none()) {
+            if same_part(old, new) {
                 if old.model.is_none() {
                     old.model = new.model.clone();
                 }
@@ -2872,15 +2876,17 @@ mod tests {
     #[test]
     fn snapshots_of_one_request_keep_what_either_recorded_in_either_order() {
         let w = Workspace::new();
-        // The earlier snapshot alone records the advisor's model, a cache counter and the
-        // tier; the later one alone records the final output.
-        let snapshot = |early: bool| {
+        // The earlier snapshot alone records a cache counter and the tier, the later one the
+        // final output, and either one the advisor's model.
+        let snapshot = |early: bool, model_early: bool| {
             let mut advisor = json!({"type": "advisor_message", "input_tokens": 9, "output_tokens": if early { 1 } else { 3 }, "cache_creation_input_tokens": 0});
             let mut record = assistant("session", "message");
             if early {
-                advisor["model"] = "claude-fable-5-2".into();
                 advisor["cache_read_input_tokens"] = 4.into();
                 record["message"]["usage"]["service_tier"] = "standard".into();
+            }
+            if early == model_early {
+                advisor["model"] = "claude-fable-5-2".into();
             }
             record["message"]["usage"]["iterations"] = json!([
                 {"type": "message", "input_tokens": 1, "output_tokens": 2, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
@@ -2889,10 +2895,12 @@ mod tests {
             record
         };
         // In either order, as copies of a transcript may be read.
-        for records in [
-            [snapshot(true), snapshot(false)],
-            [snapshot(false), snapshot(true)],
-        ] {
+        for records in [true, false].into_iter().flat_map(|m| {
+            [
+                [snapshot(true, m), snapshot(false, m)],
+                [snapshot(false, m), snapshot(true, m)],
+            ]
+        }) {
             write(
                 w.claude.join("projects/project/main.jsonl"),
                 jsonl(&records),

@@ -1901,9 +1901,10 @@ models, and what the advisor iterations alone cost at API prices over the
 window, which `--details` breaks out with what could not be priced and what
 was assumed. Like the subagent lines it is evidence with no verdict, since the
 advisor's alternative is a stronger main model, which a replay can't price
-the work of. A T3 instance's threads' calls count on the line of the settings
-file it shares; an instance that shares no native line's file, as in a scan
-of only `--t3-dir`, gets a line of its own with no card. A request that names
+the work of. A T3 instance's threads' calls count on the line whose
+`advisorModel` its settings file owns; an instance with no such line, as in a
+scan of only `--t3-dir`, gets a line of its own with no card, as does one
+removed from T3's settings whose history the window still holds. A request that names
 profiles on two lines, as when two config roots read one `projects/`
 directory, counts once, on a shared line that says whose it was is unknown,
 and each line it touches says how many of its requests moved there.

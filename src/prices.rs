@@ -762,6 +762,19 @@ fn critical95(df: u64) -> f64 {
     T.get(df as usize - 1).copied().unwrap_or(Z95)
 }
 
+/// `estimate` over `total` items, raised so no partly priced item's share falls below what it
+/// is known to cost: `floors` holds each such item's known charge.
+pub fn floored(estimate: Option<Estimate>, total: u64, floors: &[f64]) -> Option<Estimate> {
+    estimate.map(|e| {
+        let mean = e.usd / total as f64;
+        let raise: f64 = floors.iter().map(|&k| (k - mean).max(0.0)).sum();
+        Estimate {
+            usd: e.usd + raise,
+            ..e
+        }
+    })
+}
+
 /// Per-item dollar figures summed over the items that could be priced, so their total over
 /// every item can be extrapolated with a margin of error.
 ///

@@ -1473,7 +1473,8 @@ when any of its parts ran on Fable, such as an advisor iteration under another
 main model, and only those parts are priced; server-tool fees go with the
 request's own model, and are unknown when it recorded none. A request that recorded no model, or an advisor
 iteration that recorded none, is counted apart, as possibly Fable; beside a Fable part, such an advisor
-iteration leaves its request unpriced, extrapolated like any other. A request shared
+iteration leaves its request unpriced, extrapolated like any other but never
+below what it is known to cost. A request shared
 by profiles of several files, as when two homes read the same transcripts,
 counts in each, since each line describes one file's sessions; the line says
 how many were shared, since whose they were is unknown.
@@ -1515,13 +1516,16 @@ executor's). An iteration records no service tier, so it is priced at
 standard when every executor iteration of its request is, since Priority
 Tier is committed per model; otherwise it is unknown. Unpriced requests are
 extrapolated from the priced ones, never below what each is known to cost.
-A T3 instance's requests count on the first line of the settings file it
-shares, since its threads read that file's `advisorModel`; instances that share
-no line's file get a line per settings file of their own, with no card. A
+A T3 instance's requests count on the first line whose `advisorModel` its
+settings file owns, since its threads read that file; a line whose owner is
+another file, such as a project's, takes none. The rest get a line per
+settings file of their own, with no card, and a T3 instance removed from T3's
+settings a line of its own for the requests its history still names. A
 request naming profiles on several lines counts on none of them but once on a
 shared entry for that set of lines, whose profiles are theirs together, and
 each of those lines counts it as shared. A compact request's `advisor_message`
-iterations stay advisor calls rather than summary work. The suggested
+iterations, and those of a request a compaction boundary links to, stay
+advisor calls rather than summary work. The suggested
 advisor is `advisor::pick`: Opus above Haiku 4.5 or later and Sonnet 4.6 or
 later, Fable above Opus 4.6 or later, none above Fable, by the main model's
 canonical ID.

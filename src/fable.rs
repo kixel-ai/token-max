@@ -2,7 +2,8 @@
 
 use crate::model::{FableUse, FableWeek, Harness, Millis, PartKind, Request, Scan, Usd};
 use crate::prices::{
-    Catalog, Sample, Sum, add_costs, price_part, request_evidence, server_cost, unknown_cost,
+    Catalog, Sample, Sum, add_costs, floored, price_part, request_evidence, server_cost,
+    unknown_cost,
 };
 
 const WEEK: Millis = 7 * 24 * 60 * 60 * 1000;
@@ -93,9 +94,11 @@ pub fn fable_use(
         .iter()
         .map(|line| {
             let mine = |p: &String| line.ids.contains(p);
-            let mut sums: Vec<(u64, Sum, Sample)> = spans
+            // Each span's requests, cost, priced sample, and the known charge of each partly
+            // priced request, which its extrapolated share never falls below.
+            let mut sums: Vec<(u64, Sum, Sample, Vec<f64>)> = spans
                 .iter()
-                .map(|_| (0, Sum::new(), Sample::default()))
+                .map(|_| (0, Sum::new(), Sample::default(), vec![]))
                 .collect();
             let mut unrecorded = 0;
             let mut shared = 0;
@@ -119,6 +122,9 @@ pub fn fable_use(
                     sums[i].0 += 1;
                     sums[i].1.add(&cost);
                     sums[i].2.add_cost(&cost);
+                    if cost.total_usd.is_none() {
+                        sums[i].3.push(cost.known_usd.to_f64());
+                    }
                 }
                 if r.profiles
                     .iter()
@@ -128,19 +134,23 @@ pub fn fable_use(
                 }
             }
             let mut all = Sample::default();
-            for (_, _, sample) in &sums {
+            let mut floors = vec![];
+            for (_, _, sample, known) in &sums {
                 all += *sample;
+                floors.extend(known);
             }
             let mut weeks: Vec<FableWeek> = spans
                 .iter()
                 .zip(sums)
-                .map(|(&(start, end), (requests, sum, sample))| FableWeek {
-                    start,
-                    end,
-                    requests,
-                    cost: sum.cost(),
-                    estimate: sample.estimate(requests),
-                })
+                .map(
+                    |(&(start, end), (requests, sum, sample, known))| FableWeek {
+                        start,
+                        end,
+                        requests,
+                        cost: sum.cost(),
+                        estimate: floored(sample.estimate(requests), requests, &known),
+                    },
+                )
                 .collect();
             // Weeks before the first Fable request say nothing, and a long history has many.
             while weeks.last().is_some_and(|w| w.requests == 0) {
@@ -153,7 +163,7 @@ pub fn fable_use(
                 unrecorded,
                 shared,
                 weeks,
-                estimate: all.estimate(requests),
+                estimate: floored(all.estimate(requests), requests, &floors),
             }
         })
         .collect()
@@ -360,6 +370,31 @@ mod tests {
         let week = uses[0].weeks.last().unwrap();
         assert_eq!(week.cost.total_usd, None);
         assert_eq!(week.cost.known_usd, fable_part + fees);
+        // Beside small requests priced in full, its estimate never falls below its known
+        // charge.
+        let mut large = fable.clone();
+        large.parts[0].usage.input = Some(10_000_000);
+        let mut advisor = large.parts[0].clone();
+        advisor.kind = crate::model::PartKind::Advisor;
+        advisor.model = None;
+        large.parts.push(advisor);
+        let known = fable_cost(&catalog, &large).unwrap().known_usd;
+        let mut small = fable.clone();
+        small.parts[0].usage.input = Some(1);
+        let small_cost = fable_cost(&catalog, &small).unwrap().total_usd.unwrap();
+        let uses = fable_use(
+            &scan(vec![small.clone(), small, large], None),
+            &catalog,
+            None,
+            now,
+        );
+        let floor = (known + small_cost + small_cost).to_f64();
+        for estimate in [uses[0].estimate, uses[0].weeks.last().unwrap().estimate] {
+            assert!(
+                estimate.unwrap().usd >= floor - 1e-9,
+                "{estimate:?} {floor}"
+            );
+        }
     }
 
     #[test]

@@ -6,10 +6,10 @@ use serde_json::Value;
 use crate::collections::IndexMap;
 use crate::controls::{Env, SettingsScope, env_flag, js_string, scoped_environment};
 use crate::model::{
-    AdvisorControl, AdvisorLine, AdvisorUse, Cost, Estimate, Harness, Millis, PartKind, Profile,
-    Request, Scan, Share,
+    AdvisorControl, AdvisorLine, AdvisorUse, Cost, Harness, Millis, PartKind, Profile, Request,
+    Scan, Share,
 };
-use crate::prices::{Catalog, Sample, add_costs, price_part, request_evidence};
+use crate::prices::{Catalog, Sample, add_costs, floored, price_part, request_evidence};
 
 /// Claude Code's page on the advisor tool.
 pub(crate) const DOCS: &str = "https://code.claude.com/docs/en/advisor";
@@ -225,12 +225,13 @@ pub(crate) fn accepts(main: &str, advisor: &str) -> Option<bool> {
 
 /// The advisor calls of each line of Claude profiles that share an advisor owner, in the
 /// window from `since`, else from the first request: one line per card, then one per group
-/// of T3 instances that read no card's settings file, then one per set of lines that share
-/// requests.
+/// of T3 instances that read no card's settings file, then one per removed T3 instance, then
+/// one per set of lines that share requests.
 pub fn advisor_use(scan: &Scan, catalog: &Catalog, since: Option<Millis>) -> Vec<AdvisorUse> {
     let advised = scan.profiles.iter().filter(|p| p.advisor.is_some());
-    // A T3 instance has no card of its own, but its threads read the same settings file, so
-    // its calls count on the first line of that file.
+    // A T3 instance has no card of its own, but its threads read its settings file, so its
+    // calls count on the first line whose advisorModel that file owns. A line whose owner is
+    // another file, such as a project's, is a setting the threads may never read.
     let file = |p: &Profile| crate::rows::canonical(&format!("{}:", p.settings_file));
     let mut t3: Vec<&Profile> = scan
         .profiles
@@ -241,16 +242,19 @@ pub fn advisor_use(scan: &Scan, catalog: &Catalog, since: Option<Millis>) -> Vec
     let mut lines: Vec<(Vec<String>, Vec<String>, AdvisorLine)> = vec![];
     let mut owners: Vec<String> = vec![];
     for line in crate::rows::groups(advised, |p| owner(p).expect("filtered on an advisor")) {
-        let files: Vec<String> = line.members.iter().map(|m| file(m)).collect();
+        let control = line.lead.advisor.as_ref().expect("filtered on an advisor");
+        let owned = control
+            .owner
+            .strip_suffix(&format!(":{KEY}"))
+            .map(|f| crate::rows::canonical(&format!("{f}:")));
         let mut ids = line.ids.clone();
         t3.retain(|p| {
-            let mine = files.contains(&file(p));
+            let mine = owned.as_ref() == Some(&file(p));
             if mine {
                 ids.push(p.id.clone());
             }
             !mine
         });
-        let control = line.lead.advisor.as_ref().expect("filtered on an advisor");
         owners.push(control.owner.clone());
         lines.push((line.ids, ids, AdvisorLine::Settings));
     }
@@ -259,6 +263,14 @@ pub fn advisor_use(scan: &Scan, catalog: &Catalog, since: Option<Millis>) -> Vec
         let owner = format!("{}:{KEY}", line.lead.settings_file);
         owners.push(owner.clone());
         lines.push((line.ids.clone(), line.ids, AdvisorLine::T3 { owner }));
+    }
+    // A removed instance's retained requests name its old key, which no profile has.
+    for state in &scan.t3 {
+        for instance in state.removed.keys() {
+            let key = crate::t3::profile_key(&state.path, instance);
+            owners.push(String::new());
+            lines.push((vec![key.clone()], vec![key], AdvisorLine::Removed));
+        }
     }
     let mut tallies: Vec<Tally> = lines.iter().map(|_| Tally::default()).collect();
     let mut shared: Vec<u64> = vec![0; lines.len()];
@@ -308,7 +320,11 @@ pub fn advisor_use(scan: &Scan, catalog: &Catalog, since: Option<Millis>) -> Vec
                 }
             }
         }
-        let owners = on.iter().map(|&i| owners[i].clone()).collect();
+        let owners = on
+            .iter()
+            .map(|&i| owners[i].clone())
+            .filter(|o| !o.is_empty())
+            .collect();
         result.push(tally.finish(profiles, AdvisorLine::Shared { owners }, 0));
     }
     result
@@ -366,14 +382,7 @@ impl Tally {
             calls: self.calls,
             models,
             cost: add_costs(&self.total),
-            estimate: self.sample.estimate(requests).map(|e| {
-                let mean = e.usd / requests as f64;
-                let raise: f64 = floors.iter().map(|&k| (k - mean).max(0.0)).sum();
-                Estimate {
-                    usd: e.usd + raise,
-                    ..e
-                }
-            }),
+            estimate: floored(self.sample.estimate(requests), requests, &floors),
             shared,
         }
     }
@@ -735,12 +744,13 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].profiles, ["a", "b"]);
         assert_eq!((lines[0].requests, lines[0].calls), (3, 4));
-        // Matched against every member's settings file, not only the lead's.
-        scan.profiles[1].settings_file = "/synthetic/other/settings.json".into();
+        // Only a line whose advisorModel the instance's own file owns takes its calls, not
+        // one a project's file sets.
         scan.profiles[2].settings_file = "/synthetic/other/settings.json".into();
         let lines = advisor_use(&scan, &catalog, None);
-        assert_eq!(lines.len(), 1);
-        assert_eq!((lines[0].requests, lines[0].calls), (3, 4));
+        assert_eq!(lines.len(), 2);
+        assert_eq!((lines[0].requests, lines[0].calls), (2, 3));
+        assert_eq!(lines[1].profiles, ["t3"]);
         // An instance whose settings file no native line reads, as in a scan of only
         // `--t3-dir`, gets a line of its own rather than losing its calls.
         scan.profiles.drain(..2);
@@ -754,7 +764,29 @@ mod tests {
             }
         );
         assert_eq!((lines[0].requests, lines[0].calls), (1, 1));
-        // With no calls, it has none.
+        // A removed instance's retained requests keep its old key, and a line of their own.
+        let gone = crate::t3::profile_key("/state", "gone");
+        scan.t3.push(crate::model::T3State {
+            path: "/state".into(),
+            status: "selected".into(),
+            exclusions: vec![],
+            metadata: String::new(),
+            snapshot_started_at: None,
+            snapshot_finished_at: None,
+            ambiguous_requests: 0,
+            unresolved: IndexMap::default(),
+            removed: IndexMap::from_iter([("gone".into(), 1)]),
+            instances: Default::default(),
+            text_generation: None,
+        });
+        scan.requests.push(request(&gone, 1));
+        let lines = advisor_use(&scan, &catalog, None);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            (&lines[1].profiles, &lines[1].line, lines[1].calls),
+            (&vec![gone], &AdvisorLine::Removed, 1)
+        );
+        // With no calls, neither has a line.
         scan.requests.clear();
         assert!(advisor_use(&scan, &catalog, None).is_empty());
     }

@@ -506,11 +506,15 @@ fn default_item(e: &EffortCheck, profile: &str, how: Option<How>, out: &Out<'_>)
         .collect();
     let shared = |p: &Profile| {
         // The files the profile reads, lowest precedence first: a session in the home
-        // directory reads another profile's user file as its project's.
+        // directory reads another profile's user file as its project's. A file read twice,
+        // such as through a symlink, ranks at its last read, where its settings win.
         let rank = |file: &str| {
             std::iter::once(&p.settings_file)
                 .chain(&p.project_files)
-                .position(|r| crate::discovery::same_file(r, file))
+                .enumerate()
+                .filter(|(_, r)| crate::discovery::same_file(r, file))
+                .map(|(i, _)| i)
+                .last()
         };
         p.effort.as_ref().is_some_and(|o| {
             match model_setting(&o.model_owner, &p.settings_file) {
@@ -12218,6 +12222,7 @@ mod tests {
         let own = format!("{elsewhere}:model");
         let above = format!("{local}:model");
         let reads: &[&str] = &[file.as_str(), local];
+        let again: &[&str] = &[file.as_str(), local, file.as_str()];
         let mut cases = vec![
             ((null.as_str(), null.as_str(), file.as_str(), &[][..]), true),
             ((recorded, recorded, file.as_str(), &[]), true),
@@ -12225,6 +12230,8 @@ mod tests {
             ((recorded, recorded, elsewhere, reads), true),
             ((recorded, own.as_str(), elsewhere, reads), true),
             ((recorded, above.as_str(), elsewhere, reads), false),
+            // A file read again above the one naming the model ranks at its last read.
+            ((recorded, above.as_str(), elsewhere, again), true),
         ];
         let set = format!("{real}:model");
         let env = format!("{real}:env.ANTHROPIC_MODEL");

@@ -13089,10 +13089,13 @@ mod tests {
             }
             moved.push((file, old));
         }
+        // The report shows a path under the real home from `~`, as a CI runner's temp dir is.
+        let home = std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned());
         (w, move |text: String| {
-            moved
-                .iter()
-                .fold(text, |text, (file, old)| text.replace(file, old))
+            moved.iter().fold(text, |text, (file, old)| {
+                let text = text.replace(file, old);
+                text.replace(&crate::doctor::home_in(file, home.as_deref()), old)
+            })
         })
     }
 

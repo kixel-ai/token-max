@@ -6991,18 +6991,18 @@ fn summary(
         out.line(&credit.text(spend.monthly(), &host), 0, PLAIN);
     }
     // Said once, for every figure extrapolated over requests that could not be priced.
-    // The details also print every compaction window's estimate, the cap's included.
-    let windows = out.options.details
-        && report.checks.iter().any(|c| {
-            matches!(c, CheckResult::Compaction(c)
-                if c.scenarios.iter().chain(&c.cap).any(|s| s.margin.is_some()))
-        });
+    // The details print many more estimates, so check what they render rather than list them.
+    let detailed = out.options.details && {
+        let mut scratch = Out::new(report, out.options);
+        details(report, &mut scratch);
+        sampled(&scratch.text)
+    };
     // A switched-off feature's baseline can carry the only margin, in its line and the credit.
     let tilde = spend.margin.is_some()
         || rows
             .iter()
             .any(|r| r.margin.is_some() || r.baseline.as_ref().is_some_and(|b| b.margin.is_some()))
-        || windows;
+        || detailed;
     let left = left_out(report, conditional);
     // A blank line sets the notes and legend apart, when any follow.
     if out.options.details || out.options.color || tilde || !left.is_empty() {
@@ -8523,6 +8523,27 @@ mod tests {
         }
         server.description = Some("Searches the docs.".into());
         assert_eq!(piece_what(&server), "Searches the docs.");
+    }
+
+    #[test]
+    fn a_tilde_only_the_details_print_is_explained() {
+        let mut report = synthetic();
+        for group in &mut report.historical {
+            group.estimate.as_mut().unwrap().margin = None;
+        }
+        let base = check_base(Action::Keep, Some(true), Some(true));
+        report.checks = vec![idle_check(base, PeriodCounts::default(), Some(-30.0))];
+        if let CheckResult::Idle(c) = &mut report.checks[0] {
+            c.after_recommendations.sensitivity.closed_delta = Some(Estimate {
+                usd: -5.0,
+                margin: Some(Margin::Usd(2.0)),
+            });
+        }
+        let detailed = text(&report, None, true);
+        assert!(detailed.contains("closed ~-$5"), "{detailed}");
+        assert!(detailed.contains(TILDE), "{detailed}");
+        let short = text(&report, None, false);
+        assert!(!sampled(&short) && !short.contains(TILDE), "{short}");
     }
 
     #[test]

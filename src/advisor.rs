@@ -143,11 +143,31 @@ fn parse(id: &str) -> Option<(&str, (u32, u32))> {
     Some((family, (major, minor)))
 }
 
-/// Whether `name` is an alias or a Claude model ID of a family that can advise.
+/// Whether `name` is, in full, an alias or a Claude model ID of a family that can advise:
+/// `claude-<family>-<major>`, then an optional one- or two-digit minor and an optional
+/// eight-digit date.
 fn recognized(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     let family = |f: &str| ["fable", "opus", "sonnet", "haiku"].contains(&f);
-    family(&name) || parse(&name).is_some_and(|(f, _)| family(f))
+    if family(&name) {
+        return true;
+    }
+    let Some(rest) = name.strip_prefix("claude-") else {
+        return false;
+    };
+    let parts: Vec<&str> = rest.split('-').collect();
+    let digits = |s: &str, len: std::ops::RangeInclusive<usize>| {
+        len.contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit())
+    };
+    match parts.as_slice() {
+        [f, major, tail @ ..] if family(f) && digits(major, 1..=2) => match tail {
+            [] => true,
+            [n] => digits(n, 1..=2) || digits(n, 8..=8),
+            [minor, date] => digits(minor, 1..=2) && digits(date, 8..=8),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// Whether Claude Code pairs `main`, a canonical model ID, with `advisor`, by its pairing
@@ -289,7 +309,21 @@ mod tests {
         let a = resolve(json!({"advisorModel": "sk-ant-secret"}), json!({}), &[]);
         assert_eq!(a.model.as_deref(), Some("an unknown name"));
         assert!(a.blocked.is_some());
-        for name in ["Opus", "claude-sonnet-5-5", "claude-haiku-5-5-20260101"] {
+        for name in [
+            "claude-opus-5-5sk-ant-secret",
+            "claude-opus-5-5-sk",
+            "claude-opus-x",
+        ] {
+            let a = resolve(json!({"advisorModel": name}), json!({}), &[]);
+            assert_eq!(a.model.as_deref(), Some("an unknown name"), "{name}");
+        }
+        for name in [
+            "Opus",
+            "claude-opus-5",
+            "claude-sonnet-5-5",
+            "claude-sonnet-5-20260101",
+            "claude-haiku-5-5-20260101",
+        ] {
             let a = resolve(json!({"advisorModel": name}), json!({}), &[]);
             assert_eq!((a.model.as_deref(), a.blocked), (Some(name), None));
         }

@@ -792,7 +792,7 @@ fn event(
         settings: Settings::default(),
         idle_attribution: IdleAttribution::Unknown,
         shell: None,
-        language: None,
+        file: None,
         meta: EventMeta {
             harness: snapshot.harness,
             session: context.session.clone(),
@@ -1372,12 +1372,8 @@ impl Reader {
                         e.request = Some(request_id.clone());
                         let input = nested(b, "input");
                         // Only the language is kept, never the path.
-                        if matches!(
-                            string(b, "name"),
-                            Some("Read" | "Edit" | "MultiEdit" | "Write")
-                        ) {
-                            e.language = string(input, "file_path").and_then(crate::lsp::Lsp::of);
-                        }
+                        e.file =
+                            crate::lsp::File::call(string(b, "name"), string(input, "file_path"));
                         if is(b, "name", "Bash") {
                             e.shell = Some(ShellCall {
                                 background: is_true(input, "run_in_background"),
@@ -1465,6 +1461,9 @@ impl Reader {
                             string(b, "tool_use_id"),
                         );
                         e.tool_id = opaque(b, "tool_use_id")?.map(Id::from);
+                        if is_true(b, "is_error") {
+                            e.file = Some(crate::lsp::File::Failed);
+                        }
                         if timed_out {
                             e.shell = Some(ShellCall {
                                 timed_out,
@@ -2236,6 +2235,14 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     // After T3 attribution, so each instance reads its own sessions' directory.
     crate::discovery::discover_inbound(&options.discovery, &mut profiles, &requests)?;
     crate::discovery::discover_instructions(&mut profiles, &requests, since)?;
+    let touches = crate::lsp::Touches {
+        events: &events,
+        sessions: &sessions,
+        parents: crate::lsp::parents(subagents.values()),
+        since,
+    };
+    crate::lsp::discover(&options.discovery, &mut profiles, &touches);
+    drop(touches);
     // What T3 changed holds its own copy of the shared fields; share them again.
     for r in &mut requests {
         if Arc::strong_count(&r.meta) == 1 {

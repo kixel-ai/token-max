@@ -669,7 +669,7 @@ mod tests {
             settings: Default::default(),
             idle_attribution: crate::model::IdleAttribution::Unknown,
             shell: None,
-            language: None,
+            file: None,
             meta: crate::model::EventMeta {
                 harness: Harness::Claude,
                 session: "session".into(),

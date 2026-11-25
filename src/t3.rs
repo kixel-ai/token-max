@@ -62,7 +62,6 @@ const ENVIRONMENT: &[&str] = &[
     "MAX_MCP_OUTPUT_TOKENS",
     "BASH_MAX_TIMEOUT_MS",
     "BASH_DEFAULT_TIMEOUT_MS",
-    "CLAUDE_CODE_PLUGIN_CACHE_DIR",
 ];
 
 /// The profile id of a T3 instance, which a removed instance keeps for its retained history.
@@ -373,7 +372,8 @@ impl<'de> Deserialize<'de> for Environment {
             secret: Option<&'a RawValue>,
         }
         let entry = Entry::deserialize(d)?;
-        let allowed = ENVIRONMENT.contains(&entry.name.as_str())
+        let allowed = (ENVIRONMENT.contains(&entry.name.as_str())
+            || entry.name == crate::lsp::CACHE_DIR)
             && !entry.sensitive
             && entry.secret.is_none();
         let value = if allowed {
@@ -663,14 +663,32 @@ pub(crate) fn discover(
             let mut env: Env = options
                 .env
                 .iter()
-                // The host's PATH is where token-max looks for language servers.
-                .filter(|(k, _)| ENVIRONMENT.contains(&k.as_str()) || crate::lsp::is_path(k))
+                // Where plugins are and the PATH their servers are found on, which only the
+                // code intelligence card reads.
+                .filter(|(k, _)| {
+                    ENVIRONMENT.contains(&k.as_str())
+                        || k.as_str() == crate::lsp::CACHE_DIR
+                        || crate::lsp::is_path(k)
+                })
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
             let mut unresolved_env = false;
+            // A secret plugins directory leaves only the card's plugins unread, not the
+            // settings every other line reads.
+            let mut secret_plugins = false;
             let mut own_environment = vec![];
             for entry in instance.environment {
-                if ENVIRONMENT.contains(&entry.name.as_str()) {
+                if entry.name == crate::lsp::CACHE_DIR {
+                    match entry.value {
+                        Some(value) => {
+                            env.insert(entry.name, value);
+                        }
+                        None => {
+                            secret_plugins = true;
+                            env.remove(&entry.name);
+                        }
+                    }
+                } else if ENVIRONMENT.contains(&entry.name.as_str()) {
                     match entry.value {
                         Some(value) => {
                             if !own_environment.contains(&entry.name) {
@@ -743,6 +761,10 @@ pub(crate) fn discover(
             };
             let key = profile_key(&state.path, &id);
             let mut profile = crate::discovery::profile(&local, harness, root.clone(), root, &key)?;
+            if secret_plugins && let Some(plugins) = &mut profile.plugins {
+                plugins.dir = None;
+                plugins.cache_dir = None;
+            }
             let owner = format!("{}:providerInstances.{id}", file.display());
             let (idle_mode, idle_owner) = match config.idle_compaction.as_deref() {
                 None | Some("default") => (
@@ -3042,6 +3064,40 @@ mod tests {
                 .any(|t| t.settings_unresolved)
         );
         assert!(!format!("{scan:?}").contains("PRIVATE_HOME"));
+    }
+    #[test]
+    fn a_secret_plugins_directory_leaves_only_the_plugins_unread() {
+        let w = Workspace::new();
+        native(&w);
+        let instance = |entry: Value| {
+            state(
+                &w,
+                json!({"providerInstances":{"claudeAgent":{"driver":"claudeAgent","environment":[entry]}}}),
+            );
+            let scan = scan(&w.scan_options()).unwrap();
+            assert!(!format!("{scan:?}").contains("PRIVATE_DIR"));
+            scan.profiles
+                .into_iter()
+                .find(|p| p.t3.is_some() && p.harness == Harness::Claude)
+                .unwrap()
+        };
+        let secret = instance(
+            json!({"name":"CLAUDE_CODE_PLUGIN_CACHE_DIR","value":"PRIVATE_DIR","sensitive":true}),
+        );
+        // Every other line still reads the instance's settings.
+        assert_eq!(
+            secret.t3.as_ref().unwrap().settings_unresolved,
+            managed_policy_unresolved()
+        );
+        assert_eq!(secret.plugins.unwrap().dir, None);
+        let plain =
+            instance(json!({"name":"CLAUDE_CODE_PLUGIN_CACHE_DIR","value":"~/plugin-cache"}));
+        assert_eq!(
+            plain.plugins.unwrap().dir,
+            Some(crate::test_support::native_path(
+                w.home.join("plugin-cache")
+            ))
+        );
     }
     #[test]
     fn claude_exact_sdk_items_link_idle_runs_without_exporting_text() {

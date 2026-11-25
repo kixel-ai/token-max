@@ -974,6 +974,9 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
     }
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
         let mut discovery = DiscoveryOptions::host()?;
+        // A command over SSH often runs without the directories a login shell adds to PATH,
+        // such as ~/.cargo/bin, so its PATH can't say which language servers claude finds.
+        discovery.env.retain(|k, _| !crate::lsp::is_path(k));
         if scope == (Scope::Report { defaults: true }) {
             discovery.pretend_defaults();
         }

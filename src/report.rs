@@ -6666,12 +6666,13 @@ fn summary(
         if report
             .lsp
             .iter()
-            .filter(|o| o.settings_file == u.settings_file)
-            .count()
-            > 1
+            .any(|o| o.settings_file == u.settings_file && o.plugins_dir != u.plugins_dir)
         {
-            let dir = crate::lsp::plugins_dir(&u.root, u.cache_dir.as_deref());
-            profile = tagged(profile, &format!("(plugins in {})", out.home_in(&dir)));
+            let dir = u
+                .plugins_dir
+                .as_deref()
+                .map_or_else(|| "a secret directory".into(), |d| out.home_in(d));
+            profile = tagged(profile, &format!("(plugins in {dir})"));
         }
         let view = crate::lsp::View {
             home: out.home.as_deref(),
@@ -10232,25 +10233,30 @@ mod tests {
 
     #[test]
     fn code_intelligence_cards_sharing_a_settings_file_name_their_plugins_directory() {
-        use crate::lsp::{LanguageUse, Lsp, LspUse, Plugin};
+        use crate::lsp::{LanguageUse, Lsp, LspUse, Need};
         let mut report = synthetic();
-        let card = |cache_dir: Option<&str>| LspUse {
+        let card = |plugins_dir: &str| LspUse {
             profiles: vec!["profile".into()],
             sessions: 1,
             languages: vec![LanguageUse {
                 lsp: Lsp::of("main.rs").unwrap(),
                 sessions: 1,
-                uncovered: 1,
-                directories: vec![],
-                plugin: Plugin::Missing,
-                binary: true,
+                shared: 0,
+                loaded: 0,
+                projects: vec![],
+                installed_for: vec![],
+                needs: vec![(Need::Install, 1)],
+                server: Some(true),
             }],
             settings_file: format!("{ROOT}/settings.json"),
             root: ROOT.into(),
-            cache_dir: cache_dir.map(str::to_string),
+            plugins_dir: Some(plugins_dir.into()),
+            cache_dir: None,
+            explicit: false,
             unresolved: false,
+            unread: None,
         };
-        report.lsp = vec![card(None)];
+        report.lsp = vec![card(&format!("{ROOT}/plugins"))];
         let names = |report: &Report| -> Vec<String> {
             advice(report, ReportOptions::default())
                 .into_iter()
@@ -10261,7 +10267,10 @@ mod tests {
         let plain = names(&report);
         assert_eq!(plain.len(), 1);
         assert!(!plain[0].contains("plugins in"), "{plain:?}");
-        report.lsp.push(card(Some("/synthetic/cache")));
+        // A T3 instance split off for its unresolved settings shares the directory: no tag.
+        report.lsp.push(card(&format!("{ROOT}/plugins")));
+        assert!(names(&report).iter().all(|n| !n.contains("plugins in")));
+        report.lsp[1] = card("/synthetic/cache");
         let both = names(&report);
         assert_eq!(both.len(), 2);
         assert_ne!(both[0], both[1]);

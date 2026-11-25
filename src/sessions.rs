@@ -82,11 +82,9 @@ fn branch(value: Option<&Value>) -> Option<&str> {
 }
 
 impl Sessions {
-    /// The reader's key for a Claude subagent session's parent, from the session ID its
-    /// records carry, which links it even when no spawn record names its type.
-    pub(crate) fn parent(&self, session: &str) -> Option<Text> {
-        let parent = self.facts.get(session)?.parent.as_deref()?;
-        Some(crate::safe::identity(parent).into())
+    /// The directory a session's first record names, where it started.
+    pub(crate) fn cwd(&self, session: &str) -> Option<&Text> {
+        self.facts.get(session)?.cwd.as_ref()
     }
 
     pub(crate) fn observe(&mut self, record: Record) {

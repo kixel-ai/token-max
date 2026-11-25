@@ -74,16 +74,14 @@ impl DiscoveryOptions {
     }
 
     /// Pretend the settings files and the shell's setting variables away, keeping the
-    /// variables that only say where each CLI keeps its files, sends its requests or finds
-    /// the programs its plugins start.
+    /// variables that only say where each CLI keeps its files or sends its requests.
     pub fn pretend_defaults(&mut self) {
         self.defaults = true;
         self.env.retain(|k, _| {
             matches!(
                 k.as_str(),
-                "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "T3CODE_HOME" | "CLAUDE_CODE_PLUGIN_CACHE_DIR"
+                "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "T3CODE_HOME"
             ) || CLAUDE_PROVIDERS.contains(&k.as_str())
-                || crate::lsp::is_path(k)
         });
     }
 
@@ -2062,7 +2060,7 @@ fn ancestors_setting_codex_memory(
 }
 
 /// Whether two paths name one file, as recorded or once resolved.
-fn same_file(a: &str, b: &str) -> bool {
+pub(crate) fn same_file(a: &str, b: &str) -> bool {
     a == b || realpath(a).is_ok_and(|a| realpath(b).is_ok_and(|b| a == b))
 }
 
@@ -2595,25 +2593,33 @@ pub(crate) fn profile(
             ..codex_memory(&speed_scopes, &settings_file)?
         }
     };
-    let lsp = if claude {
-        let cache = environment.values.get("CLAUDE_CODE_PLUGIN_CACHE_DIR");
-        Some(crate::lsp::controls(
-            &canonical,
-            cache.and_then(Value::as_str),
-            &user,
-            &managed,
-            options
-                .env
-                .iter()
-                .find(|(k, _)| crate::lsp::is_path(k))
-                .map(|(_, v)| v.as_str()),
-        )?)
-    } else {
-        None
-    };
     // A shell's CLAUDE_CONFIG_DIR keeps Claude Code's state inside it, even when it names
     // the default directory.
     let explicit = options.env.contains_key(variable) && active == canonical;
+    let plugins = claude.then(|| {
+        let cache_dir = environment
+            .values
+            .get(crate::lsp::CACHE_DIR)
+            .and_then(Value::as_str)
+            .filter(|d| !d.is_empty())
+            .map(|d| crate::lsp::expand(&options.home, d));
+        crate::lsp::Plugins {
+            dir: Some(match &cache_dir {
+                Some(dir) => dir.clone(),
+                None => join(&[&canonical, "plugins"]),
+            }),
+            cache_dir,
+            explicit,
+            path: options
+                .env
+                .iter()
+                .find(|(k, _)| crate::lsp::is_path(k))
+                .map(|(_, v)| v.clone()),
+            user: members(user.get("enabledPlugins")).clone(),
+            managed: crate::lsp::Plugins::policy(&managed),
+            read: None,
+        }
+    });
     let claude_config = claude.then(|| claude_config(&options.home, &canonical, explicit));
     let mut profile = Profile {
         id: identity(key),
@@ -2642,7 +2648,7 @@ pub(crate) fn profile(
         memory: Some(memory),
         inbound: None,
         t3: None,
-        lsp,
+        plugins,
         agents: crate::model::AgentControls::default(),
         instruction_budget_file,
         instruction_budget_unresolved: None,
@@ -3294,19 +3300,11 @@ mod tests {
         o.env = env(&[
             ("CLAUDE_CONFIG_DIR", &native_path(&w.claude)),
             ("CLAUDE_CODE_PROMPT_CACHE_TTL", "5m"),
-            (
-                "CLAUDE_CODE_PLUGIN_CACHE_DIR",
-                &native_path(w.home.join("plugins")),
-            ),
-            ("PATH", &native_path(w.home.join("bin"))),
         ]);
         o.pretend_defaults();
-        // Where files and programs are found is host state, not a setting.
-        let mut kept: Vec<&String> = o.env.keys().collect();
-        kept.sort();
         assert_eq!(
-            kept,
-            ["CLAUDE_CODE_PLUGIN_CACHE_DIR", "CLAUDE_CONFIG_DIR", "PATH"]
+            o.env.keys().collect::<Vec<_>>(),
+            [&"CLAUDE_CONFIG_DIR".to_string()]
         );
         let data = discover(&o).unwrap();
         let claude = claude(&data);

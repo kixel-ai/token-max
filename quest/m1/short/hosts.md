@@ -17,7 +17,7 @@ A destination sends its report as preformatted text (`Outcome::Report` in
 A destination runs the same token-max version, so the wire change needs no
 compatibility path. Each destination still reads, checks and writes its own
 files; this host only sends back which members were accepted, as it does
-now. That replaces "a group only gathers one host's changes" in
+now. That replaces "a section only gathers one host's changes" in
 `docs/reference.md`.
 
 A split section's answers go back to each host member by member, so a
@@ -30,11 +30,7 @@ apart, as the post-walk report already lists them, so its accepted total
 counts only what was accepted; validation and writing stay on each host.
 
 Percents are of every host's spend together, as the total line already
-computes (`Totals::monthly`). The left-out line from the
-[preamble quest](/quest/m1/short/preamble.md) sums across hosts.
+computes (`Totals::monthly`). The report's left-out line
+(`left_out` in `src/report.rs`) sums its counts across hosts.
 
 Rerun `assets/demo/walk.tape`.
-
-## Required
-
-- [Sections](/quest/m1/short/sections.md) - the per-host sections this merges

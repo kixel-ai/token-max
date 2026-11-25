@@ -24,8 +24,11 @@ and states its assumption that the unpriced requests resemble the priced ones.
   `--max-cost-per-use` (default $1) per recorded use, suggest turning it off
   as an advisory (yellow, exit 0); otherwise recommend keeping it (green).
 - Show every setting and feature on its own line, and name the setting that
-  changes it. A setting with nothing measured to compare, such as the Bash
-  timeout cap, has its line in `vibes`, not `doctor`.
+  changes it; that line may sit under `--details`. Changes of one kind and
+  reason share a section's row, and so does the rest of one kind of feature
+  or one setting across profiles, with each member's line under `--details`. A setting with nothing measured to
+  compare, such as the Bash timeout cap, has its line in `vibes`, not
+  `doctor`.
 
 `token-max doctor` is the command people run. It is interactive: it walks
 through the recommendations and offers to apply each one, editing a settings

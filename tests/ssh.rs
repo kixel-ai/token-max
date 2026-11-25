@@ -398,7 +398,6 @@ fn a_remote_report_matches_running_there() {
     let (_, credit) = head.split_once("Compared with defaults, ").unwrap();
     assert!(credit.contains("of these hosts' spend."), "{text}");
     assert!(text.contains("\ntoken-max: devbox  "), "{text}");
-    assert!(text.contains("  Profiles: claude ~/.claude.\n"), "{text}");
     assert!(!text.contains("don't add amounts across hosts"), "{text}");
 }
 
@@ -921,7 +920,15 @@ fn background_controls_and_estimates_keep_their_remote_history() {
     let (status, there, stderr) = run(hosts.command(&args).env("HOME", &home));
     assert_eq!(status, 1, "{stderr}");
     assert_eq!(stderr, "");
-    assert_eq!(timeless(section(&stdout, "devbox")), timeless(&there));
+    // The same report, but for its closing edits naming their files after the host, as `scp`
+    // would, and its steps by hand naming the host.
+    let devbox = section(&stdout, "devbox");
+    assert!(devbox.contains("\n  EDITS  devbox:~"), "{devbox}");
+    assert!(devbox.contains("\n  STEPS BY HAND  devbox\n"), "{devbox}");
+    let devbox = devbox
+        .replace("\n  EDITS  devbox:~", "\n  EDITS  ~")
+        .replace("\n  STEPS BY HAND  devbox\n", "\n  STEPS BY HAND\n");
+    assert_eq!(timeless(&devbox), timeless(&there));
     // Why a cost is unknown is evidence, which only details show.
     let (_, text, stderr) = hosts.run(&["--ssh", "devbox", "--details"]);
     assert_eq!(stderr, "");
@@ -1678,7 +1685,6 @@ fn one_hosts_walk_opens_with_its_credit() {
     // Nothing to change, yet the header is followed by the credit before the report.
     terminal.wait("token-max  2 requests in 1 session");
     terminal.wait("at API prices\n  Compared with defaults, your settings save <$0.01/mo");
-    terminal.wait("Profiles: claude ~/.claude.");
     terminal.answer("can't price. Show it?", "n");
     let (code, output, stderr) = terminal.finish();
     assert_eq!((code, stderr.as_str()), (0, ""), "{output}");

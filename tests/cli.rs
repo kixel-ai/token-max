@@ -151,9 +151,9 @@ fn setting_start(text: &str) -> Option<usize> {
     }
 }
 
-/// A plain report's line whose heading starts with `head`: its verdict word, heading
-/// (name, value, figure and percent) with padding collapsed, and the evidence under it,
-/// which only details show. The evidence cards after the lines are not searched.
+/// A plain report's line whose heading starts with `head`, a section's member included: its
+/// verdict word, heading (name, value, figure and percent) with padding collapsed, and the
+/// evidence under it, which only details show. The evidence cards after the lines are not searched.
 fn report_line(text: &str, head: &str) -> (String, String, String) {
     // Every line but the header sits inside the report's two-cell margin.
     let lines: Vec<&str> = text
@@ -165,6 +165,11 @@ fn report_line(text: &str, head: &str) -> (String, String, String) {
         .iter()
         .enumerate()
         .find_map(|(i, line)| {
+            // A section's members sit two cells in under its row.
+            let (line, margin) = match line.strip_prefix("  ") {
+                Some(member) => (member, "           "),
+                None => (*line, "         "),
+            };
             let (word, _) = line.split_once(' ')?;
             if !["change", "consider", "keep", "unknown", "info"].contains(&word) {
                 return None;
@@ -176,7 +181,7 @@ fn report_line(text: &str, head: &str) -> (String, String, String) {
             let under = |n: usize| {
                 lines
                     .get(i + n)
-                    .and_then(|l| l.strip_prefix("         "))
+                    .and_then(|l| l.strip_prefix(margin))
                     .unwrap_or_default()
             };
             // Details open each line with what it does, then its evidence.
@@ -325,12 +330,12 @@ fn conditional_codex_prices_keep_assumptions_in_the_analysis_and_text() {
                     .any(|s| s.tier == "flex" && s.cost.total_usd.is_none())
             );
         }
-        // The default report points to details, which show the assumption.
+        // The default report counts the assumption and points to details, which show it.
         let (status, stdout, stderr) = run(&mut command(&w, &args(&base, &[])));
         assert!((0..=1).contains(&status), "{stderr}");
         if expected.is_some() {
             assert!(
-                stdout.contains("--details shows each tier's cost"),
+                stdout.contains(" 1 request at an assumed service tier. --details says why."),
                 "{stdout}"
             );
         }
@@ -1596,6 +1601,20 @@ mod unix {
         ] {
             assert!(!stdout.contains(leak), "{leak}");
         }
+        // On a row wide enough, the line counts the checks and ends on the report's total.
+        let mut c = command(&w, &args(&base, &[]));
+        let (status, stdout, stderr) = tty(&mut c, 200);
+        assert_eq!(status, 1, "{stderr}");
+        let (_, together) = stdout
+            .split_once("Together, these changes save about ")
+            .or_else(|| stdout.split_once("Together, these changes save "))
+            .expect("a total under the headline");
+        let amount = format!("{}/mo", together.split("/mo").next().unwrap());
+        assert!(stderr.contains("checks  "), "{stderr}");
+        assert!(
+            stderr.contains(&format!("found {amount} more")),
+            "{amount}: {stderr}"
+        );
         let (status, stdout, stderr) = invoke(&[], &[("NO_COLOR", "1")]);
         assert_eq!(status, 1, "{stderr}");
         assert!(!stdout.contains('\x1b'));
@@ -1650,12 +1669,8 @@ mod unix {
             plain.push_str(&part[skip..]);
         }
         let stdout = plain;
-        let unreadable = stdout.find("1 unreadable transcript").unwrap();
-        let rest = stdout[unreadable + "1 unreadable transcript".len()..]
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        assert!(rest.starts_with("lines in 1 files"), "{stdout}");
+        let words = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(words.contains("1 unreadable line"), "{stdout}");
         assert!(!format!("{stdout}{stderr}").contains("SYNTHETIC_PRIVATE"));
     }
 
@@ -1774,7 +1789,7 @@ mod unix {
         // Each card shows the saving, the change and its verdict, then what the setting does
         // and why; the window ends now, so its day count and the wrapping follow the clock.
         let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let entry = words(&stdout[ttl..at("\n  Profiles: ")]);
+        let entry = words(&stdout[ttl..report]);
         assert!(
             entry.starts_with("[1/1] Main-agent prompt cache TTL saves $N/mo 13% 5m -> 1h Recommended What How long the main conversation's prompt stays cached between requests: a 1h cache costs more to write than 5m but survives longer pauses. Why Measured on 2 requests over "),
             "{entry}"
@@ -1930,6 +1945,42 @@ mod unix {
         let status = child.wait().unwrap().code().unwrap();
         drop(keyboard);
         (status, out.join().unwrap(), err.join().unwrap())
+    }
+
+    #[test]
+    fn vibes_ranks_the_advisor_against_a_default_accepted_in_the_same_walk() {
+        let w = Workspace::new();
+        w.fixture();
+        w.settings(r#"{"model":"claude-sonnet-5-5","cleanupPeriodDays":365}"#);
+        let mut base = vec!["vibes".to_string()];
+        base.extend(prices_args(&w));
+        let base: Vec<&str> = base.iter().map(String::as_str).collect();
+        // Off a terminal, the advisor card ranks against Sonnet and names what the default's
+        // change would do.
+        let (_, stdout, _) = run(&mut command(&w, &base));
+        let note = "Accepting the Main-session default card's change to claude-opus-5-5 suggests a Fable advisor instead.";
+        assert!(
+            stdout.contains("none -> opus") && stdout.contains(note),
+            "{stdout}"
+        );
+        // A plan pays, no to the Bash cap and the window, yes to the Opus default, then the advisor card is rebuilt on it.
+        let mut c = command(&w, &[&base[..], &["--plain"]].concat());
+        let (status, stdout, stderr) = typed(&mut c, b"p\nn\nn\ny\ny\ny\n");
+        assert_eq!(status, 0, "{stderr}");
+        let advisor = &stdout[stdout
+            .find("Advisor model")
+            .unwrap_or_else(|| panic!("{stdout}"))..];
+        assert!(
+            advisor.contains("none -> fable") && !advisor.contains(note),
+            "{stdout}"
+        );
+        let settings: Value =
+            serde_json::from_str(&std::fs::read_to_string(w.claude.join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            settings,
+            json!({"model": "claude-opus-5-5", "cleanupPeriodDays": 365, "advisorModel": "fable"})
+        );
     }
 
     /// Every name in `dir`.

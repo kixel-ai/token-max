@@ -551,8 +551,11 @@ fn image_inputs_and_unlinked_requests_never_calibrate_from_partial_text() {
     assert!(report.context.iter().all(|c| c.estimated_usd.is_none()));
     let text = text(&report);
     let artifact = report_line(&text, "Artifact tool");
-    // No figure at all rather than $0.
-    assert_eq!(artifact.head, "Artifact tool on", "{artifact:?}");
+    // An unknown cost rather than $0.
+    assert_eq!(
+        artifact.head, "Artifact tool on costs unknown",
+        "{artifact:?}"
+    );
     assert!(
         artifact
             .evidence
@@ -938,7 +941,10 @@ fn recorded_request_shapes_price_each_piece_at_its_cache_position_and_count_its_
     let off: Vec<String> = crate::doctor::fixes(&strict, false)
         .iter()
         .filter(|f| !f.suggested)
-        .map(|f| crate::doctor::setting(f, None))
+        .flat_map(|f| match &f.how {
+            crate::doctor::How::Edit(p) => p.edits.iter().map(|e| e.text(p.harness)).collect(),
+            crate::doctor::How::Manual { step, .. } => vec![step.clone()],
+        })
         .collect();
     let off = off.join("\n");
     assert!(off.contains(r#""enableArtifact": false"#), "{off}");

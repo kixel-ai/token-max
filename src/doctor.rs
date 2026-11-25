@@ -26,6 +26,7 @@ use crate::report::{
 };
 use crate::safe::{ScanError, terminal_text};
 use crate::terminal::{BOLD, DIM, GREEN, RED, WrapOptions, YELLOW, wrap_spans};
+use crate::version::{Needs, Upgrade};
 
 /// Whose spend a share is of, for a host's own changes.
 const THIS_HOST: &str = "this host's";
@@ -55,9 +56,11 @@ pub struct Fix {
     pub how: How,
     /// The report lines it comes from: the first, and any other line making the same edit.
     pub origins: Vec<Origin>,
-    /// The changes of its kind and reason it is offered with when it saves little; none
-    /// for a change that stands alone, such as a check.
-    pub group: Option<Group>,
+    /// The section it is offered and listed in, with the changes of its kind and reason.
+    pub section: Section,
+    /// The settings file or profile its report line names, when several profiles were read;
+    /// empty otherwise.
+    pub profile: String,
     /// Where a never-used MCP server it turns off is configured, which the walk offers to
     /// remove after a yes; empty for any other change.
     pub removal: Vec<Definition>,
@@ -77,26 +80,87 @@ fn known<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<&'static s
         .ok_or_else(|| serde::de::Error::custom("unknown saving verb"))
 }
 
-/// Small changes the walk offers together: features of one kind changed for one reason,
-/// such as never-used MCP servers turned off.
+/// The section a change joins, which the walk asks as one question and the report lists as
+/// one row: features of one kind changed for one reason, such as never-used MCP servers
+/// turned off, both prompt cache TTLs, or one setting across profiles, such as auto memory.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Group {
-    pub kind: ContextKind,
-    pub reason: Reason,
-    /// The group's heading, such as "Never-used MCP servers".
+pub struct Section {
+    pub kind: Kind,
+    /// The section's heading, such as "Never-used MCP servers".
     pub label: String,
-    /// This member's name in the group's list, such as the server's name.
+    /// This member's name in the section's list, such as the server's name, or "main" for the
+    /// main agent's cache TTL.
     pub member: String,
     /// Where the member was found, such as a skill's SKILL.md, which tells apart two
     /// members with one name.
     pub location: Option<String>,
 }
 
-impl Group {
-    /// Whether two changes in these groups belong to one: the same kind and reason, and
-    /// so the same heading. Their changes must match too.
-    fn joins(&self, other: &Group) -> bool {
-        self.kind == other.kind && self.reason == other.reason && self.label == other.label
+/// What joins changes into a section.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Kind {
+    /// Tools, skills or MCP servers changed for one reason.
+    Feature(ContextKind, Reason),
+    /// The main-agent and subagent prompt cache TTLs, which may move to different values.
+    CacheTtl,
+    /// One setting with no kind, such as auto memory, across profiles.
+    Setting,
+}
+
+impl Fix {
+    /// Whether `other` joins this change's section: the same kind, reason and heading, the
+    /// same offered effect and, for a setting, the same verdict, and measured or not alike. The cache TTLs may move to different
+    /// values, which the section names each.
+    pub(crate) fn joins(&self, other: &Fix) -> bool {
+        let (a, b) = (&self.section, &other.section);
+        a.kind == b.kind
+            && a.label == b.label
+            && (a.kind == Kind::CacheTtl || target(&self.value) == target(&other.value))
+            // A setting recommended off, such as never-used auto memory, is asked apart from
+            // one only worth considering, such as auto memory used at a high cost.
+            && (a.kind != Kind::Setting || self.suggested == other.suggested)
+            && self.saving.is_some() == other.saving.is_some()
+    }
+}
+
+/// The value a change offers, such as "off" in "on -> off".
+fn target(value: &str) -> &str {
+    [" → ", " -> "]
+        .iter()
+        .filter_map(|arrow| value.rsplit_once(arrow))
+        .map(|(_, to)| to)
+        .next()
+        .unwrap_or(value)
+}
+
+/// A section's values as one: its member count and offered value, such as "19 -> typed only",
+/// or each cache TTL's own change, such as "main 5m -> 1h, subagent 1h -> 5m". `members`
+/// gives each change's section, profile and value, a change listed once.
+pub(crate) fn section_value<'a>(
+    members: impl IntoIterator<Item = (&'a Section, &'a str, &'a str)>,
+    arrow: &str,
+) -> String {
+    let members: Vec<(&Section, &str, &str)> = members.into_iter().collect();
+    match members.as_slice() {
+        [] => String::new(),
+        [(_, _, value)] => (*value).to_string(),
+        [(first, _, _), ..] if first.kind == Kind::CacheTtl => {
+            // A section spanning several profiles names each change's profile.
+            let profiles: IndexSet<&str> = members.iter().map(|(_, p, _)| *p).collect();
+            let spans = profiles.len() > 1;
+            members
+                .iter()
+                .map(|(s, profile, v)| {
+                    if spans && !profile.is_empty() {
+                        format!("{} ({profile}) {v}", s.member)
+                    } else {
+                        format!("{} {v}", s.member)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+        [(_, _, value), ..] => format!("{} {arrow} {}", members.len(), target(value)),
     }
 }
 
@@ -185,7 +249,14 @@ impl Edit {
                 "{} (added to the list)",
                 setting_text(&self.path, self.value.clone(), true, harness)
             ),
-            Op::Remove => format!("remove {}", self.path.join(".")),
+            Op::Remove => format!(
+                "remove {}",
+                self.path
+                    .iter()
+                    .map(|k| crate::context::toml_key(k))
+                    .collect::<Vec<_>>()
+                    .join(".")
+            ),
         }
     }
 }
@@ -216,23 +287,19 @@ pub fn fixes(report: &Report, unicode: bool) -> Vec<Fix> {
 pub(crate) fn fixes_from(all: Vec<Fix>) -> Vec<Fix> {
     let mut fixes: Vec<Fix> = vec![];
     for mut fix in all {
-        if let Some(same) = fixes
-            .iter_mut()
-            .find(|f| matches!(f.how, How::Edit(_)) && f.how == fix.how)
-        {
-            same.origins.extend(fix.origins);
+        let listed: Vec<&How> = fixes.iter().map(|f| &f.how).collect();
+        let placed = place(&listed, &fix.how);
+        if let Placed::Same(at) = placed {
+            let origins = std::mem::take(&mut fix.origins);
+            fixes[at].origins.extend(origins);
             continue;
         }
-        // Two lines that want one setting at different values, such as checks for two
-        // projects that share the user file, leave the choice to the person.
-        if let How::Edit(patch) = &fix.how
-            && let Some(other) = fixes.iter().find(|f| conflicts(&f.how, patch))
-        {
+        if let (Placed::Conflicts(at), How::Edit(patch)) = (placed, &fix.how) {
             fix.how = How::Manual {
                 step: steps(patch),
                 reason: format!(
                     "{} wants a different value for the same setting",
-                    other.name
+                    fixes[at].name
                 ),
             };
         }
@@ -241,20 +308,47 @@ pub(crate) fn fixes_from(all: Vec<Fix>) -> Vec<Fix> {
     fixes
 }
 
+/// Where a change carried out as `how` goes among the changes `listed` before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Placed {
+    /// The change at this index makes the same edit, so the two are listed once.
+    Same(usize),
+    /// The change at this index sets the same setting to another value, so this one is left
+    /// to do by hand, still listed.
+    Conflicts(usize),
+    New,
+}
+
+/// Where the walk lists a change carried out as `how`, after those `listed` already: an edit
+/// one of them makes is listed once, and one that wants a setting at another value, such as
+/// checks for two projects that share the user file, leaves the choice to the person.
+pub(crate) fn place(listed: &[&How], how: &How) -> Placed {
+    let How::Edit(patch) = how else {
+        return Placed::New;
+    };
+    if let Some(at) = listed.iter().position(|l| *l == how) {
+        return Placed::Same(at);
+    }
+    match listed.iter().position(|l| conflicts(l, patch)) {
+        Some(at) => Placed::Conflicts(at),
+        None => Placed::New,
+    }
+}
+
 /// Whether `how` sets a setting `patch` also sets, to another value, in the same file or
 /// one a symlink makes the same.
 fn conflicts(how: &How, patch: &Patch) -> bool {
     let How::Edit(other) = how else { return false };
-    (other.file == patch.file
-        || identity(Path::new(&other.file)) == identity(Path::new(&patch.file)))
-        && other.edits.iter().any(|a| {
-            patch.edits.iter().any(|b| {
-                a.op != Op::Append
-                    && b.op != Op::Append
-                    && a.path == b.path
-                    && (a.op != b.op || a.value != b.value)
-            })
+    // The edits first, since they rarely meet, and resolving a file asks the filesystem.
+    other.edits.iter().any(|a| {
+        patch.edits.iter().any(|b| {
+            a.op != Op::Append
+                && b.op != Op::Append
+                && a.path == b.path
+                && (a.op != b.op || a.value != b.value)
         })
+    }) && (other.file == patch.file
+        || identity(Path::new(&other.file)) == identity(Path::new(&patch.file)))
 }
 
 /// The edits as steps to take by hand.
@@ -291,9 +385,13 @@ fn identity(path: &Path) -> PathBuf {
     }
 }
 
-fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
-    // Every profile on the line, the one whose controls it reports first.
-    let ids: Vec<&str> = match line.source {
+/// The profiles on a line by id, the one whose controls it reports first, and those of them
+/// still selected among `profiles`.
+fn members<'r, 's>(
+    profiles: &'r [Profile],
+    source: &'s Source<'_>,
+) -> (Vec<&'s str>, Vec<&'r Profile>) {
+    let ids: Vec<&str> = match source {
         Source::Check(result) => {
             let (lead, all) = check_profiles(result);
             std::iter::once(lead)
@@ -302,52 +400,63 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
         }
         Source::Piece(c) => c.profiles.iter().map(String::as_str).collect(),
     };
-    let profile_id = ids.first().copied().unwrap_or_default();
-    let members: Vec<&Profile> = ids
+    let members = ids
         .iter()
-        .filter_map(|id| report.scan.profiles.iter().find(|p| p.id == *id))
+        .filter_map(|id| profiles.iter().find(|p| p.id == *id))
         .collect();
-    let group = group(report, &line);
-    let mut removal = vec![];
-    let how = match (members.first(), line.source) {
+    (ids, members)
+}
+
+/// How a line's change is carried out among `profiles`: the edit the walk offers, or the
+/// step to take by hand. `defaults` is whether every setting is pretended at its default.
+pub(crate) fn how(profiles: &[Profile], source: &Source<'_>, defaults: bool) -> How {
+    let (ids, members) = members(profiles, source);
+    match (members.first(), source) {
         (None, _) => How::Manual {
-            step: format!("change it where {profile_id} is configured"),
+            step: format!(
+                "change it where {} is configured",
+                ids.first().copied().unwrap_or_default()
+            ),
             reason: "its profile is no longer selected".into(),
         },
         (Some(profile), Source::Check(result)) => check_how(result, profile),
         (Some(_), Source::Piece(c)) => match &c.control {
-            Some(control) => {
-                let how = switch(&members, control.into(), report.scan.defaults);
-                let unused = group.as_ref().is_some_and(|g| {
-                    g.kind == ContextKind::McpServer && g.reason == Reason::Unused
-                });
-                if unused && matches!(how, How::Edit(_)) {
-                    let versions = claude_versions(report, &ids);
-                    let whole = ends_at(&c.name, c.details.iter().map(|d| d.name.as_str()));
-                    let own = holds_its_tools(&c.name);
-                    removal = crate::mcp::definitions(&c.name, control, &members)
-                        .into_iter()
-                        .map(|d| match d {
-                            Definition::Entry(entry) if !own => Definition::Manual {
-                                step: format!("remove {} from {}", entry.text(), entry.file),
-                                reason: SHORTER.into(),
-                            },
-                            Definition::Deny(deny) if !own => deny.by_hand(SHORTER),
-                            Definition::Deny(deny) if !whole => {
-                                deny.by_hand("its tools' names do not show where its name ends")
-                            }
-                            d => gate(d, &versions),
-                        })
-                        .collect();
-                }
-                how
-            }
+            Some(control) => switch(&members, control.into(), defaults),
             None => How::Manual {
                 step: "disable it in config.toml with [[skills.config]]".into(),
                 reason: "the recorded catalog does not give its SKILL.md path".into(),
             },
         },
-    };
+    }
+}
+
+fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
+    let section = section(report, &line);
+    let how = how(&report.scan.profiles, &line.source, report.scan.defaults);
+    let unused = section.kind == Kind::Feature(ContextKind::McpServer, Reason::Unused);
+    let mut removal = vec![];
+    if let (Source::Piece(c), How::Edit(patch)) = (&line.source, &how)
+        && let Some(control) = &c.control
+        && unused
+    {
+        let (_, members) = members(&report.scan.profiles, &line.source);
+        let whole = ends_at(&c.name, c.details.iter().map(|d| d.name.as_str()));
+        let own = holds_its_tools(&c.name);
+        removal = crate::mcp::definitions(&c.name, control, &members)
+            .into_iter()
+            .map(|d| match d {
+                Definition::Entry(entry) if !own => Definition::Manual {
+                    step: format!("remove {} from {}", entry.text(), entry.file),
+                    reason: SHORTER.into(),
+                },
+                Definition::Deny(deny) if !own => deny.by_hand(SHORTER),
+                Definition::Deny(deny) if !whole => {
+                    deny.by_hand("its tools' names do not show where its name ends")
+                }
+                d => gate(d, &members, &report.scan.requests, &patch.file),
+            })
+            .collect();
+    }
     Fix {
         name: line.name,
         value: line.value,
@@ -360,7 +469,8 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
         evidence: String::new(),
         how,
         origins: vec![line.origin],
-        group,
+        section,
+        profile: String::new(),
         removal,
     }
 }
@@ -388,72 +498,100 @@ fn holds_its_tools(server: &str) -> bool {
     !server.contains("__") && !server.ends_with('_')
 }
 
-/// The Claude Code each profile in `ids` last recorded a request from, for those with any.
-pub(crate) fn claude_versions<'r>(report: &'r Report, ids: &[&str]) -> Vec<Option<&'r str>> {
-    ids.iter()
-        .filter_map(|id| {
-            let mut requests = report.scan.requests.iter().rev();
-            let last = requests.find(|r| r.profiles.iter().any(|p| p == id))?;
-            Some(last.version.as_deref())
-        })
-        .collect()
-}
-
-/// A `deniedMcpServers` entry where every profile's latest Claude Code matches it by name,
-/// else its step by hand.
-fn gate(definition: Definition, versions: &[Option<&str>]) -> Definition {
+/// A `deniedMcpServers` entry where the latest Claude Code of every one of `members` matches
+/// it by name, else its step by hand, or an upgrade and the entry to add to `file` after it.
+fn gate(
+    definition: Definition,
+    members: &[&Profile],
+    requests: &[crate::model::Request],
+    file: &str,
+) -> Definition {
     let Definition::Deny(deny) = definition else {
         return definition;
     };
+    let versions = crate::version::latest(members, requests);
     let (minor, patch) = deny.since;
-    if !versions.is_empty()
-        && versions
-            .iter()
-            .all(|v| crate::version::claude_at_least(*v, minor, patch))
-    {
+    let needs = Needs::claude(minor, patch);
+    // With no recorded session, the version is unrecorded.
+    let upgrade = match versions.first() {
+        Some(_) => needs.unmet(versions.iter().copied()),
+        None => Some(Upgrade {
+            needs,
+            ran: None,
+            command: None,
+            several: false,
+        }),
+    };
+    let Some(upgrade) = upgrade else {
         return Definition::Deny(deny);
-    }
-    // The first version that fails the check, which may be unrecorded.
-    let ran = versions
-        .iter()
-        .find(|v| !crate::version::claude_at_least(**v, minor, patch))
-        .copied()
-        .flatten()
-        .map_or("an unrecorded Claude Code".to_string(), |v| {
-            format!("Claude Code {v}")
-        });
-    deny.by_hand(&format!(
-        "its latest sessions ran {ran}, before 2.{minor}.{patch}, where a deniedMcpServers entry blocks just this server by name"
-    ))
+    };
+    // Only an old interactive install is worth upgrading; an SDK app pins its own.
+    let advice = needs.advice(members, requests);
+    let what = "blocking just this server by name with a deniedMcpServers entry";
+    let Some(upgrade) = advice else {
+        return deny.by_hand(&upgrade.why(what));
+    };
+    let why = upgrade.why(what);
+    // A rerun would not offer the entry, since the walk's switch already turned it off.
+    let step = format!(
+        "{}, or {} and add {} to deniedMcpServers in {file}",
+        deny.step,
+        upgrade.step(),
+        serde_json::json!({ "serverName": deny.name })
+    );
+    crate::mcp::Deny { step, ..deny }.by_hand(&why)
 }
 
-/// The group a feature's change joins: its kind and why it is offered, as its verdict says.
-fn group(report: &Report, line: &Recommendation<'_>) -> Option<Group> {
-    let Source::Piece(c) = line.source else {
-        return None;
-    };
-    let kind = match c.kind {
-        ContextKind::Tool => "tools",
-        ContextKind::McpServer => "MCP servers",
-        ContextKind::McpTool => "MCP tools",
-        ContextKind::McpDiscovery => "MCP discovery listings",
-        ContextKind::Skill => "skills",
-        ContextKind::ToolOutput => "tool outputs",
+/// The plural a section of features of `kind` names them by, such as "MCP servers"; None
+/// for a kind that is a setting of its own, such as auto memory.
+pub(crate) fn feature_noun(kind: ContextKind) -> Option<&'static str> {
+    match kind {
+        ContextKind::Tool => Some("tools"),
+        ContextKind::McpServer => Some("MCP servers"),
+        ContextKind::McpTool => Some("MCP tools"),
+        ContextKind::McpDiscovery => Some("MCP discovery listings"),
+        ContextKind::Skill => Some("skills"),
+        ContextKind::ToolOutput => Some("tool outputs"),
         ContextKind::Instructions
         | ContextKind::System
         | ContextKind::Memory
-        | ContextKind::Other => return None,
+        | ContextKind::Other => None,
+    }
+}
+
+/// The section a line's change joins: a feature's kind and why it is offered, as its verdict
+/// says; both cache TTLs; or, for any other setting, that setting across profiles.
+fn section(report: &Report, line: &Recommendation<'_>) -> Section {
+    let own = |kind, label: &str, member: &str| Section {
+        kind,
+        label: label.into(),
+        member: member.into(),
+        location: None,
+    };
+    let c = match line.source {
+        Source::Check(CheckResult::Ttl(t)) => {
+            let member = match t.bucket {
+                Bucket::Main => "main",
+                Bucket::Subagent => "subagent",
+            };
+            return own(Kind::CacheTtl, "Prompt cache TTL", member);
+        }
+        Source::Check(_) => return own(Kind::Setting, &line.name, &line.name),
+        Source::Piece(c) => c,
+    };
+    let Some(kind) = feature_noun(c.kind) else {
+        return own(Kind::Setting, &line.name, &line.name);
     };
     let duplicate = c
         .skill
         .as_ref()
         .is_some_and(|s| s.retained_path.is_some() && s.path != s.retained_path);
-    let reason = match (c.verdict?, c.calls) {
-        (Verdict::Off, _) if duplicate => Reason::Duplicate,
-        (Verdict::Off, _) => Reason::Unused,
-        (Verdict::Consider, Some(0)) => Reason::Unrecorded,
-        (Verdict::Consider, Some(_)) => Reason::Costly,
-        _ => return None,
+    let reason = match (c.verdict, c.calls) {
+        (Some(Verdict::Off), _) if duplicate => Reason::Duplicate,
+        (Some(Verdict::Off), _) => Reason::Unused,
+        (Some(Verdict::Consider), Some(0)) => Reason::Unrecorded,
+        (Some(Verdict::Consider), Some(_)) => Reason::Costly,
+        _ => return own(Kind::Setting, &line.name, &line.name),
     };
     let what = match reason {
         // A skill left typeable counts only the model's uses.
@@ -469,20 +607,20 @@ fn group(report: &Report, line: &Recommendation<'_>) -> Option<Group> {
         ),
         Reason::Duplicate => format!("Duplicate copies of {kind}"),
     };
-    Some(Group {
-        kind: c.kind,
-        reason,
+    Section {
+        kind: Kind::Feature(c.kind, reason),
         label: what,
         member: c.name.clone(),
         location: c.skill.as_ref().and_then(|s| s.path.clone()),
-    })
+    }
 }
 
-/// Fill each fix's description and evidence from the report lines it comes from.
+/// Fill each fix's description, evidence and profile from the report lines it comes from.
 pub fn explain(fixes: &mut [Fix], listing: &Listing) {
     for fix in fixes {
         fix.what = listing.what(fix.origins[0]);
         fix.evidence = listing.evidence(fix.origins[0]);
+        fix.profile = listing.profile(fix.origins[0]);
     }
 }
 
@@ -1334,19 +1472,208 @@ pub fn describe(fix: &Fix, home: Option<&str>) -> Described {
     Described { head, body }
 }
 
-/// A fix on one line, for the report's list: its edits and file, or its step by hand.
-pub fn setting(fix: &Fix, home: Option<&str>) -> String {
-    match &fix.how {
-        How::Edit(patch) => {
-            let edits: Vec<String> = patch.edits.iter().map(|e| e.text(patch.harness)).collect();
-            format!(
-                "{} in {}",
-                edits.join(" and "),
-                crate::report::home_path(home, &patch.file)
-            )
+/// The name the closing steps give removing servers that are off already by hand.
+const CLEANUP: &str = "MCP servers that are off";
+
+/// The settings-file edits and steps by hand left to make, which a report or walk lists once,
+/// at its end: each file's edits, then the steps.
+#[derive(Debug, Default)]
+pub struct Remaining {
+    /// The SSH destination whose these are, which names the steps; none for this host's.
+    host: Option<String>,
+    files: Vec<Unmade>,
+    /// Each change made by hand: its name, the step, and why the doctor cannot take it.
+    steps: Vec<(String, String, String)>,
+}
+
+/// One file's edits left to make.
+#[derive(Debug)]
+struct Unmade {
+    /// As shown, such as `devbox:~/.claude/settings.json`.
+    file: String,
+    harness: Harness,
+    /// Each edit once.
+    edits: Vec<Edit>,
+    /// Each MCP server entry to remove, as a person finds it in the file.
+    removals: Vec<String>,
+}
+
+impl Remaining {
+    /// The edits and steps of `fixes`, their files named as `style` names them.
+    pub fn of<'a>(fixes: impl IntoIterator<Item = &'a Fix>, style: &Style) -> Self {
+        let mut remaining = Remaining {
+            host: style.host.clone(),
+            ..Remaining::default()
+        };
+        for fix in fixes {
+            match &fix.how {
+                How::Edit(patch) => {
+                    let unmade = remaining.file(&style.file(&patch.file), patch.harness);
+                    for edit in &patch.edits {
+                        if !unmade.edits.contains(edit) {
+                            unmade.edits.push(edit.clone());
+                        }
+                    }
+                }
+                How::Manual { step, reason } => remaining.step(&fix.name, step, reason, style),
+            }
         }
-        How::Manual { step, .. } => format!("by hand: {}", home_in(step, home)),
+        remaining
     }
+
+    /// Add the step by hand `name` takes, and why the doctor cannot take it.
+    fn step(&mut self, name: &str, step: &str, reason: &str, style: &Style) {
+        self.steps.push((
+            name.into(),
+            home_in(step, style.home.as_deref()),
+            home_in(reason, style.home.as_deref()),
+        ));
+    }
+
+    /// The edits left in `file`, empty until one is added.
+    fn file(&mut self, file: &str, harness: Harness) -> &mut Unmade {
+        let at = match self.files.iter().position(|u| u.file == file) {
+            Some(at) => at,
+            None => {
+                self.files.push(Unmade {
+                    file: file.into(),
+                    harness,
+                    edits: vec![],
+                    removals: vec![],
+                });
+                self.files.len() - 1
+            }
+        };
+        &mut self.files[at]
+    }
+
+    /// Add removing an MCP server's `entry`, its file named as `style` names it.
+    fn remove(&mut self, entry: &Entry, style: &Style) {
+        let text = format!("remove {}", entry.text());
+        let unmade = self.file(&style.file(&entry.file), entry.harness);
+        if !unmade.removals.contains(&text) {
+            unmade.removals.push(text);
+        }
+    }
+
+    /// Each file with its lines: one per key, or each edit's exact JSON or TOML under
+    /// `details`, then its removals.
+    pub(crate) fn files(&self, details: bool) -> impl Iterator<Item = (&str, Vec<String>)> {
+        self.files.iter().map(move |u| {
+            let mut lines = match details {
+                true => u.edits.iter().map(|e| e.text(u.harness)).collect(),
+                false => keys(u.harness, &u.edits),
+            };
+            lines.extend(u.removals.iter().cloned());
+            (u.file.as_str(), lines)
+        })
+    }
+
+    /// Each change made by hand: its name, the step, and why the doctor cannot take it.
+    pub(crate) fn steps(&self) -> &[(String, String, String)] {
+        &self.steps
+    }
+
+    /// The SSH destination whose steps these are; none for this host's.
+    pub(crate) fn host(&self) -> Option<&str> {
+        self.host.as_deref()
+    }
+}
+
+/// One line per key a file's edits touch: a list's added members on one line, and settings
+/// under one parent set to one value, such as skills turned off, together.
+fn keys(harness: Harness, edits: &[Edit]) -> Vec<String> {
+    enum Key<'a> {
+        /// The list's path and the members added to it.
+        List(&'a [String], Vec<&'a Value>),
+        /// The parent's path, the value, and each child's name set to it.
+        Set(&'a [String], &'a Value, Vec<&'a str>),
+        Remove(&'a [String]),
+    }
+    let mut keys: Vec<Key> = vec![];
+    for edit in edits {
+        match edit.op {
+            Op::Append => {
+                let list = keys.iter_mut().find_map(|k| {
+                    matches!(k, Key::List(p, _) if *p == edit.path.as_slice()).then_some(k)
+                });
+                match list {
+                    Some(Key::List(_, members)) => members.push(&edit.value),
+                    _ => keys.push(Key::List(&edit.path, vec![&edit.value])),
+                }
+            }
+            Op::Set => {
+                let Some((name, parent)) = edit.path.split_last() else {
+                    continue;
+                };
+                // Top-level settings stay apart, since they share no parent to name.
+                let siblings = keys.iter_mut().find(|k| {
+                    matches!(k, Key::Set(p, v, _)
+                        if !parent.is_empty() && *p == parent && **v == edit.value)
+                });
+                match siblings {
+                    Some(Key::Set(_, _, names)) => names.push(name),
+                    _ => keys.push(Key::Set(parent, &edit.value, vec![name])),
+                }
+            }
+            Op::Remove => keys.push(Key::Remove(&edit.path)),
+        }
+    }
+    // A key that is not bare, such as a model name with a dot, is quoted so it reads as one.
+    let path = |path: &[String]| -> String {
+        path.iter()
+            .map(|k| crate::context::toml_key(k))
+            .collect::<Vec<_>>()
+            .join(".")
+    };
+    let value = |value: &Value| -> String {
+        match harness {
+            Harness::Claude => value.to_string(),
+            Harness::Codex => toml::Value::try_from(value)
+                .expect("settings values are TOML values")
+                .to_string(),
+        }
+    };
+    // A string member reads as its text; any other keeps its shape, such as a denied server's
+    // `{"serverName": ...}`, so a person adding it by hand adds what the setting expects.
+    let member = |m: &Value| match m {
+        Value::String(s) => s.clone(),
+        _ => value(m),
+    };
+    let count = |n: usize| {
+        if n > 1 {
+            format!(" ({n})")
+        } else {
+            String::new()
+        }
+    };
+    keys.into_iter()
+        .map(|key| match key {
+            Key::List(p, members) => format!(
+                "{} += {}{}",
+                path(p),
+                members
+                    .iter()
+                    .map(|m| member(m))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                count(members.len())
+            ),
+            Key::Set(parent, v, names) => {
+                let names: Vec<String> = names.iter().map(|n| path(&[n.to_string()])).collect();
+                let child = match names.as_slice() {
+                    [one] => one.clone(),
+                    many => format!("{{{}}}", many.join(", ")),
+                };
+                let key = match parent {
+                    [] => child,
+                    parent => format!("{}.{child}", path(parent)),
+                };
+                format!("{key} = {}{}", value(v), count(names.len()))
+            }
+            Key::Remove(p) => format!("remove {}", path(p)),
+        })
+        .collect()
 }
 
 /// How the walk prints.
@@ -1406,7 +1733,7 @@ impl Standing {
     }
 }
 
-/// A prompt: its question, and whether it offers to split a group into its changes.
+/// A prompt: its question, and whether it offers to split a section into its changes.
 pub(crate) struct Prompt {
     text: String,
     split: bool,
@@ -1565,6 +1892,9 @@ impl Style {
         let mut rows = vec![];
         if let Some(host) = host {
             rows.push(("Host", host.to_string()));
+        }
+        if !fix.profile.is_empty() {
+            rows.push(("Profile", fix.profile.clone()));
         }
         if !fix.what.is_empty() {
             rows.push(("What", fix.what.clone()));
@@ -1928,11 +2258,33 @@ fn writable(path: &Path) -> bool {
 /// A question saving less than this every 30 days in total is not asked.
 pub(crate) const ASKED_USD: f64 = 1.0;
 
-/// Whether the walk takes up `fix`, a change no other joins in a group: it names a step by
-/// hand whatever it saves, and asks about an edit only as `ask` asks any question.
-pub(crate) fn takes_up(fix: &Fix) -> bool {
-    debug_assert!(fix.group.is_none(), "a grouped change shares its question");
-    !matches!(fix.how, How::Edit(_)) || Total::of(std::slice::from_ref(fix)).asked()
+/// Whether the walk offers `fix` as an edit: a member whose file refuses its edit becomes a
+/// step by hand, outside its section's question.
+pub(crate) fn offered(fix: &Fix) -> bool {
+    match &fix.how {
+        How::Edit(patch) => Target::open(&patch.file, patch.harness)
+            .is_ok_and(|target| apply(&target, &patch.edits, &[]).is_ok()),
+        How::Manual { .. } => false,
+    }
+}
+
+/// Whether the walk takes up `fix`, one of `fixes`: it names a step by hand whatever it
+/// saves, including an edit its file refuses, and asks about an edit only when its section
+/// saves enough to ask: `fix` and the other edits in `fixes` it joins whose files take them,
+/// as `Owner::new` checks each offer.
+pub(crate) fn takes_up(fix: &Fix, fixes: &[Fix]) -> bool {
+    if !offered(fix) {
+        return true;
+    }
+    let section: Vec<Fix> = std::iter::once(fix)
+        .chain(
+            fixes
+                .iter()
+                .filter(|f| *f != fix && f.joins(fix) && offered(f)),
+        )
+        .cloned()
+        .collect();
+    Total::of(&section).asked()
 }
 
 /// A file's accepted changes: settings to set, and MCP server entries to remove.
@@ -2032,6 +2384,17 @@ impl Sum {
     }
 }
 
+/// One change's saving as a [`Total`] counts it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Saved {
+    /// What it saves every 30 days, when measured.
+    pub saving: Option<f64>,
+    /// How far `saving` may be off when extrapolated over unpriced requests.
+    pub margin: Option<Margin>,
+    /// How the saving reads, such as "saves up to".
+    pub verb: Known,
+}
+
 /// "1 change" or "2 changes".
 fn changes(n: usize) -> String {
     format!("{n} change{}", if n == 1 { "" } else { "s" })
@@ -2081,16 +2444,67 @@ impl Total {
     }
 
     fn add(&mut self, fix: &Fix) {
-        let Some(usd) = fix.saving else {
+        let found = Saved {
+            saving: fix.saving,
+            margin: fix.margin,
+            verb: fix.verb,
+        };
+        self.put(&found, fix.share);
+    }
+
+    /// A change found while checking, before the spend its share is of is known.
+    pub fn count(&mut self, found: &Saved) {
+        self.put(found, None);
+    }
+
+    fn put(&mut self, found: &Saved, share: Option<f64>) {
+        let Some(usd) = found.saving else {
             self.unmeasured += 1;
             return;
         };
-        if fix.verb == UP_TO {
-            self.up_to.add(usd, fix.margin, fix.share);
+        if found.verb == UP_TO {
+            self.up_to.add(usd, found.margin, share);
             return;
         }
-        self.measured.add(usd, fix.margin, fix.share);
-        self.partial += usize::from(fix.verb == AT_LEAST);
+        self.measured.add(usd, found.margin, share);
+        self.partial += usize::from(found.verb == AT_LEAST);
+    }
+
+    /// The changes' savings as a progress line tallies them: those measured, those that
+    /// depend on the default they replace, and how many were not measured, each kept apart as
+    /// the line under the headline keeps them; the count not measured joins the measured
+    /// figure when there is one. `more` says they come on top of what the
+    /// settings save already.
+    pub(crate) fn tally(&self, more: bool) -> crate::totals::Tallied {
+        let more = if more { " more" } else { "" };
+        // Said with the measured figure, so a row too narrow for it drops both.
+        let unmeasured = match self.unmeasured {
+            0 => String::new(),
+            n => format!(", {n} more not measured"),
+        };
+        let measured = (self.measured.changes > 0).then(|| {
+            let partial = match self.partial {
+                0 => String::new(),
+                n => format!(", {n} priced in part"),
+            };
+            format!(
+                "found {}{more}{partial}{unmeasured}",
+                approx(self.measured.usd, self.measured.margin, "/mo")
+            )
+        });
+        let up_to = (self.up_to.changes > 0).then(|| {
+            format!(
+                "found up to {}{more}, depending on billing",
+                approx(self.up_to.usd, self.up_to.margin, "/mo")
+            )
+        });
+        let unmeasured = (self.unmeasured > 0 && measured.is_none())
+            .then(|| format!("found {} not measured", changes(self.unmeasured)));
+        crate::totals::Tallied {
+            measured,
+            up_to: up_to.into_iter().collect(),
+            unmeasured,
+        }
     }
 
     /// How many changes were accepted.
@@ -2179,7 +2593,7 @@ pub(crate) enum Answer {
     Yes,
     No,
     Quit,
-    /// Split a group, asking about each of its changes.
+    /// Split a section, asking about each of its changes.
     Split,
 }
 
@@ -2293,10 +2707,6 @@ pub fn opening(found: &[Found], destinations: &[String], style: &Style) -> Strin
     if found.is_empty() {
         out.push_str(&style.dim("No transcripts found on this host."));
     }
-    let name = |harness| match harness {
-        Harness::Claude => "Claude Code",
-        Harness::Codex => "Codex",
-    };
     let roots: Vec<String> = found
         .iter()
         .map(|f| home_in(&f.root, style.home.as_deref()))
@@ -2309,7 +2719,7 @@ pub fn opening(found: &[Found], destinations: &[String], style: &Style) -> Strin
     let widest = |column: &[String]| column.iter().map(|c| crate::terminal::cells(c)).max();
     let name_cells = found
         .iter()
-        .map(|f| name(f.harness).len())
+        .map(|f| f.harness.product().len())
         .max()
         .unwrap_or(0);
     let root_cells = widest(&roots).unwrap_or(0);
@@ -2322,7 +2732,7 @@ pub fn opening(found: &[Found], destinations: &[String], style: &Style) -> Strin
     // A table wider than the terminal puts each root's figures on the line below it.
     let stacked = style.width.is_some_and(|w| table > w);
     for (((f, root), files), bytes) in found.iter().zip(&roots).zip(&counts).zip(&sizes) {
-        let lead = format!("{:<name_cells$}  {}", name(f.harness), root);
+        let lead = format!("{:<name_cells$}  {}", f.harness.product(), root);
         let noun = if f.files == 1 {
             "transcript "
         } else {
@@ -2578,6 +2988,73 @@ impl Selection {
         }
     }
 
+    /// The edits and steps the walk left to make on the host whose changes are `offers`:
+    /// each offer not accepted, every accepted one too unless `wrote`, and each step by hand.
+    pub fn unwritten(&self, offers: &Offers, wrote: bool, style: &Style) -> Remaining {
+        let mut remaining = Remaining::of(&offers.by_hand, style);
+        // What the walk wrote to a target, if anything.
+        let written = |target: usize| {
+            self.accepted
+                .iter()
+                .find(|(t, _, _)| wrote && *t == target)
+                .map(|(_, edits, removals)| (edits, removals))
+        };
+        // Each edit not written, leaving out one a declined change shares with a written one.
+        for offer in &offers.offers {
+            let How::Edit(patch) = &offer.fix.how else {
+                unreachable!("offers are edits")
+            };
+            let unmade = remaining.file(&style.file(&patch.file), patch.harness);
+            for edit in &patch.edits {
+                let made = written(offer.target).is_some_and(|(edits, _)| edits.contains(edit));
+                if !made && !unmade.edits.contains(edit) {
+                    unmade.edits.push(edit.clone());
+                }
+            }
+        }
+        remaining.files.retain(|u| !u.edits.is_empty());
+        // An entry is removed when its target lost its key, under whichever name for the file
+        // the removal used, such as another profile's symlink.
+        let removed =
+            |removals: &Vec<Entry>, entry: &Entry| removals.iter().any(|r| r.path == entry.path);
+        // An accepted change's own removals and blocks, and the cleanup of servers off
+        // already; a declined change's are moot.
+        for (index, offer) in offers.offers.iter().enumerate() {
+            if !self.yes.contains(&index) {
+                continue;
+            }
+            let How::Edit(patch) = &offer.fix.how else {
+                unreachable!("offers are edits")
+            };
+            for name in &offer.denials {
+                let edit = deny(name);
+                if !written(offer.target).is_some_and(|(edits, _)| edits.contains(&edit)) {
+                    let unmade = remaining.file(&style.file(&patch.file), patch.harness);
+                    if !unmade.edits.contains(&edit) {
+                        unmade.edits.push(edit);
+                    }
+                }
+            }
+            for (target, entry) in &offer.entries {
+                if !written(*target).is_some_and(|(_, removals)| removed(removals, entry)) {
+                    remaining.remove(entry, style);
+                }
+            }
+            for (step, reason) in &offer.manual {
+                remaining.step(&offer.fix.name, step, reason, style);
+            }
+        }
+        for (target, entry) in &offers.cleanup {
+            if !written(*target).is_some_and(|(_, removals)| removed(removals, entry)) {
+                remaining.remove(entry, style);
+            }
+        }
+        for (step, reason) in &offers.cleanup_by_hand {
+            remaining.step(CLEANUP, step, reason, style);
+        }
+        remaining
+    }
+
     /// What the walk came to on the host whose changes are `offers`.
     pub fn summary(&self, offers: &Offers) -> Summary {
         Summary {
@@ -2703,6 +3180,8 @@ pub struct Offers {
     offers: Vec<Offer>,
     /// What became of each change that is a step by hand.
     steps: Vec<(Origin, Choice)>,
+    /// Each change that is a step by hand, which the walk lists once it ends.
+    by_hand: Vec<Fix>,
     /// The entries of MCP servers that are off already, each with its target, which the
     /// walk's last question offers to remove.
     cleanup: Vec<(usize, Entry)>,
@@ -2800,12 +3279,14 @@ impl Owner {
                 .collect::<Vec<_>>()
         };
         let mut steps = vec![];
+        let mut manual_fixes = vec![];
         // Every entry a never-used server's question may remove, so the last question leaves
         // them out.
         let mut offered_entries: Vec<Entry> = vec![];
         for mut fix in fixes {
             let How::Edit(patch) = &fix.how else {
                 steps.extend(manual(&fix));
+                manual_fixes.push(fix);
                 continue;
             };
             let index = targets.open(&patch.file, patch.harness);
@@ -2822,6 +3303,7 @@ impl Owner {
                     reason,
                 };
                 steps.extend(manual(&fix));
+                manual_fixes.push(fix);
                 continue;
             }
             let mut entries = vec![];
@@ -2902,6 +3384,7 @@ impl Owner {
             offers: Offers {
                 offers,
                 steps,
+                by_hand: manual_fixes,
                 cleanup,
                 cleanup_by_hand,
                 files,
@@ -2970,7 +3453,7 @@ struct Member<'a> {
     offer: &'a Offer,
 }
 
-/// One question of the walk: a change, or a group of one host's small ones.
+/// One question of the walk: a change, or a section of one host's changes.
 struct Question<'a> {
     members: Vec<Member<'a>>,
 }
@@ -2991,61 +3474,124 @@ impl Question<'_> {
         self.together().usd()
     }
 
-    /// What the members save together, such as ("saves $9.40/mo", "2%"): up to that
-    /// when one's saving depends on a default, at least that when one was measured in part.
+    /// What the members save together, such as ("saves $9.40/mo", "2%"): at least that
+    /// when one was measured in part, and a saving that depends on a default apart, as up to
+    /// that, such as "saves $3/mo + up to $9/mo".
     fn saving(&self) -> Option<(String, String)> {
         let total = self.together();
         let usd = self.usd()?;
-        let verb = if total.up_to.changes > 0 {
-            UP_TO
-        } else if total.partial > 0 {
-            AT_LEAST
-        } else {
-            "saves"
-        };
+        let verb = if total.partial > 0 { AT_LEAST } else { "saves" };
         let unknown = total.measured.unknown_share || total.up_to.unknown_share;
         let share = (!unknown).then_some(total.measured.share + total.up_to.share);
-        let margin = Margin::plus(total.measured.margin, total.up_to.margin);
-        saving(verb, Some(usd), margin, share)
+        let (measured, up_to) = (&total.measured, &total.up_to);
+        match (measured.changes, up_to.changes) {
+            (_, 0) => saving(verb, Some(usd), measured.margin, share),
+            (0, _) => saving(UP_TO, Some(usd), up_to.margin, share),
+            _ => Some((
+                format!(
+                    "{verb} {} + up to {}",
+                    approx(measured.usd, measured.margin, "/mo"),
+                    approx(up_to.usd, up_to.margin, "/mo")
+                ),
+                share.map_or_else(String::new, share_text),
+            )),
+        }
     }
 
-    /// A group as the walk offers it, its counter `counter`: what its kind of feature is,
-    /// then every member's name. Each member says what it does when the person splits
-    /// the group.
+    /// A section as the walk offers it, its counter `counter`: what its kind of change is,
+    /// then how many members and the largest of them by name. Each member says what it does
+    /// when the person splits the section.
     fn card(&self, counter: &str, host: Option<&str>, style: &Style) -> String {
-        let first = &self.members[0].offer.fix;
-        let group = first.group.as_ref().expect("only groups share a question");
-        let groups: Vec<&Group> = self
-            .members
-            .iter()
-            .filter_map(|m| m.offer.fix.group.as_ref())
-            .collect();
-        // A name two members share, such as a duplicate skill's, is followed by its location.
-        let names: Vec<String> = groups
-            .iter()
-            .map(|g| {
-                let shared = groups.iter().filter(|o| o.member == g.member).count() > 1;
-                match &g.location {
-                    Some(at) if shared => format!("{} ({})", g.member, style.path(at)),
-                    _ => g.member.clone(),
-                }
-            })
-            .collect();
+        let fixes: Vec<&Fix> = self.members.iter().map(|m| &m.offer.fix).collect();
+        let first = fixes[0];
         let mut rows = vec![];
         if let Some(host) = host {
             rows.push(("Host", host.to_string()));
         }
-        rows.push(("What", crate::descriptions::kind(group.kind).to_string()));
-        rows.push(("Which", format!("{}.", names.join(", "))));
+        rows.push(("What", section_what(&first.section, &first.what)));
+        rows.push(("Which", which(&fixes, style)));
+        let value = section_value(
+            fixes
+                .iter()
+                .map(|f| (&f.section, f.profile.as_str(), f.value.as_str())),
+            style.arrow(),
+        );
         style.card(&Card {
             counter: counter.into(),
-            name: &group.label,
+            name: &first.section.label,
             saving: self.saving(),
             no_saving: "savings not measured",
-            value: first.value.clone(),
-            standing: Standing::of(first.suggested),
+            value,
+            standing: Standing::of(fixes.iter().all(|f| f.suggested)),
             rows,
         })
+    }
+}
+
+/// How many members a section card names before counting the rest.
+const NAMED: usize = 3;
+
+/// A section's members by name, largest saving first: every one when there are few, else
+/// the largest few and how many more, such as "dataviz, code-review, run and 16 more".
+fn which(fixes: &[&Fix], style: &Style) -> String {
+    let mut fixes = fixes.to_vec();
+    // A stable sort keeps the report's order among equal and unmeasured savings.
+    fixes.sort_by(|a, b| match (a.saving, b.saving) {
+        (Some(a), Some(b)) => b.total_cmp(&a),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+    let names: Vec<String> = fixes
+        .iter()
+        .map(|f| {
+            let s = &f.section;
+            // A name two members share, such as a duplicate skill's, is followed by its
+            // location when the copies' locations differ, and by its profile when the
+            // location alone repeats, as two profiles' copies of one skill do; a setting's
+            // name is its profile.
+            let peers = |same: &dyn Fn(&Fix) -> bool| fixes.iter().filter(|o| same(o)).count() > 1;
+            let shared = peers(&|o| o.section.member == s.member);
+            let placed =
+                !peers(&|o| o.section.member == s.member && o.section.location == s.location);
+            let moved = fixes
+                .iter()
+                .any(|o| o.section.member == s.member && o.section.location != s.location);
+            match (&s.location, s.kind, f.profile.as_str()) {
+                (Some(at), Kind::Feature(..), profile) if shared && moved => {
+                    if placed || profile.is_empty() {
+                        format!("{} ({})", s.member, style.path(at))
+                    } else {
+                        format!("{} ({}, {profile})", s.member, style.path(at))
+                    }
+                }
+                (_, _, "") => s.member.clone(),
+                (_, Kind::Setting, profile) => profile.to_string(),
+                (_, _, profile) if shared => format!("{} ({profile})", s.member),
+                _ => s.member.clone(),
+            }
+        })
+        .collect();
+    let named = if names.len() > NAMED + 1 {
+        NAMED
+    } else {
+        names.len()
+    };
+    let mut text = names[..named].join(", ");
+    match names.len() - named {
+        0 => {}
+        rest => text += &format!(" and {rest} more"),
+    }
+    text + "."
+}
+
+/// What a section's kind of change does, in one sentence; for a section of one setting, that
+/// setting's own sentence, `what`.
+pub(crate) fn section_what(section: &Section, what: &str) -> String {
+    match section.kind {
+        Kind::Feature(kind, _) => crate::descriptions::kind(kind).into(),
+        Kind::CacheTtl => crate::descriptions::CACHE_TTLS.into(),
+        Kind::Setting => what.into(),
     }
 }
 
@@ -3156,9 +3702,9 @@ impl Walk<'_, '_> {
             }
         }
         for member in members {
-            // A group's step names its server.
-            let it = match (&member.offer.fix.group, members.len()) {
-                (Some(group), 2..) => group.member.as_str(),
+            // A section's step names its server.
+            let it = match members.len() {
+                2.. => member.offer.fix.section.member.as_str(),
                 _ => "it",
             };
             for (step, reason) in &member.offer.manual {
@@ -3288,9 +3834,9 @@ impl Walk<'_, '_> {
 }
 
 /// Walk through each host's changes, biggest saving first across hosts, and return what the
-/// person accepted on each, in the order of `hosts`. Features are offered in groups of one
-/// host's changes of one kind and reason, which the person can split to answer each, and a
-/// question saving under $1/mo in total is not asked. A yes to turning a never-used MCP
+/// person accepted on each, in the order of `hosts`. Changes are offered in sections of one
+/// host's changes of one kind and reason across its profiles, which the person can split to
+/// answer each, and a question saving under $1/mo in total is not asked. A yes to turning a never-used MCP
 /// server off is followed by an offer to remove its configuration, and each host's last
 /// question offers to remove the servers that are off already. Nothing is read or written
 /// here; end of input is a quit, which leaves the rest unaccepted.
@@ -3300,23 +3846,15 @@ pub fn ask(
     input: &mut impl BufRead,
     output: &mut impl Write,
 ) -> io::Result<Vec<Selection>> {
-    // A feature's change joins the others of its host, kind and reason, whatever it saves,
-    // measured apart from unmeasured; the person can split a group to answer each.
+    // A change joins the others of its host's section, whatever it saves, measured apart from
+    // unmeasured; the person can split a section to answer each.
     let mut questions: Vec<Question> = vec![];
     for (host, walking) in hosts.iter().enumerate() {
         for (index, offer) in walking.offers.offers.iter().enumerate() {
             let fix = &offer.fix;
             let joins = |q: &Question| {
                 let first = &q.members[0];
-                let first_fix = &first.offer.fix;
-                first.host == host
-                    && first_fix.value == fix.value
-                    && first_fix.saving.is_some() == fix.saving.is_some()
-                    && first_fix
-                        .group
-                        .as_ref()
-                        .zip(fix.group.as_ref())
-                        .is_some_and(|(a, b)| a.joins(b))
+                first.host == host && first.offer.fix.joins(fix)
             };
             let member = Member { host, index, offer };
             match questions.iter_mut().find(|q| joins(q)) {
@@ -3466,7 +4004,7 @@ pub fn ask(
             ("were", "they're")
         };
         let text = format!(
-            "{left}{more} change{} in groups saving under {}/mo {was} not asked; {they} in the list below.",
+            "{left}{more} change{} in sections saving under {}/mo {was} not asked; {they} in the list below.",
             if left == 1 { "" } else { "s" },
             about(ASKED_USD)
         );
@@ -3990,7 +4528,7 @@ pub fn finish(hosts: &[(&Summary, &[Written], &Style)], style: &Style) -> String
             "Nothing to change on this host."
         }
     } else if summaries().all(|s| s.offered == 0) {
-        "token-max cannot make these changes; the steps by hand are listed above."
+        "token-max cannot make these changes; take the steps by hand it names."
     } else if summaries().all(|s| s.files.is_empty()) {
         "Nothing was accepted, so nothing was written."
     } else {
@@ -4400,7 +4938,13 @@ mod tests {
             what: String::new(),
             evidence: String::new(),
             origins: vec![Origin::Check(usize::from(name.as_bytes()[0]))],
-            group: None,
+            section: crate::doctor::Section {
+                kind: crate::doctor::Kind::Setting,
+                label: name.into(),
+                member: name.into(),
+                location: None,
+            },
+            profile: String::new(),
             removal: vec![],
             how: How::Edit(Patch {
                 file: file.to_string_lossy().into_owned(),
@@ -4408,6 +4952,334 @@ mod tests {
                 edits,
             }),
         }
+    }
+
+    #[test]
+    fn edits_left_to_make_take_one_line_per_key_and_their_exact_text_under_details() {
+        let settings = Path::new("/synthetic/home/.claude/settings.json");
+        let config = Path::new("/synthetic/home/.codex/config.toml");
+        // A removal's model name holds a dot, so its key is quoted to read as one.
+        let old = Edit {
+            path: vec![
+                "modelSettings".into(),
+                "claude-opus-4.6".into(),
+                "autoCompactWindow".into(),
+            ],
+            value: Value::Null,
+            op: Op::Remove,
+        };
+        let fixes = [
+            change(
+                "A",
+                settings,
+                Harness::Claude,
+                vec![
+                    edit("permissions.deny", "X", true),
+                    edit("skillOverrides.a", "off", false),
+                ],
+            ),
+            change(
+                "B",
+                settings,
+                Harness::Claude,
+                vec![
+                    edit("permissions.deny", "Y", true),
+                    edit("skillOverrides.b", "off", false),
+                    edit("fastMode", false, false),
+                    edit(
+                        "deniedMcpServers",
+                        serde_json::json!({ "serverName": "docs" }),
+                        true,
+                    ),
+                ],
+            ),
+            // An edit two changes make is listed once.
+            change(
+                "C",
+                settings,
+                Harness::Claude,
+                vec![
+                    edit("permissions.deny", "X", true),
+                    edit("autoMemoryEnabled", false, false),
+                    old,
+                ],
+            ),
+            change(
+                "D",
+                config,
+                Harness::Codex,
+                vec![Edit {
+                    path: vec!["mcp_servers".into(), "my.server".into(), "enabled".into()],
+                    value: false.into(),
+                    op: Op::Set,
+                }],
+            ),
+            Fix {
+                how: How::Manual {
+                    step: "uninstall the plugin in /synthetic/home/.claude".into(),
+                    reason: "token-max does not uninstall plugins".into(),
+                },
+                ..change("Plugin", settings, Harness::Claude, vec![])
+            },
+        ];
+        let style = Style {
+            color: false,
+            unicode: false,
+            width: None,
+            home: Some("/synthetic/home".into()),
+            host: Some("devbox".into()),
+        };
+        let remaining = Remaining::of(&fixes, &style);
+        let files: Vec<(&str, Vec<String>)> = remaining.files(false).collect();
+        assert_eq!(
+            files,
+            [
+                (
+                    "devbox:~/.claude/settings.json",
+                    vec![
+                        "permissions.deny += X, Y (2)".to_string(),
+                        r#"skillOverrides.{a, b} = "off" (2)"#.into(),
+                        // Top-level settings share no parent, so they stay apart.
+                        "fastMode = false".into(),
+                        r#"deniedMcpServers += {"serverName":"docs"}"#.into(),
+                        "autoMemoryEnabled = false".into(),
+                        r#"remove modelSettings."claude-opus-4.6".autoCompactWindow"#.into(),
+                    ]
+                ),
+                (
+                    "devbox:~/.codex/config.toml",
+                    vec![r#"mcp_servers."my.server".enabled = false"#.to_string()]
+                ),
+            ]
+        );
+        let exact: Vec<(&str, Vec<String>)> = remaining.files(true).collect();
+        assert_eq!(
+            exact[0].1[..2],
+            [
+                r#""permissions": {"deny": ["X"]} (added to the list)"#,
+                r#""skillOverrides": {"a": "off"}"#,
+            ]
+        );
+        assert_eq!(exact[0].1.len(), 8);
+        assert_eq!(
+            exact[0].1[7],
+            r#"remove modelSettings."claude-opus-4.6".autoCompactWindow"#
+        );
+        assert_eq!(
+            remaining.steps(),
+            [(
+                "Plugin".to_string(),
+                // slash ok: the step's text passes through, its home shortened
+                "uninstall the plugin in ~/.claude".to_string(),
+                "token-max does not uninstall plugins".to_string()
+            )]
+        );
+        // Each file is its own section, its lines wrapping under it, then the steps.
+        let text = crate::report::closing(
+            &remaining,
+            "EDITS",
+            crate::report::ReportOptions {
+                width: Some(40),
+                ..Default::default()
+            },
+        );
+        assert!(
+            text.starts_with(
+                "\n  EDITS  devbox:~/.claude/settings.json\n    permissions.deny += X, Y (2)\n"
+            ),
+            "{text}"
+        );
+        // slash ok: the step's text passes through, its home shortened
+        let steps = "\n  STEPS BY HAND  devbox\n    Plugin: uninstall the plugin in\n      ~/.claude (since token-max does\n      not uninstall plugins)\n";
+        assert!(text.ends_with(steps), "{text}");
+        assert_eq!(
+            crate::report::closing(&Remaining::default(), "EDITS", Default::default()),
+            ""
+        );
+    }
+
+    #[test]
+    fn the_walk_leaves_listed_every_edit_it_did_not_write() {
+        let w = Workspace::new();
+        let settings = w.claude.join("settings.json");
+        std::fs::write(&settings, "{}\n").unwrap();
+        let fixes = vec![
+            change(
+                "A",
+                &settings,
+                Harness::Claude,
+                vec![edit("a", false, false)],
+            ),
+            // B shares A's edit, which writing A makes.
+            change(
+                "B",
+                &settings,
+                Harness::Claude,
+                vec![edit("a", false, false), edit("b", false, false)],
+            ),
+            Fix {
+                how: How::Manual {
+                    step: "unset C".into(),
+                    reason: "the environment sets it".into(),
+                },
+                ..change("C", &settings, Harness::Claude, vec![])
+            },
+        ];
+        let owner = Owner::new(fixes, vec![], None, 0.0);
+        let mut selection = Selection::default();
+        // A is accepted, B declined.
+        for (offer, yes) in [(0, true), (1, false)] {
+            selection
+                .apply(owner.offers(), Event::Choose { offer, yes })
+                .unwrap();
+        }
+        let style = style(&w);
+        let left = |wrote| {
+            let remaining = selection.unwritten(owner.offers(), wrote, &style);
+            let lines: Vec<String> = remaining.files(false).flat_map(|(_, l)| l).collect();
+            let steps: Vec<String> = remaining
+                .steps()
+                .iter()
+                .map(|(n, _, _)| n.clone())
+                .collect();
+            (lines, steps)
+        };
+        // Once A is written, B and the step are left; a no at the confirm leaves A too.
+        assert_eq!(left(true), (vec!["b = false".into()], vec!["C".into()]));
+        assert_eq!(
+            left(false),
+            (
+                vec!["a = false".into(), "b = false".into()],
+                vec!["C".into()]
+            )
+        );
+    }
+
+    #[test]
+    fn the_walk_leaves_listed_the_mcp_removals_and_blocks_it_did_not_write() {
+        let w = Workspace::new();
+        let settings = w.claude.join("settings.json");
+        let state = w.home.join(".claude.json");
+        let config = w.codex.join("config.toml");
+        std::fs::write(&settings, "{}\n").unwrap();
+        std::fs::write(&state, "{\n  \"mcpServers\": {\"A\": {}, \"B\": {}}\n}\n").unwrap();
+        std::fs::write(&config, "[mcp_servers.off]\nenabled = false\n").unwrap();
+        let a = entry(&state, Harness::Claude, &["mcpServers", "A"]);
+        let b = entry(&state, Harness::Claude, &["mcpServers", "B"]);
+        let gmail = Definition::Deny(crate::mcp::Deny {
+            name: "Gmail".into(),
+            since: (1, 330),
+            step: "disconnect it at claude.ai".into(),
+            reason: "it is a claude.ai connector".into(),
+        });
+        let plugin = |name: &str| Definition::Manual {
+            step: format!("uninstall plugin {name}"),
+            reason: "token-max does not uninstall plugins".into(),
+        };
+        let fixes = vec![
+            server(
+                "A",
+                6.0,
+                &settings,
+                vec![Definition::Entry(a), gmail, plugin("a")],
+            ),
+            server("B", 2.0, &settings, vec![Definition::Entry(b), plugin("b")]),
+        ];
+        let off = entry(&config, Harness::Codex, &["mcp_servers", "off"]);
+        let owner = Owner::new(
+            fixes,
+            vec![Definition::Entry(off), plugin("off")],
+            None,
+            0.0,
+        );
+        let mut selection = Selection::default();
+        // A and the removal of its entry are accepted, not its block; B is declined, and so
+        // is the cleanup of the server off already.
+        for event in [
+            Event::Choose {
+                offer: 0,
+                yes: true,
+            },
+            Event::Remove { offer: 0, entry: 0 },
+            Event::Choose {
+                offer: 1,
+                yes: false,
+            },
+        ] {
+            selection.apply(owner.offers(), event).unwrap();
+        }
+        let style = style(&w);
+        let left = |wrote| -> Vec<Vec<String>> {
+            selection
+                .unwritten(owner.offers(), wrote, &style)
+                .files(false)
+                .map(|(_, lines)| lines)
+                .collect()
+        };
+        // Once written, A's block is left, and B's removal is moot since B stays on.
+        assert_eq!(
+            left(true),
+            [
+                vec![
+                    "permissions.deny += mcp__B".to_string(),
+                    r#"deniedMcpServers += {"serverName":"Gmail"}"#.into()
+                ],
+                vec!["remove [mcp_servers.off]".into()],
+            ]
+        );
+        // A no at the confirm leaves A's removal too.
+        assert_eq!(
+            left(false),
+            [
+                vec![
+                    "permissions.deny += mcp__A, mcp__B (2)".to_string(),
+                    r#"deniedMcpServers += {"serverName":"Gmail"}"#.into()
+                ],
+                vec!["remove mcpServers.A".into()],
+                vec!["remove [mcp_servers.off]".into()],
+            ]
+        );
+        // The accepted change's step by hand and the cleanup's are left; the declined B's is
+        // moot.
+        let steps: Vec<(String, String)> = selection
+            .unwritten(owner.offers(), true, &style)
+            .steps()
+            .iter()
+            .map(|(name, step, _)| (name.clone(), step.clone()))
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                ("A".to_string(), "uninstall plugin a".to_string()),
+                (CLEANUP.into(), "uninstall plugin off".into()),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_removal_written_through_one_symlink_is_not_left_under_another() {
+        let w = Workspace::new();
+        let config = w.codex.join("config.toml");
+        let link = w.home.join("linked.toml");
+        std::fs::write(&config, "[mcp_servers.off]\nenabled = false\n").unwrap();
+        std::os::unix::fs::symlink(&config, &link).unwrap();
+        let turned_off = [&config, &link]
+            .map(|f| Definition::Entry(entry(f, Harness::Codex, &["mcp_servers", "off"])));
+        let owner = Owner::new(vec![], turned_off.to_vec(), None, 0.0);
+        let mut selection = Selection::default();
+        selection
+            .apply(owner.offers(), Event::Cleanup { entry: 0 })
+            .unwrap();
+        let left = |wrote| {
+            selection
+                .unwritten(owner.offers(), wrote, &style(&w))
+                .files(false)
+                .count()
+        };
+        // One file under two names: removing the table under one removes it under both.
+        assert_eq!(left(true), 0);
+        assert_eq!(left(false), 2);
     }
 
     /// What became of the change named `name`.
@@ -4947,13 +5819,12 @@ mod tests {
             ..change(name, &settings, Harness::Claude, vec![edit(name, 1, false)])
         };
         let member = |name: &str, saving, reason, label: &str| Fix {
-            group: Some(Group {
-                kind: ContextKind::Skill,
-                reason,
+            section: Section {
+                kind: Kind::Feature(ContextKind::Skill, reason),
                 label: label.into(),
                 member: name.to_lowercase(),
                 location: None,
-            }),
+            },
             ..fix(name, saving)
         };
         let unused = "Never-used skills";
@@ -5005,13 +5876,13 @@ mod tests {
         );
         assert!(printed.contains("\n  5 questions about 8 changes, biggest saving first.\n"));
         assert!(printed.contains(
-            "\n  [2/5] Never-used skills  saves $11/mo  11%\n        on -> off  Recommended\n        What   Skills are packaged instructions the model can load when a task calls for one; each is listed by name and description in every request.\n        Which  b, s, t.\n  Accept all 3? [y]es, [n]o, [s]plit, [q]uit: "
+            "\n  [2/5] Never-used skills  saves $11/mo  11%\n        3 -> off  Recommended\n        What   Skills are packaged instructions the model can load when a task calls for one; each is listed by name and description in every request.\n        Which  b, s, t.\n  Accept all 3? [y]es, [n]o, [s]plit, [q]uit: "
         ), "{printed}");
         assert!(printed.contains(
-            "\n  [5/5] Never-used skills  savings not measured\n        on -> off  Recommended\n        What   Skills are packaged instructions the model can load when a task calls for one; each is listed by name and description in every request.\n        Which  k, l.\n"
+            "\n  [5/5] Never-used skills  savings not measured\n        2 -> off  Recommended\n        What   Skills are packaged instructions the model can load when a task calls for one; each is listed by name and description in every request.\n        Which  k, l.\n"
         ), "{printed}");
         assert!(printed.ends_with(
-            "\n  2 more changes in groups saving under $1/mo were not asked; they're in the list below.\n"
+            "\n  2 more changes in sections saving under $1/mo were not asked; they're in the list below.\n"
         ), "{printed}");
         for (name, want) in [
             ("A", Some(Choice::Accepted)),
@@ -5048,7 +5919,7 @@ mod tests {
         let (plan, printed) = walk(vec![fix("C", Some(0.3))], &w, "");
         assert_eq!(
             printed,
-            "\n  1 change in groups saving under $1/mo was not asked; it's in the list below.\n"
+            "\n  1 change in sections saving under $1/mo was not asked; it's in the list below.\n"
         );
         assert_eq!(choice(&plan, "C"), &Choice::Declined);
         assert_eq!(
@@ -5064,13 +5935,12 @@ mod tests {
         let home = w.home.to_string_lossy().into_owned();
         let copy = |line: &str, member: &str, at: Option<&str>| Fix {
             saving: Some(2.0),
-            group: Some(Group {
-                kind: ContextKind::Skill,
-                reason: Reason::Duplicate,
+            section: Section {
+                kind: Kind::Feature(ContextKind::Skill, Reason::Duplicate),
                 label: "Duplicate copies of skills".into(),
                 member: member.into(),
                 location: at.map(|at| format!("{home}/{at}/SKILL.md")),
-            }),
+            },
             ..change(line, &settings, Harness::Claude, vec![edit(line, 1, false)])
         };
         let (_, printed) = walk(
@@ -5087,6 +5957,170 @@ mod tests {
             printed.contains("  Which  review (~/a/SKILL.md), review (~/b/SKILL.md), lint.\n"),
             "{printed}"
         );
+        // Two profiles' copies of one skill at one path name their profiles instead.
+        let profiled = |line: &str, profile: &str| Fix {
+            profile: profile.into(),
+            ..copy(line, "review", Some("a"))
+        };
+        let (_, printed) = walk(
+            vec![profiled("A", "work"), profiled("B", "home")],
+            &w,
+            "n\n",
+        );
+        assert!(
+            printed.contains("  Which  review (work), review (home).\n"),
+            "{printed}"
+        );
+        // Two profiles each holding the same two copies name both the path and the profile.
+        let at = |line: &str, profile: &str, dir: &str| Fix {
+            profile: profile.into(),
+            ..copy(line, "review", Some(dir))
+        };
+        let (_, printed) = walk(
+            vec![
+                at("A", "work", "a"),
+                at("B", "work", "b"),
+                at("C", "home", "a"),
+                at("D", "home", "b"),
+            ],
+            &w,
+            "n\n",
+        );
+        // slash ok: the locations are formatted with / and abbreviated as given
+        let a = "~/a/SKILL.md";
+        // slash ok: as above
+        let b = "~/b/SKILL.md";
+        let expected = format!(
+            "  Which  review ({a}, work), review ({b}, work), review ({a}, home), \
+             review ({b}, home).\n"
+        );
+        assert!(printed.contains(&expected), "{printed}");
+    }
+
+    #[test]
+    fn a_section_card_names_its_largest_members_and_each_cache_ttl_its_own_change() {
+        let w = Workspace::new();
+        let settings = w.claude.join("settings.json");
+        let skill = |line: &str, saving: f64| Fix {
+            saving: Some(saving),
+            section: Section {
+                kind: Kind::Feature(ContextKind::Skill, Reason::Unused),
+                label: "Never-used skills".into(),
+                member: line.to_lowercase(),
+                location: None,
+            },
+            ..change(line, &settings, Harness::Claude, vec![edit(line, 1, false)])
+        };
+        let skills = ["A", "B", "C", "D", "E"]
+            .iter()
+            .zip([1.0, 5.0, 4.0, 3.0, 2.0])
+            .map(|(line, saving)| skill(line, saving))
+            .collect();
+        let (_, printed) = walk(
+            skills, &w, "n
+",
+        );
+        assert!(
+            printed.contains("        5 -> off  Recommended\n"),
+            "{printed}"
+        );
+        assert!(
+            printed.contains("  Which  b, c, d and 2 more.\n"),
+            "{printed}"
+        );
+        // The main agent's TTL moves up and the subagents' down; the unset main TTL's saving
+        // depends on the default, so it is counted apart. Split, each member names its profile.
+        let ttl = |line: &str, member: &str, value: &str, verb, suggested| Fix {
+            value: value.into(),
+            verb,
+            suggested,
+            profile: "~/.claude/settings.json".into(),
+            section: Section {
+                kind: Kind::CacheTtl,
+                label: "Prompt cache TTL".into(),
+                member: member.into(),
+                location: None,
+            },
+            ..change(line, &settings, Harness::Claude, vec![edit(line, 1, false)])
+        };
+        let (plan, printed) = walk(
+            vec![
+                ttl("M", "main", "unset -> 1h", UP_TO, false),
+                ttl("S", "subagent", "1h -> 5m", "saves", true),
+            ],
+            &w,
+            "s\ny\nn\n",
+        );
+        assert!(
+            printed.contains(
+                "  [1/1] Prompt cache TTL  saves $10/mo + up to $10/mo  20%\n        main unset -> 1h, subagent 1h -> 5m  Recommended\n"
+            ),
+            "{printed}"
+        );
+        assert!(
+            // slash ok: the profile is the report's tag, passed through as given
+            printed.contains("  Profile  ~/.claude/settings.json\n"),
+            "{printed}"
+        );
+        assert_eq!(choice(&plan, "M"), &Choice::Accepted);
+        assert_eq!(choice(&plan, "S"), &Choice::Declined);
+    }
+
+    #[test]
+    fn a_cache_ttl_changed_in_several_profiles_names_each_profile() {
+        let ttl = |member: &str| Section {
+            kind: Kind::CacheTtl,
+            label: "Prompt cache TTL".into(),
+            member: member.into(),
+            location: None,
+        };
+        let (main, sub) = (ttl("main"), ttl("subagent"));
+        assert_eq!(
+            section_value(
+                [
+                    (&main, "a", "5m -> 1h"),
+                    (&main, "b", "5m -> 1h"),
+                    (&main, "c", "1h -> 5m"),
+                    (&sub, "a", "1h -> 5m"),
+                ],
+                "->"
+            ),
+            "main (a) 5m -> 1h, main (b) 5m -> 1h, main (c) 1h -> 5m, subagent (a) 1h -> 5m"
+        );
+    }
+
+    #[test]
+    fn a_change_is_taken_up_when_its_section_saves_enough_to_ask() {
+        let w = Workspace::new();
+        let settings = w.claude.join("settings.json");
+        let elsewhere = w.home.join("other").join("settings.json");
+        std::fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
+        let memory = |line: &str, settings: &Path| Fix {
+            saving: Some(0.6),
+            section: Section {
+                kind: Kind::Setting,
+                label: "Auto memory".into(),
+                member: "Auto memory".into(),
+                location: None,
+            },
+            ..change(line, settings, Harness::Claude, vec![edit(line, 1, false)])
+        };
+        let (a, b) = (memory("A", &settings), memory("B", &elsewhere));
+        assert!(!takes_up(&a, std::slice::from_ref(&a)));
+        assert!(takes_up(&a, &[a.clone(), b.clone()]));
+        // Another member whose file refuses its edit becomes a step by hand, so it adds
+        // nothing to the section's question.
+        let refused = memory("R", Path::new("/nonexistent/token-max/settings.json"));
+        assert!(!takes_up(&a, &[a.clone(), refused.clone()]));
+        // The refused edit itself is a step by hand the walk names, whatever it saves.
+        assert!(takes_up(&refused, &[a.clone(), refused.clone()]));
+        // One only worth considering, such as memory used at a high cost, is its own section.
+        let considered = Fix {
+            suggested: true,
+            ..b
+        };
+        assert!(!a.joins(&considered));
+        assert!(!takes_up(&a, &[a.clone(), considered]));
     }
 
     #[test]
@@ -5197,20 +6231,19 @@ mod tests {
             ]),
             "Accepted: ~$25/mo, margin unknown, 25% of this host's spend; overlapping changes may save less."
         );
-        // A group's heading sums its members the same way.
+        // A section's heading sums its members the same way, the "up to" part apart.
         let w = Workspace::new();
         let settings = w.claude.join("settings.json");
         let small = |name: &str, verb, usd| Fix {
             verb,
             saving: Some(usd),
             share: Some(usd / 100.0),
-            group: Some(Group {
-                kind: ContextKind::Tool,
-                reason: Reason::Unused,
+            section: Section {
+                kind: Kind::Feature(ContextKind::Tool, Reason::Unused),
                 label: "Never-used tools".into(),
                 member: name.into(),
                 location: None,
-            }),
+            },
             ..change(name, &settings, Harness::Claude, vec![edit(name, 1, false)])
         };
         let (_, printed) = walk(
@@ -5218,9 +6251,8 @@ mod tests {
             &w,
             "y\n",
         );
-        // The heading's figure holds only up to its sum; the running total says which part.
         assert!(
-            printed.contains("  [1/1] Never-used tools  saves up to $4/mo  4%\n"),
+            printed.contains("  [1/1] Never-used tools  saves $1/mo + up to $3/mo  4%\n"),
             "{printed}"
         );
         assert!(printed.contains(
@@ -5316,7 +6348,7 @@ mod tests {
         );
         assert_eq!(
             finish(&plan, &[], &style(&w)),
-            "\n  token-max cannot make these changes; the steps by hand are listed above.\n"
+            "\n  token-max cannot make these changes; take the steps by hand it names.\n"
         );
         std::fs::write(&settings, "{}").unwrap();
         let (plan, _) = walk(vec![deny], &w, "y\n");
@@ -5447,13 +6479,12 @@ mod tests {
         Fix {
             saving: Some(usd),
             share: Some(usd / 100.0),
-            group: Some(Group {
-                kind: ContextKind::McpServer,
-                reason: Reason::Unused,
+            section: Section {
+                kind: Kind::Feature(ContextKind::McpServer, Reason::Unused),
                 label: "Never-used MCP servers".into(),
                 member: name.to_lowercase(),
                 location: None,
-            }),
+            },
             removal,
             ..change(
                 name,
@@ -5504,13 +6535,12 @@ mod tests {
             vec![
                 // Offered for another reason, so asked alone, and its removal too.
                 Fix {
-                    group: Some(Group {
-                        reason: Reason::Costly,
+                    section: Section {
+                        kind: Kind::Feature(ContextKind::McpServer, Reason::Costly),
                         label: "MCP servers over $1 per use".into(),
                         member: "a".into(),
-                        kind: ContextKind::McpServer,
                         location: None,
-                    }),
+                    },
                     ..server("A", 6.0, &settings, vec![Definition::Entry(a.clone())])
                 },
                 server(
@@ -5680,34 +6710,113 @@ mod tests {
                 reason: "a plugin adds it".into(),
             })
         };
+        let mut native = crate::test_support::make_profile("native", "/n");
+        native.updater = Some("claude update");
+        let other = crate::test_support::make_profile("other", "/o");
+        // Each (profile, client, version) is one request, in time order.
+        let ran = |sent: &[(&str, &str, Option<&str>)]| -> Vec<crate::model::Request> {
+            sent.iter()
+                .enumerate()
+                .map(|(i, &(profile, client, version))| {
+                    let mut r = crate::test_support::make_request();
+                    r.time = i as i64;
+                    r.profiles = vec![profile.into()].into();
+                    r.client = Some(client.into());
+                    r.version = version.map(Into::into);
+                    r
+                })
+                .collect()
+        };
+        let both = [&native, &other];
         // Every profile's latest Claude Code must match it by name.
-        let new = [Some("2.1.182"), Some("2.1.331")];
-        assert_eq!(gate(blocked("p"), &new), blocked("p"));
-        let Definition::Manual { step, reason } =
-            gate(blocked("p"), &[Some("2.1.331"), Some("2.1.90"), None])
-        else {
+        let new = ran(&[
+            ("native", "cli", Some("2.1.182")),
+            ("other", "cli", Some("2.1.331")),
+        ]);
+        assert_eq!(gate(blocked("p"), &both, &new, "s.json"), blocked("p"));
+        let Definition::Manual { step, reason } = gate(
+            blocked("p"),
+            &both,
+            &ran(&[("native", "cli", Some("2.1.90")), ("other", "cli", None)]),
+            "s.json",
+        ) else {
             panic!("an older Claude Code is a step by hand")
+        };
+        // The unrecorded version may already match it, so no upgrade is advised.
+        assert_eq!(step, "uninstall the plugin");
+        assert_eq!(
+            reason,
+            "a plugin adds it, and blocking just this server by name with a deniedMcpServers entry needs Claude Code 2.1.182 or later, but its latest session ran 2.1.90"
+        );
+        // A command is named only when it reaches every install that is too old.
+        let Definition::Manual { step, .. } = gate(
+            blocked("p"),
+            &[&other, &native],
+            &ran(&[
+                ("other", "cli", Some("2.1.331")),
+                ("native", "cli", Some("2.1.90")),
+            ]),
+            "s.json",
+        ) else {
+            panic!("an older Claude Code is a step by hand")
+        };
+        assert!(
+            step.contains("upgrade Claude Code with `claude update` and add"),
+            "{step}"
+        );
+        // The reason names the version that failed, even when another was recorded, and
+        // advises no upgrade for a version it doesn't know.
+        let Definition::Manual { step, reason } = gate(
+            blocked("p"),
+            &both,
+            &ran(&[("native", "cli", Some("2.1.331")), ("other", "cli", None)]),
+            "s.json",
+        ) else {
+            panic!("an unrecorded Claude Code is a step by hand")
         };
         assert_eq!(step, "uninstall the plugin");
         assert!(
-            reason.starts_with(
-                "a plugin adds it, and its latest sessions ran Claude Code 2.1.90, before 2.1.182"
-            ),
-            "{reason}"
-        );
-        // The reason names the version that failed, even when another was recorded.
-        let Definition::Manual { reason, .. } = gate(blocked("p"), &[Some("2.1.331"), None]) else {
-            panic!("an unrecorded Claude Code is a step by hand")
-        };
-        assert!(
-            reason.contains("ran an unrecorded Claude Code, before"),
+            reason.ends_with("but its latest session ran an unrecorded version"),
             "{reason}"
         );
         assert!(matches!(
-            gate(blocked("p"), &[None]),
+            gate(blocked("p"), &both, &[], "s.json"),
             Definition::Manual { .. }
         ));
-        assert!(matches!(gate(blocked("p"), &[]), Definition::Manual { .. }));
+        // An Agent SDK app pinned to an old Claude Code on the same file holds the entry back,
+        // and names no upgrade, both when the interactive install already matches it and when
+        // it is old too, since upgrading the install alone would still hold the entry back.
+        for cli in ["2.1.331", "2.1.90"] {
+            let Definition::Manual { step, reason } = gate(
+                blocked("p"),
+                &[&native],
+                &ran(&[
+                    ("native", "cli", Some(cli)),
+                    ("native", "sdk-ts", Some("2.1.90")),
+                ]),
+                "s.json",
+            ) else {
+                panic!("an older SDK's Claude Code is a step by hand")
+            };
+            assert_eq!(step, "uninstall the plugin");
+            assert!(
+                reason.ends_with("but its latest session ran 2.1.90"),
+                "{reason}"
+            );
+        }
+        // When only the interactive install is old, upgrading it unlocks the entry.
+        let Definition::Manual { step, .. } = gate(
+            blocked("p"),
+            &[&native],
+            &ran(&[
+                ("native", "sdk-ts", Some("2.1.331")),
+                ("native", "cli", Some("2.1.90")),
+            ]),
+            "s.json",
+        ) else {
+            panic!("an older Claude Code is a step by hand")
+        };
+        assert!(step.contains("with `claude update` and add"), "{step}");
 
         // A tool family whose tools may belong to a longer name is not denied by its own.
         assert!(ends_at(

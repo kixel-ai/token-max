@@ -254,6 +254,7 @@ pub fn make_ttl_check(profile: &str, bucket: Bucket, action: Action, recommended
             assumptions: vec![],
             uncertainty: vec![],
             sources: vec![],
+            upgrade: None,
         },
         window_basis_kind: WindowBasisKind::Available,
         bucket,
@@ -288,6 +289,7 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
         outranking_files: vec![],
         ttl_directories: IndexMap::default(),
         claude_config: None,
+        updater: None,
         codex_system_config: None,
         switched_off: vec![],
         pretended_on: vec![],
@@ -378,6 +380,8 @@ pub struct ReportLine {
     /// The line under it naming its default and what the current value saves against it;
     /// empty when the setting is at its default.
     pub default: String,
+    /// The line after any default advising a harness upgrade; empty when there is none.
+    pub upgrade: String,
     /// What the setting or feature does, the first line after any default in a details
     /// report; empty otherwise.
     pub what: String,
@@ -437,8 +441,10 @@ fn collapse(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The setting lines of a plain, unwrapped report, in order.
+/// The setting lines of a plain, unwrapped report, in order. Under `--details`, the lines a
+/// line of EVERYTHING ELSE lists take its place, as they would have been listed alone.
 pub fn report_lines(text: &str) -> Vec<ReportLine> {
+    const MARKS: [&str; 5] = ["change", "consider", "keep", "unknown", "info"];
     let mut group = None;
     let mut rows = vec![];
     // Every line but the header sits inside the report's margin.
@@ -446,6 +452,11 @@ pub fn report_lines(text: &str) -> Vec<ReportLine> {
         .lines()
         .map(|l| l.strip_prefix("  ").unwrap_or(l))
         .collect();
+    // A member of an EVERYTHING ELSE line, two cells in under it.
+    let member = |line: &str| {
+        line.strip_prefix("  ")
+            .is_some_and(|l| MARKS.contains(&l.split(' ').next().unwrap_or_default()))
+    };
     for (i, line) in lines.iter().enumerate() {
         if line.starts_with("CHANGES  ") {
             group = Some(true);
@@ -459,9 +470,15 @@ pub fn report_lines(text: &str) -> Vec<ReportLine> {
         if line.starts_with("EVIDENCE") {
             break;
         }
-        let word = line.split(' ').next().unwrap_or_default();
         let Some(change) = group else { continue };
-        if !["change", "consider", "keep", "unknown", "info"].contains(&word) || line.len() < 9 {
+        let nested = !change && member(line);
+        let line = if nested { &line[2..] } else { line };
+        let word = line.split(' ').next().unwrap_or_default();
+        if !MARKS.contains(&word) || line.len() < 9 {
+            continue;
+        }
+        // A line listing others, which follow it.
+        if !change && !nested && lines.get(i + 1).is_some_and(|l| member(l)) {
             continue;
         }
         let rest = &line[9..];
@@ -469,16 +486,21 @@ pub fn report_lines(text: &str) -> Vec<ReportLine> {
             Some(at) => (&rest[..at], &rest[at..]),
             None => (rest, ""),
         };
+        let indent = " ".repeat(if nested { 11 } else { 9 });
         let under = |n: usize| {
             lines
                 .get(i + n)
-                .and_then(|l| l.strip_prefix("         "))
+                .and_then(|l| l.strip_prefix(indent.as_str()))
                 .unwrap_or_default()
         };
         let default = Some(under(1))
             .filter(|l| l.starts_with("default "))
             .unwrap_or_default();
         let skip = usize::from(!default.is_empty());
+        let upgrade = Some(under(1 + skip))
+            .filter(|l| !l.starts_with("What: "))
+            .unwrap_or_default();
+        let skip = skip + usize::from(!upgrade.is_empty());
         let what = under(1 + skip).strip_prefix("What: ").unwrap_or_default();
         let evidence = if what.is_empty() { "" } else { under(2 + skip) };
         rows.push(ReportLine {
@@ -487,6 +509,7 @@ pub fn report_lines(text: &str) -> Vec<ReportLine> {
             head: collapse(head),
             setting: collapse(setting),
             default: default.into(),
+            upgrade: upgrade.into(),
             what: what.into(),
             evidence: evidence.into(),
         });

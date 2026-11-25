@@ -30,6 +30,8 @@ Each run:
   transcripts goes to `doctor`, not measurable to `vibes`, and anything an
   existing check reads gets checked against that check. Skips what an earlier
   run rejected, listed below, unless the release changed it.
+- Plans a new version gate through `Needs` in `src/version.rs`, so its line
+  or card recommends the upgrade as the others do.
 - Diffs the Code intelligence card's `SERVERS` table (`src/lsp.rs`) against
   the language server entries of
   [anthropics/claude-plugins-official](https://github.com/anthropics/claude-plugins-official)'s

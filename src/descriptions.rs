@@ -191,6 +191,9 @@ pub fn claude_tool(name: &str) -> Option<&'static str> {
     })
 }
 
+/// What the prompt cache TTLs are, for the section holding the main agent's and subagents'.
+pub const CACHE_TTLS: &str = "How long the main conversation's and subagents' prompts stay cached between requests: a 1h cache costs more to write than 5m but survives longer pauses.";
+
 /// What a kind of feature is, for a walk question that groups several of them.
 pub fn kind(kind: ContextKind) -> &'static str {
     match kind {

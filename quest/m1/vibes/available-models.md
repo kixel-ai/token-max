@@ -41,5 +41,6 @@ Recommendations:
 - A list from a managed source token-max can't read (the admin console)
   leaves both cards advisory; say so in the text.
 
-0.1.0 need not wait for it: an allowlist is an organization's managed setup,
-and an `advisorModel` it blocks adds no billable calls.
+0.1.0 need not wait for it: an allowlist is uncommon (mostly an
+organization's managed setup, though user, project and local settings can set
+one too), and an `advisorModel` it blocks adds no billable calls.

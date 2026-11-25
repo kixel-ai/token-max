@@ -602,9 +602,10 @@ line under it says which version the setting needs, which version the latest
 session ran, and to upgrade. `vibes`' window cap and
 subagent default cards and a step by hand to block an MCP server say so too. token-max never upgrades a
 harness itself. A version the session didn't record, or one that isn't plain
-digits, holds the setting back as "an unrecorded version" or "a version
-token-max cannot read" but advises no upgrade and names no command, since that
-release may already meet it.
+digits, still holds the setting back but advises no upgrade and names no
+command, since that release may already meet it: a `doctor` line then gets no
+upgrade line, and a card or step by hand that explains the wait calls it "an
+unrecorded version" or "a version token-max cannot read".
 
 Every request on a settings file counts toward whether its setting applies,
 but only Claude Code's interactive clients (`cli`, `claude-vscode` and

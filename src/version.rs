@@ -36,15 +36,18 @@ pub(crate) fn installed<'a>(
     members: &[&'a Profile],
     requests: impl IntoIterator<Item = &'a Request>,
 ) -> Vec<(&'a Profile, Option<&'a str>)> {
+    latest_where(members, requests, interactive)
+}
+
+/// Whether an upgrade of `profile`'s own install reaches the client that sent `request`.
+fn interactive(profile: &Profile, request: &Request) -> bool {
     // T3 runs its own binary under each instance's profile, and Codex profiles count every request.
-    latest_where(members, requests, |p, r| {
-        p.harness != Harness::Claude
-            || p.t3.is_some()
-            || matches!(
-                r.client.as_deref(),
-                Some("cli" | "claude-vscode" | "ssh-remote")
-            )
-    })
+    profile.harness != Harness::Claude
+        || profile.t3.is_some()
+        || matches!(
+            request.client.as_deref(),
+            Some("cli" | "claude-vscode" | "ssh-remote")
+        )
 }
 
 fn latest_where<'a>(
@@ -140,6 +143,21 @@ impl Needs {
             command,
             several: installs.len() > 1,
         })
+    }
+
+    /// Advice to upgrade the interactive installs of `members`, when they are the only clients
+    /// too old for this version. None when every one meets it, or when another client on a
+    /// member's settings file, which pins its own Claude Code, is also too old, since upgrading
+    /// the installs alone would still leave the setting held back.
+    pub fn advice<'a, R>(self, members: &[&'a Profile], requests: R) -> Option<Upgrade>
+    where
+        R: IntoIterator<Item = &'a Request> + Clone,
+    {
+        let pinned = latest_where(members, requests.clone(), |p, r| !interactive(p, r));
+        if pinned.iter().any(|(_, v)| !self.met(*v)) {
+            return None;
+        }
+        self.upgrade(installed(members, requests))
     }
 }
 

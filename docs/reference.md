@@ -607,7 +607,9 @@ but only Claude Code's interactive clients (`cli`, `claude-vscode` and
 `ssh-remote`, main agent or subagent) say which version to upgrade: an Agent
 SDK app, remote session or MCP client on the same file pins its own Claude
 Code, which `claude update` doesn't reach. Such a client holds the line back
-without advising an upgrade. The idle compaction toggle, which only an
+without advising an upgrade, and while its own latest version is also too old
+the line advises none at all, since upgrading the interactive install alone
+would still leave it held back. The idle compaction toggle, which only an
 interactive client runs, is judged by interactive requests alone. A T3
 instance's own requests and every Codex request count.
 

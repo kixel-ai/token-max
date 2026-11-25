@@ -689,13 +689,11 @@ fn ttl_check(
     let pinnable = current.value.is_none() && current.reason == TTL_BILLING_UNKNOWN;
     let settable = current.value.is_some() || pinnable;
     let applies = supported && settable;
-    // Advice names only the install an upgrade reaches, never an SDK app's pinned one.
-    let upgrade = upgrade.filter(|_| settable).and_then(|_| {
-        TTL_CONTROLS.upgrade(crate::version::installed(
-            &group.members,
-            requests.iter().copied(),
-        ))
-    });
+    // Advice names only the install an upgrade reaches, and none while an SDK app on the
+    // same file is also too old.
+    let upgrade = upgrade
+        .filter(|_| settable)
+        .and_then(|_| TTL_CONTROLS.advice(&group.members, requests.iter().copied()));
     let action = match recommended {
         Some(recommended) if applies => {
             if Some(recommended) != current.value {
@@ -1561,6 +1559,19 @@ mod tests {
             (upgrade.needs, upgrade.ran.as_deref()),
             (TTL_CONTROLS, Some("2.1.100"))
         );
+        // An SDK app on the same file just as old would still hold it back after the
+        // install's upgrade, so neither names one; a new enough one leaves the advice.
+        let mut sdk = s.requests[0].clone();
+        sdk.id = "sdk".into();
+        sdk.time -= 1;
+        sdk.client = Some("sdk-ts".into());
+        s.requests.insert(0, sdk);
+        let both = check(&s, None, 100);
+        assert_eq!(both.base.action, Action::Advisory);
+        assert_eq!(both.base.upgrade, None);
+        s.requests[0].version = Some("2.1.242".into());
+        assert!(check(&s, None, 100).base.upgrade.is_some());
+        s.requests.remove(0);
         s.requests[0].parts[0].model = Some("private-internal".into());
         let result = check(&s, None, 100);
         assert_eq!(result.base.recommended, None);

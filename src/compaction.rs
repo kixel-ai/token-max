@@ -1869,7 +1869,6 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             .collect();
         // What each profile's next session runs, whichever model it last used.
         let versions = crate::version::latest(&group.members, requests.iter().copied());
-        let installed = crate::version::installed(&group.members, requests.iter().copied());
         let selected: Vec<&Request> = requests
             .iter()
             .copied()
@@ -2246,10 +2245,11 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             } else {
                 None
             };
-            // Advice names only the install an upgrade reaches, never an SDK app's pinned one.
+            // Advice names only the install an upgrade reaches, and none while an SDK app on the
+            // same file is also too old.
             let upgrade = upgrade
                 .filter(|_| unlocked)
-                .and_then(|_| needs.upgrade(installed.iter().copied()));
+                .and_then(|_| needs.advice(&group.members, requests.iter().copied()));
             let profiles: IndexSet<&String> =
                 selected.iter().flat_map(|r| r.profiles.iter()).collect();
             let savings = winning
@@ -6067,6 +6067,12 @@ mod tests {
             for r in &mut old.requests {
                 r.client = Some("claude-vscode".into());
             }
+            // An SDK app on the same file just as old would still hold it back after the
+            // install's upgrade, so neither names one.
+            old.requests[0].client = Some("sdk-ts".into());
+            assert_eq!(check(&old).base.upgrade, None);
+            // Once only the interactive install is too old, upgrading it unlocks the window.
+            old.requests[0].version = Some("2.1.288".into());
             let c = check(&old);
             assert_eq!(c.base.action, Action::Advisory);
             let upgrade = c.base.upgrade.expect("only the version holds it back");
@@ -6106,6 +6112,7 @@ mod tests {
             );
             for r in &mut old.requests {
                 r.version = Some("3.unverified".into());
+                r.client = Some("claude-vscode".into());
             }
             let c = check(&old);
             assert_eq!(c.base.action, Action::Advisory);

@@ -5614,6 +5614,13 @@ mod tests {
             let declined = crate::vibes::settled(vec![item.clone()], &[Origin::Check(index + 1)]);
             assert_eq!(declined[0].after, []);
             assert_eq!(declined[0].text, item.text);
+            // A replay that changed nothing but left a part unpriced does not claim equal costs.
+            let CheckResult::Compaction(c) = &mut report.checks[index] else {
+                unreachable!()
+            };
+            let cap = c.cap.as_mut().unwrap();
+            cap.comparison_cost.unknown.push("synthetic unpriced part".into());
+            assert!(!card(&report).text.contains("costs the same"));
             // A cap the replay priced says what it costs against the current window.
             let CheckResult::Compaction(c) = &mut report.checks[index] else {
                 unreachable!()
@@ -5626,7 +5633,7 @@ mod tests {
             let text = card(&report).text;
             assert!(
                 text.contains(&format!(
-                    " Against the 600k window, its replay of a 400k window costs {} more at API prices. ",
+                    " Against the 600k window, both at a 5m main-session cache TTL, its replay of a 400k window costs {} more at API prices. ",
                     crate::report::approx(0.5 * scale, None, "/mo")
                 )),
                 "{text}"
@@ -5653,12 +5660,11 @@ mod tests {
                 ),
                 "{text}"
             );
-            // An unpriced cap is unmeasured too.
+            // An unpriced cap says so, even at an assumed tier: recording it would not price it.
             let CheckResult::Compaction(c) = &mut report.checks[index] else {
                 unreachable!()
             };
             let cap = c.cap.as_mut().unwrap();
-            cap.comparison_cost.assumptions.clear();
             cap.savings_usd = None;
             let text = card(&report).text;
             assert!(

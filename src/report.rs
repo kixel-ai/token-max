@@ -4821,13 +4821,21 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
     // A cap priced at an assumed service tier is unmeasured even when the line's winner is
     // settled, since no tier reversing the winner says nothing of the cap.
     let replayed = c.scenarios.iter().chain(&c.cap).find(|s| s.window == cap);
-    let assumed = replayed.is_some_and(|s| {
-        crate::prices::tier_sensitive(&s.comparison_cost)
-            || crate::prices::tier_sensitive(&s.baseline_comparison_cost)
-    });
+    // An unpriced replay says so first: recording the tier would not price it.
+    let saving = replayed.and_then(|s| s.savings_usd);
+    let assumed = saving.is_some()
+        && replayed.is_some_and(|s| {
+            crate::prices::tier_sensitive(&s.comparison_cost)
+                || crate::prices::tier_sensitive(&s.baseline_comparison_cost)
+        });
     let priced = replayed.filter(|_| !assumed).and_then(|s| {
-        let changes = s.affected_requests > 0 || !s.added.is_empty();
-        Some((s.savings_usd?, s.margin, changes))
+        // Equal only when the replay changed nothing and left nothing unpriced.
+        let same = s.savings_usd == Some(0.0)
+            && s.affected_requests == 0
+            && s.added.is_empty()
+            && s.comparison_cost.unknown.is_empty()
+            && s.baseline_comparison_cost.unknown.is_empty();
+        Some((s.savings_usd?, s.margin, same))
     });
     let against = match (doctor, c.base.current) {
         (Doctor::Wrote(_), Some(w)) => format!("the {} window before that change", tokens(w)),
@@ -4836,11 +4844,11 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
     };
     let cost = match priced {
         // Every recorded context stayed under the cap, so its replay is the window's own.
-        Some((_, _, false)) => format!(
+        Some((_, _, true)) => format!(
             "Against {against}, its replay of a {} window changes no recorded request, so it costs the same at API prices.",
             tokens(cap)
         ),
-        Some((usd, margin, true)) => {
+        Some((usd, margin, false)) => {
             let scale = monthly(1.0, c.base.since, c.base.until);
             let margin = margin.map(|m| m.scale(scale));
             let usd = usd * scale;
@@ -4849,8 +4857,13 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
             } else {
                 format!("saves {}", approx(usd, margin, "/mo"))
             };
+            // Both windows replay the TTL doctor's TTL line recommends, which may not be today's.
+            let ttl = c.ttls.main.map_or_else(
+                || ",".into(),
+                |t| format!(", both at a {} main-session cache TTL,", t.as_str()),
+            );
             format!(
-                "Against {against}, its replay of a {} window {amount} at API prices.",
+                "Against {against}{ttl} its replay of a {} window {amount} at API prices.",
                 tokens(cap)
             )
         }
@@ -5740,7 +5753,7 @@ fn summary(
                         )
                     }
                     Mark::Keep => format!(
-                        "No other window was cheaper, replayed assuming the same sessions.{}{} {set_in}",
+                        "No other candidate window was cheaper, replayed assuming the same sessions.{}{} {set_in}",
                         assumed_tier(r),
                         context_rot(report, result)
                     ),

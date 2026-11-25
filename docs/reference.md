@@ -1481,9 +1481,11 @@ The card names the line's verdict, which weighs cost alone, and stays apart
 from it. Where the window is above the cap, the line's replay prices the cap
 beside its own candidates but never recommends it: the verdict stays the best
 of the windows the evidence names, and `--details` lists the cap's replay
-apart from them. The card gives what the cap saves or costs every 30 days
-against the current window, or says what the cap costs is not measured, and
-why: the replay could not price it, or priced it at an assumed service tier.
+after them. When the evidence names the cap's window itself, such as a
+measured resumed prefix of exactly 240K, it is an ordinary candidate. The card gives what the cap saves or costs every 30 days
+against the current window, both at the cache TTL the line replays, or says
+what the cap costs is not measured, and why: the replay could not price it,
+or priced it at an assumed service tier.
 
 The cap goes through the same edit the line's own change makes: where the
 owner holds it, as a model's `modelSettings` row, or, under

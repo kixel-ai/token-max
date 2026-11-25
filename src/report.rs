@@ -4869,7 +4869,10 @@ fn advisor_row(u: &AdvisorUse, control: Option<&AdvisorControl>, out: &Out<'_>) 
         }
         AdvisorLine::T3 { owner } => (
             "T3 Code threads made these calls, and no native advisor line is confirmed to name the advisorModel they read, which is not read here: T3 picks each thread's main model, so its instances get no advisor card.".into(),
-            out.home(owner),
+            owner.as_ref().map_or_else(
+                || "unresolved: T3 launch settings may replace its settings file".into(),
+                |o| out.home(o),
+            ),
         ),
         AdvisorLine::Removed => (
             "A T3 instance since removed from T3's settings made these calls, so no setting of its own is left to change.".into(),
@@ -11082,7 +11085,7 @@ mod tests {
         report.advisor = vec![
             used(
                 AdvisorLine::T3 {
-                    owner: "/synthetic/t3/settings.json:advisorModel".into(),
+                    owner: Some("/synthetic/t3/settings.json:advisorModel".into()),
                 },
                 &["t3"],
                 1.5,
@@ -11117,6 +11120,20 @@ mod tests {
             lines[1].evidence
         );
         assert!(details.contains("shared, profile attribution unknown"));
+        assert!(
+            lines[0].setting.contains("advisorModel"),
+            "{}",
+            lines[0].setting
+        );
+        // An instance whose launch settings are unresolved names no file's setting.
+        report.advisor[0].line = AdvisorLine::T3 { owner: None };
+        let details = text(&report, None, true);
+        let line = report_lines(&details)
+            .into_iter()
+            .find(|l| l.head.starts_with("Advisor model"))
+            .unwrap();
+        assert!(line.setting.contains("unresolved"), "{}", line.setting);
+        assert!(!line.setting.contains("advisorModel"), "{}", line.setting);
     }
 
     #[test]

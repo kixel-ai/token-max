@@ -963,8 +963,8 @@ pub enum AdvisorLine {
     /// settings file.
     Settings,
     /// T3 instances that read no native line's settings file; `owner` is that file's
-    /// `advisorModel`.
-    T3 { owner: String },
+    /// `advisorModel`, None when unresolved launch settings may replace the file.
+    T3 { owner: Option<String> },
     /// A T3 instance since removed from T3's settings, whose retained history still names it.
     Removed,
     /// Requests naming profiles on several lines, as when two config roots read one

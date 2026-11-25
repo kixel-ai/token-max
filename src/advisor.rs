@@ -261,9 +261,11 @@ pub fn advisor_use(scan: &Scan, catalog: &Catalog, since: Option<Millis>) -> Vec
         lines.push((line.ids, ids, AdvisorLine::Settings));
     }
     // The rest read a file no card does, as in a scan of only `--t3-dir`.
+    let unresolved = |p: &Profile| p.t3.as_ref().is_some_and(|t| t.settings_unresolved);
+    // Unresolved launch settings leave the file unknown, and the instance on a line of its own.
     for line in crate::rows::groups(t3, |p| format!("{}:", p.settings_file)) {
-        let owner = format!("{}:{KEY}", line.lead.settings_file);
-        owners.push(owner.clone());
+        let owner = (!unresolved(line.lead)).then(|| format!("{}:{KEY}", line.lead.settings_file));
+        owners.push(owner.clone().unwrap_or_default());
         lines.push((line.ids.clone(), line.ids, AdvisorLine::T3 { owner }));
     }
     // A removed instance's retained requests name its old key, which no profile has.
@@ -768,10 +770,15 @@ mod tests {
         assert_eq!(
             lines[0].line,
             AdvisorLine::T3 {
-                owner: "/synthetic/other/settings.json:advisorModel".into()
+                owner: Some("/synthetic/other/settings.json:advisorModel".into())
             }
         );
         assert_eq!((lines[0].requests, lines[0].calls), (1, 1));
+        // Unresolved launch settings may replace that file, so the line names no setting.
+        scan.profiles[0].t3.as_mut().unwrap().settings_unresolved = true;
+        let lines = advisor_use(&scan, &catalog, None);
+        assert_eq!(lines[0].line, AdvisorLine::T3 { owner: None });
+        scan.profiles[0].t3.as_mut().unwrap().settings_unresolved = false;
         // A removed instance's retained requests keep its old key, and a line of their own.
         let gone = crate::t3::profile_key("/state", "gone");
         scan.t3.push(crate::model::T3State {

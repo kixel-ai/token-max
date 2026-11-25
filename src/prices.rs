@@ -123,12 +123,18 @@ fn service_tier<'a>(r: &'a Request, p: &'a BillingPart) -> Result<&'a str, &'sta
     }
     // An advisor call records no tier of its own, and Priority Tier needs a commitment on
     // each model, so under an executor at standard the call is too, barring a commitment on
-    // the advisor model alone. A summary request's executor iterations are compaction.
+    // the advisor model alone. A summary request's executor iterations are compaction, so
+    // those count only when the request has no message iteration.
     if p.kind == PartKind::Advisor {
+        let kind = if r.parts.iter().any(|e| e.kind == PartKind::Message) {
+            PartKind::Message
+        } else {
+            PartKind::Compaction
+        };
         let mut executor = r
             .parts
             .iter()
-            .filter(|e| matches!(e.kind, PartKind::Message | PartKind::Compaction))
+            .filter(|e| e.kind == kind)
             .map(|e| e.tier.as_deref().map(tier_name));
         let first = executor.next().flatten();
         return match first {
@@ -1705,6 +1711,27 @@ mod tests {
             let last = r.parts.last().unwrap();
             assert_eq!(price_part(&catalog, &r, last).total_usd, None, "{tiers:?}");
         }
+        // A standard message iteration decides the tier over a tierless compaction one, and a
+        // summary request's standard compaction iteration decides it when no message exists.
+        let compaction = BillingPart {
+            kind: PartKind::Compaction,
+            tier: None,
+            ..r.parts[0].clone()
+        };
+        let mut mixed = r.clone();
+        mixed.parts = vec![r.parts[0].clone(), compaction.clone(), advisor.clone()];
+        let last = mixed.parts.last().unwrap();
+        assert!(price_part(&catalog, &mixed, last).total_usd.is_some());
+        let mut summary = r.clone();
+        summary.parts = vec![
+            BillingPart {
+                tier: r.parts[0].tier.clone(),
+                ..compaction
+            },
+            advisor.clone(),
+        ];
+        let last = summary.parts.last().unwrap();
+        assert!(price_part(&catalog, &summary, last).total_usd.is_some());
     }
 
     /// Recorded Codex usage, normalized as the reader does.

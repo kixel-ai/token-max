@@ -1413,6 +1413,7 @@ an exit code.
 | [Transcript retention](#transcript-retention) | A Claude profile whose `cleanupPeriodDays` is under 365, the default of 30 included: the disk its transcripts take, and the change to 365. |
 | [Auto-compact window](#auto-compact-window-cap) | Every compaction window line: the maintainer's cap of 400K for Claude and 240K for Codex, beside `doctor`'s replay of it. |
 | [Main-session default](#main-session-default) | Every resolved main-session default: the maintainer's pick of a model and effort beside what each recorded pair cost, and past `high` the provider's guidance. |
+| [Subagent default](#subagent-default) | A profile that sets `CLAUDE_CODE_SUBAGENT_EFFORT` or Codex's `agents.default_subagent_reasoning_effort`: past `high` the provider's guidance and the change to `high`, and an upgrade when the latest Claude Code ignores the variable. |
 | An instruction file | A CLAUDE.md of 200 lines or more, past Claude Code's [guidance](https://code.claude.com/docs/en/memory#write-effective-instructions), or an AGENTS.md at or above the byte budget Codex [loads](https://learn.chatgpt.com/docs/agent-configuration/agents-md), with what each 100 lines of it costs. |
 | Explore subagent | Claude's built-in Explore ran off Haiku: what it cost, the same tokens on the cheapest model, the model guide's tip, and the agent file that follows it as a step by hand. |
 | Fable weekly use | Any Fable request in the window: what they cost, and Anthropic's [plan rule](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan). |
@@ -1586,6 +1587,44 @@ either setting, or a `maxEffortLevel` below the pick's level would lower it,
 the whole change is a step by hand naming each setting; so is a new model on
 a cloud provider, such as Bedrock, which spells model IDs its own way, whether
 the profile's or the project's settings turn it on. A Codex level with no model set or recorded has no card.
+
+### Subagent default
+
+A profile that sets a default subagent effort, Claude Code's
+`CLAUDE_CODE_SUBAGENT_EFFORT` or Codex's
+`agents.default_subagent_reasoning_effort`, gets a card naming the level and
+the model it pairs with: `CLAUDE_CODE_SUBAGENT_MODEL` or
+`agents.default_subagent_model` when set, else the main session's model. It
+applies when neither the Agent call nor the agent's definition names an
+effort. Unset, subagents follow the main session, which the
+[`Main-session default`](#main-session-default) card covers, so there is no
+card.
+
+Past `high`, the card quotes the same provider guidance as the main-session
+card and offers the maintainer's pick, `high`, which every model that takes
+effort accepts. The edit sets the variable where it is set now: `env` in the
+profile's Claude `settings.json` or the key in its Codex `config.toml`. A
+shell variable, a T3 instance's own `environment` entry, or another file that
+sets it makes the change a step by hand naming that setting.
+An agent file's `effort:` or an Agent call's effort overrides the default and
+is left alone; the [subagent lines](#subagent-models) show it. At or below
+`high` the card advises nothing.
+
+Claude Code reads `CLAUDE_CODE_SUBAGENT_EFFORT` from 2.1.316
+([changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md)).
+When a profile's latest request ran an older Claude Code, the card says the
+variable is ignored and advises upgrading; past `high` it still offers the
+change to `high`, which applies once Claude Code is upgraded. Profiles that
+share the setting but pair it with different subagent models get a card each.
+Only the profile's own settings and environment, or a T3 instance's, are
+read; a project's settings that set the variable are not.
+
+A T3 instance can set these variables as secret or sensitive entries, which
+token-max never reads. A secret subagent model, `_MODEL_FORCE` or Explore cap
+gets its own card that names the model as one token-max cannot resolve and
+says which entry it couldn't read. A secret effort gives no card, and the
+[subagent lines](#subagent-models) mark only the effort unresolved, keeping
+their model attribution.
 
 ### Auto memory in vibes
 

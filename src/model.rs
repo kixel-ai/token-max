@@ -1114,6 +1114,9 @@ pub struct AgentControls {
     pub declared: IndexMap<String, String>,
     /// Why these controls may not be the ones a run used, such as a project of unknown trust.
     pub unresolved: Option<String>,
+    /// Why the default subagent effort alone can't be read, such as a secret value; the
+    /// model's attribution still holds.
+    pub effort_unresolved: Option<String>,
     /// The controls at each recorded subagent working directory whose project settings or
     /// agent files change them; other directories use these.
     pub directories: IndexMap<String, AgentControls>,

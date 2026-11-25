@@ -389,7 +389,7 @@ fn holds_its_tools(server: &str) -> bool {
 }
 
 /// The Claude Code each profile in `ids` last recorded a request from, for those with any.
-fn claude_versions<'r>(report: &'r Report, ids: &[&str]) -> Vec<Option<&'r str>> {
+pub(crate) fn claude_versions<'r>(report: &'r Report, ids: &[&str]) -> Vec<Option<&'r str>> {
     ids.iter()
         .filter_map(|id| {
             let mut requests = report.scan.requests.iter().rev();
@@ -878,6 +878,29 @@ pub(crate) fn default_how(control: &EffortControl, profile: &Profile) -> Option<
         harness: profile.harness,
         edits,
     }))
+}
+
+/// How to set the default subagent effort to `level` where `owner` sets it now: the
+/// profile's own file is edited, any other owner is a step by hand.
+pub(crate) fn subagent_effort_how(owner: &str, profile: &Profile, level: &str) -> How {
+    let (key, edit) = match profile.harness {
+        Harness::Claude => (
+            "env.CLAUDE_CODE_SUBAGENT_EFFORT",
+            env("CLAUDE_CODE_SUBAGENT_EFFORT", level),
+        ),
+        Harness::Codex => (
+            "agents.default_subagent_reasoning_effort",
+            Edit::set("agents.default_subagent_reasoning_effort", level),
+        ),
+    };
+    // T3 keeps an instance's variables as entries named in a list.
+    let step = match owner.rsplit_once(".environment.") {
+        Some((list, key)) if list.contains(":providerInstances.") => {
+            format!("set the {key} entry in {list}.environment to {level}")
+        }
+        _ => format!("set {owner} to {level}"),
+    };
+    owned(owner, profile, vec![(key.into(), vec![edit])], step)
 }
 
 /// The edit that sets a main-session default level at `key` in the profile's own file, or

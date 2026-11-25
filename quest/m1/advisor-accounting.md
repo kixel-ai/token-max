@@ -64,8 +64,10 @@ Recommendations for the open findings:
 
 - Give a T3 instance with no native line its own advisor line, with no card,
   rather than dropping its calls.
-- Count a request shared across advisor lines the way `src/fable.rs` does,
-  and say so on the line.
+- Count a request shared across advisor lines once, in a shared entry of
+  its own rather than in full on each line (`src/fable.rs` marks such a
+  request shared but still adds it to every line), and say so on the lines
+  it touches.
 - Treat an advisor iteration with no model as possibly Fable in the Fable
   line's coverage note.
 - Keep `advisor_message` iterations out of compaction reclassification.

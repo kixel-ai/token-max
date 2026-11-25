@@ -1114,8 +1114,9 @@ impl Reader {
         }
     }
 
-    /// Bring `reading`'s counts up to date with the requests read so far.
-    fn count(&mut self, reading: &Reading, profiles: &[Profile]) {
+    /// Bring `reading`'s counts up to date with the requests read so far, priced at `catalog`
+    /// when it has loaded.
+    fn count(&mut self, reading: &Reading, catalog: Option<&Catalog>, profiles: &[Profile]) {
         let Some(tally) = &mut self.requests.tally else {
             return;
         };
@@ -1127,7 +1128,7 @@ impl Reader {
                 modern: &self.modern_totals,
                 subagents: &self.subagents,
                 profiles: Some(profiles),
-                catalog: reading.catalog.get(),
+                catalog,
             },
         );
         *reading
@@ -2157,10 +2158,10 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
                 let read = finished + records.position;
                 reading.read.store(read, Ordering::Relaxed);
                 let now = Instant::now();
-                let prices = reading.catalog.get().is_some();
-                if pace.due(now, prices) {
-                    reader.count(reading, &profiles);
-                    pace.counted(now, Instant::now(), prices);
+                let catalog = reading.catalog.get();
+                if pace.due(now, catalog.is_some()) {
+                    reader.count(reading, catalog, &profiles);
+                    pace.counted(now, Instant::now(), catalog.is_some());
                 }
             }
         }

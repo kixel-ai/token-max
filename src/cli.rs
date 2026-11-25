@@ -274,9 +274,13 @@ struct Meter {
 }
 
 /// What the progress line shows: the current phase and when it began, how far the local scan
-/// has read, and what the hosts count to.
+/// has read, and what the hosts count to. It outlives each [`Meter`] that draws it, so a host's
+/// totals count from whenever they arrive.
 struct Shown {
+    /// The phase, empty while no meter draws the line.
     phase: Mutex<(&'static str, Instant)>,
+    /// What the line last showed before its figures, unless the reading bar.
+    head: Mutex<String>,
     reading: Arc<Reading>,
     /// Each host's counts by its index, this host's first, once its report is rendered.
     hosts: Mutex<Vec<Option<Counts>>>,
@@ -286,6 +290,17 @@ struct Shown {
 }
 
 impl Shown {
+    fn new(look: Look, reading: Arc<Reading>, whose: Option<&'static str>) -> Self {
+        Shown {
+            phase: Mutex::new(("", Instant::now())),
+            head: Mutex::new(String::new()),
+            reading,
+            hosts: Mutex::new(vec![]),
+            whose,
+            look,
+        }
+    }
+
     /// What the hosts count to so far: this host's from its scan until its report settles
     /// them, then added to each other host's in the order the report's total adds them.
     fn counts(&self) -> Option<Counts> {
@@ -307,33 +322,47 @@ impl Shown {
         sum
     }
 
-    /// Count host `index`'s settled `counts`, this host's at 0.
+    /// Count host `index`'s settled `counts`, this host's at 0, in place of what its scan
+    /// counted, and show them now, so the line never clears before showing them.
     fn settle(&self, index: usize, counts: Counts) {
-        let mut hosts = self.hosts.lock().unwrap_or_else(PoisonError::into_inner);
-        if hosts.len() <= index {
-            hosts.resize(index + 1, None);
+        {
+            let mut hosts = self.hosts.lock().unwrap_or_else(PoisonError::into_inner);
+            if hosts.len() <= index {
+                hosts.resize(index + 1, None);
+            }
+            hosts[index] = Some(counts);
         }
-        hosts[index] = Some(counts);
+        let head = self.head.lock().unwrap_or_else(PoisonError::into_inner);
+        // The reading bar's ticker shows them within its next tick.
+        if !head.is_empty() && !self.reading() {
+            let line = with(head.clone(), self.figures(), self.whose, progress_room());
+            show_progress(&line, &line);
+        }
+    }
+
+    /// Show the phase line `head` with the figures after it.
+    fn show(&self, head: String) {
+        let mut shown = self.head.lock().unwrap_or_else(PoisonError::into_inner);
+        let line = with(head.clone(), self.figures(), self.whose, progress_room());
+        show_progress(&line, &line);
+        *shown = head;
     }
 
     /// The figures that follow the phase on the line.
     fn figures(&self) -> Vec<Piece> {
-        self.counts()
-            .map(|counts| figures(&counts, self.whose))
-            .unwrap_or_default()
+        self.counts().map(|c| figures(&c)).unwrap_or_default()
+    }
+
+    fn reading(&self) -> bool {
+        let reading = &self.reading;
+        reading.read.load(Ordering::Relaxed) < reading.total.load(Ordering::Relaxed)
     }
 }
 
 impl Meter {
-    /// Start the line; `whose` names the counts when they leave other hosts out.
-    fn start(look: Look, reading: Arc<Reading>, whose: Option<&'static str>) -> Self {
-        let shared = Arc::new(Shown {
-            phase: Mutex::new(("", Instant::now())),
-            reading,
-            hosts: Mutex::new(vec![]),
-            whose,
-            look,
-        });
+    /// Start drawing `shared`.
+    fn start(shared: Arc<Shown>) -> Self {
+        *shared.phase.lock().unwrap_or_else(PoisonError::into_inner) = ("", Instant::now());
         let (stop, stopped) = mpsc::channel::<()>();
         let ticker = {
             let shared = shared.clone();
@@ -352,28 +381,32 @@ impl Meter {
                     }
                     let total = shared.reading.total.load(Ordering::Relaxed);
                     let read = shared.reading.read.load(Ordering::Relaxed);
-                    let figures = shared.figures();
                     // The local scan may still be reading after the phase moves on, as
                     // when SSH hosts' prices or reports arrive first.
-                    let (line, plain) = if read < total {
+                    if read < total {
                         let began = *began.get_or_insert_with(Instant::now);
                         let progress = Progress {
                             read,
                             total,
                             elapsed: began.elapsed(),
                         };
-                        bar(&progress, figures, shared.look, progress_room())
+                        let figures = shared.figures();
+                        let (line, plain) = bar(
+                            &progress,
+                            figures,
+                            shared.whose,
+                            shared.look,
+                            progress_room(),
+                        );
+                        show_progress(&line, &plain);
                     } else {
                         // A phase that began under the bar is timed from when reading ended.
                         let since = match total {
                             0 => since,
                             _ => since.max(*read_end.get_or_insert_with(Instant::now)),
                         };
-                        let head = busy(name, since.elapsed(), tick, shared.look.unicode);
-                        let line = with(head, figures, progress_room());
-                        (line.clone(), line)
-                    };
-                    show_progress(&line, &plain);
+                        shared.show(busy(name, since.elapsed(), tick, shared.look.unicode));
+                    }
                 }
             })
         };
@@ -393,19 +426,11 @@ impl Meter {
             .unwrap_or_else(PoisonError::into_inner);
         *current = (phase, Instant::now());
         // While this host still reads, the bar stays; the ticker shows the phase after it.
-        let reading = &self.shared.reading;
-        if reading.read.load(Ordering::Relaxed) < reading.total.load(Ordering::Relaxed) {
+        if self.shared.reading() {
             return;
         }
-        let head = busy(phase, Duration::ZERO, 0, self.shared.look.unicode);
-        let line = with(head, self.shared.figures(), progress_room());
-        show_progress(&line, &line);
-    }
-
-    /// Count host `index`'s settled `counts`, this host's at 0, in place of what its scan
-    /// counted.
-    fn settle(&self, index: usize, counts: Counts) {
-        self.shared.settle(index, counts);
+        self.shared
+            .show(busy(phase, Duration::ZERO, 0, self.shared.look.unicode));
     }
 }
 
@@ -415,6 +440,18 @@ impl Drop for Meter {
         if let Some(ticker) = self.ticker.take() {
             let _ = ticker.join();
         }
+        // Until another meter starts, a host's totals arriving draw nothing.
+        *self
+            .shared
+            .phase
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = ("", Instant::now());
+        let mut head = self
+            .shared
+            .head
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        head.clear();
         drop(clear_progress());
     }
 }
@@ -435,49 +472,47 @@ fn busy(phase: &str, elapsed: Duration, tick: usize, unicode: bool) -> String {
     line
 }
 
-/// A figure on the progress line, and how long it stays as the row narrows: the lowest
-/// `keep` is dropped first.
+/// A figure on the progress line, how long it stays as the row narrows (the lowest `keep` is
+/// dropped first), and whether it is one of the hosts' counts, which a label may name.
 struct Piece {
     text: String,
     keep: u8,
+    count: bool,
 }
 
-/// The counts as the line shows them, with `whose` they are before the first: requests and
-/// sessions as the report's header writes them, tokens short, and the spend once priced.
-fn figures(counts: &Counts, whose: Option<&str>) -> Vec<Piece> {
-    let whose = whose.map_or_else(String::new, |whose| format!("{whose}: "));
-    let requests = crate::report::plural(counts.requests, "request");
+/// The counts as the line shows them: requests and sessions as the report's header writes
+/// them, tokens short, and the spend once priced.
+fn figures(counts: &Counts) -> Vec<Piece> {
+    let piece = |text, keep| Piece {
+        text,
+        keep,
+        count: true,
+    };
     let mut pieces = vec![
-        Piece {
-            text: format!("{whose}{requests}"),
-            keep: 5,
-        },
-        Piece {
-            text: crate::report::plural(counts.sessions, "session"),
-            keep: 3,
-        },
-        Piece {
-            text: format!("{} tokens", crate::report::short(counts.tokens)),
-            keep: 2,
-        },
+        piece(crate::report::plural(counts.requests, "request"), 5),
+        piece(crate::report::plural(counts.sessions, "session"), 3),
+        piece(format!("{} tokens", crate::report::short(counts.tokens)), 2),
     ];
     if let Some(spend) = &counts.spend {
-        pieces.push(Piece {
-            text: spend.text(),
-            keep: 6,
-        });
+        pieces.push(piece(spend.text(), 6));
     }
     pieces
 }
 
 /// The pieces that fit in `room` cells after `used`, each after two spaces, dropping the
-/// least kept first; and the cells left over.
-fn fit(mut pieces: Vec<Piece>, used: usize, room: usize) -> (String, usize) {
+/// least kept first, with `whose` they are before the first count; and the cells left over.
+fn fit(mut pieces: Vec<Piece>, whose: Option<&str>, used: usize, room: usize) -> (String, usize) {
+    let label = whose.map_or_else(String::new, |whose| format!("{whose}: "));
     let width = |pieces: &[Piece]| -> usize {
-        pieces
+        let label = match pieces.iter().any(|p| p.count) {
+            true => crate::terminal::cells(&label),
+            false => 0,
+        };
+        let texts: usize = pieces
             .iter()
             .map(|p| 2 + crate::terminal::cells(&p.text))
-            .sum()
+            .sum();
+        label + texts
     };
     while used + width(&pieces) > room {
         let Some(least) = (0..pieces.len()).min_by_key(|&at| pieces[at].keep) else {
@@ -486,13 +521,22 @@ fn fit(mut pieces: Vec<Piece>, used: usize, room: usize) -> (String, usize) {
         pieces.remove(least);
     }
     let left = room.saturating_sub(used + width(&pieces));
-    let text = pieces.iter().map(|p| format!("  {}", p.text)).collect();
+    let mut text = String::new();
+    let mut labeled = false;
+    for p in &pieces {
+        text.push_str("  ");
+        if p.count && !labeled {
+            text.push_str(&label);
+            labeled = true;
+        }
+        text.push_str(&p.text);
+    }
     (text, left)
 }
 
-/// `head` followed by the `figures` that fit in `room` cells.
-fn with(head: String, figures: Vec<Piece>, room: usize) -> String {
-    let (tail, _) = fit(figures, crate::terminal::cells(&head), room);
+/// `head` followed by the `figures` that fit in `room` cells, with `whose` they are.
+fn with(head: String, figures: Vec<Piece>, whose: Option<&str>, room: usize) -> String {
+    let (tail, _) = fit(figures, whose, crate::terminal::cells(&head), room);
     head + &tail
 }
 
@@ -506,11 +550,17 @@ struct Progress {
     elapsed: Duration,
 }
 
-/// The reading bar and `figures` after it, fitted to `room` cells: how much is read, and when
-/// the rest should be, from the rate so far. What doesn't fit beside the narrowest track is
-/// dropped, least useful first, and the track widens into what is left. Returns the line and
-/// its text without color.
-fn bar(progress: &Progress, figures: Vec<Piece>, look: Look, room: usize) -> (String, String) {
+/// The reading bar and `figures` after it, with `whose` they are, fitted to `room` cells:
+/// how much is read, and when the rest should be, from the rate so far. What doesn't fit
+/// beside the narrowest track is dropped, least useful first, and the track widens into what
+/// is left. Returns the line and its text without color.
+fn bar(
+    progress: &Progress,
+    figures: Vec<Piece>,
+    whose: Option<&str>,
+    look: Look,
+    room: usize,
+) -> (String, String) {
     let Progress {
         read,
         total,
@@ -525,6 +575,7 @@ fn bar(progress: &Progress, figures: Vec<Piece>, look: Look, room: usize) -> (St
             crate::report::size(total)
         ),
         keep: 1,
+        count: false,
     }];
     // A rate needs a second of reading, and a few percent, to mean anything.
     if elapsed >= Duration::from_secs(1) && fraction >= 0.02 {
@@ -532,13 +583,14 @@ fn bar(progress: &Progress, figures: Vec<Piece>, look: Look, room: usize) -> (St
         pieces.push(Piece {
             text: format!("~{} left to read", duration(left)),
             keep: 4,
+            count: false,
         });
     }
     pieces.extend(figures);
     let lead = "token-max: Reading ";
     let (open, close) = if look.unicode { ("", "") } else { ("[", "]") };
     let used = crate::terminal::cells(lead) + open.len() + close.len() + percent.len();
-    let (rest, left) = fit(pieces, used + TRACK_CELLS.1, room);
+    let (rest, left) = fit(pieces, whose, used + TRACK_CELLS.1, room);
     let track = (TRACK_CELLS.1 + left).min(TRACK_CELLS.0);
     let rest = percent + &rest;
     // Eighths of a cell, so the bar moves smoothly on a Unicode terminal.
@@ -1403,6 +1455,7 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
     // A destination's `vibes` sends no usage, so the line counts only this host's.
     let whose = (!destinations.is_empty() && matches!(job, Job::Report { vibes: true, .. }))
         .then_some("this host");
+    let shown = progress.map(|look| Arc::new(Shown::new(look, reading.clone(), whose)));
     let scope = match job {
         Job::Report { .. } => Scope::Report { defaults },
         Job::Sessions => Scope::Sessions,
@@ -1456,6 +1509,7 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
         }
         payments.push(pay);
         hosts.push(Some(destination.clone()));
+        let shown = shown.clone();
         thread::spawn(move || {
             let audit = || {
                 let connected = ssh::connect(&destination, since, scope)?;
@@ -1472,9 +1526,14 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
                 connected.audit(paid, receiver)
             };
             let result = panic::catch_unwind(AssertUnwindSafe(audit))
-                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))
-                .map(Scanned::Remote);
-            let _ = sender.send(Arrival::Host(index, result));
+                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));
+            // Counted as it arrives, even while this host's report is still being rendered.
+            if let (Some(shown), Ok(Reply::Report(printed) | Reply::Walk { printed, .. })) =
+                (&shown, &result)
+            {
+                shown.settle(index, printed.totals.counts());
+            }
+            let _ = sender.send(Arrival::Host(index, result.map(Scanned::Remote)));
         });
     }
     let stop = |error: ScanError| {
@@ -1522,10 +1581,10 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
             for (index, pay) in (1..).zip(&payments) {
                 // Shown while a destination still connects, or this host still reads.
                 let waiting = (asking.profiles[index].is_none())
-                    .then_some(progress)
+                    .then_some(shown.clone())
                     .flatten()
-                    .map(|look| {
-                        let meter = Meter::start(look, reading.clone(), whose);
+                    .map(|shown| {
+                        let meter = Meter::start(shown);
                         meter.phase("Connecting to SSH hosts");
                         meter
                     });
@@ -1553,7 +1612,7 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
             .map_err(|_| stop(terminal_failed()))?;
     }
     drop(payments);
-    let meter = progress.map(|look| Meter::start(look, reading.clone(), whose));
+    let meter = shown.map(Meter::start);
     let phase = |message: &'static str| {
         if let Some(meter) = &meter {
             meter.phase(message);
@@ -1619,16 +1678,10 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
                     },
                     Scanned::Remote(reply) => reply,
                 });
-                // The line ends on what the report's header or total counts.
-                let totals = match &replies[index] {
-                    Some(Reply::Here(rendered)) => Some(&rendered.printed.totals),
-                    Some(Reply::Report(printed) | Reply::Walk { printed, .. }) => {
-                        Some(&printed.totals)
-                    }
-                    _ => None,
-                };
-                if let (Some(meter), Some(totals)) = (&meter, totals) {
-                    meter.settle(index, totals.counts());
+                // The line ends on what the report's header or total counts; a
+                // destination's totals counted when they arrived.
+                if let (Some(meter), Some(Reply::Here(rendered))) = (&meter, &replies[index]) {
+                    meter.shared.settle(index, rendered.printed.totals.counts());
                 }
             }
         }
@@ -2520,7 +2573,7 @@ mod tests {
                 total,
                 elapsed,
             };
-            bar(&progress, vec![], look, room)
+            bar(&progress, vec![], None, look, room)
         };
         // 1/64 of 24 cells is 3/8 of the first one.
         let (line, text) = at(1, 64, second, unicode, 200);
@@ -2600,7 +2653,7 @@ mod tests {
             total: 10_000_000_000,
             elapsed: Duration::from_secs(10),
         };
-        let reading = |counts: &Counts, room| bar(&progress, figures(counts, None), look, room).0;
+        let reading = |counts: &Counts, room| bar(&progress, figures(counts), None, look, room).0;
         assert_eq!(
             reading(&counts, 200),
             format!(
@@ -2630,15 +2683,24 @@ mod tests {
         }
         let checking = busy("Checking settings", Duration::from_secs(12), 3, true);
         let after =
-            |counts: &Counts, whose, room| with(checking.clone(), figures(counts, whose), room);
+            |counts: &Counts, whose, room| with(checking.clone(), figures(counts), whose, room);
         assert_eq!(
             after(&counts, None, 79),
             "token-max: Checking settings... ⠸ 12s  78,786 requests  ~$4,081 ± $2.04"
         );
-        // Under `vibes --ssh` the counts are this host's alone.
+        // Under `vibes --ssh` the counts are this host's alone, which the label says before
+        // whichever count is left first.
         assert_eq!(
             after(&counts, Some("this host"), 200),
             "token-max: Checking settings... ⠸ 12s  this host: 78,786 requests  1,798 sessions  1.9B tokens  ~$4,081 ± $2.04"
+        );
+        assert_eq!(
+            after(&counts, Some("this host"), 70),
+            "token-max: Checking settings... ⠸ 12s  this host: ~$4,081 ± $2.04"
+        );
+        assert_eq!(
+            bar(&progress, figures(&counts), Some("this host"), look, 70).0,
+            "token-max: Reading ████████░░░░░░░░░░  45%  this host: ~$4,081 ± $2.04"
         );
         // Before prices load, the counts show without a spend.
         counts.spend = None;
@@ -2662,16 +2724,11 @@ mod tests {
             ..Totals::default()
         };
         let (here, there) = (host(700, 41.3, 0.7), host(300, 12.1, 2.4));
-        let shown = Shown {
-            phase: Mutex::new(("", Instant::now())),
-            reading: Arc::new(Reading::default()),
-            hosts: Mutex::new(vec![]),
-            whose: None,
-            look: Look {
-                color: false,
-                unicode: false,
-            },
+        let look = Look {
+            color: false,
+            unicode: false,
         };
+        let shown = Shown::new(look, Arc::new(Reading::default()), None);
         assert_eq!(shown.counts(), None);
         let read = Counts {
             requests: 650,

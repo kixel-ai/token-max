@@ -5,16 +5,17 @@
 //! The counts follow the report header's rules on what the read loop knows, so they near the
 //! header's as reading ends; the analysis then replaces them with the header's own.
 
+use std::collections::BTreeMap;
+
 use crate::collections::{HashMap, HashSet, IndexMap};
-use crate::model::{Harness, Millis, Profile, Profiles, Request, Subagent, Text, Usd};
+use crate::model::{Estimate, Harness, Millis, Profile, Profiles, Request, Subagent, Text, Usd};
 use crate::prices::{Catalog, Sample, price_request};
 use crate::totals::{Counts, Spent};
 
 /// What one request adds to the counts.
 struct Counted {
     tokens: u64,
-    /// The session it counts in: its own, or the one that spawned its subagent.
-    root: Text,
+    session: Text,
     /// The profiles that share its history, sorted, as the header groups its spend.
     group: Profiles,
     /// What it costs at API prices, once prices load.
@@ -22,6 +23,7 @@ struct Counted {
 }
 
 /// A request's price: whole, or only what is known of it.
+#[derive(Clone, Copy)]
 enum Cost {
     Priced(Usd),
     Known(Usd),
@@ -32,8 +34,30 @@ enum Cost {
 struct Group {
     requests: u64,
     priced: Sample,
-    /// What the unpriced requests are known to cost.
+    /// What the unpriced requests are known to cost, in all and how many cost each amount.
     known: Usd,
+    floors: BTreeMap<Usd, u64>,
+}
+
+impl Group {
+    /// What the group costs, as the header estimates it: each unpriced request at the priced
+    /// mean, or what it is known to cost when that is more; None when none was priced.
+    fn estimate(&self) -> Option<Estimate> {
+        let e = self.priced.estimate(self.requests)?;
+        let mean = e.usd / self.requests as f64;
+        let raise: f64 = self
+            .floors
+            .iter()
+            .rev()
+            .map(|(k, &n)| (k.to_f64(), n))
+            .take_while(|&(k, _)| k > mean)
+            .map(|(k, n)| (k - mean) * n as f64)
+            .sum();
+        Some(Estimate {
+            usd: e.usd + raise,
+            ..e
+        })
+    }
 }
 
 /// The running counts over a scan's requests, by their position in its list, and over its
@@ -43,20 +67,29 @@ struct Group {
 pub(crate) struct Tally {
     /// What each request adds, None for one outside the window.
     counted: Vec<Option<Counted>>,
-    /// What each legacy record adds, by its position in the scan's list of them; None for
-    /// one outside the window, superseded, or a copy of one counted already.
-    legacy: Vec<Option<Counted>>,
-    /// The counted legacy records' request ids.
-    legacy_ids: HashSet<Text>,
-    /// The counted legacy records by the total a modern record would supersede them with.
-    legacy_totals: HashMap<String, Vec<usize>>,
     /// Requests changed since the counts were last brought up to date, each once.
     changed: Vec<usize>,
     stale: Vec<bool>,
+    /// What each legacy record adds, by its position in the scan's list of them; None for
+    /// one not counted.
+    legacy: Vec<Option<Counted>>,
+    /// The legacy records in the window by request id, in the order read. Copies of one id
+    /// become one request, so only one is counted: the first no modern record supersedes.
+    copies: HashMap<Text, Vec<usize>>,
+    /// The copy counted for each id.
+    claimed: HashMap<Text, usize>,
+    /// The counted legacy records by the total a modern record would supersede them with.
+    totals: HashMap<String, Vec<usize>>,
+    /// Totals modern records recorded since the counts were last brought up to date.
+    superseded: Vec<String>,
     requests: u64,
     tokens: u64,
-    /// Requests per session.
-    roots: HashMap<Text, u64>,
+    /// Counted requests per session, whose roots are counted again when a session comes or
+    /// goes or a subagent's lineage is recorded.
+    sessions: HashMap<Text, u64>,
+    sessions_changed: bool,
+    subagents_seen: usize,
+    roots: u64,
     groups: IndexMap<Profiles, Group>,
     /// Each history's profiles, sorted.
     sorted: HashMap<Profiles, Profiles>,
@@ -88,13 +121,22 @@ impl Tally {
         }
     }
 
-    /// Take back the legacy records a modern record of `total` supersedes.
+    /// Note that a modern record recorded `total`, which supersedes the legacy records of it.
     pub(crate) fn supersede(&mut self, total: &str) {
-        for index in self.legacy_totals.remove(total).unwrap_or_default() {
-            if let Some(old) = self.legacy[index].take() {
-                self.apply(&old, false);
-            }
+        if self.totals.contains_key(total) {
+            self.superseded.push(total.to_string());
         }
+    }
+
+    /// Take back every legacy record, once the scan has made requests of those it keeps.
+    pub(crate) fn forget_legacy(&mut self) {
+        for counted in std::mem::take(&mut self.legacy).into_iter().flatten() {
+            self.apply(&counted, false);
+        }
+        self.copies.clear();
+        self.claimed.clear();
+        self.totals.clear();
+        self.superseded.clear();
     }
 
     /// Bring the counts up to date with `requests` and the `legacy` records, each with the
@@ -111,33 +153,16 @@ impl Tally {
             for index in 0..requests.len() {
                 self.touch(index);
             }
-            // Those not yet seen are measured below.
-            for index in 0..self.legacy.len() {
+            for index in self.claimed.values().copied().collect::<Vec<_>>() {
                 if let Some(old) = self.legacy[index].take() {
                     self.apply(&old, false);
-                    let counted = self.measure(&mut legacy[index].0, basis);
-                    self.apply(&counted, true);
-                    self.legacy[index] = Some(counted);
                 }
+                let counted = self.measure(&mut legacy[index].0, basis);
+                self.apply(&counted, true);
+                self.legacy[index] = Some(counted);
             }
         }
-        for index in self.legacy.len()..legacy.len() {
-            self.legacy.push(None);
-            let (r, total) = &mut legacy[index];
-            if basis.since.is_some_and(|since| r.time < since)
-                || basis.modern.contains(total)
-                || !self.legacy_ids.insert(r.id.clone())
-            {
-                continue;
-            }
-            let counted = self.measure(r, basis);
-            self.apply(&counted, true);
-            self.legacy[index] = Some(counted);
-            self.legacy_totals
-                .entry(total.clone())
-                .or_default()
-                .push(index);
-        }
+        self.count_legacy(legacy, basis);
         for index in std::mem::take(&mut self.changed) {
             self.stale[index] = false;
             if let Some(old) = self.counted[index].take() {
@@ -151,19 +176,74 @@ impl Tally {
             self.apply(&counted, true);
             self.counted[index] = Some(counted);
         }
+        if self.sessions_changed || self.subagents_seen != basis.subagents.len() {
+            let roots: HashSet<&Text> = self
+                .sessions
+                .keys()
+                .map(|session| root(session, basis.subagents))
+                .collect();
+            self.roots = roots.len() as u64;
+            self.sessions_changed = false;
+            self.subagents_seen = basis.subagents.len();
+        }
         Counts {
             requests: self.requests,
             tokens: self.tokens,
-            sessions: self.roots.len() as u64,
-            // The header also raises an unpriced request known to cost more than its group's
-            // mean to what it is known to cost; that settles with the header's figures.
+            sessions: self.roots,
             spend: self.priced.then(|| {
                 Spent::estimated(
                     self.groups
                         .values()
-                        .map(|g| (g.priced.estimate(g.requests), g.known.to_f64())),
+                        .map(|g| (g.estimate(), g.known.to_f64())),
                 )
             }),
+        }
+    }
+
+    /// Count the legacy records read since the last count, and recount the ids whose counted
+    /// copy a modern record has superseded since.
+    fn count_legacy(&mut self, legacy: &mut [(Request, String)], basis: &Basis<'_>) {
+        let mut ids: Vec<Text> = vec![];
+        let read = self.legacy.len();
+        for (index, (r, _)) in legacy.iter().enumerate().skip(read) {
+            self.legacy.push(None);
+            if basis.since.is_some_and(|since| r.time < since) {
+                continue;
+            }
+            self.copies.entry(r.id.clone()).or_default().push(index);
+            if !self.claimed.contains_key(&r.id) {
+                ids.push(r.id.clone());
+            }
+        }
+        for total in std::mem::take(&mut self.superseded) {
+            for index in self.totals.remove(&total).unwrap_or_default() {
+                if let Some(old) = self.legacy[index].take() {
+                    self.apply(&old, false);
+                }
+                let id = legacy[index].0.id.clone();
+                self.claimed.remove(&id);
+                ids.push(id);
+            }
+        }
+        for id in ids {
+            if self.claimed.contains_key(&id) {
+                continue;
+            }
+            let Some(index) = self.copies[&id]
+                .iter()
+                .copied()
+                .find(|&index| !basis.modern.contains(&legacy[index].1))
+            else {
+                continue;
+            };
+            let counted = self.measure(&mut legacy[index].0, basis);
+            self.apply(&counted, true);
+            self.legacy[index] = Some(counted);
+            self.claimed.insert(id, index);
+            self.totals
+                .entry(legacy[index].1.clone())
+                .or_default()
+                .push(index);
         }
     }
 
@@ -199,7 +279,7 @@ impl Tally {
         });
         Counted {
             tokens: crate::totals::tokens(r),
-            root: root(&r.session, basis.subagents),
+            session: r.session.clone(),
             group,
             cost,
         }
@@ -211,27 +291,41 @@ impl Tally {
         if add {
             self.requests += 1;
             self.tokens += counted.tokens;
-            *self.roots.entry(counted.root.clone()).or_default() += 1;
+            let n = self.sessions.entry(counted.session.clone()).or_default();
+            *n += 1;
+            self.sessions_changed |= *n == 1;
             group.requests += 1;
             match counted.cost {
                 Some(Cost::Priced(usd)) => group.priced.add(usd),
-                Some(Cost::Known(usd)) => group.known += usd,
+                Some(Cost::Known(usd)) => {
+                    group.known += usd;
+                    *group.floors.entry(usd).or_default() += 1;
+                }
                 None => {}
             }
             return;
         }
         self.requests -= 1;
         self.tokens -= counted.tokens;
-        if let Some(n) = self.roots.get_mut(&counted.root) {
+        if let Some(n) = self.sessions.get_mut(&counted.session) {
             *n -= 1;
             if *n == 0 {
-                self.roots.remove(&counted.root);
+                self.sessions.remove(&counted.session);
+                self.sessions_changed = true;
             }
         }
         group.requests -= 1;
         match counted.cost {
             Some(Cost::Priced(usd)) => group.priced.remove(usd),
-            Some(Cost::Known(usd)) => group.known -= usd,
+            Some(Cost::Known(usd)) => {
+                group.known -= usd;
+                if let Some(n) = group.floors.get_mut(&usd) {
+                    *n -= 1;
+                    if *n == 0 {
+                        group.floors.remove(&usd);
+                    }
+                }
+            }
             None => {}
         }
         if group.requests == 0 {
@@ -263,7 +357,7 @@ fn provider(r: &Request, profiles: &[Profile]) -> Option<Text> {
 }
 
 /// The session `session` counts in: the one that spawned it, when it is a subagent's.
-fn root(session: &Text, subagents: &IndexMap<Text, Subagent>) -> Text {
+fn root<'a>(session: &'a Text, subagents: &'a IndexMap<Text, Subagent>) -> &'a Text {
     let mut root = session;
     // Bounded so a cycle in recorded lineage cannot loop.
     for _ in 0..subagents.len() {
@@ -272,7 +366,7 @@ fn root(session: &Text, subagents: &IndexMap<Text, Subagent>) -> Text {
             None => break,
         }
     }
-    root.clone()
+    root
 }
 
 #[cfg(test)]
@@ -317,7 +411,7 @@ mod tests {
         let gone = tally.count(&mut requests, &mut [], &basis(Some(&catalog)));
         assert_eq!((gone.requests, gone.tokens, gone.sessions), (0, 0, 0));
         assert_eq!(usd(gone), 0.0);
-        assert!(tally.groups.is_empty() && tally.roots.is_empty());
+        assert!(tally.groups.is_empty() && tally.sessions.is_empty());
     }
 
     /// A legacy record counts once across copies, until a modern record of its total arrives,
@@ -346,12 +440,85 @@ mod tests {
             tally.count(&mut [], records, &basis).requests
         };
         assert_eq!(count(&mut tally, &mut records, &modern), 1);
+        modern.insert("one".to_string());
         tally.supersede("one");
         assert_eq!(count(&mut tally, &mut records, &modern), 0);
         modern.insert("two".to_string());
         records.push(legacy("b", "two"));
         records.push(legacy("c", "three"));
         assert_eq!(count(&mut tally, &mut records, &modern), 1);
+        // A fork's copy of a counted id, under a total of its own, counts once the parent's
+        // is superseded.
+        records.push(legacy("c", "fork"));
+        assert_eq!(count(&mut tally, &mut records, &modern), 1);
+        modern.insert("three".to_string());
+        tally.supersede("three");
+        assert_eq!(count(&mut tally, &mut records, &modern), 1);
+        modern.insert("fork".to_string());
+        tally.supersede("fork");
+        assert_eq!(count(&mut tally, &mut records, &modern), 0);
+    }
+
+    /// A subagent counts in the session at the root of its lineage, however much of that
+    /// lineage had been read when its requests were.
+    #[test]
+    fn a_subagent_counts_in_its_root_session_once_its_lineage_is_read() {
+        let modern = HashSet::default();
+        let mut subagents = IndexMap::default();
+        let session = |id: &str| Request {
+            id: id.into(),
+            meta: std::sync::Arc::new(crate::model::RequestMeta {
+                session: id.into(),
+                ..(*make_request().meta).clone()
+            }),
+            ..make_request()
+        };
+        let mut requests = vec![session("root"), session("grandchild")];
+        let mut tally = Tally::default();
+        let mut count = |tally: &mut Tally, subagents: &IndexMap<Text, Subagent>| {
+            tally.touch(0);
+            tally.touch(1);
+            let basis = Basis {
+                since: None,
+                modern: &modern,
+                subagents,
+                profiles: &[],
+                catalog: None,
+            };
+            tally.count(&mut requests, &mut [], &basis).sessions
+        };
+        assert_eq!(count(&mut tally, &subagents), 2);
+        let spawned = |session: &str, parent: &str| Subagent {
+            harness: Harness::Codex,
+            session: session.into(),
+            parent: Some(parent.into()),
+            kind: "default".into(),
+            built_in: None,
+            fork: false,
+            native: false,
+            model: None,
+            effort: None,
+        };
+        subagents.insert("grandchild".into(), spawned("grandchild", "child"));
+        assert_eq!(count(&mut tally, &subagents), 2);
+        subagents.insert("child".into(), spawned("child", "root"));
+        assert_eq!(count(&mut tally, &subagents), 1);
+    }
+
+    /// An unpriced request known to cost more than its group's priced mean costs at least
+    /// what is known, as the header estimates it.
+    #[test]
+    fn a_known_charge_above_the_mean_raises_the_estimate() {
+        let mut group = Group {
+            requests: 2,
+            known: Usd::from_f64(10.0),
+            ..Group::default()
+        };
+        group.priced.add(Usd::from_f64(1.0));
+        group.floors.insert(Usd::from_f64(10.0), 1);
+        assert_eq!(group.estimate().unwrap().usd, 11.0);
+        group.floors = BTreeMap::from([(Usd::from_f64(0.5), 1)]);
+        assert_eq!(group.estimate().unwrap().usd, 2.0);
     }
 
     #[test]

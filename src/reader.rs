@@ -2127,11 +2127,6 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
             reading.read.store(finished, Ordering::Relaxed);
         }
     }
-    // What reading leaves to settle, the analysis settles with the header's own counts.
-    if let Some(reading) = &options.reading {
-        reader.count(reading, &profiles);
-    }
-    reader.requests.tally = None;
     let Reader {
         exposure,
         mut strings,
@@ -2173,6 +2168,27 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     }
     for r in unanswered {
         add(&mut requests, &mut strings, r);
+    }
+    // Legacy records and unanswered request records are requests now, so count them as such,
+    // pricing everything if prices loaded since the last count. What changes after this, the
+    // analysis settles with the header's own counts.
+    if let (Some(reading), Some(tally)) = (&options.reading, &mut requests.tally) {
+        tally.forget_legacy();
+        let counts = tally.count(
+            &mut requests.list,
+            &mut [],
+            &Basis {
+                since,
+                modern: &modern_totals,
+                subagents: &subagents,
+                profiles: &profiles,
+                catalog: reading.catalog.get(),
+            },
+        );
+        *reading
+            .counts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(counts);
     }
     let Requests {
         list: mut requests,

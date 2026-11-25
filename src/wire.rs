@@ -186,7 +186,9 @@ pub enum Outcome {
     /// The destination's answer to [`Answer::Review`], once it checked the answers against
     /// its files: each file's text as the accepted changes would change it, for the confirm.
     #[serde(rename_all = "camelCase")]
-    Reviewed { preview: String },
+    Reviewed {
+        preview: String,
+    },
     /// The destination's answer to [`Answer::Write`]: the files it wrote.
     Wrote {
         written: Vec<Written>,

@@ -10,7 +10,8 @@ use std::io::{self, BufRead, Write};
 use serde::{Deserialize, Serialize};
 
 use crate::doctor::{
-    Answer, Card, Change, Event, Fix, How, Kind, Offers, Owner, Section, Selection, Standing, Style,
+    Answer, Card, Change, Event, Fix, How, Joint, Kind, Offers, Owner, Section, Selection,
+    Standing, Style, Total,
 };
 use crate::model::Harness;
 use crate::report::Origin;
@@ -39,6 +40,59 @@ pub struct Item {
     /// The cards to show instead once `doctor`'s walk writes changes that move the setting
     /// this one advises on; the first whose lines were written applies.
     pub after: Vec<After>,
+    /// The section of `doctor`'s walk this card leaves its change to, when the walk asks it.
+    pub defers: Option<Defers>,
+}
+
+/// The section of `doctor`'s changes a card leaves its change to, which across hosts the
+/// walk asks once every host's changes in it together save enough to ask.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Defers {
+    pub joint: Joint,
+    /// What this host's changes in the section save together.
+    pub total: Total,
+    /// The card once the walk asks the section, which other hosts' changes can make it; None
+    /// when that changes nothing, such as when the walk asks it already.
+    pub asked: Option<Box<Item>>,
+}
+
+/// Every host's `hosts` cards as they read once the walk asks a section that only the hosts'
+/// changes together save enough to ask, as one host's would.
+pub fn joined(hosts: &mut [&mut Vec<Item>]) {
+    let mut sections: Vec<(Joint, Total)> = vec![];
+    for items in hosts.iter() {
+        // A host's own cards share their section's total, so each host adds it once.
+        let mut own: Vec<&Joint> = vec![];
+        for defers in items.iter().filter_map(|i| i.defers.as_ref()) {
+            if own.contains(&&defers.joint) {
+                continue;
+            }
+            own.push(&defers.joint);
+            match sections.iter_mut().find(|(j, _)| *j == defers.joint) {
+                Some((_, total)) => total.merge(&defers.total),
+                None => sections.push((defers.joint.clone(), defers.total)),
+            }
+        }
+    }
+    for items in hosts.iter_mut() {
+        for item in items.iter_mut() {
+            let Some(defers) = &mut item.defers else {
+                continue;
+            };
+            let asked = sections
+                .iter()
+                .any(|(j, total)| *j == defers.joint && total.asked());
+            if !asked {
+                continue;
+            }
+            if let Some(card) = defers.asked.take() {
+                let defers = item.defers.take();
+                *item = *card;
+                item.defers = defers;
+            }
+        }
+    }
 }
 
 /// What a card becomes once `doctor` writes the change for any of some lines.
@@ -249,7 +303,9 @@ pub fn ask(
         let mut answered = vec![];
         for (index, item) in host.items.iter().enumerate() {
             n += 1;
-            let change = offers.change(Origin::Vibe(index));
+            // A card with nothing to act on, such as one leaving its change to `doctor`'s walk
+            // of several hosts, asks nothing.
+            let change = offers.change(Origin::Vibe(index)).filter(|_| !item.quiet);
             let offer = match change {
                 Some(Change::Offer(offer, _)) => Some(offer),
                 _ => None,
@@ -341,6 +397,7 @@ mod tests {
             how: None,
             quiet: false,
             after: vec![],
+            defers: None,
         }
     }
 
@@ -368,6 +425,47 @@ mod tests {
             })),
             ..card(name)
         }
+    }
+
+    #[test]
+    fn a_card_leaving_its_change_to_a_section_reads_as_asked_once_hosts_together_ask_it() {
+        let w = Workspace::new();
+        let fix = |usd: f64| Fix {
+            saving: Some(usd),
+            ..fixes(&[cap(&w, "Auto memory", &["A"], "1")]).remove(0)
+        };
+        // A host's card offers the change itself while its walk would not ask it.
+        let deferring = |usd: f64, name: &str| {
+            let fix = fix(usd);
+            Item {
+                defers: Some(Defers {
+                    joint: fix.joint(),
+                    total: Total::of(std::slice::from_ref(&fix)),
+                    asked: Some(Box::new(Item {
+                        quiet: true,
+                        ..card(&format!("{name}, asked"))
+                    })),
+                }),
+                ..card(name)
+            }
+        };
+        let (mut here, mut there) = (
+            vec![deferring(0.6, "here"), card("other")],
+            vec![deferring(0.5, "there")],
+        );
+        // Alone, neither host's section is asked, so each keeps its own card.
+        joined(&mut [&mut here]);
+        assert_eq!(here[0].name, "here");
+        // Together they save $1.10, which the walk asks once across both hosts.
+        joined(&mut [&mut here, &mut there]);
+        assert_eq!(
+            [&here[0].name, &here[1].name, &there[0].name],
+            ["here, asked", "other", "there, asked"]
+        );
+        assert!(here[0].quiet && there[0].quiet);
+        // Joining again, as after a walk reads its advice anew, keeps them as they are.
+        joined(&mut [&mut here, &mut there]);
+        assert_eq!(here[0].name, "here, asked");
     }
 
     /// Walk `items` on this host with `answers` typed, returning what was printed and each

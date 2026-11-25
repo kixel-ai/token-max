@@ -726,6 +726,7 @@ pub fn items(u: &LspUse, view: &View<'_>) -> Vec<Item> {
             how: None,
             quiet,
             after: vec![],
+            defers: None,
         }];
     }
     u.languages
@@ -766,6 +767,7 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
             how: None,
             quiet: true,
             after: vec![],
+            defers: None,
         });
     }
     let mut text = format!(
@@ -907,6 +909,7 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
         how,
         // It advises on enabledPlugins and installs, which no `doctor` line writes.
         after: vec![],
+        defers: None,
     })
 }
 

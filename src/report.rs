@@ -531,6 +531,7 @@ fn default_item(e: &EffortCheck, profile: &str, how: Option<How>, out: &Out<'_>)
         quiet,
         // doctor keeps this line, so its walk never writes the default the card reads.
         after: vec![],
+        defers: None,
     })
 }
 
@@ -653,6 +654,7 @@ fn subagent_item(line: &SubagentLine<'_>, out: &Out<'_>) -> Option<Item> {
         how,
         quiet,
         after: vec![],
+        defers: None,
     })
 }
 
@@ -1798,7 +1800,11 @@ impl Listing {
         let head = &self.head;
         let whose = self.whose.as_str();
         let changes = self.rows.iter().filter(|r| r.mark == Mark::Change).count();
-        let considered = self.rows.iter().filter(|r| r.mark == Mark::Consider).count();
+        let considered = self
+            .rows
+            .iter()
+            .filter(|r| r.mark == Mark::Consider)
+            .count();
         let headline = headline(changes, considered);
         let headline: Vec<(&str, &str)> = headline.iter().map(|(t, s)| (t.as_str(), *s)).collect();
         out.spans(&headline, 0, None);
@@ -5464,6 +5470,7 @@ fn guidance(name: String, profile: &str, text: String, sources: &[&str]) -> Item
         how: None,
         quiet: false,
         after: vec![],
+        defers: None,
     }
 }
 
@@ -5605,6 +5612,7 @@ fn advisor_item(p: &Profile, profile: &str, out: &Out<'_>) -> Item {
         quiet,
         // No `doctor` line writes the main model, `advisorModel` or what blocks the advisor.
         after: vec![],
+        defers: None,
     }
 }
 
@@ -5706,6 +5714,7 @@ fn bash_item(cap: &BashCap, profile: &str, how: Option<How>, out: &Out<'_>) -> I
         how,
         quiet: value_is_empty,
         after: vec![],
+        defers: None,
     }
 }
 
@@ -5750,6 +5759,7 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
         how: None,
         quiet: true,
         after: vec![],
+        defers: None,
     };
     let (window, now) = match (doctor, c.base.current) {
         (Doctor::Wrote(to), _) => (
@@ -6081,6 +6091,7 @@ fn memory_item(line: MemoryLine<'_>, out: &Out<'_>) -> Item {
         how: None,
         quiet,
         after: vec![],
+        defers: None,
     }
 }
 
@@ -6142,6 +6153,7 @@ fn retention_item(
         how: Some(how),
         quiet: false,
         after: vec![],
+        defers: None,
     }
 }
 
@@ -7435,25 +7447,25 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
         if !matches!(result, CheckResult::Memory(_)) {
             continue;
         }
-        let offered = fixes
+        let fix = fixes
             .iter()
-            .find(|f| f.origins.contains(&Origin::Check(*index)))
-            .map(|f| Offered {
-                suggested: f.suggested,
-                asked: crate::doctor::takes_up(f, fixes),
-            });
-        let mut item = memory_item(
-            MemoryLine {
-                result,
-                common: r,
-                name: tagged(
-                    setting_name(result),
-                    &tag(r.profiles, &|_| r.owner.to_string(), out),
-                ),
-                offered,
-            },
-            out,
-        );
+            .find(|f| f.origins.contains(&Origin::Check(*index)));
+        // The section of `doctor`'s walk this card defers to, and this host's part of it.
+        let section = fix.and_then(|f| crate::doctor::section_total(f, fixes));
+        let offered = fix.map(|f| Offered {
+            suggested: f.suggested,
+            asked: section.is_none_or(|total| total.asked()),
+        });
+        let line = |offered| MemoryLine {
+            result,
+            common: r,
+            name: tagged(
+                setting_name(result),
+                &tag(r.profiles, &|_| r.owner.to_string(), out),
+            ),
+            offered,
+        };
+        let mut item = memory_item(line(offered), out);
         if !item.quiet {
             item.how = report
                 .scan
@@ -7461,6 +7473,21 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
                 .iter()
                 .find(|p| p.id == r.profile)
                 .map(|profile| crate::doctor::check_how(result, profile));
+        }
+        // Another host's changes in the same section can make the walk ask it after all.
+        if let (Some(fix), Some(total), Some(offered)) = (fix, section, offered) {
+            let asked = (!offered.asked && !item.quiet).then(|| {
+                let offered = Offered {
+                    asked: true,
+                    ..offered
+                };
+                Box::new(memory_item(line(Some(offered)), out))
+            });
+            item.defers = Some(crate::vibes::Defers {
+                joint: fix.joint(),
+                total,
+                asked,
+            });
         }
         vibes.push(item);
     }
@@ -7911,7 +7938,11 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
         );
         let notes: IndexSet<&str> = loading.iter().flat_map(|g| g.notes.clone()).collect();
         row.evidence = notes.into_iter().collect::<Vec<_>>().join(" ");
-        row.sources = loading.iter().filter_map(|g| g.source).map(Into::into).collect();
+        row.sources = loading
+            .iter()
+            .filter_map(|g| g.source)
+            .map(Into::into)
+            .collect();
         row.setting = loading
             .iter()
             .filter_map(|g| g.setting)
@@ -9252,6 +9283,62 @@ pub(crate) mod tests {
             "Policy in /etc/managed-settings.json keeps it off, which a user can't change."
         );
         assert_eq!(report_line(&text, "MCP server docs off").mark, "info");
+    }
+
+    /// Hosts' reports join into one: every row once per host, tagged with it, its percent of
+    /// every host's spend together; each host's notes and evidence after the rows, a
+    /// destination's escaped.
+    #[test]
+    fn hosts_join_into_one_report_whose_rows_name_their_host() {
+        let report = synthetic();
+        let fixes = crate::doctor::fixes(&report, false);
+        let options = ReportOptions {
+            details: true,
+            ..ReportOptions::default()
+        };
+        let here = format_report(&report, &fixes, options);
+        let mut there = format_report(&report, &fixes, options);
+        there
+            .evidence
+            .push_str("    Stray: \u{1b}]0;retitled\u{7}\n");
+        let mut totals = crate::totals::Totals::new(&report, &fixes, here.credit());
+        totals.merge(&totals.clone());
+        let joined = Listing::join(
+            vec![
+                (None, format_report(&report, &fixes, options)),
+                (Some("devbox".into()), there),
+            ],
+            &totals,
+            options,
+        );
+        assert_eq!(joined.rows.len(), 2 * here.rows.len());
+        let (mine, theirs) = joined.rows.split_at(here.rows.len());
+        for (alone, (mine, theirs)) in here.rows.iter().zip(mine.iter().zip(theirs)) {
+            assert_eq!(mine.host, None);
+            assert_eq!(theirs.host.as_deref(), Some("devbox"));
+            assert!(theirs.profile.starts_with("[devbox"), "{theirs:?}");
+            // Two hosts that spend the same halve each line's share.
+            for row in [mine, theirs] {
+                match (alone.share, row.share) {
+                    (Some(alone), Some(joined)) => assert!((alone - 2.0 * joined).abs() < 1e-9),
+                    (alone, joined) => assert_eq!(alone, joined, "{row:?}"),
+                }
+            }
+            // A section's change stays apart from the same change on the other host.
+            if let (Some(mine), Some(theirs)) = (&mine.section, &theirs.section) {
+                assert_ne!(mine.fix, theirs.fix);
+                assert_eq!(mine.joint, theirs.joint);
+            }
+        }
+        let text = joined.text();
+        assert!(
+            text.starts_with("token-max: total over 2 hosts  "),
+            "{text}"
+        );
+        // Each host's own title heads its notes and evidence.
+        assert_eq!(text.matches("\ntoken-max  ").count(), 2, "{text}");
+        assert!(!text.contains('\u{1b}'), "{text}");
+        assert!(text.contains("Stray: \\u001b]0;retitled\\u0007"), "{text}");
     }
 
     /// The tally a progress line keeps while checking, from each check's result and the

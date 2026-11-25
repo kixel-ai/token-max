@@ -266,13 +266,102 @@ const NOW: i64 = 1_796_083_200_000;
 const NOVEMBER: i64 = 1_793_491_200_000;
 const MINUTE: i64 = 60_000;
 
-/// One host's section of a report covering several, from what its header says was read.
+/// One host's part of a report covering several, under `--details`: its title, notes and
+/// evidence, from the block its title heads after the shared rows.
 fn section<'a>(text: &'a str, host: &str) -> &'a str {
-    let heading = format!("token-max: {host}  ");
+    let heading = format!("\ntoken-max: {host}  ");
     let start = text.find(&heading).unwrap_or_else(|| panic!("{text}")) + heading.len();
     let rest = &text[start..];
     let end = rest.find("\ntoken-max: ").unwrap_or(rest.len());
     &rest[..end]
+}
+
+/// What a report says of one host, to compare a report covering several with one run there:
+/// that host's rows, by heading, without the tag naming it or the percents, which are of
+/// every host's spend; and its evidence. `host` is None for a report of that host alone.
+fn view(text: &str, host: Option<&str>) -> String {
+    let rows_end = text.find("\n  EVIDENCE\n").unwrap_or(text.len());
+    let mut rows: Vec<String> = vec![];
+    let mut heading = "";
+    let mut keep = false;
+    for line in text[..rows_end].lines() {
+        if line.starts_with("token-max") {
+            continue;
+        }
+        let Some(body) = line.strip_prefix("  ") else {
+            continue;
+        };
+        // A section's members sit under its row, two columns in.
+        let body = body
+            .strip_prefix("  ")
+            .filter(|b| b.starts_with(|c: char| c.is_ascii_lowercase()))
+            .unwrap_or(body);
+        if body.starts_with(|c: char| c.is_ascii_uppercase())
+            && body
+                .split("  ")
+                .next()
+                .unwrap()
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c == ' ')
+        {
+            heading = body.split("  ").next().unwrap();
+            continue;
+        }
+        // A row's detail lines sit under its name.
+        if body.starts_with("         ") {
+            if keep {
+                let words: Vec<&str> = body.split_whitespace().collect();
+                rows.last_mut()
+                    .unwrap()
+                    .push_str(&format!("\n  {}", words.join(" ")));
+            }
+            continue;
+        }
+        if !body.starts_with(|c: char| c.is_ascii_lowercase()) || body.starts_with("token-max") {
+            keep = false;
+            continue;
+        }
+        let mut words: Vec<String> = vec![];
+        keep = host.is_none();
+        for word in body.split_whitespace() {
+            if word.ends_with('%')
+                && word[..word.len() - 1]
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == '<')
+            {
+                continue;
+            }
+            match host {
+                Some(host) if word == format!("[{host}]") => keep = true,
+                Some(host) if word.starts_with(&format!("[{host}:")) => {
+                    keep = true;
+                    words.push(format!("[{}", &word[host.len() + 2..]));
+                }
+                _ => words.push(word.to_string()),
+            }
+        }
+        if keep {
+            rows.push(format!("{heading}: {}", words.join(" ")));
+        }
+    }
+    rows.sort();
+    let block = match host {
+        Some(host) => section(text, host),
+        None => text,
+    };
+    let evidence = block.find("\n  EVIDENCE\n").map_or("", |at| &block[at..]);
+    // What the walk leaves to write comes after every host's evidence.
+    let evidence = [
+        "\n  EDITS  ",
+        "\n  STEPS BY HAND",
+        "\n  NOT WRITTEN",
+        "\n  token-max vibes has ",
+    ]
+    .iter()
+    .filter_map(|end| evidence.find(end))
+    .min()
+    .map_or(evidence, |at| &evidence[..at]);
+    timeless(&format!("{}\n{}", rows.join("\n"), evidence.trim_end()))
 }
 
 /// A report without what depends on each run's own clock: instants, dates, day counts, and
@@ -358,16 +447,19 @@ fn a_remote_report_matches_running_there() {
     // Login noise and transcript text stay out of the output.
     assert_eq!(stderr, "");
     assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
+    // Each host's evidence follows the rows every host shares.
     for host in ["this host", "devbox"] {
         assert!(section(&stdout, host).contains("; 2 requests;"), "{host}");
-        // Each section's percents are of its own host's spend, which it names.
-        let base = format!("each percent is of {host}'s spend");
-        assert!(section(&stdout, host).contains(&base), "{host}");
     }
+    // Every percent is of both hosts' spend together.
+    assert!(
+        flat(&stdout).contains("each percent is of these hosts' spend"),
+        "{stdout}"
+    );
     let (_, there, _) = run(hosts
         .command(&["--details", since[0], since[1]])
         .env("HOME", &home));
-    assert_eq!(timeless(section(&stdout, "devbox")), timeless(&there));
+    assert_eq!(view(&stdout, Some("devbox")), view(&there, None));
 
     let args = std::fs::read_to_string(hosts.root.join("ssh.args")).unwrap();
     for option in [
@@ -391,13 +483,26 @@ fn a_remote_report_matches_running_there() {
         ),
         "{text}"
     );
-    assert!(text.contains("\n  Changes offered: "), "{text}");
-    // So does one credit, before any host's section.
-    let (head, _) = text.split_once("\ntoken-max: this host  ").unwrap();
-    let head = flat(head);
-    let (_, credit) = head.split_once("Compared with defaults, ").unwrap();
+    // One credit and one list of changes cover both hosts, each row naming its host.
+    let flat_text = flat(&text);
+    assert!(
+        flat_text.contains("Together, these changes save <$0.01/mo, 7% of these hosts' spend."),
+        "{text}"
+    );
+    let (_, credit) = flat_text.split_once("Compared with defaults, ").unwrap();
     assert!(credit.contains("of these hosts' spend."), "{text}");
-    assert!(text.contains("\ntoken-max: devbox  "), "{text}");
+    let change = text
+        .lines()
+        .find(|line| line.starts_with("  change "))
+        .unwrap();
+    assert!(change.contains("Main-agent prompt cache TTL"), "{text}");
+    assert!(change.contains(" [devbox] "), "{text}");
+    assert!(!text.contains("\ntoken-max: devbox  "), "{text}");
+    // The edit to make names the file on its host.
+    assert!(
+        text.contains("\n  EDITS  devbox:~/.claude/settings.json\n"),
+        "{text}"
+    );
     assert!(!text.contains("don't add amounts across hosts"), "{text}");
 }
 
@@ -474,11 +579,11 @@ fn keepalive_retains_costs_unknowns_and_caps_over_ssh() {
     assert_ne!(status, 2, "{stderr}");
     assert!(stderr.is_empty(), "{stderr}");
     assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
-    let remote = section(&stdout, "devbox");
+    let remote = view(&stdout, Some("devbox"));
     assert!(remote.contains("keepalive"), "{remote}");
     let (_, there, stderr) = run(hosts.command(&args).env("HOME", &home));
     assert!(stderr.is_empty(), "{stderr}");
-    assert_eq!(timeless(remote), timeless(&there));
+    assert_eq!(remote, view(&there, None));
 }
 
 #[test]
@@ -718,15 +823,15 @@ fn codex_context_and_output_keep_their_remote_controls() {
         assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
         // What the remote's server says it does comes back with its report.
         assert!(
-            section(&stdout, "devbox").contains("What: SYNTHETIC_SHIPPED_SCHEMA"),
+            view(&stdout, Some("devbox")).contains("What: SYNTHETIC_SHIPPED_SCHEMA"),
             "{stdout}"
         );
         let (_, there, stderr) = run(hosts.command(&["--details"]).env("HOME", &home));
         assert_eq!(stderr, "");
-        assert_eq!(timeless(section(&stdout, "devbox")), timeless(&there));
+        assert_eq!(view(&stdout, Some("devbox")), view(&there, None));
         let (_, alone, stderr) = hosts.run(&["--ssh", "devbox", "--details"]);
         assert_eq!(stderr, "");
-        assert_eq!(timeless(section(&alone, "devbox")), timeless(&there));
+        assert_eq!(view(&alone, Some("devbox")), view(&there, None));
 
         // The tier assumptions and the output cap are evidence, which only details show.
         let (_, text, stderr) = hosts.run(&["--ssh", "devbox", "--details"]);
@@ -922,12 +1027,27 @@ fn background_controls_and_estimates_keep_their_remote_history() {
     assert_eq!(stderr, "");
     // The same report, but for its closing edits naming their files after the host, as `scp`
     // would, and its steps by hand naming the host.
-    let devbox = section(&stdout, "devbox");
+    assert_eq!(view(&stdout, Some("devbox")), view(&there, None));
+    // What is left to write on one host, from the first of `starts`.
+    let closings = |text: &str, starts: &[&str]| {
+        let start = starts
+            .iter()
+            .filter_map(|at| text.find(at))
+            .min()
+            .unwrap_or_else(|| panic!("{text}"));
+        let end = text.find("\n  token-max vibes has ").unwrap_or(text.len());
+        text[start..end].trim_end().to_string()
+    };
+    let devbox = closings(
+        &stdout,
+        &["\n  EDITS  devbox:", "\n  STEPS BY HAND  devbox\n"],
+    );
     assert!(devbox.contains("\n  EDITS  devbox:~"), "{devbox}");
     assert!(devbox.contains("\n  STEPS BY HAND  devbox\n"), "{devbox}");
     let devbox = devbox
         .replace("\n  EDITS  devbox:~", "\n  EDITS  ~")
         .replace("\n  STEPS BY HAND  devbox\n", "\n  STEPS BY HAND\n");
+    let there = closings(&there, &["\n  EDITS  ", "\n  STEPS BY HAND\n"]);
     assert_eq!(timeless(&devbox), timeless(&there));
     // Why a cost is unknown is evidence, which only details show.
     let (_, text, stderr) = hosts.run(&["--ssh", "devbox", "--details"]);
@@ -967,7 +1087,7 @@ fn the_coordinator_copies_itself_once_and_replaces_older_copies() {
     for _ in 0..2 {
         let (status, stdout, stderr) = hosts.run(&["--ssh", "devbox"]);
         assert_eq!(status, 0, "{stderr}");
-        assert!(stdout.contains("\ntoken-max: devbox  "), "{stdout}");
+        assert!(stdout.contains(" [devbox] "), "{stdout}");
         assert_eq!(copies(), 1);
     }
     let cached: Vec<_> = std::fs::read_dir(&cache)
@@ -995,7 +1115,7 @@ fn another_platform_runs_its_installed_build() {
     script(&cargo.join("token-max"), "exit 2");
     let (status, stdout, stderr) = hosts.run(&["--ssh", "installed"]);
     assert_eq!(status, 0, "{stderr}");
-    assert!(stdout.contains("\ntoken-max: installed  "), "{stdout}");
+    assert!(stdout.contains(" [installed] "), "{stdout}");
     assert!(!hosts.cache("installed").exists());
 }
 
@@ -1624,10 +1744,7 @@ fn doctor_hands_every_host_to_vibes_from_the_same_scan() {
     // One credit for every host opens the walk, before this host's header.
     terminal.wait("token-max: total over 3 hosts  ");
     terminal.wait("Compared with defaults, ");
-    terminal.wait("token-max: this host  ");
-    // Nothing measured to change, so doctor's walk ends with each host's report.
-    terminal.wait("token-max: devbox  ");
-    terminal.wait("token-max: laptop  ");
+    // Nothing measured to change, so doctor's walk ends with one report for every host.
     terminal.wait("Nothing to change on these hosts.");
     terminal.wait("token-max vibes has 3 pieces of advice the transcripts can't price. Show them?");
     terminal.answer("[y]es, [n]o:", "y");
@@ -1662,15 +1779,20 @@ fn doctor_hands_every_host_to_vibes_from_the_same_scan() {
     assert_eq!(args.matches("--ssh-scan").count(), 2, "{args}");
     assert_eq!(output.matches("paid for?").count(), 3, "{output}");
     // Each host saves the same with its 1h TTL and counts one setting not measured; the
-    // credit adds them, its share of the three hosts' spend together, and each report keeps
-    // its own.
+    // credit adds them, its share of the three hosts' spend together, both where the walk
+    // opens and in the one report after it.
     let flat = flat(&output);
-    assert!(flat.contains("$0.03 at API prices Compared with defaults, your settings save <$0.01/mo, 13% of these hosts' spend. 3 more settings differ by amounts not measured. Overlapping settings may save less. token-max: this host "), "{output}");
-    for host in ["this host's", "devbox's", "laptop's"] {
-        let own = format!(
-            "No changes recommended or worth considering. Compared with defaults, your settings save <$0.01/mo, 13% of {host} spend. 1 more setting differs by an amount not measured."
-        );
-        assert!(flat.contains(&own), "{host}: {output}");
+    let credit = "Compared with defaults, your settings save <$0.01/mo, 13% of these hosts' spend. 3 more settings differ by amounts not measured. Overlapping settings may save less.";
+    assert!(
+        flat.contains(&format!(
+            "$0.03 at API prices {credit} No changes recommended or worth considering. {credit}"
+        )),
+        "{output}"
+    );
+    assert_eq!(flat.matches(credit).count(), 2, "{output}");
+    for host in ["this host", "devbox", "laptop"] {
+        let row = format!("keep Main-agent prompt cache TTL 1h saves <$0.01/mo 4% [{host}]");
+        assert!(flat.contains(&row), "{host}: {output}");
     }
 }
 
@@ -1870,19 +1992,13 @@ fn each_destination_prices_its_main_ttl_by_the_answer_given_for_it() {
     let (code, output, stderr) = terminal.finish();
     assert_eq!(code, 1, "{output}{stderr}");
     // Skipped, a plan's 1h, and an API key's 5m: each host's own answer, not this host's.
-    for (host, line) in [
-        (
-            "this host",
-            "Main-agent prompt cache TTL unset -> 1h saves up to",
-        ),
-        ("devbox", "Main-agent prompt cache TTL 1h (default)"),
-        (
-            "laptop",
-            "Main-agent prompt cache TTL 5m (default) -> 1h saves <$0.01/mo",
-        ),
+    // This host's and laptop's changes share a row, which names each host's own value.
+    let text = flat(&output);
+    for line in [
+        "Prompt cache TTL main (this host) unset -> 1h, main (laptop) 5m (default) -> 1h saves <$0.01/mo + up to <$0.01/mo 9% [this host, laptop]",
+        "Main-agent prompt cache TTL 1h (default) saves <$0.01/mo 4% [devbox]",
     ] {
-        let section = flat(section(&output, host));
-        assert!(section.contains(line), "{host}: {section}");
+        assert!(text.contains(line), "{line}: {output}");
     }
     // Every setting is its default, so neither the total nor any host compares with them.
     assert!(!output.contains("Compared with defaults"), "{output}");

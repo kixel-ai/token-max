@@ -131,7 +131,9 @@ a check, is not asked: one dim line says how many changes were left out, and
 the list after the walk shows them among those not accepted. `vibes`' card
 that says the walk skips a change too small to ask, such as auto memory's,
 judges its section's total, not the one change's, leaving out a member whose
-file refuses its edit, which the walk lists as a step by hand.
+file refuses its edit, which the walk lists as a step by hand. Under `--ssh`
+that total sums every host's members, as the walk's section does, so another
+host's changes can leave the card to the walk.
 
 Each question takes `y`, `n` or `q`, and a section also `s`; anything else asks
 again. An answer only selects: after each yes, a running total sums the
@@ -311,13 +313,17 @@ section's row names the settings its members change, such as
 ### On SSH hosts
 
 With `--ssh`, the walk offers every host's changes in one list, biggest saving
-first across hosts. A card for another host's change, or any card when the run
-covers several hosts, names its host under `Host`, and a section only gathers one
-host's changes. Each host's last question offers to remove its servers that are
-off already. The running total sums the accepted changes of every host, as a
-percent of the hosts' spend together. Each host's report follows the walk,
-marked with its answers, and the confirm shows every host's diffs and names
-each file as `host:path`, such as `devbox:~/.claude/settings.json`.
+first across hosts. A section gathers its kind and reason's changes from every
+host, so never-used skills on two hosts are one question whose saving sums
+both, and its card names its hosts under `Hosts` (`Host` when it holds one
+host's changes). Splitting a section asks each member on its own, biggest
+saving first, naming its host, and a member whose name another host shares
+reads as `dataviz on devbox`. The last question offers to remove the servers
+that are off already on every host. The running total sums the accepted
+changes of every host, as a percent of the hosts' spend together. One report
+follows the walk, marked with each host's answers, and the confirm shows every
+host's diffs and names each file as `host:path`, such as
+`devbox:~/.claude/settings.json`.
 
 Each destination's own token-max reads, checks and writes its files, so the
 rules above hold there as they do here: which edits apply, the masked diff,
@@ -693,9 +699,8 @@ setting was found to differ from its Claude Code or Codex default." when none
 differs. A line whose current value is unknown gets no note, and that
 sentence does not claim it matches its default. On a terminal the same line
 also opens `doctor`'s walk, under its header, before the first question.
-With `--ssh`, the total that heads the run adds every host's savings before
-rounding into one such line, each percent of the hosts' spend together, while
-each host's section keeps its own.
+With `--ssh`, the one report adds every host's savings before rounding into
+one such line, each percent of the hosts' spend together.
 
 Each saving is priced like its line's own comparison, holding every other
 setting at its current value, so the sum adds savings that may count the same
@@ -1366,8 +1371,13 @@ linked build to run here instead, such as the release installers'.
 
 `--claude-dir`, `--codex-dir` and `--t3-dir` select this host's profiles only.
 
-Each host is analyzed on its own and gets its own section, labeled with the
-destination, or `this host`. A run of several hosts heads its report with one
+Each host is analyzed on its own, and a run of several hosts prints one
+report whose rows span them: a row's tag names its host, as `[this host]`,
+`[devbox]` or, where a host read several profiles, `[devbox:~/.claude/settings.json]`,
+and a section's row sums its members on every host, each listed under
+`--details` with its own tag. Under `--details`, or when a host has a note
+such as a profile it could not read, each host's notes and evidence follow
+the rows, under a title naming the host. The report opens with one
 total: the hosts' requests, the input and output tokens they recorded (cache reads and writes included) and their sessions, their spend at API prices, and the sum of what the
 changes they offer save every 30 days and of what their settings save against
 the defaults, with each saving's percent of the hosts'
@@ -1384,8 +1394,8 @@ with exit 2 and no report, and Ctrl-C then stops every destination. After
 the reports, a failure during the walk, a Ctrl-C during its questions, or a
 Ctrl-C after the yes that leaves a host unwritten also exits 2. On a terminal,
 `doctor` walks through every host's changes and writes each on its own host, as
-[On SSH hosts](#on-ssh-hosts) describes. Each host's percents
-are of that host's own spend, and the total's of the hosts' spend together.
+[On SSH hosts](#on-ssh-hosts) describes. Every percent is of the hosts' spend
+together.
 
 ## Keepalive pings
 

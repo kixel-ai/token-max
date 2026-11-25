@@ -2278,13 +2278,12 @@ pub(crate) fn offered(fix: &Fix) -> bool {
     }
 }
 
-/// Whether the walk takes up `fix`, one of `fixes`: it names a step by hand whatever it
-/// saves, including an edit its file refuses, and asks about an edit only when its section
-/// saves enough to ask: `fix` and the other edits in `fixes` it joins whose files take them,
-/// as `Owner::new` checks each offer.
-pub(crate) fn takes_up(fix: &Fix, fixes: &[Fix]) -> bool {
+/// What `fix`'s section of `fixes` saves together, when the walk offers `fix` as an edit:
+/// `fix` and the other edits in `fixes` it joins whose files take them, as `Owner::new`
+/// checks each offer. None for a step by hand, which joins no section.
+pub(crate) fn section_total(fix: &Fix, fixes: &[Fix]) -> Option<Total> {
     if !offered(fix) {
-        return true;
+        return None;
     }
     let section: Vec<Fix> = std::iter::once(fix)
         .chain(
@@ -2294,7 +2293,7 @@ pub(crate) fn takes_up(fix: &Fix, fixes: &[Fix]) -> bool {
         )
         .cloned()
         .collect();
-    Total::of(&section).asked()
+    Some(Total::of(&section))
 }
 
 /// A file's accepted changes: settings to set, and MCP server entries to remove.
@@ -2442,7 +2441,7 @@ impl Total {
 
     /// Whether the walk asks about these changes as one question: they save at least
     /// `ASKED_USD` together, or one's saving was not measured.
-    fn asked(&self) -> bool {
+    pub(crate) fn asked(&self) -> bool {
         self.usd().is_none_or(|usd| usd >= ASKED_USD)
     }
 
@@ -3481,7 +3480,10 @@ impl Question<'_> {
     fn fix(&self, member: &Member<'_>) -> Fix {
         let mut fix = member.offer.fix.clone();
         if let Some(monthly) = self.monthly {
-            fix.share = fix.saving.filter(|_| monthly > 0.0).map(|usd| usd / monthly);
+            fix.share = fix
+                .saving
+                .filter(|_| monthly > 0.0)
+                .map(|usd| usd / monthly);
         }
         fix
     }
@@ -3585,11 +3587,7 @@ fn which(fixes: &[(&Fix, Option<&str>)], style: &Style) -> String {
             // location alone repeats, as two profiles' copies of one skill do; a setting's
             // name is its profile. Members on several hosts compare within their own.
             let peers = |same: &dyn Fn(&Fix) -> bool| {
-                fixes
-                    .iter()
-                    .filter(|(o, h)| *h == host && same(o))
-                    .count()
-                    > 1
+                fixes.iter().filter(|(o, h)| *h == host && same(o)).count() > 1
             };
             let shared = peers(&|o| o.section.member == s.member);
             let placed =
@@ -4031,7 +4029,8 @@ pub fn ask(
                     write!(
                         output,
                         "\n{}",
-                        host.style.entry(&question.fix(member), &counter, host.label)
+                        host.style
+                            .entry(&question.fix(member), &counter, host.label)
                     )?;
                     let answer = answer(&style.prompt("Accept?", false), input, output)?;
                     going = walk.take(member, answer, output)?;
@@ -6066,8 +6065,13 @@ mod tests {
             },
         ];
         let mut printed = vec![];
-        let selections =
-            super::ask(&hosts, &styles[0], &mut "s\ny\ny\nn\n".as_bytes(), &mut printed).unwrap();
+        let selections = super::ask(
+            &hosts,
+            &styles[0],
+            &mut "s\ny\ny\nn\n".as_bytes(),
+            &mut printed,
+        )
+        .unwrap();
         let printed = String::from_utf8(printed).unwrap();
         let heads: Vec<&str> = printed
             .lines()
@@ -6084,7 +6088,10 @@ mod tests {
             ],
             "{printed}"
         );
-        assert!(printed.contains("\n        Hosts  this host, devbox\n"), "{printed}");
+        assert!(
+            printed.contains("\n        Hosts  this host, devbox\n"),
+            "{printed}"
+        );
         assert!(
             printed.contains("\n        Which  dataviz on this host, dataviz on devbox, run.\n"),
             "{printed}"
@@ -6294,6 +6301,10 @@ mod tests {
             },
             ..change(line, settings, Harness::Claude, vec![edit(line, 1, false)])
         };
+        // Whether the walk takes up a change: it names a step by hand whatever it saves, and
+        // asks about an edit only when its section saves enough to ask.
+        let takes_up =
+            |fix: &Fix, fixes: &[Fix]| section_total(fix, fixes).is_none_or(|t| t.asked());
         let (a, b) = (memory("A", &settings), memory("B", &elsewhere));
         assert!(!takes_up(&a, std::slice::from_ref(&a)));
         assert!(takes_up(&a, &[a.clone(), b.clone()]));
@@ -7424,6 +7435,7 @@ mod tests {
             how: Some(how),
             quiet: false,
             after: vec![],
+            defers: None,
         };
         let owner = crate::vibes::owner(&[item], None, 100.0);
         let plan = owner

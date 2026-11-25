@@ -1209,6 +1209,11 @@ impl WalkHost {
     }
 }
 
+/// Every host's advice as it reads once the walk asks the sections their changes share.
+fn join(hosts: &mut [WalkHost]) {
+    vibes::joined(&mut hosts.iter_mut().map(|h| &mut h.items).collect::<Vec<_>>());
+}
+
 /// One host before its job runs here: this host's scan, or a destination's reply.
 enum Scanned {
     Local(Box<Scan>),
@@ -2073,6 +2078,15 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
         // Off a terminal, `doctor` names how much advice `vibes` has.
         cards.push((ssh.clone(), items, style.clone()));
     }
+    // A card leaving its change to a section the walk asks only for several hosts' changes
+    // together reads as the walk asks it.
+    vibes::joined(
+        &mut hosts
+            .iter_mut()
+            .map(|h| &mut h.items)
+            .chain(cards.iter_mut().map(|(_, items, _)| items))
+            .collect::<Vec<_>>(),
+    );
     // One report across hosts, which a total of every host's figures opens.
     let options = ReportOptions {
         width: style.width,
@@ -2135,7 +2149,10 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
     let text = listing.map_or_else(String::new, |l| l.text());
     // Off a terminal, the advice this report leaves out is one command away. Under
     // `--defaults` the count is of settings pretended away, which `vibes` reads as they are.
-    let pending: usize = cards.iter().map(|(_, items, _)| vibes::pending(items)).sum();
+    let pending: usize = cards
+        .iter()
+        .map(|(_, items, _)| vibes::pending(items))
+        .sum();
     let hint = if pending > 0 && !values.defaults {
         let hint = format!(
             "{} Run token-max vibes with the same profile, host, --since and price options to see {}.",
@@ -2395,6 +2412,7 @@ fn walk(walk: Walk) -> Result<(), ScanError> {
             for host in hosts.iter_mut().filter(|h| h.wrote) {
                 host.advise()?;
             }
+            join(&mut hosts);
             let pending: usize = hosts.iter().map(|h| vibes::pending(&h.items)).sum();
             if pending == 0 {
                 return Ok(());
@@ -2407,6 +2425,7 @@ fn walk(walk: Walk) -> Result<(), ScanError> {
             for host in hosts.iter_mut().filter(|h| !h.wrote) {
                 host.advise()?;
             }
+            join(&mut hosts);
         }
         let wrote = hosts.iter().any(|h| h.wrote);
         let asking: Vec<vibes::Host> = hosts
@@ -2509,8 +2528,10 @@ fn settle(
     }
     // The report reads as its own section after the questions; `vibes` has none.
     if let Some(listing) = settling.listing {
-        let answered: Vec<(&Selection, &Offers)> =
-            selections.iter().zip(hosts.iter().map(|h| h.offers())).collect();
+        let answered: Vec<(&Selection, &Offers)> = selections
+            .iter()
+            .zip(hosts.iter().map(|h| h.offers()))
+            .collect();
         let total = crate::doctor::accepted(&answered, "Accepted");
         let gap = if summaries.iter().any(|s| s.answered()) {
             "\n"

@@ -10,15 +10,15 @@ use crate::context::{
 };
 use crate::controls::CAPPED_SHARED;
 use crate::discovery::{TTL_API_DEFAULT, TTL_BILLING_UNKNOWN, TTL_PLAN_DEFAULT};
-use crate::doctor::How;
+use crate::doctor::{How, Saved};
 use crate::keepalive::duration as keepalive_duration;
 use crate::model::{
     Action, BackgroundCheck, BackgroundFeature, BashCap, Billing, CacheReplayEvidence, CheckBase,
     CheckResult, CompactionCheck, ContextCost, ContextKind, ControlValue, Cost, Coverage,
     EffortCheck, EffortRun, Estimate, EstimateEvidence, Evidence, FableUse, FableWeek, Harness,
     InboundControl, InboundUse, KeepaliveCheck, Margin, MemoryCheck, Millis, ModelSource,
-    PeriodStatus, Profile, Report, RequestEvidence, RetentionControl, ReturnTiming, Scalar, Share,
-    SubagentCost, T3IdleCheck, T3TextGeneration, Ttl, UsageEstimate, Verdict,
+    PeriodStatus, Profile, Report, RequestEvidence, RetentionControl, ReturnTiming, Scalar, Scan,
+    Share, SubagentCost, T3IdleCheck, T3TextGeneration, Ttl, UsageEstimate, Verdict,
 };
 use crate::prices::{TIER_SENSITIVITY, TIER_SIGNS, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
@@ -741,7 +741,7 @@ fn plan_note(
     let profile = out.profiles.get(r.profile);
     let harness = profile.map(|p| p.harness);
     match result {
-        CheckResult::Ttl(_) if unset_main_ttl(result, r, out) => Some((
+        CheckResult::Ttl(_) if unset_main_ttl(result, out.lead(r)) => Some((
             "while it is unset, Claude Code gives the main conversation 1h on a Claude plan within its included usage, and 5m once usage credits or an API key pay for it.",
             TTL_SOURCE,
         )),
@@ -803,11 +803,10 @@ fn answered_main_ttl(result: &CheckResult, r: &Common<'_>, out: &Out<'_>) -> Opt
 }
 
 /// Whether a check is the main TTL left unset, which Claude Code picks by how the request is paid for.
-fn unset_main_ttl(result: &CheckResult, r: &Common<'_>, out: &Out<'_>) -> bool {
+/// `lead` is the line's lead profile.
+fn unset_main_ttl(result: &CheckResult, lead: Option<&Profile>) -> bool {
     matches!(result, CheckResult::Ttl(t) if t.bucket == crate::model::Bucket::Main)
-        && out
-            .profiles
-            .get(r.profile)
+        && lead
             .is_some_and(|p| p.ttl.main.value.is_none() && p.ttl.main.reason == TTL_BILLING_UNKNOWN)
 }
 
@@ -1021,6 +1020,11 @@ pub(crate) struct Spend {
     until: Millis,
 }
 
+/// Where a report's window starts: the scan's billing window, else its first request.
+fn window_start(scan: &Scan) -> Option<Millis> {
+    scan.since.or(scan.requests.first().map(|r| r.time))
+}
+
 impl Spend {
     pub(crate) fn new(report: &Report) -> Self {
         let crate::totals::Spent {
@@ -1034,10 +1038,7 @@ impl Spend {
             margin,
             floor,
             partial,
-            since: report
-                .scan
-                .since
-                .or(report.scan.requests.first().map(|r| r.time)),
+            since: window_start(&report.scan),
             until: generated_at(report),
         }
     }
@@ -1091,6 +1092,10 @@ pub(crate) fn spend_text(usd: f64, margin: Option<Margin>, floor: f64, partial: 
 }
 
 impl<'a> Out<'a> {
+    /// The profile whose controls a check's line reports.
+    fn lead(&self, r: &Common<'_>) -> Option<&'a Profile> {
+        self.profiles.get(r.profile).copied()
+    }
     fn new(report: &'a Report, options: ReportOptions<'a>) -> Self {
         let mut profiles = IndexMap::default();
         for p in &report.scan.profiles {
@@ -5516,7 +5521,7 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
             continue;
         }
         let target = check_target(result, &r, mark);
-        let mut current = if unset_main_ttl(result, &r, &out) {
+        let mut current = if unset_main_ttl(result, out.lead(&r)) {
             "unset".into()
         } else {
             match r.current {
@@ -5530,40 +5535,45 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
         {
             current += " (default)";
         }
-        let saving = check_saving(result, &r, &out);
+        let Saved {
+            saving,
+            margin,
+            verb,
+        } = check_found(result, &r, out.lead(&r));
         lines.push(Recommendation {
             suggested: mark == Mark::Consider,
             name: setting_name(result),
             value: format!("{current} {arrow} {target}"),
             saving,
-            margin: check_margin(result, &r).filter(|_| saving.is_some()),
-            verb: check_verb(result, &r, &out),
+            margin,
+            verb,
             share: saving.and_then(|usd| out.spend.of_month(usd)),
             source: Source::Check(result),
             origin: Origin::Check(index),
         });
     }
     for (index, c) in setting_rows(&report.context).enumerate() {
-        let mark = match c.verdict {
-            // A switch the file already sets is a change made before any request showed it.
-            _ if crate::defaults::applied(report, c).is_some() => continue,
-            Some(Verdict::Off) => Mark::Change,
-            Some(Verdict::Consider) => Mark::Consider,
-            _ => continue,
+        // A switch the file already sets is a change made before any request showed it.
+        let Some(mark) = piece_mark(c, &report.scan.profiles) else {
+            continue;
         };
         let target = if typed_only(c.control.as_ref()) {
             "typed only"
         } else {
             "off"
         };
-        let saving = piece_saving(c, &out.spend);
+        let Saved {
+            saving,
+            margin,
+            verb,
+        } = piece_found(c, &out.spend);
         lines.push(Recommendation {
             suggested: mark == Mark::Consider,
             name: short_label(c, &out),
             value: format!("on {arrow} {target}"),
             saving,
-            margin: piece_margin(c, &out.spend).filter(|_| saving.is_some()),
-            verb: "saves",
+            margin,
+            verb,
             share: saving.and_then(|usd| out.spend.of_month(usd)),
             source: Source::Piece(c),
             origin: Origin::Context(index),
@@ -5614,9 +5624,9 @@ pub(crate) const UP_TO: &str = "saves up to";
 pub(crate) const AT_LEAST: &str = "saves at least";
 
 /// How a recommended or suggested check's saving reads, such as "saves up to".
-fn check_verb(result: &CheckResult, r: &Common<'_>, out: &Out<'_>) -> &'static str {
+fn check_verb(result: &CheckResult, lead: Option<&Profile>) -> &'static str {
     match result {
-        _ if unset_main_ttl(result, r, out) => UP_TO,
+        _ if unset_main_ttl(result, lead) => UP_TO,
         // Memory with unmeasured generation or reads saves at least what was priced.
         CheckResult::Memory(m) if m.lower_bound() => AT_LEAST,
         _ => "saves",
@@ -5624,12 +5634,12 @@ fn check_verb(result: &CheckResult, r: &Common<'_>, out: &Out<'_>) -> &'static s
 }
 
 /// What a recommended or suggested check saves every 30 days, when it was measured.
-fn check_saving(result: &CheckResult, r: &Common<'_>, out: &Out<'_>) -> Option<f64> {
+fn check_saving(result: &CheckResult, r: &Common<'_>, lead: Option<&Profile>) -> Option<f64> {
     match result {
         // A lower or higher effort changes the output, which the transcripts cannot price.
         CheckResult::Effort(_) => None,
         // Either default may be in force, so the saving is the whole gap or nothing.
-        CheckResult::Ttl(t) if unset_main_ttl(result, r, out) => {
+        CheckResult::Ttl(t) if unset_main_ttl(result, lead) => {
             Some(monthly(t.one_hour_savings_usd.abs(), r.since, r.until))
         }
         _ => r
@@ -5669,6 +5679,69 @@ fn piece_saving(c: &ContextCost, spend: &Spend) -> Option<f64> {
 fn piece_margin(c: &ContextCost, spend: &Spend) -> Option<Margin> {
     c.margin
         .map(|m| m.scale(monthly(1.0, spend.since, Some(spend.until))))
+}
+
+/// Whether a piece of context's line recommends turning it off or suggests it; None when it
+/// offers no change, as when a settings file turns it off already.
+fn piece_mark(c: &ContextCost, profiles: &[Profile]) -> Option<Mark> {
+    match c.verdict {
+        _ if crate::defaults::applied(profiles, c).is_some() => None,
+        Some(Verdict::Off) => Some(Mark::Change),
+        Some(Verdict::Consider) => Some(Mark::Consider),
+        _ => None,
+    }
+}
+
+/// What a check's recommended or suggested change saves, as the walk counts it.
+fn check_found(result: &CheckResult, r: &Common<'_>, lead: Option<&Profile>) -> Saved {
+    let saving = check_saving(result, r, lead);
+    Saved {
+        saving,
+        margin: check_margin(result, r).filter(|_| saving.is_some()),
+        verb: check_verb(result, lead),
+    }
+}
+
+/// What turning a piece of context off saves, as the walk counts it.
+fn piece_found(c: &ContextCost, spend: &Spend) -> Saved {
+    let saving = piece_saving(c, spend);
+    Saved {
+        saving,
+        margin: piece_margin(c, spend).filter(|_| saving.is_some()),
+        verb: "saves",
+    }
+}
+
+/// What a check adds to a progress line's tallies while the settings are checked, as its
+/// report line and the walk count them: what its current value saves against the default,
+/// and what the change it recommends or suggests saves, None when it offers none.
+pub(crate) fn check_tally(
+    result: &CheckResult,
+    profiles: &[Profile],
+) -> (Option<crate::defaults::Baseline>, Option<Saved>) {
+    let r = common(result);
+    let lead = profiles.iter().find(|p| p.id == r.profile);
+    let found = matches!(check_mark(result, &r), Mark::Change | Mark::Consider)
+        .then(|| check_found(result, &r, lead));
+    (crate::defaults::check(result, lead), found)
+}
+
+/// What turning each piece of `context` off saves, for each line that offers it, as the walk
+/// counts it while the settings are checked: `scan`'s, in a report generated at `now`.
+pub(crate) fn context_tally(context: &[ContextCost], scan: &Scan, now: Millis) -> Vec<Saved> {
+    // Only the spend's window reads here, and the spend is not yet summed.
+    let spend = Spend {
+        usd: 0.0,
+        margin: None,
+        floor: 0.0,
+        partial: false,
+        since: window_start(scan),
+        until: now,
+    };
+    setting_rows(context)
+        .filter(|c| piece_mark(c, &scan.profiles).is_some())
+        .map(|c| piece_found(c, &spend))
+        .collect()
 }
 
 /// The settings file a piece's switch lives in: its first profile's.
@@ -5912,7 +5985,7 @@ fn summary(
     };
     // A switch the settings file already sets shows as off below, even while the latest
     // request, made before the change, still carried the feature.
-    let applied = |c: &ContextCost| crate::defaults::applied(report, c).is_some();
+    let applied = |c: &ContextCost| crate::defaults::applied(&report.scan.profiles, c).is_some();
     let pieces: Vec<(usize, &ContextCost)> = setting_rows(&report.context)
         .enumerate()
         .filter(|(_, c)| c.verdict.is_some() && !applied(c))
@@ -5957,7 +6030,7 @@ fn summary(
         if let CheckResult::Background(b) = result {
             row.scopes = background_scopes(b, out);
         }
-        let unset = unset_main_ttl(result, r, out);
+        let unset = unset_main_ttl(result, out.lead(r));
         let current = match r.current {
             None if unset => "unset".into(),
             Some(Setting::Window(n)) => tokens(n),
@@ -6290,8 +6363,8 @@ fn summary(
         // The figure: what a change saves, else what the setting cost or saves as it is.
         if row.offered() {
             row.saves(
-                check_verb(result, r, out),
-                check_saving(result, r, out),
+                check_verb(result, out.lead(r)),
+                check_saving(result, r, out.lead(r)),
                 check_margin(result, r),
                 &spend,
             );
@@ -7436,7 +7509,7 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
             String::new()
         };
         let text = format!("{}{profile}: {cost}{used}", piece_label(c, out));
-        let tier = match crate::defaults::applied(report, c) {
+        let tier = match crate::defaults::applied(&report.scan.profiles, c) {
             Some(_) => PLAIN,
             None => feature_tier(c, covered),
         };
@@ -7516,7 +7589,7 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
             .and_then(|p| p.memory.as_ref())
             .filter(|_| c.kind == ContextKind::Memory);
         let text = match &c.control {
-            _ if crate::defaults::applied(report, c).is_some() => {
+            _ if crate::defaults::applied(&report.scan.profiles, c).is_some() => {
                 "Already off in its settings file, since the latest request that carried it"
                     .into()
             }
@@ -8305,6 +8378,34 @@ mod tests {
             "Policy in /etc/managed-settings.json keeps it off, which a user can't change."
         );
         assert_eq!(report_line(&text, "MCP server docs off").mark, "info");
+    }
+
+    /// The tally a progress line keeps while checking, from each check's result and the
+    /// context's lines, ends on the figures the report prints: the credit line's, and the
+    /// total under its headline.
+    #[test]
+    fn the_tally_while_checking_ends_on_the_reports_own_figures() {
+        let report = synthetic();
+        let fixes = crate::doctor::fixes(&report, false);
+        let listing = format_report(&report, &fixes, ReportOptions::default());
+        let totals = crate::totals::Totals::new(&report, &fixes, listing.credit());
+        let mut checked = crate::totals::Checked::new(1, report.scan.defaults);
+        for result in &report.checks {
+            checked.check(result, &report.scan.profiles);
+        }
+        for found in context_tally(&report.context, &report.scan, generated_at(&report)) {
+            checked.savings.count(&found);
+        }
+        assert_eq!(checked.credit, totals.credit);
+        assert_eq!(checked.savings.changes(), totals.savings.changes());
+        assert_eq!(checked.savings.tally(true), totals.savings.tally(true));
+        // A measured change, and a setting whose default depends on how usage is paid.
+        assert_eq!(
+            checked.savings.tally(true).0.as_deref(),
+            Some("found ~$314/mo ± $1.25 more")
+        );
+        let (_, saving_up_to) = checked.credit.as_ref().unwrap().tally();
+        assert_eq!(saving_up_to.len(), 1);
     }
 
     #[test]

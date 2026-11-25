@@ -32,7 +32,7 @@ use crate::safe::{
 };
 use crate::sessions::{Record, Sessions};
 use crate::tally::{Basis, Tally};
-use crate::totals::Counts;
+use crate::totals::{Checked, Counts};
 use crate::unreadable::ToolIds;
 
 /// Select a time window and local roots.
@@ -79,6 +79,8 @@ pub struct Reading {
     every_record: bool,
     /// A step the scan takes after reading, and when it began, while it runs.
     pub step: Mutex<Option<(&'static str, Instant)>>,
+    /// What the analysis has checked so far; None until it starts checking.
+    pub checked: Mutex<Option<Checked>>,
 }
 
 impl Reading {
@@ -2804,6 +2806,9 @@ mod tests {
             settled,
             crate::totals::Totals::new(&report, &[], None).counts()
         );
+        // The analysis counted every check it ran.
+        let checked = reading.checked.lock().unwrap().clone().unwrap();
+        assert!(checked.of > 0 && checked.done == checked.of, "{checked:?}");
         // Two Claude requests, one streamed in chunks, a subagent's in its parent's session,
         // Codex's once across its copy, and two legacy counters; the old one is before the
         // window.

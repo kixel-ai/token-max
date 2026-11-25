@@ -4,7 +4,7 @@
 
 use crate::model::{
     Action, Bucket, CheckResult, ContextCost, Control, ControlValue, Harness, Margin, Profile,
-    Report, T3IdleMode, Ttl,
+    T3IdleMode, Ttl,
 };
 use crate::report::{approx, monthly, tokens};
 use serde::{Deserialize, Serialize};
@@ -396,15 +396,10 @@ pub fn switch_what(control: &Control) -> String {
 /// The switch that already turns a piece off: every selected profile on its line has its
 /// settings file set it, and no file that outranks theirs sets it too. The latest request may
 /// still carry the piece, when the change came after it.
-pub fn applied<'a>(report: &'a Report, c: &ContextCost) -> Option<&'a Control> {
+pub fn applied<'a>(profiles: &'a [Profile], c: &ContextCost) -> Option<&'a Control> {
     let control = c.control.as_ref()?;
     let mut found = None;
-    for p in report
-        .scan
-        .profiles
-        .iter()
-        .filter(|p| c.profiles.contains(&p.id))
-    {
+    for p in profiles.iter().filter(|p| c.profiles.contains(&p.id)) {
         let switch = p.switched_off.iter().find(|k| covers(k, control))?;
         if crate::doctor::outranked(p, switch) {
             return None;
@@ -508,18 +503,53 @@ impl Credit {
     pub fn of<'a>(baselines: impl IntoIterator<Item = &'a Baseline>) -> Self {
         let mut credit = Credit::default();
         for b in baselines {
-            match b.saving {
-                Saving::Saves(usd) => credit.measured.add(usd, b.margin),
-                Saving::Estimated(usd) => {
-                    credit.measured.add(usd, b.margin);
-                    credit.estimated += 1;
-                }
-                Saving::UpTo(usd) if usd < 0.0 => credit.up_to_more.add(usd, b.margin),
-                Saving::UpTo(usd) => credit.up_to.add(usd, b.margin),
-                Saving::NotMeasured => credit.unmeasured += 1,
-            }
+            credit.add(b);
         }
         credit
+    }
+
+    /// What the setting behind `b` saves, added to these.
+    pub fn add(&mut self, b: &Baseline) {
+        match b.saving {
+            Saving::Saves(usd) => self.measured.add(usd, b.margin),
+            Saving::Estimated(usd) => {
+                self.measured.add(usd, b.margin);
+                self.estimated += 1;
+            }
+            Saving::UpTo(usd) if usd < 0.0 => self.up_to_more.add(usd, b.margin),
+            Saving::UpTo(usd) => self.up_to.add(usd, b.margin),
+            Saving::NotMeasured => self.unmeasured += 1,
+        }
+    }
+
+    /// What the settings save as a progress line tallies them: those measured, estimates
+    /// included and counted, then those whose default depends on how usage is paid, saving
+    /// and costing apart, as the credit line keeps them.
+    pub fn tally(&self) -> (Option<String>, Vec<String>) {
+        let amount = |sum: &Sum, up_to: &str| {
+            let (verb, more) = if sum.usd < 0.0 {
+                ("costing", " more")
+            } else {
+                ("saving", "")
+            };
+            format!(
+                "{verb} {up_to}{}{more} vs defaults",
+                approx(sum.usd.abs(), sum.margin, "/mo")
+            )
+        };
+        let measured = (self.measured.settings > 0).then(|| {
+            let estimated = match self.estimated {
+                0 => String::new(),
+                n => format!(", {n} estimated"),
+            };
+            amount(&self.measured, "") + &estimated
+        });
+        let up_to = [&self.up_to, &self.up_to_more]
+            .into_iter()
+            .filter(|sum| sum.settings > 0)
+            .map(|sum| amount(sum, "up to ") + ", depending on billing")
+            .collect();
+        (measured, up_to)
     }
 
     /// How many settings have a saving priced, in full or "up to".

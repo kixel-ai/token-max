@@ -2032,6 +2032,17 @@ impl Sum {
     }
 }
 
+/// One change's saving as a [`Total`] counts it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Saved {
+    /// What it saves every 30 days, when measured.
+    pub saving: Option<f64>,
+    /// How far `saving` may be off when extrapolated over unpriced requests.
+    pub margin: Option<Margin>,
+    /// How the saving reads, such as "saves up to".
+    pub verb: Known,
+}
+
 /// "1 change" or "2 changes".
 fn changes(n: usize) -> String {
     format!("{n} change{}", if n == 1 { "" } else { "s" })
@@ -2081,16 +2092,54 @@ impl Total {
     }
 
     fn add(&mut self, fix: &Fix) {
-        let Some(usd) = fix.saving else {
+        let found = Saved {
+            saving: fix.saving,
+            margin: fix.margin,
+            verb: fix.verb,
+        };
+        self.put(&found, fix.share);
+    }
+
+    /// A change found while checking, before the spend its share is of is known.
+    pub(crate) fn count(&mut self, found: &Saved) {
+        self.put(found, None);
+    }
+
+    fn put(&mut self, found: &Saved, share: Option<f64>) {
+        let Some(usd) = found.saving else {
             self.unmeasured += 1;
             return;
         };
-        if fix.verb == UP_TO {
-            self.up_to.add(usd, fix.margin, fix.share);
+        if found.verb == UP_TO {
+            self.up_to.add(usd, found.margin, share);
             return;
         }
-        self.measured.add(usd, fix.margin, fix.share);
-        self.partial += usize::from(fix.verb == AT_LEAST);
+        self.measured.add(usd, found.margin, share);
+        self.partial += usize::from(found.verb == AT_LEAST);
+    }
+
+    /// The changes' savings as a progress line tallies them: those measured, then those that
+    /// depend on the default they replace, each kept apart as the line under the headline
+    /// keeps them. `more` says they come on top of what the settings save already.
+    pub(crate) fn tally(&self, more: bool) -> (Option<String>, Option<String>) {
+        let more = if more { " more" } else { "" };
+        let measured = (self.measured.changes > 0).then(|| {
+            let partial = match self.partial {
+                0 => String::new(),
+                n => format!(", {n} priced in part"),
+            };
+            format!(
+                "found {}{more}{partial}",
+                approx(self.measured.usd, self.measured.margin, "/mo")
+            )
+        });
+        let up_to = (self.up_to.changes > 0).then(|| {
+            format!(
+                "found up to {}{more}, depending on billing",
+                approx(self.up_to.usd, self.up_to.margin, "/mo")
+            )
+        });
+        (measured, up_to)
     }
 
     /// How many changes were accepted.

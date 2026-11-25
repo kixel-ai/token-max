@@ -845,6 +845,23 @@ requests, the time left to read, the sessions, the tokens, then the bytes read.
 A figure too wide for the room left is skipped, and narrower ones after it
 still show.
 
+While `doctor` checks settings, the line also counts the checks done, such as
+`7/11 checks`, and tallies two figures as each check lands: what the current
+settings save against the Claude Code and Codex defaults, as the report's
+"Compared with defaults" line sums them, and what the changes found so far
+save, as the total under the report's headline sums them. Each figure keeps
+the report's kinds apart: a saving that depends on how usage is paid, such as
+a pinned main-agent TTL, has its own "up to" figure, an estimate for a feature
+that is off is counted beside the saving it joins, and a change priced only in
+part says so. A figure whose qualifier doesn't fit the row is dropped whole.
+The tools, skills and MCP servers a settings file already turns off join the
+defaults figure once the report is formatted, and the line then ends on the
+report's own figures; each SSH host's figures join when its report arrives.
+Under `--defaults` there is no comparison with the defaults, so the line
+tallies only the changes. `vibes` counts its checks but tallies nothing, since
+its advice is unmeasured. Ahead of the tallies on a narrow terminal stays only
+the count of checks; the "up to" figures go before the sessions and tokens.
+
 On a terminal, `doctor` opens with its name, says it is about to scan this
 host's transcripts, and lists each profile root it found with its transcript
 files and their size, then the SSH destinations it adds, or how to add one with

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::defaults::Credit;
 use crate::doctor::{Fix, Total};
-use crate::model::{Estimate, HistoricalCost, Margin, Report, Request, Scan};
+use crate::model::{CheckResult, Estimate, HistoricalCost, Margin, Profile, Report, Request, Scan};
 use crate::report::{Spend, spend_text};
 
 /// One host's figures, or the sum of several.
@@ -104,6 +104,41 @@ impl Totals {
     pub fn credit(&self, whose: &str) -> Option<String> {
         let credit = self.credit.as_ref()?;
         Some(credit.text(self.monthly, whose))
+    }
+}
+
+/// What a host's checks have found so far, for a progress line while its settings are checked.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Checked {
+    /// How many checks are done, of `of`.
+    pub done: usize,
+    pub of: usize,
+    /// What the changes found so far save, their shares unknown until the spend is summed.
+    pub savings: Total,
+    /// What the settings checked so far save against the defaults; None under `--defaults`.
+    /// The tools, skills and MCP servers already off join once the report is formatted.
+    pub credit: Option<Credit>,
+}
+
+impl Checked {
+    /// Nothing checked yet of `of` checks, with a credit unless every setting is its default.
+    pub fn new(of: usize, defaults: bool) -> Self {
+        Checked {
+            of,
+            credit: (!defaults).then(Credit::default),
+            ..Checked::default()
+        }
+    }
+
+    /// One check's result, among `profiles`, counted as its report line and the walk count it.
+    pub fn check(&mut self, result: &CheckResult, profiles: &[Profile]) {
+        let (baseline, found) = crate::report::check_tally(result, profiles);
+        if let (Some(credit), Some(baseline)) = (&mut self.credit, &baseline) {
+            credit.add(baseline);
+        }
+        if let Some(found) = &found {
+            self.savings.count(found);
+        }
     }
 }
 

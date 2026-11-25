@@ -60,7 +60,10 @@ it without `--defaults` to upgrade.
 A binary under `/nix/store`, or in Cargo's `bin` directory (`$CARGO_HOME/bin`
 or `~/.cargo/bin`), belongs to that tool, so doctor prints the command that
 upgrades it instead of asking; so does one in the run scripts' cache, which
-names each binary for its release. A binary in a directory this user cannot
+names each binary for its release. One in crabx's cache (`crabx/v1/` under the
+user cache directory) is crabx's: doctor says an unpinned `crabx token-max`
+picks up the release on its own and a pinned one stays on its version, and
+never replaces the file crabx verified. A binary in a directory this user cannot
 write, such as a root-owned `/usr/local/bin`, or on a platform with no
 prebuilt release, gets a link to the install methods instead. Telling that
 directory apart means creating and deleting a file in it, so only a terminal

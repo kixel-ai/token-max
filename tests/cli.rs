@@ -1352,6 +1352,25 @@ fn without_a_terminal_a_newer_release_or_a_failed_check_is_one_line_on_stderr() 
             )
         )
     );
+    // A binary in crabx's cache is crabx's to move to a new release.
+    let crabx = w
+        .home
+        .join(".cache/crabx/v1/x86_64-unknown-linux-musl/author/token-max/0.1.0/bin");
+    std::fs::create_dir_all(&crabx).unwrap();
+    let bin = crabx.join(format!("token-max{}", std::env::consts::EXE_SUFFIX));
+    std::fs::hard_link(BIN, &bin).unwrap();
+    let mut c = command_at(&bin, &w, &doctor);
+    c.env("TOKEN_MAX_RELEASES", &releases.url);
+    assert_eq!(
+        run(&mut c),
+        (
+            1,
+            report.clone(),
+            format!(
+                "{stale} crabx manages this binary: an unpinned crabx token-max picks up the new release on its own, and a pinned one stays on its version.\n"
+            )
+        )
+    );
     // A run without a terminal never probes the directory, which writes beside the binary, so
     // even one this user cannot write only hears that a terminal run upgrades.
     #[cfg(unix)]

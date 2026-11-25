@@ -104,7 +104,7 @@ fn newer(tag: &str, version: &str) -> Check {
 pub enum Install {
     /// Put the release for `target` in place of the binary at `exe`.
     Replace { exe: PathBuf, target: &'static str },
-    /// A package manager owns the binary, and this command upgrades it.
+    /// A package manager owns the binary, and this sentence says how it upgrades.
     Manager(&'static str),
     /// Why the binary cannot be replaced here, such as a platform with no release, so it must
     /// be installed again.
@@ -150,20 +150,29 @@ impl Paths {
             .is_some_and(|dir| dir.ends_with("token-max/run"))
         {
             return Install::Manager(if cfg!(windows) {
-                "irm https://max.kixel.me/run.ps1 | iex"
+                "Upgrade with irm https://max.kixel.me/run.ps1 | iex."
             } else {
-                "curl -LsSf https://max.kixel.me/run.sh | sh"
+                "Upgrade with curl -LsSf https://max.kixel.me/run.sh | sh."
             });
         }
+        // crabx keeps each version it verified under `<cache dir>/crabx/v1/`, and an unpinned
+        // `crabx token-max` moves to a new release on its own schedule, so saying when would
+        // be a guess.
+        if self.exe.ancestors().any(|dir| dir.ends_with("crabx/v1")) {
+            return Install::Manager(
+                "crabx manages this binary: an unpinned crabx token-max picks up the new release \
+                 on its own, and a pinned one stays on its version.",
+            );
+        }
         if self.exe.starts_with("/nix/store") {
-            return Install::Manager("nix run github:kixel-ai/token-max -- doctor");
+            return Install::Manager("Upgrade with nix run github:kixel-ai/token-max -- doctor.");
         }
         let cargo_bin = self.cargo.map(|home| home.join("bin"));
         // Canonical, as `exe` is, so a symlinked Cargo home still matches.
         let cargo_bin = cargo_bin.map(|bin| bin.canonicalize().unwrap_or(bin));
         if cargo_bin.is_some_and(|bin| self.exe.parent() == Some(bin.as_path())) {
             return Install::Manager(
-                "cargo binstall token-max or cargo install --locked token-max",
+                "Upgrade with cargo binstall token-max or cargo install --locked token-max.",
             );
         }
         let Some(target) = TARGET else {
@@ -427,7 +436,7 @@ mod tests {
         };
         assert!(matches!(
             paths("/nix/store/abc-token-max/bin/token-max", None).install(),
-            Install::Manager(command) if command.starts_with("nix run ")
+            Install::Manager(command) if command.starts_with("Upgrade with nix run ")
         ));
         // Paths that don't exist stay as given, so these compare without a filesystem.
         assert!(matches!(
@@ -439,6 +448,11 @@ mod tests {
             paths("/home/u/.cache/token-max/run/token-max-v0.0.1-x86_64-unknown-linux-musl", None).install(),
             // slash ok: a URL
             Install::Manager(command) if command.contains("max.kixel.me/run.")
+        ));
+        // crabx's cache keeps each version it verified, pinned or not.
+        assert!(matches!(
+            paths("/home/u/.cache/crabx/v1/x86_64-unknown-linux-musl/author/token-max/0.1.0/bin/token-max", None).install(),
+            Install::Manager(command) if command.starts_with("crabx manages this binary")
         ));
         let Some(target) = TARGET else {
             let elsewhere = paths("/home/u/.local/bin/token-max", None).install();

@@ -6,8 +6,8 @@ max.kixel.me opens on a `node` tab showing `npx @kixel/crabx token-max doctor`,
 followed by a `crabx` tab and then today's `macOS / Linux` and `Windows` run
 scripts, which stay. The README and `docs/reference.md` list the same lines.
 Run through crabx, `doctor` is interactive on Linux, macOS and Windows, and
-[its upgrade guard](/quest/m1/crabx-upgrade.md) keeps 0.1.0's upgrade offer
-away from crabx's cache. Non-goals:
+its upgrade offer names crabx without replacing the binary in crabx's cache.
+Non-goals:
 publishing token-max to npm itself, and holding back 0.1.0 for this.
 
 ## Plan

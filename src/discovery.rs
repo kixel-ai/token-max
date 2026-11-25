@@ -980,7 +980,6 @@ pub(crate) fn git_dir(root: &str) -> Result<Option<GitDir>, ScanError> {
 }
 
 /// The main checkout of a linked worktree, reading only Git's path metadata.
-#[cfg(unix)]
 pub(crate) fn main_checkout(root: &str) -> Result<String, ScanError> {
     let Some(GitDir {
         common,
@@ -2604,6 +2603,7 @@ pub(crate) fn profile(
             .and_then(Value::as_str)
             .filter(|d| !d.is_empty())
             .map(|d| crate::lsp::expand(&options.home, d));
+        let (path, shell) = crate::lsp::claude_path(&[&managed, &user], &options.env);
         crate::lsp::Plugins {
             dir: Some(match &cache_dir {
                 Some(dir) => dir.clone(),
@@ -2613,21 +2613,10 @@ pub(crate) fn profile(
             // Without the variable, a shell reaches only the default home.
             named: explicit
                 || !realpath(&join(&[&options.home, ".claude"])).is_ok_and(|d| d == canonical),
-            // Claude Code starts its servers with the PATH its settings' `env` gives it, else
-            // the shell's.
-            path: environment
-                .values
-                .iter()
-                .find_map(|(k, v)| v.as_str().filter(|_| crate::lsp::is_path(k)))
-                .or_else(|| {
-                    options
-                        .env
-                        .iter()
-                        .find_map(|(k, v)| crate::lsp::is_path(k).then_some(v.as_str()))
-                })
-                .map(str::to_string)
-                .ok_or(crate::lsp::NO_PATH),
+            path,
+            shell,
             complete: true,
+            denied: crate::lsp::denies_lsp(&[(&managed, managed_file), (&user, &settings_file)]),
             home: options.home.clone(),
             user: crate::lsp::enabled_entries(&user, &settings_file),
             managed: crate::lsp::enabled_entries(&managed, managed_file),

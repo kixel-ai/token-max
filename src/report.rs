@@ -10254,7 +10254,7 @@ mod tests {
             cache_dir: None,
             named: false,
             unresolved: false,
-            denied: false,
+            denied: None,
             unread: None,
         };
         report.lsp = vec![card(&format!("{ROOT}/plugins"))];

@@ -1605,9 +1605,11 @@ directory and its user and managed settings, read when the report is built:
   in the profile) holds a user or managed record of
   `<plugin>@claude-plugins-official`. A project or local record installs it
   only for the project it names, which the card names too; one for every
-  project the sessions ran in serves them as well as a user install.
-- **On** by the `enabledPlugins` entry that wins: managed settings, then the
-  user's. An entry may be `true`, `false` or a list of version constraints,
+  project the sessions ran in, when each session recorded its directory,
+  serves them as well as a user install.
+- **On**, for a user or managed install, by the `enabledPlugins` entry that
+  wins: managed settings, then the user's. A project or local install is
+  turned on in that project's settings, which the card doesn't read. An entry may be `true`, `false` or a list of version constraints,
   which keeps it on. With no entry, a plugin is on: its
   [`defaultEnabled`](https://code.claude.com/docs/en/plugins-reference#defaultenabled)
   defaults to `true`, and no official language server plugin sets it.
@@ -1620,30 +1622,38 @@ are not read. The advice is always for the official copy:
 | State for a new session | Change |
 | --- | --- |
 | Not installed for every project | By hand: `claude plugin install <plugin>@claude-plugins-official`, since `enabledPlugins` turns a plugin on but doesn't download it. A bare install goes to whichever directories the shell selects, so the step sets `CLAUDE_CONFIG_DIR` to the profile, unsetting it only for the default `~/.claude` that the shell doesn't name, and sets or unsets `CLAUDE_CODE_PLUGIN_CACHE_DIR` as the profile has it. |
-| Installed, and turned off in the user settings | `enabledPlugins` set to `true` there, offered as an edit when the server is on `PATH`. Otherwise by hand. For a T3 instance whose launch arguments, secret environment values or machine policy can replace the settings it reads, the step names the user settings unless the launch arguments name others. |
+| Installed, and turned off in the user settings | `enabledPlugins` set to `true` there, offered as an edit when the server is on `PATH`. Otherwise by hand. For a T3 instance whose launch arguments, secret environment values or machine policy can replace the settings it reads, the card says the user settings turn it off only if the instance reads them, and the step names no file. |
 | Turned off by managed settings | None. |
-| Installed and on | None, unless its server is missing. |
+| Installed and on | None, unless its server is missing or is rustup's proxy. |
 
-The server is looked for on the `PATH` claude starts with: the one the user
-settings' `env` sets, else the shell's. A server that isn't there gets a step
-by hand to install it, unless managed settings turn the plugin off. Whether it
-is installed is unknown, and turning the plugin on is by hand, in three cases:
+The server is looked for on the `PATH` claude starts with: the one managed or
+user settings' `env` sets, else for a T3 instance the one its environment sets,
+else the shell's. Profiles that share a card find it only if each does. A
+server that isn't there gets a step by hand to install it, unless managed
+settings turn the plugin off. Whether it is installed is unknown, and turning
+the plugin on is by hand, for a server it doesn't find:
 
-- over `--ssh`, whose `PATH` often leaves out what a login shell adds, for a
-  server it doesn't find;
+- over `--ssh`, on the shell's `PATH`, which often leaves out what a login
+  shell adds, though not on one a setting or a T3 instance gives claude;
 - for a T3 instance, which starts claude from its own process, unless its
   environment or settings set `PATH`;
-- for rustup's `rust-analyzer` proxy, which starts the server only for a
-  toolchain that has its component.
+- when `PATH` holds a relative directory, which depends on where claude starts.
 
-When `permissions.deny` turns off the `LSP` tool, which Claude looks symbols up
-with, the card says the plugin would give only diagnostics after edits.
+rustup's `rust-analyzer` proxy, a link to `rustup` itself, starts the server
+only for a toolchain that has its component, so it gets a step by hand to add
+the component to each toolchain that lacks it.
+
+When `permissions.deny` in managed or user settings turns off the `LSP` tool,
+which Claude looks symbols up with, the card says the plugin would give only
+diagnostics after edits.
 
 Profiles share a card only when they share a settings file and a plugins
 directory; cards that share only the settings file name their plugins
-directory. A session that may have been another profile's, such as T3 history
-two homes could hold, is left out and counted apart; a language only such
-sessions touched gets a quiet card saying so, when anything is missing. A
+directory. A session whose recorded profiles span more than one card, such as
+T3 history two homes could hold, is left out and counted apart; a language
+only such sessions touched gets a quiet card saying so, when anything is
+missing. History T3 left unsettled counts for the card holding all its
+recorded profiles, as on every other line. A
 disabled T3 instance gets no card. When `installed_plugins.json` or an
 `enabledPlugins` entry holds what Claude Code would not write, or the registry
 isn't a file, the card says so in place of its advice, and nothing else fails;

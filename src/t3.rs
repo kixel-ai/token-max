@@ -684,10 +684,13 @@ pub(crate) fn discover(
             // A plugins directory token-max can't read leaves only the card's plugins unread,
             // not the settings every other line reads.
             let mut secret_plugins = false;
+            // Whether the instance gives claude a PATH of its own.
+            let mut own_path = false;
             let mut own_environment = vec![];
             for entry in instance.environment {
                 if crate::lsp::is_path(&entry.name) {
                     if let Some(value) = entry.value {
+                        own_path = true;
                         env.insert(entry.name, value);
                     }
                 } else if entry.name == crate::lsp::CACHE_DIR {
@@ -780,6 +783,10 @@ pub(crate) fn discover(
                 }
                 if plugins.path == Err(crate::lsp::NO_PATH) {
                     plugins.path = Err(crate::lsp::T3_PATH);
+                }
+                // The instance's PATH is the one T3 starts claude with, not a shell's.
+                if own_path {
+                    plugins.shell = false;
                 }
             }
             let owner = format!("{}:providerInstances.{id}", file.display());

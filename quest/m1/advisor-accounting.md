@@ -38,27 +38,22 @@ here (rejected: keep them in #217, reverting its line split and filling the
 cache counters; merge #217 as is). Decided 2026-11-25 (maintainer,
 /quest-run): ✅ keep this quest (rejected: drop it).
 
-What moved, all in #217's head before the split,
-[0f29d68](https://github.com/kixel-ai/token-max/commit/0f29d68039a6167a10361c632e36bc93a9c6fa2b),
-to restore and fix rather than rewrite:
+What moved, to restore from #217's last head before the split,
+[0f29d68](https://github.com/kixel-ai/token-max/pull/217/commits/0f29d68039a6167a10361c632e36bc93a9c6fa2b),
+and fix rather than rewrite:
 
-- `AdvisorUse`, `Report.advisor` and `advisor::advisor_use`: lines grouped
-  by `advisor::owner`, a T3 instance's calls counted on the line of the
-  settings file it shares, and partly priced requests never extrapolated
-  below their known charge.
-- `advisor_row` and the `--details` section in `src/report.rs`, the README
-  table row, and `docs/reference.md#advisor-model`'s paragraph on the line.
-- The card's sentence naming the window's calls (`advisor_calls`), which
-  says a blocked card's advisor still loaded somewhere.
-- Pricing: an advisor iteration records no `service_tier`, so it priced as
-  unknown; price it at standard when every executor iteration on its request
-  is standard (Priority Tier is committed per model), stating the
-  assumption (`service_tier` in `src/prices.rs`, with
-  `docs/semantics.md`'s note).
-- Reader: an advisor iteration that records no model stays unpriced instead
-  of taking the executor's (`claude_parts`), and a streamed snapshot keeps
-  an advisor model the other recorded, in either read order (`add` in
-  `src/reader.rs`).
+- The line itself, grouped as the `vibes` card groups profiles, with
+  `--details`' cost breakdown, the README table row and the reference docs.
+  Partly priced requests never extrapolate below their known charge.
+- The card's sentence naming the window's calls, which shows a blocked
+  card's advisor still loaded somewhere.
+- Pricing: an advisor iteration records no service tier, so every request
+  with one prices as unknown today. Price it at standard when every executor
+  iteration on its request is standard (Priority Tier is committed per
+  model), stating the assumption.
+- Reading: an advisor iteration that records no model stays unpriced
+  instead of taking the executor's, and a streamed snapshot keeps an advisor
+  model the other recorded, in either read order.
 
 Recommendations for the open findings:
 

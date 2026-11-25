@@ -4690,7 +4690,27 @@ fn advisor_item(p: &Profile, profile: &str, out: &Out<'_>) -> Item {
             None,
             false,
         ),
-        (Some(m), None, _) => quiet(format!("Set to {m} in {file}.")),
+        (Some(m), None, _) => {
+            use crate::advisor::rank;
+            let set = format!("Set to {m} in {file}");
+            let advise = |text: String| (String::new(), text, None, false);
+            match main.map(|main| (main, crate::advisor::pick(main))) {
+                Some((main, Pick::Unsupported)) => advise(format!(
+                    "{set}, but Claude Code attaches no advisor to {main}, the main-session default."
+                )),
+                Some((main, Pick::Top)) if rank(m) != rank(main) => advise(format!(
+                    "{set}, but Claude Code pairs {main}, the main-session default, only with a Fable advisor."
+                )),
+                Some((main, Pick::Advisor(pick)))
+                    if rank(m).zip(rank(main)).is_some_and(|(a, b)| a <= b) =>
+                {
+                    advise(format!(
+                        "{set}, which ranks no higher than {main}, the main-session default. The maintainer's pick is {pick}, one rank above it."
+                    ))
+                }
+                _ => quiet(format!("{set}.")),
+            }
+        }
         (None, Some(b), _) => quiet(format!(
             "No advisor is suggested, since none would load: {b}."
         )),
@@ -4721,6 +4741,18 @@ fn advisor_item(p: &Profile, profile: &str, out: &Out<'_>) -> Item {
                 }
                 if pick == "fable" {
                     text += " A Fable advisor needs Fable access, and on plans that bill Fable to usage credits, the one-time consent /model fable asks for; until then Claude Code sends requests without it.";
+                }
+                // T3's threads read the same file under a main model T3 picks per thread.
+                if out.profiles.values().any(|o| {
+                    o.harness == Harness::Claude
+                        && o.t3.is_some()
+                        && same_file(&o.settings_file, &p.settings_file)
+                }) {
+                    let _ = write!(
+                        text,
+                        " T3 Code threads read {} too, and T3 picks each thread's main model, so they would take this advisor whatever model they run.",
+                        p.settings_file
+                    );
                 }
                 // A project's settings file that picks the main model picks it for that
                 // project only, and an advisor in the profile's own file would pair with
@@ -4760,12 +4792,18 @@ fn project_file<'a>(owner: &'a str, user_file: &str) -> Option<&'a str> {
     let file = owner
         .strip_suffix(":model")
         .or_else(|| owner.strip_suffix(":env.ANTHROPIC_MODEL"))?;
-    let project = file != user_file
+    let project = !same_file(file, user_file)
         && std::path::Path::new(file)
             .parent()
             .and_then(|dir| dir.file_name())
             .is_some_and(|dir| dir == ".claude");
     project.then_some(file)
+}
+
+/// Whether two paths name one file, such as through a symlinked `~/.claude`.
+fn same_file(a: &str, b: &str) -> bool {
+    let real = |path: &str| crate::discovery::realpath(path).ok();
+    a == b || real(a).is_some_and(|a| real(b).is_some_and(|b| a == b))
 }
 
 /// Whose advice the Bash cap's margin is, before the pages on how the cap and cache work.
@@ -10399,7 +10437,7 @@ mod tests {
         let card = |report: &Report| {
             advice(report, ReportOptions::default())
                 .into_iter()
-                .find(|i| i.name == "Advisor model")
+                .find(|i| i.name.starts_with("Advisor model"))
                 .unwrap()
         };
         // A Sonnet main gets Opus, offered as one edit to the file that would set it.
@@ -10491,6 +10529,29 @@ mod tests {
             c.text,
             "Set to opus in /synthetic/home/.claude/settings.json."
         );
+        // A set advisor the main model can't take, or one no stronger than it, is advice
+        // with no edit.
+        for (main, says) in [
+            (
+                "claude-sonnet-4-5",
+                "but Claude Code attaches no advisor to claude-sonnet-4-5",
+            ),
+            (
+                "claude-fable-5-2",
+                "pairs claude-fable-5-2, the main-session default, only with a Fable advisor",
+            ),
+            (
+                "claude-opus-5-5",
+                "ranks no higher than claude-opus-5-5, the main-session default. The maintainer's pick is fable",
+            ),
+        ] {
+            set(&mut report, Some("opus"), None, Some(main));
+            let c = card(&report);
+            assert!(c.text.contains(says), "{says} in {}", c.text);
+            assert_eq!((c.how, c.quiet), (None, false));
+        }
+        set(&mut report, Some("fable"), None, Some("claude-fable-5-2"));
+        assert!(card(&report).quiet);
         set(
             &mut report,
             Some("opus"),
@@ -10522,6 +10583,43 @@ mod tests {
         assert_eq!(cards(&report), ["none -> opus"]);
         report.scan.profiles[1].effort.as_mut().unwrap().model = Some("claude-opus-5-5".into());
         assert_eq!(cards(&report), ["none -> opus", "none -> fable"]);
+        report.scan.profiles.pop();
+        // A T3 instance reading the same file takes the advisor under its own thread models.
+        assert!(!card(&report).text.contains("T3 Code threads"));
+        let mut t3 = crate::test_support::make_t3_profile("t3", ROOT);
+        t3.settings_file = file.clone();
+        report.scan.profiles.push(t3);
+        let c = card(&report);
+        assert!(
+            c.text.contains(&format!(
+                "T3 Code threads read {file} too, and T3 picks each thread's main model"
+            )),
+            "{}",
+            c.text
+        );
+        assert!(matches!(c.how, Some(How::Edit(_))));
+    }
+
+    #[test]
+    fn a_symlink_to_the_user_settings_file_is_not_a_project_file() {
+        let w = crate::test_support::Workspace::new();
+        std::fs::write(w.claude.join("settings.json"), "{}").unwrap();
+        let user = w.claude.join("settings.json").display().to_string();
+        let project = |dir: &std::path::Path| {
+            format!("{}:model", dir.join(".claude/settings.json").display())
+        };
+        // The latest session ran in a directory that links to the home, so its project file
+        // is the user's.
+        #[cfg(unix)]
+        {
+            let link = w.home.join("link");
+            std::os::unix::fs::symlink(&w.home, &link).unwrap();
+            assert_eq!(project_file(&project(&link), &user), None);
+        }
+        let repo = w.home.join("repo");
+        std::fs::create_dir_all(repo.join(".claude")).unwrap();
+        std::fs::write(repo.join(".claude/settings.json"), "{}").unwrap();
+        assert!(project_file(&project(&repo), &user).is_some());
     }
 
     #[test]

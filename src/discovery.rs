@@ -1171,14 +1171,19 @@ pub fn discover_latest_claude_controls(
     let active = realpath(&resolve(configured)).unwrap_or_default();
     let managed_file = options.managed_settings_file.as_str();
     let t3 = t3_instances(profiles);
-    // T3 resolves its instances' controls itself, and they get no advisor: T3 picks each
-    // thread's main model, which an advisor ranks against.
-    for profile in profiles
+    let mut native = profiles
         .iter_mut()
         .filter(|p| p.harness == Harness::Claude && p.t3.is_none())
-    {
+        .peekable();
+    // Read only for a native Claude profile: a Codex-only scan never reads Claude's policy.
+    if native.peek().is_none() {
+        return Ok(());
+    }
+    let managed = settings(managed_file, Harness::Claude)?;
+    // T3 resolves its instances' controls itself, and they get no advisor: T3 picks each
+    // thread's main model, which an advisor ranks against.
+    for profile in native {
         let user = options.settings(&profile.settings_file, Harness::Claude)?;
-        let managed = settings(managed_file, Harness::Claude)?;
         let local_env = if active == profile.root { env } else { &empty };
         let mine: Vec<&Request> = requests
             .iter()
@@ -1215,12 +1220,19 @@ pub fn discover_latest_claude_controls(
             directory: directory.map(Into::into),
             ..claude_memory(&scopes, local_env)?
         });
-        profile.effort = Some(claude_effort(
-            &scopes,
-            &profile.settings_file,
-            local_env,
-            recorded,
-        )?);
+        let mut effort = claude_effort(&scopes, &profile.settings_file, local_env, recorded)?;
+        // A model only requests T3 left unsettled recorded is no evidence for this profile,
+        // but saying none was recorded would be wrong.
+        if effort.unresolved.as_deref() == Some(crate::effort::NO_MODEL)
+            && requests.iter().any(|r| {
+                r.agent == Agent::Main
+                    && r.model.is_some()
+                    && r.profiles.iter().any(|p| **p == *profile.id)
+            })
+        {
+            effort.unresolved = Some(crate::effort::UNSETTLED_MODEL.into());
+        }
+        profile.effort = Some(effort);
         // Read where effort is: the advisor card ranks against that main-session default.
         profile.advisor = Some(crate::advisor::control(
             &scopes,
@@ -4887,7 +4899,14 @@ mod tests {
             advisor.owner,
             format!("{}:advisorModel", profile.settings_file)
         );
-        assert_eq!(profile.effort.as_ref().unwrap().model, None);
+        // Its recorded model is no evidence, and the reason says why rather than that none
+        // was recorded.
+        let effort = profile.effort.as_ref().unwrap();
+        assert_eq!(effort.model, None);
+        assert_eq!(
+            effort.unresolved.as_deref(),
+            Some(crate::effort::UNSETTLED_MODEL)
+        );
 
         // One T3 marked unsettled decides for no one, even when it names a single candidate.
         let mut single = request(&profile.clone(), Some(&theirs));

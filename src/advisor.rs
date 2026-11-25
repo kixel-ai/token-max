@@ -3,7 +3,7 @@
 
 use serde_json::Value;
 
-use crate::controls::{Env, SettingsScope, js_string, scoped_environment};
+use crate::controls::{Env, SettingsScope, env_flag, js_string, scoped_environment};
 use crate::model::{AdvisorControl, Profile};
 use crate::safe::ScanError;
 
@@ -45,11 +45,7 @@ pub fn control(
     user_file: &str,
 ) -> Result<AdvisorControl, ScanError> {
     // A null outranks the files below it, as settings merge.
-    let set = scopes
-        .iter()
-        .rev()
-        .find_map(|s| s.config.get(KEY).map(|v| (v, s.file)));
-    let (model, owner) = match set {
+    let (model, owner) = match crate::effort::highest(scopes, KEY) {
         Some((Value::Null, file)) => (None, format!("{file}:{KEY}")),
         Some((Value::String(m), file)) => (
             Some(m.trim().to_string()).filter(|m| !m.is_empty()),
@@ -71,14 +67,7 @@ pub fn control(
         let value = js_string(environment.values.get(key));
         (environment.values.contains_key(key) && !value.is_empty()).then_some(value)
     };
-    let on = |key: &str| {
-        value(key).is_some_and(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-    };
+    let on = |key: &str| environment.values.get(key).and_then(env_flag) == Some(true);
     // Where a variable is set, as a reader would look for it.
     let named = |key: &str| {
         let owner = &environment.owners[key];
@@ -133,6 +122,15 @@ pub(crate) fn owner(p: &Profile) -> Option<String> {
         "{}\nmain {main:?}\n{:?} {:?} {:?}",
         a.owner, a.model, a.blocked, a.gateway
     ))
+}
+
+/// Where a Claude model or alias, such as `opus` or `claude-sonnet-5-5`, ranks among the
+/// families an advisor pairs across: Haiku, Sonnet, Opus, then Fable. None for any other name.
+pub(crate) fn rank(model: &str) -> Option<usize> {
+    let model = model.to_ascii_lowercase();
+    ["haiku", "sonnet", "opus", "fable"]
+        .iter()
+        .position(|family| model.contains(family))
 }
 
 /// What `vibes` suggests as the advisor for a main model, by Claude Code's ranking.

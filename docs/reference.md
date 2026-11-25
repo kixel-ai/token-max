@@ -1719,11 +1719,15 @@ Cloud (Anthropic managed) need no flag. An `ANTHROPIC_BASE_URL` gateway must
 pass the advisor tool on intact, and a Fable advisor needs Fable access and,
 on plans that bill Fable to usage credits, the consent `/model fable` asks
 for; the card says both. An `advisorModel` already set gets a card that
-advises nothing, unless one of those stops it loading.
+advises nothing, unless one of those stops it loading, the main model takes
+no advisor or only a Fable one, or the advisor ranks no higher than the main
+model; then it says so and offers no edit.
 
-`doctor` has no advisor line: what the advisor's recorded calls cost is
-not counted or priced. T3 Code picks each thread's main model, so T3
-instances get no card.
+T3 Code picks each thread's main model, so T3 instances get no card; when one
+reads the same settings file, the card says its threads would take the
+advisor too. `doctor` has no advisor line: a recorded advisor call counts in
+its request's cost, priced where the transcript records what pricing needs,
+but no line says how many ran or what they cost.
 
 ## Messages from other sessions
 

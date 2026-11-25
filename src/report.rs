@@ -5254,7 +5254,7 @@ fn memory_item(line: MemoryLine<'_>, out: &Out<'_>) -> Item {
             "No main session ran in the window, so where the work happens is unknown.".to_string()
         }
         (0, left) => format!(
-            "No main session in the window is known to be this line's alone: T3 could not settle whether this line or another ran {}, or matched its turns to both, so where the work happens is unknown.",
+            "No main session in the window is known to be this line's alone: {} ran under owners that may be this line's or another's, so where the work happens is unknown.",
             plural(left, "session")
         ),
         (n, _) => format!(
@@ -5274,7 +5274,7 @@ fn memory_item(line: MemoryLine<'_>, out: &Out<'_>) -> Item {
     if p.sessions > 0 && p.unsettled > 0 {
         let _ = write!(
             share,
-            ", leaving out {} T3 could not settle between this line and another, or matched to both",
+            ", leaving out {} whose owners may be this line's or another's",
             plural(p.unsettled, "session")
         );
     }
@@ -11386,7 +11386,7 @@ mod tests {
         let item = card(&report);
         assert!(item.quiet && item.how.is_none());
         assert!(
-            item.text.starts_with("2 of 4 main sessions (50%) in the window ran in a repository with a CLAUDE.md or AGENTS.md, counting as without 1 session whose transcript recorded loading none and whose directory is gone or unrecorded, leaving out 2 sessions T3 could not settle between this line and another, or matched to both. Outside a repository, memory may be the only place a fact is kept, so turning it off is not advised."),
+            item.text.starts_with("2 of 4 main sessions (50%) in the window ran in a repository with a CLAUDE.md or AGENTS.md, counting as without 1 session whose transcript recorded loading none and whose directory is gone or unrecorded, leaving out 2 sessions whose owners may be this line's or another's. Outside a repository, memory may be the only place a fact is kept, so turning it off is not advised."),
             "{}",
             item.text
         );
@@ -11398,7 +11398,7 @@ mod tests {
         let item = card(&report);
         assert!(item.quiet && item.how.is_none());
         assert!(
-            item.text.starts_with("No main session in the window is known to be this line's alone: T3 could not settle whether this line or another ran 1 session, or matched its turns to both, so where the work happens is unknown."),
+            item.text.starts_with("No main session in the window is known to be this line's alone: 1 session ran under owners that may be this line's or another's, so where the work happens is unknown."),
             "{}",
             item.text
         );

@@ -134,23 +134,33 @@ fn target(value: &str) -> &str {
 
 /// A section's values as one: its member count and offered value, such as "19 -> typed only",
 /// or each cache TTL's own change, such as "main 5m -> 1h, subagent 1h -> 5m". `members`
-/// gives each change's section and value, a change listed once.
+/// gives each change's section, profile and value, a change listed once.
 pub(crate) fn section_value<'a>(
-    members: impl IntoIterator<Item = (&'a Section, &'a str)>,
+    members: impl IntoIterator<Item = (&'a Section, &'a str, &'a str)>,
     arrow: &str,
 ) -> String {
-    let members: Vec<(&Section, &str)> = members.into_iter().collect();
+    let members: Vec<(&Section, &str, &str)> = members.into_iter().collect();
     match members.as_slice() {
         [] => String::new(),
-        [(_, value)] => (*value).to_string(),
-        [(first, _), ..] if first.kind == Kind::CacheTtl => {
-            let each: IndexSet<String> = members
-                .iter()
-                .map(|(s, v)| format!("{} {v}", s.member))
-                .collect();
-            each.into_iter().collect::<Vec<_>>().join(", ")
-        }
-        [(_, value), ..] => format!("{} {arrow} {}", members.len(), target(value)),
+        [(_, _, value)] => (*value).to_string(),
+        [(first, _, _), ..] if first.kind == Kind::CacheTtl => members
+            .iter()
+            .map(|(s, profile, v)| {
+                // A TTL changed in several profiles names each one's profile.
+                let shared = members
+                    .iter()
+                    .filter(|(o, ..)| o.member == s.member)
+                    .count()
+                    > 1;
+                if shared && !profile.is_empty() {
+                    format!("{} ({profile}) {v}", s.member)
+                } else {
+                    format!("{} {v}", s.member)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        [(_, _, value), ..] => format!("{} {arrow} {}", members.len(), target(value)),
     }
 }
 
@@ -1962,18 +1972,19 @@ fn writable(path: &Path) -> bool {
 pub(crate) const ASKED_USD: f64 = 1.0;
 
 /// Whether the walk takes up `fix`, one of `fixes`: it names a step by hand whatever it
-/// saves, and asks about an edit only when its section saves enough to ask: `fix` and the
-/// other edits in `fixes` it joins whose files take them, as `Owner::new` checks each offer.
+/// saves, including an edit its file refuses, and asks about an edit only when its section
+/// saves enough to ask: `fix` and the other edits in `fixes` it joins whose files take them,
+/// as `Owner::new` checks each offer.
 pub(crate) fn takes_up(fix: &Fix, fixes: &[Fix]) -> bool {
-    if !matches!(fix.how, How::Edit(_)) {
-        return true;
-    }
-    // Another member whose file refuses its edit becomes a step by hand, outside the question.
+    // A member whose file refuses its edit becomes a step by hand, outside the question.
     let offered = |f: &Fix| match &f.how {
         How::Edit(patch) => Target::open(&patch.file, patch.harness)
             .is_ok_and(|target| apply(&target, &patch.edits, &[]).is_ok()),
         How::Manual { .. } => false,
     };
+    if !offered(fix) {
+        return true;
+    }
     let section: Vec<Fix> = std::iter::once(fix)
         .chain(
             fixes
@@ -3078,7 +3089,9 @@ impl Question<'_> {
         rows.push(("What", section_what(&first.section, &first.what)));
         rows.push(("Which", which(&fixes, style)));
         let value = section_value(
-            fixes.iter().map(|f| (&f.section, f.value.as_str())),
+            fixes
+                .iter()
+                .map(|f| (&f.section, f.profile.as_str(), f.value.as_str())),
             style.arrow(),
         );
         style.card(&Card {
@@ -5258,6 +5271,29 @@ mod tests {
     }
 
     #[test]
+    fn a_cache_ttl_changed_in_several_profiles_names_each_profile() {
+        let ttl = |member: &str| Section {
+            kind: Kind::CacheTtl,
+            label: "Prompt cache TTL".into(),
+            member: member.into(),
+            location: None,
+        };
+        let (main, sub) = (ttl("main"), ttl("subagent"));
+        assert_eq!(
+            section_value(
+                [
+                    (&main, "a", "5m -> 1h"),
+                    (&main, "b", "5m -> 1h"),
+                    (&main, "c", "1h -> 5m"),
+                    (&sub, "a", "1h -> 5m"),
+                ],
+                "->"
+            ),
+            "main (a) 5m -> 1h, main (b) 5m -> 1h, main (c) 1h -> 5m, subagent 1h -> 5m"
+        );
+    }
+
+    #[test]
     fn a_change_is_taken_up_when_its_section_saves_enough_to_ask() {
         let w = Workspace::new();
         let settings = w.claude.join("settings.json");
@@ -5279,7 +5315,9 @@ mod tests {
         // Another member whose file refuses its edit becomes a step by hand, so it adds
         // nothing to the section's question.
         let refused = memory("R", Path::new("/nonexistent/token-max/settings.json"));
-        assert!(!takes_up(&a, &[a.clone(), refused]));
+        assert!(!takes_up(&a, &[a.clone(), refused.clone()]));
+        // The refused edit itself is a step by hand the walk names, whatever it saves.
+        assert!(takes_up(&refused, &[a.clone(), refused.clone()]));
         // One only worth considering, such as memory used at a high cost, is its own section.
         let considered = Fix {
             suggested: true,

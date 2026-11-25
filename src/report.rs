@@ -4241,6 +4241,8 @@ struct Membership {
     /// Its own change, which another line making the same edit shares.
     fix: usize,
     section: crate::doctor::Section,
+    /// The profile its change names, when several profiles were read; empty otherwise.
+    profile: String,
     /// What the section's kind of change does.
     what: String,
 }
@@ -4667,7 +4669,7 @@ fn section_row(members: &[Row], out: &Out<'_>) -> Row {
     row.value = crate::doctor::section_value(
         changes.iter().map(|r| {
             let m = r.section.as_ref().expect("filtered on a section");
-            (&m.section, r.value.as_str())
+            (&m.section, m.profile.as_str(), r.value.as_str())
         }),
         out.arrow,
     );
@@ -5312,7 +5314,7 @@ fn memory_item(line: MemoryLine<'_>, out: &Out<'_>) -> Item {
             String::new(),
             true,
             format!(
-                "{share} {REASON} {measured}, and already {} turning it off for its cost per use, so doctor asks and this card does not.",
+                "{share} {REASON} {measured}, and already {} turning it off for its cost per use, so doctor offers it and this card does not.",
                 if suggested { "suggests" } else { "recommends" }
             ),
         ),
@@ -5708,20 +5710,7 @@ fn sectioned(rows: &mut [Row], fixes: &[crate::doctor::Fix], out: &Out<'_>) {
             let paths: IndexSet<String> = patch
                 .edits
                 .iter()
-                .map(|e| {
-                    let path: Vec<&str> = e
-                        .path
-                        .iter()
-                        .map(|p| {
-                            if *p == section.member {
-                                "*"
-                            } else {
-                                p.as_str()
-                            }
-                        })
-                        .collect();
-                    path.join(".")
-                })
+                .map(|e| starred(&e.path, &section.member))
                 .collect();
             row.key = format!(
                 "{}:{}",
@@ -5737,9 +5726,27 @@ fn sectioned(rows: &mut [Row], fixes: &[crate::doctor::Fix], out: &Out<'_>) {
             id,
             fix,
             section: section.clone(),
+            profile: fixes[fix].profile.clone(),
             what: crate::doctor::section_what(section, &row.what),
         });
     }
+}
+
+/// A setting's path with the part naming `member` starred, such as `skillOverrides.*`. Only
+/// the first match names it: `mcp_servers.enabled.enabled` ends in the setting's own key.
+fn starred(path: &[String], member: &str) -> String {
+    let mut found = false;
+    path.iter()
+        .map(|p| {
+            if !found && p == member {
+                found = true;
+                "*"
+            } else {
+                p.as_str()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 /// The sessions the selected requests ran in, each subagent counted with the session that
@@ -7563,6 +7570,19 @@ mod tests {
     use crate::test_support::{
         Workspace, make_profile, make_request, prices, report_line, report_lines,
     };
+
+    #[test]
+    fn a_section_path_stars_only_the_part_naming_its_member() {
+        let path = |p: &[&str]| p.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            starred(&path(&["mcp_servers", "enabled", "enabled"]), "enabled"),
+            "mcp_servers.*.enabled"
+        );
+        assert_eq!(
+            starred(&path(&["permissions", "deny"]), "Bash"),
+            "permissions.deny"
+        );
+    }
 
     #[test]
     fn retention_is_advised_only_where_its_settings_are_the_ones_in_force() {
@@ -10834,12 +10854,23 @@ mod tests {
         let item = card(&report);
         assert!(item.quiet && item.how.is_none() && item.value.is_empty());
         assert!(
-            item.text.contains(", and already suggests turning it off for its cost per use, so doctor asks and this card does not."),
+            item.text.contains(", and already suggests turning it off for its cost per use, so doctor offers it and this card does not."),
             "{}",
             item.text
         );
-        // A change saving too little for doctor's walk to ask is the card's to offer.
+        // A change saving too little for doctor's walk to ask is the card's to offer, when its
+        // file takes the edit; one it refuses is a step by hand the walk names.
+        let w = crate::test_support::Workspace::new();
+        let settings = w.home.join("settings.json");
+        std::fs::write(&settings, "{}").unwrap();
+        let settings = settings.to_string_lossy().into_owned();
+        let synthetic =
+            std::mem::replace(&mut report.scan.profiles[0].settings_file, settings.clone());
         let m = memory(&mut report);
+        let owner = std::mem::replace(
+            &mut m.base.owner,
+            format!("{settings}:autoMemoryEnabled (default)"),
+        );
         let measured = m.base.monthly_savings_usd.replace(0.5);
         let item = card(&report);
         assert_eq!((item.value.as_str(), item.quiet), ("on -> off", false));
@@ -10849,6 +10880,9 @@ mod tests {
             "{}",
             item.text
         );
+        report.scan.profiles[0].settings_file = synthetic;
+        memory(&mut report).base.owner = owner;
+        assert!(card(&report).quiet);
         memory(&mut report).base.monthly_savings_usd = measured;
         // Half is not most, and a session nothing settles counts as without.
         let m = memory(&mut report);

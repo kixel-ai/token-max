@@ -5131,7 +5131,8 @@ mod tests {
                 &format!("[features]\nmemories = {memories}\n"),
             );
             user += &format!(
-                "[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+                // A TOML literal key: a Windows path's backslashes are not escapes there.
+                "[projects.'{}']\ntrust_level = \"trusted\"\n",
                 native_path(dir)
             );
         }
@@ -5154,6 +5155,8 @@ mod tests {
         let codex = |mut r: Request, time: i64, profiles: &[&str]| {
             r.harness = Harness::Codex;
             r.time = time;
+            // A model of its own, so a selector reading the wrong request fails the assertion.
+            r.model = Some(format!("gpt-test-{time}").into());
             r.profiles = profiles
                 .iter()
                 .map(|p| (*p).into())

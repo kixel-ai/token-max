@@ -3585,6 +3585,7 @@ mod tests {
             retention: None,
             turn_end: None,
             effort: None,
+            advisor: None,
             speed_directories: None,
             idle_directories: None,
             background: vec![],

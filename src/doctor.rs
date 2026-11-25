@@ -726,6 +726,17 @@ fn manual(owner: &str, profile: &Profile, step: String) -> How {
     How::Manual { step, reason }
 }
 
+/// How to set `advisorModel` to `model` where `owner` names it, in `profile`'s settings.
+pub(crate) fn advisor_how(owner: &str, model: &str, profile: &Profile) -> How {
+    let key = "advisorModel";
+    owned(
+        owner,
+        profile,
+        vec![(key.into(), vec![Edit::set(key, model)])],
+        format!("set \"{key}\": \"{model}\""),
+    )
+}
+
 /// How to move a Bash timeout cap to the one suggested, in `profile`'s settings; None when
 /// it suggests no other cap.
 pub(crate) fn bash_how(cap: &BashCap, profile: &Profile) -> Option<How> {
@@ -797,14 +808,17 @@ pub(crate) fn default_how(control: &EffortControl, profile: &Profile) -> Option<
         // As the settings will name it, which keeps a `[1m]` context window.
         let model = target.model.as_deref().unwrap_or(model);
         let owner = control.model_owner.as_str();
+        let named = owner
+            .strip_suffix(crate::effort::NULL_MODEL)
+            .unwrap_or(owner);
         let (setting, edit) = if owner == crate::effort::RECORDED {
             (format!("{file}:model"), Some(Edit::set("model", model)))
         } else if names(owner, file, "model") {
-            (owner.to_string(), Some(Edit::set("model", model)))
+            (named.to_string(), Some(Edit::set("model", model)))
         } else if profile.harness == Harness::Claude && names(owner, file, "env.ANTHROPIC_MODEL") {
             (owner.to_string(), Some(env("ANTHROPIC_MODEL", model)))
         } else {
-            (owner.to_string(), None)
+            (named.to_string(), None)
         };
         let step = match &control.provider {
             // A cloud provider names its models its own way, which token-max does not write.
@@ -813,7 +827,8 @@ pub(crate) fn default_how(control: &EffortControl, profile: &Profile) -> Option<
             }
             None => format!("set {setting} to {model}"),
         };
-        changes.push((owner, edit, step));
+        // The setting as a by-hand reason names it, without the null-model note.
+        changes.push((named, edit, step));
     }
     if target.level.as_deref() != Some(effort) {
         let owner = target.owner.as_str();
@@ -6227,10 +6242,14 @@ mod tests {
             Some("claude-fable-5-2"),
         )
         .unwrap();
-        let Some(How::Manual { step, .. }) = default_how(&control, &claude) else {
+        let Some(How::Manual { step, reason }) = default_how(&control, &claude) else {
             panic!("a null model above the user file is changed by hand")
         };
         assert!(step.contains("/repo/.claude/settings.json:model"), "{step}");
+        assert_eq!(
+            reason,
+            format!("/repo/.claude/settings.json:model sets it; token-max edits only {file}")
+        );
         // An invalid level in the pick's own row is fixed by hand before the switch.
         std::fs::write(
             &file,

@@ -583,7 +583,7 @@ fn effort_evidence(e: &EffortCheck, mark: Mark, out: &Out<'_>) -> String {
         } else {
             format!("The default is set to {level} on {model}")
         };
-        if c.model_owner == crate::effort::RECORDED {
+        if crate::effort::recorded(&c.model_owner) {
             text += ", the model the latest session ran";
         }
         if let Some(why) = &c.lowered {
@@ -4673,6 +4673,154 @@ fn tagged(name: String, profile: &str) -> String {
     }
 }
 
+/// Whose advice the advisor pairing is, before Claude Code's page on the advisor.
+const ADVISOR_PICK: &str =
+    "The maintainer's pick of one rank above the main-session default. Claude Code's docs:";
+
+/// The advisor `vibes` suggests for Claude profiles with no `advisorModel`, one rank above
+/// their main-session default, or what stops one loading or keeps it unsuggested.
+fn advisor_item(p: &Profile, profile: &str, out: &Out<'_>) -> Item {
+    use crate::advisor::Pick;
+    let control = p.advisor.as_ref().expect("an advisor card has its control");
+    let effort = p.effort.as_ref();
+    let main = effort.and_then(|e| e.model.as_deref());
+    let file = control
+        .owner
+        .strip_suffix(":advisorModel")
+        .unwrap_or(&control.owner);
+    let owner = effort.map_or("", |e| e.model_owner.as_str());
+    let quiet = |text: String| (String::new(), text, None, true);
+    let (value, text, how, quiet) = match (&control.model, &control.blocked, main) {
+        (Some(m), Some(b), _) => (
+            String::new(),
+            format!("Set to {m} in {file}, but none would load from these settings: {b}."),
+            None,
+            false,
+        ),
+        // A full model ID is checked against Claude Code's pairing table; an alias's version
+        // changes with Claude Code, so only Fable's rule judges one.
+        (Some(m), None, _) => {
+            let set = format!("Set to {m} in {file}");
+            let advise = |text: String| (String::new(), text, None, false);
+            match main.map(|main| (main, crate::advisor::pick(main))) {
+                Some((main, Pick::Unsupported)) => advise(format!(
+                    "{set}, but Claude Code attaches no advisor to {main}, the main-session default ({owner})."
+                )),
+                Some((main, Pick::Top)) if crate::advisor::accepts(main, m) == Some(false) => {
+                    advise(format!(
+                        "{set}, but Claude Code pairs {main}, the main-session default ({owner}), only with a Fable advisor of its version or later."
+                    ))
+                }
+                Some((main, _)) if crate::advisor::accepts(main, m) == Some(false) => {
+                    advise(format!(
+                        "{set}, but Claude Code's pairing table doesn't take it as an advisor for {main}, the main-session default ({owner}), so none is attached."
+                    ))
+                }
+                _ => quiet(format!("{set}.")),
+            }
+        }
+        (None, Some(b), _) => quiet(format!(
+            "No advisor is suggested, since none would load: {b}."
+        )),
+        (None, None, None) => quiet(format!(
+            "No advisor is suggested: the main-session default is unknown, since {}.",
+            effort
+                .and_then(|e| e.unresolved.as_deref())
+                .unwrap_or("no effort control was read")
+        )),
+        (None, None, Some(main)) => match crate::advisor::pick(main) {
+            Pick::Top => quiet(format!(
+                "No advisor is suggested: nothing ranks above {main}, the main-session default, and Claude Code pairs a Fable main model only with a Fable advisor."
+            )),
+            Pick::Unsupported => quiet(format!(
+                "No advisor is suggested: Claude Code attaches none to {main}, the main-session default. It takes one on Fable, on Opus and Sonnet 4.6 or later, and on Haiku 4.5 or later."
+            )),
+            Pick::Advisor(pick) => {
+                let mut text = format!(
+                    "Claude consults the advisor at decision points rather than on every turn, so a faster main model with a stronger advisor \"typically costs less than running the stronger model throughout\", Claude Code's page says. {} ranks one above {main}, the main-session default ({owner}). Each call reads the whole conversation again at the advisor's rates, uncached, and what the pairing saves or costs is not measured. The advisor is experimental, and Amazon Bedrock, Google Cloud's Agent Platform and Microsoft Foundry have none.",
+                    capitalize(pick)
+                );
+                if let Some(gateway) = &control.gateway {
+                    let _ = write!(
+                        text,
+                        " {gateway} sends requests through a gateway, which must pass the advisor tool on intact."
+                    );
+                }
+                if pick == "fable" {
+                    text += " A Fable advisor needs Fable access, and on plans that bill Fable to usage credits, the one-time consent /model fable asks for; until then Claude Code sends requests without it.";
+                }
+                // T3's enabled instances read the same file under a main model T3 picks per
+                // thread; a disabled one runs no threads.
+                let t3: Vec<_> = out
+                    .profiles
+                    .values()
+                    .filter(|o| {
+                        o.harness == Harness::Claude
+                            && crate::discovery::same_file(&o.settings_file, &p.settings_file)
+                    })
+                    .filter_map(|o| o.t3.as_ref())
+                    .filter(|t| t.enabled)
+                    .collect();
+                if !t3.is_empty() {
+                    let _ = write!(
+                        text,
+                        " T3 Code threads read {} too, and T3 picks each thread's main model, so each thread whose model and provider take this advisor would use it",
+                        p.settings_file
+                    );
+                    if t3.iter().any(|t| t.settings_unresolved) {
+                        text += ", unless an instance's launch arguments, secret environment or machine policy, which token-max can't resolve, override that file";
+                    }
+                    text += ".";
+                }
+                // The edit pairs the advisor with every project's model, so it is not offered
+                // when a project's file picks the main model. A recorded main model still gets
+                // it, saying so, since the walk shows the change and asks first.
+                let how = if let Some(file) = project_file(owner, &p.settings_file) {
+                    let _ = write!(
+                        text,
+                        " {file} sets that main model for its project only, and an advisor set in {} would pair with every project's model, so no edit is offered; set advisorModel by hand where that project reads it.",
+                        p.settings_file
+                    );
+                    None
+                } else {
+                    if crate::effort::recorded(owner) {
+                        text += " No setting names the main model, so a session's /model or --model choice may run another one; the advisor pairs with whichever runs, where that model accepts it.";
+                    }
+                    text += " A project whose own settings pick another main model takes this advisor too, where that model accepts it.";
+                    Some(crate::doctor::advisor_how(&control.owner, pick, p))
+                };
+                (format!("none {} {pick}", out.arrow), text, how, false)
+            }
+        },
+    };
+    Item {
+        name: tagged("Advisor model".into(), profile),
+        value,
+        what: "A second, stronger model Claude consults at decision points.".into(),
+        text: out.home_in(&text),
+        sources: vec![ADVISOR_PICK.into(), crate::advisor::DOCS.into()],
+        how,
+        quiet,
+        // No `doctor` line writes the main model, `advisorModel` or what blocks the advisor.
+        after: vec![],
+    }
+}
+
+/// The project settings file in `owner`, a setting's owner such as `<file>:model` or
+/// `<file>:env.ANTHROPIC_MODEL`: one in a `.claude` directory other than `user_file`'s.
+/// None for the user's file, managed settings, the environment or a recorded model.
+fn project_file<'a>(owner: &'a str, user_file: &str) -> Option<&'a str> {
+    let file = owner
+        .strip_suffix(":model")
+        .or_else(|| owner.strip_suffix(":env.ANTHROPIC_MODEL"))?;
+    let project = !crate::discovery::same_file(file, user_file)
+        && std::path::Path::new(file)
+            .parent()
+            .and_then(|dir| dir.file_name())
+            .is_some_and(|dir| dir == ".claude");
+    project.then_some(file)
+}
+
 /// Whose advice the Bash cap's margin is, before the pages on how the cap and cache work.
 const BASH_PICK: &str =
     "The maintainer's pick of a margin under the cache TTL. Claude Code's docs:";
@@ -6853,6 +7001,18 @@ fn summary(
             ));
         }
         rows.push(row);
+    }
+    let advised = report.scan.profiles.iter().filter(|p| p.advisor.is_some());
+    for card in crate::rows::groups(advised, |p| {
+        crate::advisor::owner(p).expect("filtered on an advisor")
+    }) {
+        let owner = |p: &Profile| {
+            p.advisor
+                .as_ref()
+                .map_or_else(String::new, |a| a.owner.clone())
+        };
+        let profile = tag(&card.ids, &owner, out);
+        vibes.push(advisor_item(card.lead, &profile, out));
     }
     // Context with no switch: worth seeing, but not a setting to change.
     let fixed: Vec<&ContextCost> = report
@@ -10360,6 +10520,279 @@ mod tests {
             !cards.iter().any(|i| i.name.starts_with("Fable")),
             "{cards:?}"
         );
+    }
+
+    #[test]
+    fn the_advisor_card_suggests_one_rank_up_and_doctor_has_no_line() {
+        let mut report = synthetic();
+        let file = format!("{ROOT}/settings.json");
+        let set = |report: &mut Report,
+                   model: Option<&str>,
+                   blocked: Option<&str>,
+                   main: Option<&str>| {
+            let p = &mut report.scan.profiles[0];
+            p.settings_file = file.clone();
+            p.advisor = Some(crate::model::AdvisorControl {
+                model: model.map(Into::into),
+                owner: format!("{file}:advisorModel"),
+                blocked: blocked.map(Into::into),
+                gateway: None,
+            });
+            p.effort = Some(crate::model::EffortControl {
+                model: main.map(Into::into),
+                model_owner: format!("{file}:model"),
+                level: None,
+                owner: String::new(),
+                effective: None,
+                lowered: None,
+                caps: vec![],
+                default: None,
+                unresolved: main.is_none().then(|| "no setting names the model".into()),
+                picked: None,
+                provider: None,
+            });
+        };
+        let card = |report: &Report| {
+            advice(report, ReportOptions::default())
+                .into_iter()
+                .find(|i| i.name.starts_with("Advisor model"))
+                .unwrap()
+        };
+        // A Sonnet main gets Opus, offered as one edit to the file that would set it.
+        set(&mut report, None, None, Some("claude-sonnet-5-5"));
+        let sonnet = card(&report);
+        assert_eq!(
+            (sonnet.value.as_str(), sonnet.quiet),
+            ("none -> opus", false)
+        );
+        assert!(
+            sonnet.text.contains("Opus ranks one above claude-sonnet-5-5, the main-session default (/synthetic/home/.claude/settings.json:model)."),
+            "{}",
+            sonnet.text
+        );
+        assert!(!sonnet.text.contains("Fable access"));
+        assert_eq!(sonnet.sources[1], crate::advisor::DOCS);
+        match &sonnet.how {
+            Some(How::Edit(patch)) => {
+                assert_eq!(patch.file, file);
+                assert_eq!(
+                    patch
+                        .edits
+                        .iter()
+                        .map(|e| e.text(Harness::Claude))
+                        .collect::<Vec<_>>(),
+                    ["\"advisorModel\": \"opus\""]
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        // A main model a project sets, in `model` or its env, gets no edit: the user's file
+        // would pair the advisor with every project's model. The user's own env does.
+        let project = "/synthetic/repo/.claude/settings.json";
+        for key in ["model", "env.ANTHROPIC_MODEL"] {
+            report.scan.profiles[0].effort.as_mut().unwrap().model_owner =
+                format!("{project}:{key}");
+            let c = card(&report);
+            assert_eq!((c.how, c.quiet), (None, false));
+            assert!(
+                c.text.contains(&format!(
+                    "{project} sets that main model for its project only"
+                )),
+                "{}",
+                c.text
+            );
+        }
+        report.scan.profiles[0].effort.as_mut().unwrap().model_owner =
+            format!("{file}:env.ANTHROPIC_MODEL");
+        let c = card(&report);
+        assert!(matches!(c.how, Some(How::Edit(_))));
+        assert!(c.text.contains(
+            "A project whose own settings pick another main model takes this advisor too"
+        ));
+        // A model the latest session ran, with no model set or a null one, still gets the
+        // edit, saying a session's own choice may run another model.
+        for owner in [
+            crate::effort::RECORDED.to_string(),
+            format!("{project}:model{}", crate::effort::NULL_MODEL),
+        ] {
+            report.scan.profiles[0].effort.as_mut().unwrap().model_owner = owner;
+            let c = card(&report);
+            assert!(matches!(c.how, Some(How::Edit(_))), "{:?}", c.how);
+            assert_eq!((c.quiet, c.value.as_str()), (false, "none -> opus"));
+            assert!(
+                c.text.contains("No setting names the main model, so a session's /model or --model choice may run another one")
+                    && c.text.contains("A project whose own settings pick another main model"),
+                "{}",
+                c.text
+            );
+        }
+        // An Opus main gets Fable, with what Fable needs.
+        set(&mut report, None, None, Some("claude-opus-5-5"));
+        let opus = card(&report);
+        assert_eq!(opus.value, "none -> fable");
+        assert!(opus.text.contains("Fable access"), "{}", opus.text);
+        // No edit is offered when none applies: a Fable main, an old one, an unknown one,
+        // or an advisor that would not load.
+        for (main, blocked, says) in [
+            (
+                Some("claude-fable-5-2"),
+                None,
+                "nothing ranks above claude-fable-5-2",
+            ),
+            (
+                Some("claude-sonnet-4-5"),
+                None,
+                "attaches none to claude-sonnet-4-5",
+            ),
+            (None, None, "unknown, since no setting names the model."),
+            (
+                Some("claude-sonnet-5-5"),
+                Some(
+                    "DISABLE_TELEMETRY, set in the environment, turns off the feature-flag fetch the advisor needs",
+                ),
+                "since none would load: DISABLE_TELEMETRY",
+            ),
+        ] {
+            set(&mut report, None, blocked, main);
+            let c = card(&report);
+            assert!(c.text.contains(says), "{says} in {}", c.text);
+            assert_eq!((c.how, c.quiet, c.value.as_str()), (None, true, ""));
+        }
+        // Set: the card advises nothing unless something stops the advisor loading, and
+        // doctor has no line for it, set or not.
+        set(&mut report, Some("opus"), None, Some("claude-sonnet-5-5"));
+        assert!(!text(&report, None, true).contains("Advisor model"));
+        let c = card(&report);
+        assert_eq!((c.how, c.quiet), (None, true));
+        assert_eq!(
+            c.text,
+            "Set to opus in /synthetic/home/.claude/settings.json."
+        );
+        // A set advisor the main model can't take is advice with no edit, naming where the
+        // main model comes from.
+        for (advisor, main, says) in [
+            (
+                "opus",
+                "claude-sonnet-4-5",
+                "but Claude Code attaches no advisor to claude-sonnet-4-5, the main-session default (/synthetic/home/.claude/settings.json:model).",
+            ),
+            (
+                "opus",
+                "claude-fable-5-2",
+                "pairs claude-fable-5-2, the main-session default (/synthetic/home/.claude/settings.json:model), only with a Fable advisor of its version or later.",
+            ),
+            (
+                "claude-fable-5-1",
+                "claude-fable-5-2",
+                "only with a Fable advisor of its version or later.",
+            ),
+            (
+                "claude-sonnet-5-5",
+                "claude-opus-5-5",
+                "but Claude Code's pairing table doesn't take it as an advisor for claude-opus-5-5",
+            ),
+        ] {
+            set(&mut report, Some(advisor), None, Some(main));
+            let c = card(&report);
+            assert!(c.text.contains(says), "{says} in {}", c.text);
+            assert_eq!((c.how, c.quiet), (None, false));
+        }
+        // A pairing the table lists is quiet, as is an alias, whose version moves with
+        // Claude Code, except under a Fable main, which takes the Fable alias alone.
+        for (advisor, main) in [
+            ("opus", "claude-opus-5-5"),
+            ("sonnet", "claude-opus-5-5"),
+            ("claude-opus-5", "claude-opus-5-5"),
+            ("fable", "claude-fable-5-2"),
+        ] {
+            set(&mut report, Some(advisor), None, Some(main));
+            assert!(card(&report).quiet, "{advisor} over {main}");
+        }
+        set(
+            &mut report,
+            Some("opus"),
+            Some(
+                "CLAUDE_CODE_DISABLE_ADVISOR_TOOL, set in the environment, turns the advisor tool off",
+            ),
+            Some("claude-sonnet-5-5"),
+        );
+        let c = card(&report);
+        assert_eq!((c.how, c.quiet), (None, false));
+        assert!(
+            c.text.contains(
+                "but none would load from these settings: CLAUDE_CODE_DISABLE_ADVISOR_TOOL"
+            )
+        );
+        // Profiles reading one settings file share a card, unless their main-session
+        // defaults differ.
+        set(&mut report, None, None, Some("claude-sonnet-5-5"));
+        let mut other = report.scan.profiles[0].clone();
+        other.id = "other".into();
+        report.scan.profiles.push(other);
+        let cards = |report: &Report| {
+            advice(report, ReportOptions::default())
+                .into_iter()
+                .filter(|i| i.name.starts_with("Advisor model"))
+                .map(|i| i.value)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(cards(&report), ["none -> opus"]);
+        report.scan.profiles[1].effort.as_mut().unwrap().model = Some("claude-opus-5-5".into());
+        assert_eq!(cards(&report), ["none -> opus", "none -> fable"]);
+        report.scan.profiles.pop();
+        // A T3 instance reading the same file takes the advisor under its own thread models.
+        assert!(!card(&report).text.contains("T3 Code threads"));
+        let mut t3 = crate::test_support::make_t3_profile("t3", ROOT);
+        t3.settings_file = file.clone();
+        report.scan.profiles.push(t3);
+        let c = card(&report);
+        assert!(
+            c.text.contains(&format!(
+                "T3 Code threads read {file} too, and T3 picks each thread's main model"
+            )),
+            "{}",
+            c.text
+        );
+        assert!(!c.text.contains("launch arguments"), "{}", c.text);
+        assert!(matches!(c.how, Some(How::Edit(_))));
+        // An instance whose launch settings are unresolved may not read the file at all.
+        report.scan.profiles[1]
+            .t3
+            .as_mut()
+            .unwrap()
+            .settings_unresolved = true;
+        let c = card(&report);
+        assert!(
+            c.text
+                .contains("would use it, unless an instance's launch arguments"),
+            "{}",
+            c.text
+        );
+        // A disabled instance runs no threads.
+        report.scan.profiles[1].t3.as_mut().unwrap().enabled = false;
+        assert!(!card(&report).text.contains("T3 Code threads"));
+    }
+
+    #[test]
+    fn a_symlink_to_the_user_settings_file_is_not_a_project_file() {
+        let w = crate::test_support::Workspace::new();
+        std::fs::write(w.claude.join("settings.json"), "{}").unwrap();
+        let user = w.claude.join("settings.json").display().to_string();
+        let project = |dir: &std::path::Path| {
+            format!("{}:model", dir.join(".claude/settings.json").display())
+        };
+        // The latest session ran in a directory that links to the home, so its project file
+        // is the user's.
+        #[cfg(unix)]
+        {
+            let link = w.home.join("link");
+            std::os::unix::fs::symlink(&w.home, &link).unwrap();
+            assert_eq!(project_file(&project(&link), &user), None);
+        }
+        let repo = w.home.join("repo");
+        std::fs::create_dir_all(repo.join(".claude")).unwrap();
+        std::fs::write(repo.join(".claude/settings.json"), "{}").unwrap();
+        assert!(project_file(&project(&repo), &user).is_some());
     }
 
     #[test]

@@ -2251,6 +2251,11 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     }
     // After T3 attribution, so each instance reads its own sessions' directory.
     crate::discovery::discover_inbound(&options.discovery, &mut profiles, &requests)?;
+    crate::discovery::discover_latest_claude_controls(
+        &options.discovery,
+        &mut profiles,
+        &requests,
+    )?;
     crate::discovery::discover_instructions(&mut profiles, &requests, since)?;
     // What T3 changed holds its own copy of the shared fields; share them again.
     for r in &mut requests {

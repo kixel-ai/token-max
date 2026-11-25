@@ -1398,6 +1398,7 @@ an exit code.
 | An instruction file | A CLAUDE.md of 200 lines or more, past Claude Code's [guidance](https://code.claude.com/docs/en/memory#write-effective-instructions), or an AGENTS.md at or above the byte budget Codex [loads](https://learn.chatgpt.com/docs/agent-configuration/agents-md), with what each 100 lines of it costs. |
 | Explore subagent | Claude's built-in Explore ran off Haiku: what it cost, the same tokens on the cheapest model, the model guide's tip, and the agent file that follows it as a step by hand. |
 | Fable weekly use | Any Fable request in the window: what they cost, and Anthropic's [plan rule](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan). |
+| [Advisor model](#advisor-model) | Every Claude settings file: with no `advisorModel`, the advisor one rank above the main-session default, citing Claude Code's [advisor page](https://code.claude.com/docs/en/advisor). |
 | [Auto memory](#auto-memory-in-vibes) | Every auto memory or Codex memories line: off is advised when most main sessions ran in a repository with a CLAUDE.md or AGENTS.md. |
 | [Code intelligence](#code-intelligence) | Claude sessions read or edited files of a typed language whose official language server plugin a new session wouldn't load: Anthropic's [costs page](https://code.claude.com/docs/en/costs#install-code-intelligence-plugins-for-typed-languages). |
 
@@ -1776,6 +1777,69 @@ with `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` or
 `CLAUDE_CODE_USE_FOUNDRY` is billed by its cloud provider and gets no line.
 Change the model with `/model` or the `model` setting.
 See [Fable weekly use](semantics.md#fable-weekly-use).
+
+## Advisor model
+
+Claude Code's [advisor](https://code.claude.com/docs/en/advisor) is a
+second model Claude consults at decision points, which reads the whole
+conversation at its own rates. Each Claude settings file gets a
+[`vibes`](#vibes) card for it, ranked against the main-session default that
+[effort](semantics.md#main-session-effort) resolves: the `model` setting or
+`ANTHROPIC_MODEL`, else the latest recorded main-session model.
+
+With no `advisorModel` set, the card suggests one rank above that default,
+the maintainer's pick: `opus` for a Haiku or Sonnet main, `fable` for an Opus
+main, and none for a Fable main, which Claude Code pairs only with a Fable
+advisor. It cites the page's claim that a faster main model with a stronger
+advisor "typically costs less than running the stronger model throughout",
+and offers to write `advisorModel` to the profile's settings file, saying
+that a project whose own settings pick another main model takes it too, since
+the edit pairs the advisor with every project's model. When no setting names
+the main model, or `model` is null, the card ranks against the latest recorded
+main-session model and says a session's `/model` or `--model` choice may run
+another one. When a project's settings file sets the main model, in `model`
+or `env.ANTHROPIC_MODEL`, the card offers no edit, since an advisor in the
+profile's file would pair with every project's model. The card doesn't read
+other recorded projects' settings for a model they set; its caveat covers
+them. What the
+pairing saves or costs is not measured. A main model Claude Code attaches no
+advisor to (Sonnet or Opus before 4.6, Haiku before 4.5), or one token-max
+can't resolve, gets a card that advises nothing.
+
+The card says no advisor would load, and offers no edit, when the settings or
+environment read set `CLAUDE_CODE_DISABLE_ADVISOR_TOOL`, send requests to
+Amazon Bedrock (or its Mantle endpoint), Google Cloud's Agent Platform or
+Microsoft Foundry, or turn off the feature flag the advisor needs:
+`DISABLE_TELEMETRY` or `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` with any
+value, or a true `DO_NOT_TRACK`, `CLAUDE_CODE_DISABLE_FEATURE_FLAGS` or
+`DISABLE_GROWTHBOOK`. Claude Platform on AWS and Claude Models on Google
+Cloud (Anthropic managed) need no flag. An `ANTHROPIC_BASE_URL` gateway must
+pass the advisor tool on intact, and a Fable advisor needs Fable access and,
+on plans that bill Fable to usage credits, the consent `/model fable` asks
+for; the card says both. An `advisorModel` already set gets a card that
+advises nothing, unless one of those stops it loading, its value is no model
+name Claude Code recognizes (an alias, or a Claude model ID of a family that
+can advise; the card names only its kind, never the value, which could be a
+pasted credential), the main model takes no
+advisor, or Claude Code's [pairing table](https://code.claude.com/docs/en/advisor#choose-an-advisor-model)
+rejects the pair; then it says so and offers no edit. The table is checked for
+a full model ID such as `claude-sonnet-5-5`, in any case and with or without a
+`[1m]` or `[2m]` suffix, as Claude Code reads it. An alias such as `opus` resolves
+to a version that changes with Claude Code releases, so only a Fable main
+model, which takes no other family, judges one. The card doesn't yet read an
+`availableModels` allowlist, which can disable a set advisor or block the one
+it suggests.
+
+T3 Code picks each thread's main model, so T3 instances get no card; when an
+enabled one reads the same settings file, the card says each of its threads whose model
+and provider take the advisor would use it, unless the instance's launch arguments, secret
+environment or machine policy, which token-max can't resolve, override that
+file. `doctor` has no advisor line. An advisor call
+whose iteration records no service tier leaves its request with no price of its
+own: that request is extrapolated from its profile's priced requests like any
+other unpriced one, or, when none of them priced, adds only its known part as a
+lower bound ([spend](#reading-the-report)). No line says how many calls ran or
+what they cost.
 
 ## Messages from other sessions
 

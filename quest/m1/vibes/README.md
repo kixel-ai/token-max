@@ -53,8 +53,8 @@ codex-cli 0.167.1 settings worth turning on):
   mode, unused skills and MCP servers and the Artifact tool are measured
   `doctor` lines.
 - Settings worth turning on: ✅ code intelligence plugins, which shipped as
-  the Code intelligence card, ✅
-  [an advisor model](/quest/m1/vibes/advisor.md) (rejected:
+  the Code intelligence card, ✅ an advisor model, which shipped as the
+  Advisor model card (rejected:
   `includeGitInstructions: false`, spend caps, and Codex code mode, which the
   model catalog already turns on). The one measurable find,
   Codex turn-end compaction, is a measured `doctor` line, as idle compaction

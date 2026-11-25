@@ -91,6 +91,9 @@ pub(crate) fn constrain<T>(base: &mut CheckBase<T>, profiles: &[Profile]) {
     }
 }
 
+/// How the issue on a request whose owner T3 could not settle begins.
+pub(crate) const UNSETTLED: &str = "T3/shared native history ownership is unresolved";
+
 /// Why a check of a T3 instance gives no verdict when the instance's settings owner is unknown.
 pub(crate) const UNOWNED: &str = "T3 instance is disabled or its effective control ownership is unresolved; retained historical costs do not establish an active setting to change";
 
@@ -2375,7 +2378,9 @@ pub(crate) fn enrich(
                 }
                 Some(c) => {
                     cause = Some(c);
-                    r.issues.push(format!("T3/shared native history ownership is unresolved: {c}; current control guidance is advisory").into());
+                    r.issues.push(
+                        format!("{UNSETTLED}: {c}; current control guidance is advisory").into(),
+                    );
                     // Context before the window prices cache state but says nothing about
                     // which controls ran the selected requests.
                     if selected {

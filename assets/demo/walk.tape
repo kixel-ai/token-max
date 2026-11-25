@@ -64,7 +64,12 @@ Type "y"
 Sleep 300ms
 Enter
 Sleep 4s
-# The maintainer's smaller compaction window, then the write.
+# The maintainer's smaller compaction window, then a Fable advisor above the Opus main model,
+# then the write.
+Type "y"
+Sleep 300ms
+Enter
+Sleep 4s
 Type "y"
 Sleep 300ms
 Enter

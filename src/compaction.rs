@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 
 use crate::cache::{CODEX_CACHE_MILLISECONDS, CacheBoundaries, ttl_milliseconds};
 use crate::controls::{
-    CLAUDE_WINDOW_MAXIMUM, CLAUDE_WINDOW_MINIMUM, PERCENT_KEY, owner_setting, strip_dated,
+    CLAUDE_WINDOW_MAXIMUM, CLAUDE_WINDOW_MINIMUM, PERCENT_KEY, locate, owner_setting, strip_dated,
     window_control,
 };
 use crate::discovery::locale_compare;
@@ -14,8 +14,9 @@ use crate::model::{
     Action, AddedCompaction, Agent, BillingPart, CacheReplayEvidence, Change, CheckBase,
     CompactionBasis, CompactionCharge, CompactionCheck, CompactionControls, Cost, Coverage,
     EventKind, Evidence, Harness, Id, Margin, Millis, Origin, PartKind, PerBucket, PercentOverride,
-    Profile, Reowned, Request, RequestEvidence, Scalar, Scan, StructuralEvent, Text, Ttl, TtlCheck,
-    Usage, UsageEstimate, Usd, WindowBasisKind, WindowControl, WindowScenario, WindowSensitivity,
+    Profile, Reowned, Request, RequestEvidence, Scalar, Scan, Setting, Source, StructuralEvent,
+    Text, Ttl, TtlCheck, Usage, UsageEstimate, Usd, WindowBasisKind, WindowControl, WindowScenario,
+    WindowSensitivity,
 };
 use crate::prices::{
     Catalog, PRICE_SOURCES, Pairs, Signs, Sum, TIER_SENSITIVITY, TIER_SIGNS, TierSavings,
@@ -2350,37 +2351,84 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
     checks
 }
 
-/// A Codex limit that is set, with no selected request to replay it against.
-fn unmeasured(group: &crate::rows::Group<'_>, since: Option<Millis>) -> Option<CompactionCheck> {
+/// Each window that is set, with no selected request to replay it against. Claude's window is
+/// per model and no request names one, so each setting in force gets its own line: the
+/// top-level window and every `modelSettings` row, or the override above them. Codex has no rows.
+fn unmeasured(group: &crate::rows::Group<'_>, since: Option<Millis>) -> Vec<CompactionCheck> {
     let profile = group.lead;
-    if profile.harness != Harness::Codex {
-        return None;
+    let compaction = &profile.compaction;
+    // A row that names no window resolves to the setting above it, which has its own line.
+    let mut lines: IndexMap<&str, (Option<&str>, i64, &WindowControl)> = IndexMap::default();
+    let rows = compaction.models.iter().map(|(m, c)| (Some(m.as_str()), c));
+    for (model, control) in std::iter::once((None, &compaction.default)).chain(rows) {
+        if let Some(value) = control.value.filter(|_| !control.unset) {
+            lines
+                .entry(&control.owner)
+                .or_insert((model, value, control));
+        }
     }
-    let control = window_control(&profile.compaction, None);
-    let current = control.value.filter(|_| !control.unset)?;
-    let mut base = CheckBase::unmeasured(group, current, control.owner, since);
-    base.sources = SOURCES.iter().map(|s| s.to_string()).collect();
-    Some(CompactionCheck {
-        base,
-        bucket: "all",
-        model: None,
-        models: vec![],
-        unset: false,
-        setting: control.setting,
-        baseline_cost: Cost::default(),
-        observed_summary_cost: Cost::default(),
-        ttls: PerBucket {
-            main: None,
-            subagent: None,
-        },
-        scenarios: vec![],
-        usage_estimates: vec![],
-        cache_evidence: vec![],
-        reowned: None,
-        // Only Claude's percentage override needs a plan, and this line is Codex.
-        capped: None,
-        unsettable: (!control.applicable).then(|| control.reason.clone()),
-    })
+    // Settings an override such as `CLAUDE_CODE_AUTO_COMPACT_WINDOW` outranks, which would
+    // otherwise read as set.
+    let outranked: Vec<String> = compaction
+        .layers
+        .iter()
+        .flat_map(|l| l.windows())
+        .filter(|owner| !lines.contains_key(owner.as_str()))
+        .collect();
+    let percent = compaction.percent.as_ref().map(|p| {
+        let owner = p.owner();
+        match p.value {
+            Some(value) => format!(
+                "{owner} sets {PERCENT_KEY}={value}, so each model compacts below this window: at {value}% of it where it is under the model's context window, else at Claude Code's undocumented default percentage"
+            ),
+            None => format!(
+                "{owner} is not a percentage Claude Code documents, so where each model compacts under this window is unresolved"
+            ),
+        }
+    });
+    lines
+        .into_values()
+        .map(|(model, value, control)| {
+            let mut base = CheckBase::unmeasured(group, value, control.owner.clone(), since);
+            base.sources = SOURCES.iter().map(|s| s.to_string()).collect();
+            let overrides = matches!(
+                locate(&control.owner),
+                Some((Source::Instance { .. }, _) | (_, Setting::Env(_)))
+            );
+            if overrides && !outranked.is_empty() {
+                base.uncertainty.push(format!(
+                    "{} outranks {}, so none of them applies",
+                    control.owner,
+                    outranked.join(", ")
+                ));
+            }
+            base.uncertainty.extend(percent.clone());
+            if !control.applicable {
+                base.uncertainty.push(control.reason.clone());
+            }
+            let unsettable = (!control.applicable).then(|| control.reason.clone());
+            CompactionCheck {
+                base,
+                bucket: "all",
+                model: model.map(Text::from),
+                models: model.map(|m| vec![Some(Text::from(m))]).unwrap_or_default(),
+                unset: false,
+                setting: control.setting,
+                baseline_cost: Cost::default(),
+                observed_summary_cost: Cost::default(),
+                ttls: PerBucket {
+                    main: None,
+                    subagent: None,
+                },
+                scenarios: vec![],
+                usage_estimates: vec![],
+                cache_evidence: vec![],
+                reowned: None,
+                capped: None,
+                unsettable,
+            }
+        })
+        .collect()
 }
 
 /// What a window change under `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` must also change so one
@@ -6456,6 +6504,120 @@ mod tests {
             let report = report(&s);
             assert_eq!(report.compactions[0].evidence, Evidence::Estimated);
             assert_eq!(compaction(&report).scenarios[0].savings_usd, None);
+        }
+
+        /// The window lines of a scan whose only requests are earlier history, under `user`'s
+        /// settings and `env`.
+        fn unmeasured(user: Value, env: &[(&str, &str)]) -> (Report, Vec<CompactionCheck>) {
+            let mut s = data(1);
+            let env: Env = env
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            s.profiles[0].compaction = controls(Harness::Claude, user, &env, "settings.json");
+            s.cache_context.requests = std::mem::take(&mut s.requests);
+            let report = report(&s);
+            let lines = windows(&report).into_iter().cloned().collect();
+            (report, lines)
+        }
+
+        #[test]
+        fn each_set_claude_window_keeps_its_line_when_no_request_is_selected() {
+            let (report, lines) = unmeasured(
+                json!({
+                    "autoCompactWindow": 300000,
+                    "modelSettings": {
+                        "claude-opus-5-5": { "autoCompactWindow": 500000 },
+                        // A row naming no window is the top-level line's, and "auto" is unset.
+                        "claude-sonnet-5-5": {},
+                        "claude-haiku-5-5": { "autoCompactWindow": "auto" },
+                    },
+                }),
+                &[],
+            );
+            let got: Vec<_> = lines
+                .iter()
+                .map(|c| (c.base.current, &*c.base.owner, c.model.as_deref()))
+                .collect();
+            assert_eq!(
+                got,
+                [
+                    (Some(300000), "settings.json:autoCompactWindow", None),
+                    (
+                        Some(500000),
+                        "settings.json:modelSettings.claude-opus-5-5.autoCompactWindow",
+                        Some("claude-opus-5-5")
+                    ),
+                ]
+            );
+            for c in &lines {
+                assert_eq!(
+                    (
+                        c.base.action,
+                        c.base.evidence,
+                        c.base.recommended,
+                        c.base.requests
+                    ),
+                    (Action::Advisory, Evidence::Unknown, None, 0)
+                );
+                assert!(c.scenarios.is_empty() && c.unsettable.is_none());
+            }
+            let plain = text(&report, Some(200), false);
+            assert!(
+                plain.contains("Auto-compact window (claude-opus-5-5)"),
+                "{plain}"
+            );
+            let details = text(&report, Some(200), true);
+            for field in ["Current-window baseline", "Existing summaries"] {
+                assert!(!details.contains(field), "{field} shown without a replay");
+            }
+        }
+
+        #[test]
+        fn an_override_names_the_windows_it_outranks_when_no_request_is_selected() {
+            let user = json!({
+                "autoCompactWindow": 300000,
+                "modelSettings": { "claude-opus-5-5": { "autoCompactWindow": 500000 } },
+            });
+            let (_, lines) =
+                unmeasured(user.clone(), &[("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "400k")]);
+            let [line] = &lines[..] else {
+                panic!("expected only the override's line, got {lines:?}");
+            };
+            assert_eq!(
+                (line.base.current, &*line.base.owner),
+                (Some(400000), "CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+            );
+            assert!(line.base.uncertainty.iter().any(|u| u
+                == "CLAUDE_CODE_AUTO_COMPACT_WINDOW outranks settings.json:autoCompactWindow, settings.json:modelSettings.claude-opus-5-5.autoCompactWindow, so none of them applies"));
+
+            // The percentage override lowers each set window's trigger by model, so the 500k
+            // row may already compact under the cap and vibes advises no cap.
+            let (report, lines) = unmeasured(user, &[("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "50")]);
+            assert_eq!(lines.len(), 2);
+            for c in &lines {
+                assert!(
+                    c.base
+                        .uncertainty
+                        .iter()
+                        .any(|u| u.contains("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50")),
+                    "{:?}",
+                    c.base.uncertainty
+                );
+            }
+            let row = crate::report::advice(&report, ReportOptions::default())
+                .into_iter()
+                .find(|i| i.name == "Auto-compact window (claude-opus-5-5)")
+                .unwrap();
+            assert!((row.how.is_none() && row.quiet), "{row:?}");
+            assert!(row.text.contains("cannot tell"), "{}", row.text);
+        }
+
+        #[test]
+        fn an_unset_claude_window_gets_no_line_when_no_request_is_selected() {
+            assert!(unmeasured(json!({}), &[]).1.is_empty());
+            let auto = json!({ "autoCompactWindow": "auto" });
+            assert!(unmeasured(auto, &[]).1.is_empty());
         }
     }
 }

@@ -809,6 +809,7 @@ mod tests {
                 since: None,
                 now: 30 * DAY_MS,
                 max_cost_per_use_usd: 1.0,
+                reading: None,
             })
             .unwrap();
             let result = report

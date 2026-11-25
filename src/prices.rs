@@ -781,6 +781,17 @@ impl Sample {
         self.weights += weight * weight;
     }
 
+    /// Take back one item [`Sample::add`] added, as when a request read so far changes.
+    pub fn remove(&mut self, exact: Usd) {
+        let usd = exact.to_f64();
+        self.priced -= 1;
+        self.weight -= 1.0;
+        self.sum -= exact;
+        self.squares -= usd * usd;
+        self.cross -= usd;
+        self.weights -= 1.0;
+    }
+
     /// Add one item's cost when it was priced in full; a partly priced one is left for the
     /// estimate to cover like any other unpriced item.
     pub fn add_cost(&mut self, cost: &Cost) {

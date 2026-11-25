@@ -2878,6 +2878,7 @@ mod tests {
             retention: None,
             turn_end: None,
             effort: None,
+            advisor: None,
             speed_directories: None,
             idle_directories: None,
             background: vec![],
@@ -5459,6 +5460,7 @@ mod tests {
                 since: None,
                 now: NOW,
                 max_cost_per_use_usd: 1.0,
+                reading: None,
             })
             .unwrap()
         }

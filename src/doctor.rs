@@ -287,23 +287,19 @@ pub fn fixes(report: &Report, unicode: bool) -> Vec<Fix> {
 pub(crate) fn fixes_from(all: Vec<Fix>) -> Vec<Fix> {
     let mut fixes: Vec<Fix> = vec![];
     for mut fix in all {
-        if let Some(same) = fixes
-            .iter_mut()
-            .find(|f| matches!(f.how, How::Edit(_)) && f.how == fix.how)
-        {
-            same.origins.extend(fix.origins);
+        let listed: Vec<&How> = fixes.iter().map(|f| &f.how).collect();
+        let placed = place(&listed, &fix.how);
+        if let Placed::Same(at) = placed {
+            let origins = std::mem::take(&mut fix.origins);
+            fixes[at].origins.extend(origins);
             continue;
         }
-        // Two lines that want one setting at different values, such as checks for two
-        // projects that share the user file, leave the choice to the person.
-        if let How::Edit(patch) = &fix.how
-            && let Some(other) = fixes.iter().find(|f| conflicts(&f.how, patch))
-        {
+        if let (Placed::Conflicts(at), How::Edit(patch)) = (placed, &fix.how) {
             fix.how = How::Manual {
                 step: steps(patch),
                 reason: format!(
                     "{} wants a different value for the same setting",
-                    other.name
+                    fixes[at].name
                 ),
             };
         }
@@ -312,20 +308,47 @@ pub(crate) fn fixes_from(all: Vec<Fix>) -> Vec<Fix> {
     fixes
 }
 
+/// Where a change carried out as `how` goes among the changes `listed` before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Placed {
+    /// The change at this index makes the same edit, so the two are listed once.
+    Same(usize),
+    /// The change at this index sets the same setting to another value, so this one is left
+    /// to do by hand, still listed.
+    Conflicts(usize),
+    New,
+}
+
+/// Where the walk lists a change carried out as `how`, after those `listed` already: an edit
+/// one of them makes is listed once, and one that wants a setting at another value, such as
+/// checks for two projects that share the user file, leaves the choice to the person.
+pub(crate) fn place(listed: &[&How], how: &How) -> Placed {
+    let How::Edit(patch) = how else {
+        return Placed::New;
+    };
+    if let Some(at) = listed.iter().position(|l| *l == how) {
+        return Placed::Same(at);
+    }
+    match listed.iter().position(|l| conflicts(l, patch)) {
+        Some(at) => Placed::Conflicts(at),
+        None => Placed::New,
+    }
+}
+
 /// Whether `how` sets a setting `patch` also sets, to another value, in the same file or
 /// one a symlink makes the same.
 fn conflicts(how: &How, patch: &Patch) -> bool {
     let How::Edit(other) = how else { return false };
-    (other.file == patch.file
-        || identity(Path::new(&other.file)) == identity(Path::new(&patch.file)))
-        && other.edits.iter().any(|a| {
-            patch.edits.iter().any(|b| {
-                a.op != Op::Append
-                    && b.op != Op::Append
-                    && a.path == b.path
-                    && (a.op != b.op || a.value != b.value)
-            })
+    // The edits first, since they rarely meet, and resolving a file asks the filesystem.
+    other.edits.iter().any(|a| {
+        patch.edits.iter().any(|b| {
+            a.op != Op::Append
+                && b.op != Op::Append
+                && a.path == b.path
+                && (a.op != b.op || a.value != b.value)
         })
+    }) && (other.file == patch.file
+        || identity(Path::new(&other.file)) == identity(Path::new(&patch.file)))
 }
 
 /// The edits as steps to take by hand.
@@ -362,9 +385,13 @@ fn identity(path: &Path) -> PathBuf {
     }
 }
 
-fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
-    // Every profile on the line, the one whose controls it reports first.
-    let ids: Vec<&str> = match line.source {
+/// The profiles on a line by id, the one whose controls it reports first, and those of them
+/// still selected among `profiles`.
+fn members<'r, 's>(
+    profiles: &'r [Profile],
+    source: &'s Source<'_>,
+) -> (Vec<&'s str>, Vec<&'r Profile>) {
+    let ids: Vec<&str> = match source {
         Source::Check(result) => {
             let (lead, all) = check_profiles(result);
             std::iter::once(lead)
@@ -373,49 +400,63 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
         }
         Source::Piece(c) => c.profiles.iter().map(String::as_str).collect(),
     };
-    let profile_id = ids.first().copied().unwrap_or_default();
-    let members: Vec<&Profile> = ids
+    let members = ids
         .iter()
-        .filter_map(|id| report.scan.profiles.iter().find(|p| p.id == *id))
+        .filter_map(|id| profiles.iter().find(|p| p.id == *id))
         .collect();
-    let section = section(report, &line);
-    let mut removal = vec![];
-    let how = match (members.first(), line.source) {
+    (ids, members)
+}
+
+/// How a line's change is carried out among `profiles`: the edit the walk offers, or the
+/// step to take by hand. `defaults` is whether every setting is pretended at its default.
+pub(crate) fn how(profiles: &[Profile], source: &Source<'_>, defaults: bool) -> How {
+    let (ids, members) = members(profiles, source);
+    match (members.first(), source) {
         (None, _) => How::Manual {
-            step: format!("change it where {profile_id} is configured"),
+            step: format!(
+                "change it where {} is configured",
+                ids.first().copied().unwrap_or_default()
+            ),
             reason: "its profile is no longer selected".into(),
         },
         (Some(profile), Source::Check(result)) => check_how(result, profile),
         (Some(_), Source::Piece(c)) => match &c.control {
-            Some(control) => {
-                let how = switch(&members, control.into(), report.scan.defaults);
-                let unused = section.kind == Kind::Feature(ContextKind::McpServer, Reason::Unused);
-                if let (true, How::Edit(patch)) = (unused, &how) {
-                    let whole = ends_at(&c.name, c.details.iter().map(|d| d.name.as_str()));
-                    let own = holds_its_tools(&c.name);
-                    removal = crate::mcp::definitions(&c.name, control, &members)
-                        .into_iter()
-                        .map(|d| match d {
-                            Definition::Entry(entry) if !own => Definition::Manual {
-                                step: format!("remove {} from {}", entry.text(), entry.file),
-                                reason: SHORTER.into(),
-                            },
-                            Definition::Deny(deny) if !own => deny.by_hand(SHORTER),
-                            Definition::Deny(deny) if !whole => {
-                                deny.by_hand("its tools' names do not show where its name ends")
-                            }
-                            d => gate(d, &members, &report.scan.requests, &patch.file),
-                        })
-                        .collect();
-                }
-                how
-            }
+            Some(control) => switch(&members, control.into(), defaults),
             None => How::Manual {
                 step: "disable it in config.toml with [[skills.config]]".into(),
                 reason: "the recorded catalog does not give its SKILL.md path".into(),
             },
         },
-    };
+    }
+}
+
+fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
+    let section = section(report, &line);
+    let how = how(&report.scan.profiles, &line.source, report.scan.defaults);
+    let unused = section.kind == Kind::Feature(ContextKind::McpServer, Reason::Unused);
+    let mut removal = vec![];
+    if let (Source::Piece(c), How::Edit(patch)) = (&line.source, &how)
+        && let Some(control) = &c.control
+        && unused
+    {
+        let (_, members) = members(&report.scan.profiles, &line.source);
+        let whole = ends_at(&c.name, c.details.iter().map(|d| d.name.as_str()));
+        let own = holds_its_tools(&c.name);
+        removal = crate::mcp::definitions(&c.name, control, &members)
+            .into_iter()
+            .map(|d| match d {
+                Definition::Entry(entry) if !own => Definition::Manual {
+                    step: format!("remove {} from {}", entry.text(), entry.file),
+                    reason: SHORTER.into(),
+                },
+                Definition::Deny(deny) if !own => deny.by_hand(SHORTER),
+                Definition::Deny(deny) if !whole => {
+                    deny.by_hand("its tools' names do not show where its name ends")
+                }
+                d => gate(d, &members, &report.scan.requests, &patch.file),
+            })
+            .collect();
+    }
     Fix {
         name: line.name,
         value: line.value,
@@ -2335,6 +2376,17 @@ impl Sum {
     }
 }
 
+/// One change's saving as a [`Total`] counts it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Saved {
+    /// What it saves every 30 days, when measured.
+    pub saving: Option<f64>,
+    /// How far `saving` may be off when extrapolated over unpriced requests.
+    pub margin: Option<Margin>,
+    /// How the saving reads, such as "saves up to".
+    pub verb: Known,
+}
+
 /// "1 change" or "2 changes".
 fn changes(n: usize) -> String {
     format!("{n} change{}", if n == 1 { "" } else { "s" })
@@ -2384,16 +2436,67 @@ impl Total {
     }
 
     fn add(&mut self, fix: &Fix) {
-        let Some(usd) = fix.saving else {
+        let found = Saved {
+            saving: fix.saving,
+            margin: fix.margin,
+            verb: fix.verb,
+        };
+        self.put(&found, fix.share);
+    }
+
+    /// A change found while checking, before the spend its share is of is known.
+    pub fn count(&mut self, found: &Saved) {
+        self.put(found, None);
+    }
+
+    fn put(&mut self, found: &Saved, share: Option<f64>) {
+        let Some(usd) = found.saving else {
             self.unmeasured += 1;
             return;
         };
-        if fix.verb == UP_TO {
-            self.up_to.add(usd, fix.margin, fix.share);
+        if found.verb == UP_TO {
+            self.up_to.add(usd, found.margin, share);
             return;
         }
-        self.measured.add(usd, fix.margin, fix.share);
-        self.partial += usize::from(fix.verb == AT_LEAST);
+        self.measured.add(usd, found.margin, share);
+        self.partial += usize::from(found.verb == AT_LEAST);
+    }
+
+    /// The changes' savings as a progress line tallies them: those measured, those that
+    /// depend on the default they replace, and how many were not measured, each kept apart as
+    /// the line under the headline keeps them; the count not measured joins the measured
+    /// figure when there is one. `more` says they come on top of what the
+    /// settings save already.
+    pub(crate) fn tally(&self, more: bool) -> crate::totals::Tallied {
+        let more = if more { " more" } else { "" };
+        // Said with the measured figure, so a row too narrow for it drops both.
+        let unmeasured = match self.unmeasured {
+            0 => String::new(),
+            n => format!(", {n} more not measured"),
+        };
+        let measured = (self.measured.changes > 0).then(|| {
+            let partial = match self.partial {
+                0 => String::new(),
+                n => format!(", {n} priced in part"),
+            };
+            format!(
+                "found {}{more}{partial}{unmeasured}",
+                approx(self.measured.usd, self.measured.margin, "/mo")
+            )
+        });
+        let up_to = (self.up_to.changes > 0).then(|| {
+            format!(
+                "found up to {}{more}, depending on billing",
+                approx(self.up_to.usd, self.up_to.margin, "/mo")
+            )
+        });
+        let unmeasured = (self.unmeasured > 0 && measured.is_none())
+            .then(|| format!("found {} not measured", changes(self.unmeasured)));
+        crate::totals::Tallied {
+            measured,
+            up_to: up_to.into_iter().collect(),
+            unmeasured,
+        }
     }
 
     /// How many changes were accepted.

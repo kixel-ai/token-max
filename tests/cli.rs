@@ -1601,6 +1601,20 @@ mod unix {
         ] {
             assert!(!stdout.contains(leak), "{leak}");
         }
+        // On a row wide enough, the line counts the checks and ends on the report's total.
+        let mut c = command(&w, &args(&base, &[]));
+        let (status, stdout, stderr) = tty(&mut c, 200);
+        assert_eq!(status, 1, "{stderr}");
+        let (_, together) = stdout
+            .split_once("Together, these changes save about ")
+            .or_else(|| stdout.split_once("Together, these changes save "))
+            .expect("a total under the headline");
+        let amount = format!("{}/mo", together.split("/mo").next().unwrap());
+        assert!(stderr.contains("checks  "), "{stderr}");
+        assert!(
+            stderr.contains(&format!("found {amount} more")),
+            "{amount}: {stderr}"
+        );
         let (status, stdout, stderr) = invoke(&[], &[("NO_COLOR", "1")]);
         assert_eq!(status, 1, "{stderr}");
         assert!(!stdout.contains('\x1b'));

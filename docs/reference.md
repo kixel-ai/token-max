@@ -899,8 +899,8 @@ Unicode decorations require a UTF-8 locale. Progress is one line that shows each
 phase in turn and clears itself before the report. While this host's
 transcripts are read it is a bar of the bytes read out of the total discovery
 found, with the time left to read them at the rate so far; the analysis after
-reading has no measured fraction, so its phases show only a spinner and how
-long each has run. Reading T3 Code's database, which follows the transcripts,
+reading has no measured fraction, so its phases show a spinner and how long
+each has run, and checking settings also counts the checks done. Reading T3 Code's database, which follows the transcripts,
 holds the line as the bar does, so under `--ssh` it shows over a later phase
 until it ends.
 
@@ -917,10 +917,33 @@ priced the scan the counts become the header's own. Each SSH host's totals
 join them as its report arrives. The line `doctor` clears shows the header's
 figures, or the total across hosts. Under `vibes --ssh` the destinations send
 no usage, so the line counts this host alone and says so. On a narrow
-terminal the line keeps the most useful figures that fit: the spend, the
-requests, the time left to read, the sessions, the tokens, then the bytes read.
+terminal the line keeps the most useful figures that fit: while reading, the
+spend, the requests, the time left to read, the sessions, the tokens, then
+the bytes read.
 A figure too wide for the room left is skipped, and narrower ones after it
 still show.
+
+While `doctor` checks settings, the line also counts the checks done, such as
+`7/11 checks`, one per kind of check however long each runs, and tallies two
+figures as each check lands: what the current
+settings save against the Claude Code and Codex defaults, as the report's
+"Compared with defaults" line sums them, and what the changes found so far
+save, as the total under the report's headline sums them. Each figure keeps
+the report's kinds apart: a saving that depends on how usage is paid, such as
+a pinned main-agent TTL, has its own "up to" figure, an estimate for a feature
+that is off is counted beside the saving it joins, a change priced only in
+part says so, and so does a setting or change whose amount wasn't measured.
+An edit two lines make counts once, as the walk lists it. A figure whose
+qualifier doesn't fit the row is dropped whole.
+The tools, skills and MCP servers a settings file already turns off join the
+defaults figure once the report is formatted, and the line then ends on the
+report's own figures; each SSH host's figures join when its report arrives.
+Under `--defaults` there is no comparison with the defaults, so the line
+tallies only the changes. `vibes` counts its checks but tallies nothing, since
+its advice is unmeasured. While checking, a narrow terminal keeps the count of
+checks, the defaults figure, the changes found, the spend, the requests, the
+"up to" figures, the sessions, the tokens, then a count of what wasn't
+measured when nothing beside it was.
 
 On a terminal, `doctor` opens with its name, says it is about to scan this
 host's transcripts, and lists each profile root it found with its transcript

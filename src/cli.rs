@@ -13,9 +13,10 @@ use serde::Serialize;
 use serde_json::ser::Formatter;
 
 use crate::collections::IndexMap;
+use crate::defaults::Credit;
 use crate::discovery::{DiscoveryOptions, discover};
 use crate::doctor::{
-    BillingQuestions, Confirm, Fix, Found, Offers, Owner, Selection, Style, Walking, ask,
+    BillingQuestions, Confirm, Fix, Found, Offers, Owner, Selection, Style, Total, Walking, ask,
     ask_upgrade, confirm, finish, opening, preview, stale, upgrade_line, write, wrote,
 };
 use crate::model::{Billing, Location, Millis, Scan, Verdict};
@@ -282,21 +283,25 @@ struct Shown {
     /// What the line last showed before its figures, unless the reading bar.
     head: Mutex<String>,
     reading: Arc<Reading>,
-    /// Each host's counts by its index, this host's first, once its report is rendered.
-    hosts: Mutex<Vec<Option<Counts>>>,
+    /// Each host's totals by its index, this host's first, once its report is rendered.
+    hosts: Mutex<Vec<Option<Totals>>>,
     /// Whose the counts are when other hosts' are left out, such as "this host".
     whose: Option<&'static str>,
+    /// Whether the line tallies the savings while checking, as `doctor`'s does; `vibes`'
+    /// advice is unmeasured.
+    tally: bool,
     look: Look,
 }
 
 impl Shown {
-    fn new(look: Look, reading: Arc<Reading>, whose: Option<&'static str>) -> Self {
+    fn new(look: Look, reading: Arc<Reading>, whose: Option<&'static str>, tally: bool) -> Self {
         Shown {
             phase: Mutex::new(("", Instant::now())),
             head: Mutex::new(String::new()),
             reading,
             hosts: Mutex::new(vec![]),
             whose,
+            tally,
             look,
         }
     }
@@ -305,32 +310,74 @@ impl Shown {
     /// them, then added to each other host's in the order the report's total adds them.
     fn counts(&self) -> Option<Counts> {
         let hosts = self.hosts.lock().unwrap_or_else(PoisonError::into_inner);
-        let here = hosts.first().copied().flatten().or_else(|| {
-            *self
-                .reading
-                .counts
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-        });
+        let here = hosts.first().cloned().flatten().map_or_else(
+            || {
+                *self
+                    .reading
+                    .counts
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+            },
+            |totals| Some(totals.counts()),
+        );
         let mut sum: Option<Counts> = None;
-        for counts in here.iter().chain(hosts.iter().skip(1).flatten()) {
+        let there = hosts.iter().skip(1).flatten().map(Totals::counts);
+        for counts in here.into_iter().chain(there) {
             match &mut sum {
-                Some(sum) => sum.merge(counts),
-                None => sum = Some(*counts),
+                Some(sum) => sum.merge(&counts),
+                None => sum = Some(counts),
             }
         }
         sum
     }
 
-    /// Count host `index`'s settled `counts`, this host's at 0, in place of what its scan
-    /// counted, and show them now, so the line never clears before showing them.
-    fn settle(&self, index: usize, counts: Counts) {
+    /// What the hosts tally to so far: this host's from its checks until its report settles
+    /// them, then added to each other host's as the report's total adds them. The savings
+    /// the changes found, and what the settings save against the defaults, None under
+    /// `--defaults`.
+    fn tally(&self) -> Option<(Total, Option<Credit>)> {
+        let hosts = self.hosts.lock().unwrap_or_else(PoisonError::into_inner);
+        let here = match hosts.first().cloned().flatten() {
+            Some(totals) => Some((totals.savings, totals.credit)),
+            None => self
+                .reading
+                .checked
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+                .map(|checked| (checked.savings(), checked.credit.clone())),
+        };
+        let there = hosts
+            .iter()
+            .skip(1)
+            .flatten()
+            .map(|t| (t.savings, t.credit.clone()));
+        let mut sum: Option<(Total, Option<Credit>)> = None;
+        for (savings, credit) in here.into_iter().chain(there) {
+            match &mut sum {
+                Some((total, sum)) => {
+                    total.merge(&savings);
+                    // Every host runs with the same `--defaults`, so all have a credit or none.
+                    if let (Some(sum), Some(credit)) = (sum, &credit) {
+                        sum.merge(credit);
+                    }
+                }
+                None => sum = Some((savings, credit)),
+            }
+        }
+        sum
+    }
+
+    /// Count host `index`'s settled `totals`, this host's at 0, in place of what its scan
+    /// counted and its checks tallied, and show them now, so the line never clears before
+    /// showing them.
+    fn settle(&self, index: usize, totals: &Totals) {
         {
             let mut hosts = self.hosts.lock().unwrap_or_else(PoisonError::into_inner);
             if hosts.len() <= index {
                 hosts.resize(index + 1, None);
             }
-            hosts[index] = Some(counts);
+            hosts[index] = Some(totals.clone());
         }
         let phase = self.phase.lock().unwrap_or_else(PoisonError::into_inner);
         let (name, _) = *phase;
@@ -356,9 +403,31 @@ impl Shown {
         *shown = head;
     }
 
-    /// The figures that follow the phase on the line.
+    /// The figures that follow the phase on the line: this host's checks done, then the
+    /// tallies, then the counts.
     fn figures(&self) -> Vec<Piece> {
-        self.counts().map(|c| figures(&c)).unwrap_or_default()
+        let checked = self
+            .reading
+            .checked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|c| (c.done, c.of));
+        let mut pieces: Vec<Piece> = checked
+            .map(|(done, of)| Piece {
+                text: format!("{done}/{of} checks"),
+                keep: 9,
+                count: true,
+            })
+            .into_iter()
+            .collect();
+        if self.tally
+            && let Some((savings, credit)) = self.tally()
+        {
+            pieces.extend(tallies(&savings, credit.as_ref()));
+        }
+        pieces.extend(self.counts().map(|c| figures(&c)).unwrap_or_default());
+        pieces
     }
 
     /// Whether this host's reading bar or the scan's step after it holds the line.
@@ -530,6 +599,27 @@ fn figures(counts: &Counts) -> Vec<Piece> {
     if let Some(spend) = &counts.spend {
         pieces.push(piece(spend.text(), 6));
     }
+    pieces
+}
+
+/// The tallies as the line shows them, each kind apart as the report keeps it: what the
+/// settings save against the defaults, `credit`, then what the changes found so far save on
+/// top, `savings`; those that depend on how usage is paid after them, then how many were not
+/// measured, dropped in the reverse order.
+fn tallies(savings: &Total, credit: Option<&Credit>) -> Vec<Piece> {
+    let piece = |text, keep| Piece {
+        text,
+        keep,
+        count: true,
+    };
+    let saving = credit.map(Credit::tally).unwrap_or_default();
+    let found = savings.tally(credit.is_some());
+    let mut pieces: Vec<Piece> = saving.measured.map(|t| piece(t, 8)).into_iter().collect();
+    pieces.extend(found.measured.map(|t| piece(t, 7)));
+    pieces.extend(saving.up_to.into_iter().map(|t| piece(t, 4)));
+    pieces.extend(found.up_to.into_iter().map(|t| piece(t, 4)));
+    pieces.extend(saving.unmeasured.map(|t| piece(t, 1)));
+    pieces.extend(found.unmeasured.map(|t| piece(t, 1)));
     pieces
 }
 
@@ -1195,7 +1285,8 @@ pub fn render(scan: Scan, options: Render<'_>) -> Result<Rendered, ScanError> {
         .iter()
         .any(|c| c.action() == crate::model::Action::Change)
         || crate::context::setting_rows(&report.context).any(|c| {
-            c.verdict == Some(Verdict::Off) && crate::defaults::applied(&report, c).is_none()
+            c.verdict == Some(Verdict::Off)
+                && crate::defaults::applied(&report.scan.profiles, c).is_none()
         });
     let format = options.format;
     // Computed once, since each reads the files that may outrank a switch: the edits the
@@ -1499,7 +1590,8 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
     // A destination's `vibes` sends no usage, so the line counts only this host's.
     let whose = (!destinations.is_empty() && matches!(job, Job::Report { vibes: true, .. }))
         .then_some("this host");
-    let shown = progress.map(|look| Arc::new(Shown::new(look, reading.clone(), whose)));
+    let tally = matches!(job, Job::Report { vibes: false, .. });
+    let shown = progress.map(|look| Arc::new(Shown::new(look, reading.clone(), whose, tally)));
     let scope = match job {
         Job::Report { .. } => Scope::Report { defaults },
         Job::Sessions => Scope::Sessions,
@@ -1575,7 +1667,7 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
             if let (Some(shown), Ok(Reply::Report(printed) | Reply::Walk { printed, .. })) =
                 (&shown, &result)
             {
-                shown.settle(index, printed.totals.counts());
+                shown.settle(index, &printed.totals);
             }
             let _ = sender.send(Arrival::Host(index, result.map(Scanned::Remote)));
         });
@@ -1737,7 +1829,7 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
                 // The line ends on what the report's header or total counts; a
                 // destination's totals counted when they arrived.
                 if let (Some(meter), Some(Reply::Here(rendered))) = (&meter, &replies[index]) {
-                    meter.shared.settle(index, rendered.printed.totals.counts());
+                    meter.shared.settle(index, &rendered.printed.totals);
                 }
             }
         }
@@ -2814,7 +2906,7 @@ mod tests {
             color: false,
             unicode: false,
         };
-        let shown = Shown::new(look, Arc::new(Reading::default()), None);
+        let shown = Shown::new(look, Arc::new(Reading::default()), None, true);
         assert_eq!(shown.counts(), None);
         let read = Counts {
             requests: 650,
@@ -2824,15 +2916,163 @@ mod tests {
         assert_eq!(shown.counts(), Some(read));
         // A destination's total joins what this host has read so far, which has no spend
         // until prices load.
-        shown.settle(1, there.counts());
+        shown.settle(1, &there);
         let mut joined = read;
         joined.merge(&there.counts());
         assert_eq!(shown.counts(), Some(joined));
         assert_eq!(joined.spend, None);
-        shown.settle(0, here.counts());
+        shown.settle(0, &here);
         let mut total = here.clone();
         total.merge(&there);
         assert_eq!(shown.counts(), Some(total.counts()));
+    }
+
+    /// While this host checks, the line tallies its checks so far beside each destination's
+    /// settled figures, then ends on the hosts' total as the report adds it.
+    #[test]
+    fn the_tallies_end_on_the_hosts_total() {
+        use crate::defaults::{Baseline, Saving};
+        use crate::doctor::Saved;
+        use crate::model::Margin;
+        use crate::totals::Checked;
+        let credit = |usd| {
+            Credit::of(&[Baseline {
+                default: "5m".into(),
+                saving: Saving::Saves(usd),
+                margin: Some(Margin::Usd(3.0)),
+            }])
+        };
+        let found = |usd| {
+            let mut total = Total::default();
+            total.count(&Saved {
+                saving: Some(usd),
+                margin: None,
+                verb: "saves",
+            });
+            total
+        };
+        let finding = |usd| {
+            let saved = Saved {
+                saving: Some(usd),
+                margin: None,
+                verb: "saves",
+            };
+            crate::totals::Finding { saved, edit: None }
+        };
+        let host = |requests, saving, credited| Totals {
+            requests,
+            savings: found(saving),
+            credit: Some(credit(credited)),
+            ..Totals::default()
+        };
+        let (here, there) = (host(700, 310.0, 945.0), host(300, 20.0, 55.0));
+        let look = Look {
+            color: false,
+            unicode: true,
+        };
+        let shown = Shown::new(look, Arc::new(Reading::default()), None, true);
+        assert_eq!(shown.tally(), None);
+        // Partway through this host's checks, a destination's report arrives.
+        let mut checked = Checked::new(11, false);
+        checked.done = 7;
+        checked.find([finding(300.0)]);
+        checked.credit = Some(credit(900.0));
+        *shown.reading.checked.lock().unwrap() = Some(checked);
+        shown.settle(1, &there);
+        let checking = busy("Checking settings", Duration::from_secs(12), 3, true);
+        assert_eq!(
+            with(checking.clone(), shown.figures(), None, 200),
+            "token-max: Checking settings... ⠸ 12s  7/11 checks  saving ~$955/mo ± $4.24 vs defaults  found $320/mo more  300 requests  0 sessions  0 tokens  $0"
+        );
+        // Settled, this host's tallies are its report's own figures.
+        shown.reading.checked.lock().unwrap().as_mut().unwrap().done = 11;
+        shown.settle(0, &here);
+        let mut total = here.clone();
+        total.merge(&there);
+        let (savings, credit) = shown.tally().unwrap();
+        assert_eq!(credit, total.credit);
+        assert_eq!(savings.tally(true), total.savings.tally(true));
+        assert_eq!(
+            with(checking, shown.figures(), None, 200),
+            "token-max: Checking settings... ⠸ 12s  11/11 checks  saving ~$1,000/mo ± $4.24 vs defaults  found $330/mo more  1,000 requests  0 sessions  0 tokens  $0"
+        );
+    }
+
+    /// Each tally keeps its qualifier, as the report's lines do; a figure whose qualifier
+    /// won't fit the row is dropped whole rather than folded into another.
+    #[test]
+    fn the_tallies_keep_each_kind_apart() {
+        use crate::defaults::{Baseline, Saving};
+        use crate::doctor::Saved;
+        use crate::model::Margin;
+        use crate::totals::Checked;
+        let baseline = |saving, margin| Baseline {
+            default: "5m".into(),
+            saving,
+            margin,
+        };
+        let credit = Credit::of(&[
+            baseline(Saving::Saves(900.0), Some(Margin::Usd(12.0))),
+            baseline(Saving::Estimated(45.0), None),
+            baseline(Saving::UpTo(-12.0), None),
+            baseline(Saving::NotMeasured, None),
+        ]);
+        let found: Vec<crate::totals::Finding> = [
+            (Some(300.0), "saves"),
+            (Some(10.0), crate::report::AT_LEAST),
+            (Some(40.0), crate::report::UP_TO),
+            (None, "saves"),
+        ]
+        .into_iter()
+        .map(|(saving, verb)| crate::totals::Finding {
+            saved: Saved {
+                saving,
+                margin: None,
+                verb,
+            },
+            edit: None,
+        })
+        .collect();
+        let look = Look {
+            color: false,
+            unicode: true,
+        };
+        let checking = busy("Checking settings", Duration::from_secs(12), 3, true);
+        let line = |tally, credit: Option<&Credit>, room| {
+            let shown = Shown::new(look, Arc::new(Reading::default()), None, tally);
+            let mut checked = Checked::new(11, false);
+            checked.done = 7;
+            checked.find(found.clone());
+            checked.credit = credit.cloned();
+            *shown.reading.checked.lock().unwrap() = Some(checked);
+            with(checking.clone(), shown.figures(), None, room)
+        };
+        assert_eq!(
+            line(true, Some(&credit), 400),
+            "token-max: Checking settings... ⠸ 12s  7/11 checks  saving ~$945/mo ± $12 vs defaults, 1 estimated, 1 more not measured  found $310/mo more, 1 priced in part, 1 more not measured  costing up to $12/mo more vs defaults, depending on billing  found up to $40/mo more, depending on billing"
+        );
+        let narrowed = [
+            (
+                110,
+                "token-max: Checking settings... ⠸ 12s  7/11 checks  found $310/mo more, 1 priced in part, 1 more not measured",
+            ),
+            (79, "token-max: Checking settings... ⠸ 12s  7/11 checks"),
+        ];
+        for (room, expected) in narrowed {
+            let shown = line(true, Some(&credit), room);
+            assert_eq!(shown, expected);
+            assert!(crate::terminal::cells(&shown) <= room);
+        }
+        // Under `--defaults` every setting is its default, so the changes are all there is.
+        assert_eq!(
+            line(true, None, 200),
+            "token-max: Checking settings... ⠸ 12s  7/11 checks  found $310/mo, 1 priced in part, 1 more not measured  found up to $40/mo, depending on billing"
+        );
+        // `vibes` counts its checks but tallies nothing, since its advice is unmeasured.
+        assert_eq!(
+            line(false, Some(&credit), 200),
+            "token-max: Checking settings... ⠸ 12s  7/11 checks"
+        );
     }
 
     #[test]

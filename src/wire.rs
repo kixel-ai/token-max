@@ -162,7 +162,7 @@ pub enum Outcome {
         /// Whether the report recommends a change, which sets the exit code.
         change: bool,
         /// What the report adds to a total across hosts.
-        totals: Totals,
+        totals: Box<Totals>,
         /// The changes the destination offers, when this host walks through them.
         offers: Option<Box<Offers>>,
         /// How many pieces of advice `vibes` has there, which `doctor` offers to show.
@@ -350,7 +350,7 @@ mod tests {
                 since: None,
                 text: "report\n".into(),
                 change: true,
-                totals: Totals::default(),
+                totals: Box::default(),
                 offers: None,
                 vibes: 0,
             },

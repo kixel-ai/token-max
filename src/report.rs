@@ -1265,8 +1265,9 @@ impl<'a> Out<'a> {
     }
 }
 
-/// The section heading a report of several hosts: what `hosts` hosts spent and what the
-/// changes they offer would save, added as they are.
+/// The section heading a report of several hosts: what `hosts` hosts spent, what the changes
+/// they offer would save, and what their settings save against the defaults, added as they
+/// are.
 pub fn totals_section(
     totals: &crate::totals::Totals,
     hosts: usize,
@@ -1291,9 +1292,13 @@ pub fn totals_section(
     );
     text.push('\n');
     let saving = totals.savings.text("Changes offered", "these hosts'");
-    if !saving.is_empty() {
+    let credit = totals.credit("these hosts'").unwrap_or_default();
+    for line in [saving, credit] {
+        if line.is_empty() {
+            continue;
+        }
         text.push_str(&wrap_spans(
-            &[(&saving, PLAIN)],
+            &[(&line, PLAIN)],
             WrapOptions {
                 width: options.width,
                 indent: MARGIN,
@@ -1393,6 +1398,11 @@ impl Listing {
     /// The one-line header naming what was read, which the walk prints before its questions.
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    /// What the settings its lines name save against the defaults.
+    pub fn credit(&self) -> crate::defaults::Credit {
+        crate::defaults::Credit::of(self.rows.iter().filter_map(|r| r.baseline.as_ref()))
     }
 
     /// The report without its header, with its changes grouped by `choices`: the accepted
@@ -6782,14 +6792,8 @@ fn summary(
         out.line(&together, 0, PLAIN);
     }
     if !report.scan.defaults {
-        let compared = crate::defaults::headline(
-            rows.iter().filter_map(|r| r.baseline.as_ref()),
-            |usd| spend.of_month(usd),
-            &host,
-        );
-        if !compared.is_empty() {
-            out.line(&compared, 0, PLAIN);
-        }
+        let credit = crate::defaults::Credit::of(rows.iter().filter_map(|r| r.baseline.as_ref()));
+        out.line(&credit.text(spend.monthly(), &host), 0, PLAIN);
     }
     out.blank();
     // With a profile that priced nothing, the base is only what could be priced, so a share can read high.

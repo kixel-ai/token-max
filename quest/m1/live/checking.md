@@ -29,12 +29,8 @@ Recommendations:
   default baseline is computed later, while the report is formatted. Compute
   each figure once, where the tally and the report can both read it, rather
   than format the report twice.
-- SSH replies carry `Totals` with the offered savings but no credit; the
-  [credit quest](/quest/m1/live/credit.md) adds it.
+- SSH replies carry `Totals` (`src/totals.rs`) with the offered savings and
+  the credit, `defaults::Credit`, which sum across hosts before rounding.
 - Something like `Checking settings ⠋ 7/15  saving ~$945/mo vs defaults,
   found ~$310/mo more`, fitted to the row as the reading line is.
 - Validate on a real host that the final tallies match the report's lines.
-
-## Required
-
-- [Credit](/quest/m1/live/credit.md) - carries the defaults credit in each host's structured totals

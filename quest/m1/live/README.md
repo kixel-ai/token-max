@@ -38,7 +38,7 @@ Decision prompts, chosen options marked ✅:
   as the header's one total across hosts does (rejected: this host only;
   stream progress from destinations, which changes the SSH wire for a
   progress line).
-- Release: ✅ only the [credit quest](/quest/m1/live/credit.md) gates 0.1.0,
+- Release: ✅ only the credit at the walk's opening gates 0.1.0,
   so 0.1.0 and the README's demo show the credit up front, and the live
   counters ship after it (rejected: gate on all three; gate on none). The
   site's demo runs `doctor --defaults`, which has no credit to show.

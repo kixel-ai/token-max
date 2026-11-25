@@ -112,14 +112,40 @@ pub fn fixes(items: &[Item]) -> Vec<Fix> {
             removal: vec![],
         })
     };
-    let base = items
+    let base: Vec<Fix> = items
         .iter()
         .enumerate()
-        .filter_map(|(index, item)| fix(item, Origin::Vibe(index)));
-    let mut fixes = crate::doctor::fixes_from(base.collect());
+        .filter_map(|(index, item)| fix(item, Origin::Vibe(index)))
+        .collect();
+    let mut fixes = crate::doctor::fixes_from(base.clone());
     for (index, item) in items.iter().enumerate() {
         for (n, after) in item.after.iter().enumerate().filter(|(_, a)| a.walked()) {
-            fixes.extend(fix(&after.item, Origin::Walked(index, n)));
+            let origin = Origin::Walked(index, n);
+            let Some(rebuilt) = fix(&after.item, origin) else {
+                continue;
+            };
+            // Weighed after every other card's change, so it shares an identical edit and a
+            // clash leaves it by hand.
+            let others = base
+                .iter()
+                .filter(|f| !f.origins.contains(&Origin::Vibe(index)))
+                .cloned();
+            let weighed = crate::doctor::fixes_from(others.chain([rebuilt]).collect());
+            let weighed = weighed
+                .into_iter()
+                .find(|f| f.origins.contains(&origin))
+                .expect("the rebuilt change is weighed");
+            match fixes
+                .iter_mut()
+                .find(|f| weighed.origins.len() > 1 && f.how == weighed.how)
+            {
+                Some(same) => same.origins.push(origin),
+                // The cards it shares an edit with here may clash with the card it replaces.
+                None => fixes.push(Fix {
+                    origins: vec![origin],
+                    ..weighed
+                }),
+            }
         }
     }
     fixes
@@ -532,6 +558,17 @@ mod tests {
             text.contains("none -> opus") && !text.contains("fable"),
             "{text}"
         );
+        // Another card keeping its own value for the setting makes the rebuilt one by hand;
+        // one with the rebuilt card's value is by hand already, against the card replaced.
+        for (value, by_hand) in [("opus", true), ("fable", false)] {
+            let mut items = items.clone();
+            items.push(set("Advisor model (other)", "advisorModel", value));
+            std::fs::write(w.claude.join("settings.json"), "{}\n").unwrap();
+            let (text, _, _) = walk(&w, &items, "y\nn\nn\n");
+            let rebuilt = &text[text.find("[2/3]").unwrap()..text.find("[3/3]").unwrap()];
+            assert_eq!(rebuilt.contains("by hand"), by_hand, "{text}");
+            assert_eq!(text.matches("Accept?").count(), 2, "{text}");
+        }
     }
 
     #[test]

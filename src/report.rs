@@ -4947,7 +4947,7 @@ fn default_note(item: &Item, rebuilt: &Item, name: &str, model: &str) -> Option<
             format!(" {change} suggests a {} advisor instead.", capitalize(pick))
         }
         _ if item.how.is_some() => format!(" {change} leaves no advisor to suggest."),
-        _ if rebuilt.quiet => format!(" {change} pairs it with that model."),
+        _ if rebuilt.quiet => format!(" {change} leaves nothing here to act on."),
         _ => format!(" {change} leaves it unpaired, so no advisor is attached."),
     })
 }
@@ -6470,9 +6470,10 @@ fn summary(
     let mut rows: Vec<Row> = checks.iter().map(|c| check_row(c, out)).collect();
     // Advice the transcripts cannot price, which `vibes` shows instead of this report.
     let mut vibes: Vec<Item> = vec![];
-    // Each Main-session default card that offers an edit: its index among `vibes`, its name
-    // and its profiles, so an advisor card after it can rank against the default it offers.
-    let mut defaults: Vec<(usize, String, &[String])> = vec![];
+    // Each Main-session default card that offers an edit: its index among `vibes`, its name,
+    // its profiles and the edit, so an advisor card after it can rank against the default it
+    // offers.
+    let mut defaults: Vec<(usize, String, &[String], crate::doctor::Patch)> = vec![];
     for cap in &report.bash {
         let how = report
             .scan
@@ -6614,8 +6615,8 @@ fn summary(
                 .and_then(|profile| crate::doctor::default_how(&e.control, profile));
             let profile = tag(r.profiles, &|_| r.owner.to_string(), out);
             if let Some(item) = default_item(e, &profile, how, out) {
-                if matches!(item.how, Some(How::Edit(_))) {
-                    defaults.push((vibes.len(), item.name.clone(), r.profiles));
+                if let Some(How::Edit(patch)) = &item.how {
+                    defaults.push((vibes.len(), item.name.clone(), r.profiles, patch.clone()));
                 }
                 vibes.push(item);
             }
@@ -7226,9 +7227,9 @@ fn summary(
         let mut item = advisor_item(lead, lead.effort.as_ref(), &profile, out);
         let offered = defaults
             .iter()
-            .find(|(_, _, ids)| ids.contains(&lead.id))
+            .find(|(_, _, ids, _)| ids.contains(&lead.id))
             .zip(lead.effort.as_ref().and_then(|e| written_default(e, lead)));
-        if let Some(((index, name, _), written)) = offered {
+        if let Some(((_, name, _, patch), written)) = offered {
             let rebuilt = advisor_item(lead, Some(&written), &profile, out);
             let model = written
                 .model
@@ -7237,8 +7238,17 @@ fn summary(
             if let Some(note) = default_note(&item, &rebuilt, name, model) {
                 item.text += &note;
             }
+            // Another profile's card may make the same edit to the same file, under a name a
+            // symlink makes one, and accepting either writes this default.
+            let origins = defaults
+                .iter()
+                .filter(|(_, _, _, p)| {
+                    p.edits == patch.edits && crate::discovery::same_file(&p.file, &patch.file)
+                })
+                .map(|(index, ..)| Origin::Vibe(*index))
+                .collect();
             item.after.push(crate::vibes::After {
-                origins: vec![Origin::Vibe(*index)],
+                origins,
                 item: Box::new(rebuilt),
             });
         }

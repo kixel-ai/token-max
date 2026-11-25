@@ -404,6 +404,7 @@ fn gate(definition: Definition, versions: &[(&Profile, Option<&str>)], file: &st
             needs,
             ran: None,
             command: None,
+            several: false,
         }),
     };
     let Some(upgrade) = upgrade else {
@@ -5650,11 +5651,23 @@ mod tests {
         };
         assert_eq!(
             step,
-            r#"uninstall the plugin, or upgrade Claude Code with `claude update` and add {"serverName":"p"} to deniedMcpServers in s.json"#
+            r#"uninstall the plugin, or upgrade Claude Code and add {"serverName":"p"} to deniedMcpServers in s.json"#
         );
         assert_eq!(
             reason,
             "a plugin adds it, and blocking just this server by name with a deniedMcpServers entry needs Claude Code 2.1.182 or later, but its latest session ran 2.1.90"
+        );
+        // A command is named only when it reaches every install that is too old.
+        let Definition::Manual { step, .. } = gate(
+            blocked("p"),
+            &[(&other, Some("2.1.331")), (&native, Some("2.1.90"))],
+            "s.json",
+        ) else {
+            panic!("an older Claude Code is a step by hand")
+        };
+        assert!(
+            step.contains("upgrade Claude Code with `claude update` and add"),
+            "{step}"
         );
         // The reason names the version that failed, even when another was recorded, and
         // names no command for an install it doesn't know.

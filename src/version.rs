@@ -88,12 +88,27 @@ impl Needs {
         self,
         latest: impl IntoIterator<Item = (&'a Profile, Option<&'a str>)>,
     ) -> Option<Upgrade> {
-        let (profile, ran) = latest.into_iter().find(|(_, v)| !self.met(*v))?;
+        let old: Vec<(&Profile, Option<&str>)> =
+            latest.into_iter().filter(|(_, v)| !self.met(*v)).collect();
+        let &(_, ran) = old.first()?;
+        // T3 runs its own binary path, which a native install's update may not reach, so a
+        // command is named only when it reaches every install that is too old.
+        let commands: Vec<Option<&'static str>> = old
+            .iter()
+            .map(|(p, _)| p.t3.is_none().then_some(p.updater).flatten())
+            .collect();
+        let command = commands[0].filter(|c| commands.iter().all(|o| *o == Some(*c)));
+        // Native profiles that share a settings file share one install; each T3 instance
+        // may run its own.
+        let installs: std::collections::BTreeSet<Option<&str>> = old
+            .iter()
+            .map(|(p, _)| p.t3.as_ref().map(|t| t.instance.as_str()))
+            .collect();
         Some(Upgrade {
             needs: self,
             ran: ran.map(str::to_string),
-            // T3 runs its own binary path, which a native install's update may not reach.
-            command: profile.t3.is_none().then_some(profile.updater).flatten(),
+            command,
+            several: installs.len() > 1,
         })
     }
 }
@@ -118,8 +133,11 @@ pub struct Upgrade {
     pub needs: Needs,
     /// The version the latest session recorded; None when it recorded none.
     pub ran: Option<String>,
-    /// The command that upgrades the harness, when its install method is known.
+    /// The command that upgrades every install that is too old, when one does.
     pub command: Option<&'static str>,
+    /// Whether more than one install is too old, such as native Claude Code and a T3
+    /// instance that share a settings file.
+    pub several: bool,
 }
 
 impl Upgrade {
@@ -141,9 +159,14 @@ impl Upgrade {
     /// The step, such as "upgrade Claude Code with `claude update`".
     pub fn step(&self) -> String {
         let product = self.needs.harness.product();
+        let what = if self.several {
+            format!("every {product} install that reads it")
+        } else {
+            product.to_string()
+        };
         match self.command {
-            Some(command) => format!("upgrade {product} with `{command}`"),
-            None => format!("upgrade {product}"),
+            Some(command) => format!("upgrade {what} with `{command}`"),
+            None => format!("upgrade {what}"),
         }
     }
 }
@@ -241,6 +264,7 @@ mod tests {
                 needs,
                 ran: Some("2.1.200".into()),
                 command: Some("claude update"),
+                several: false,
             }
         );
         assert_eq!(
@@ -248,6 +272,17 @@ mod tests {
             "applying it needs Claude Code 2.1.242 or later, but its latest session ran 2.1.200"
         );
         assert_eq!(old.step(), "upgrade Claude Code with `claude update`");
+        // Native and T3 installs both too old: no one command reaches both.
+        let both = needs
+            .upgrade([(&native, Some("2.1.200")), (&t3, Some("2.1.100"))])
+            .unwrap();
+        assert_eq!(
+            (both.ran.as_deref(), both.step().as_str()),
+            (
+                Some("2.1.200"),
+                "upgrade every Claude Code install that reads it"
+            )
+        );
         // A T3 instance runs its own binary, and an unknown install names no command.
         for profile in [&t3, &plain] {
             let u = needs.upgrade([(profile, None)]).unwrap();

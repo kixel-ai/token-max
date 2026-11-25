@@ -4989,6 +4989,11 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
         },
         None => crate::doctor::window_change(c, c.capped.as_ref(), cap, profile),
     });
+    // A disabled or unresolved T3 instance has no active setting to change.
+    if c.base.uncertainty.iter().any(|u| u == crate::t3::UNOWNED) {
+        item.how = None;
+        item.text += " The T3 instance is disabled or the file that owns this setting for it is unresolved, so there is nothing to change.";
+    }
     item
 }
 

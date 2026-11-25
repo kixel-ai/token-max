@@ -5800,6 +5800,20 @@ mod tests {
                 reason,
                 "this window control needs Claude Code 2.1.288 or later, but its latest session ran 2.1.287"
             );
+            // A disabled or unresolved T3 line has no setting to change, upgraded or not.
+            let mut unowned = self::report(&old);
+            let CheckResult::Compaction(c) = &mut unowned.checks[index] else {
+                unreachable!()
+            };
+            c.base.uncertainty.push(crate::t3::UNOWNED.into());
+            c.base.upgrade = None;
+            let item = card(&unowned);
+            assert_eq!(item.how, None);
+            assert!(
+                item.text.ends_with("so there is nothing to change."),
+                "{}",
+                item.text
+            );
             // A window already under the cap advises nothing, and `doctor` does not offer it.
             scan.profiles[0].compaction = controls(
                 Harness::Claude,

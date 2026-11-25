@@ -1588,7 +1588,8 @@ whose files its sessions read or edited (`Read`, `Edit`, `MultiEdit` or
 `Write`), by the extensions each plugin's marketplace entry maps: the share of
 the window's sessions that touched one, a subagent's counted as its parent's,
 and the projects they ran in. A call whose result was an error, such as a read
-of a file that doesn't exist, counts for nothing. Only the language is kept,
+of a file that doesn't exist, or that has no result, such as one interrupted,
+counts for nothing. Only the language is kept,
 never the path. A project is the main checkout of the Git repository holding
 the session's directory, or for a directory removed since, such as a worktree,
 the nearest one that remains. A repository at or above home, such as one of
@@ -1613,16 +1614,17 @@ session started in, whatever directory it later worked in:
 
 Each plugin ID is read on its own, so a copy from another marketplace that
 loads counts as the plugin, without reading whether it runs a server. The
-advice is always for the official copy. Each session that ran without one
-gets what it needs:
+advice is for the official copy, unless only another marketplace's copy is
+installed where the session started: then it is to turn that copy on. Each
+session that ran without one gets what it needs:
 
 | State where the session started | Change |
 | --- | --- |
-| Not installed | By hand: `claude plugin install <plugin>@claude-plugins-official`, since `enabledPlugins` turns a plugin on but doesn't download it. The step sets or unsets `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_PLUGIN_CACHE_DIR` to the profile's, since a bare install goes to whichever directories the shell selects. |
-| Installed, and turned off in the user settings | `enabledPlugins` set to `true` there, offered as an edit when nothing else needs a step; by hand for a T3 instance whose launch arguments, secret environment values or machine policy can replace the settings it reads. |
+| Not installed | By hand: `claude plugin install <plugin>@claude-plugins-official`, since `enabledPlugins` turns a plugin on but doesn't download it. A bare install goes to whichever directories the shell selects, so the step sets `CLAUDE_CONFIG_DIR` to the profile, unsetting it only for the default `~/.claude` that the shell doesn't name, and sets or unsets `CLAUDE_CODE_PLUGIN_CACHE_DIR` as the profile has it. |
+| Installed, and turned off in the user settings | `enabledPlugins` set to `true` there, offered as an edit when nothing else needs a step, the server is on `PATH` and every such session's directory still exists. Otherwise by hand, as for a T3 instance whose launch arguments, secret environment values or machine policy can replace the settings it reads. |
 | Turned off in a project's local or project settings | By hand: set it `true` in that file. |
 | Turned off by managed settings | None. |
-| Not installed, and managed `strictKnownMarketplaces` or `blockedMarketplaces` forbid the official marketplace | None. A host pattern or git URL token-max doesn't evaluate says it may. |
+| Not installed, and managed `strictKnownMarketplaces` or `blockedMarketplaces` forbid the official marketplace | None, whatever a project's settings say. A host pattern or git URL token-max doesn't evaluate says it may. |
 
 A server whose program isn't on the `PATH` token-max runs with gets a step
 by hand to install it, whenever a copy loads or the advice would load one.
@@ -1633,10 +1635,12 @@ A plugin that loads for every session with its server on `PATH` gets no card.
 Profiles share a card only when they share a settings file and a plugins
 directory; cards that share only the settings file name their plugins
 directory. A session that may have been another profile's, such as T3 history
-two homes could hold, is left out and counted apart. A disabled T3 instance
-gets no card. When `installed_plugins.json` or a settings file the card reads
-holds what Claude Code would not write, the card says so in place of its
-advice, and nothing else fails; a secret T3 value for the plugins directory
+two homes could hold, is left out and counted apart; a language only such
+sessions touched gets a quiet card saying so. When T3 may have run a session
+under another Claude home, every step is by hand. A disabled T3 instance gets
+no card. When `installed_plugins.json` or a settings file the card reads holds
+what Claude Code would not write, or isn't a file, the card says so in place
+of its advice, and nothing else fails; a secret T3 value for the plugins directory
 leaves a quiet card saying it can't be read. Plugins synced from claude.ai,
 those loaded with `--plugin-dir` and Claude Code's own recommendation dialog
 settings are not read.

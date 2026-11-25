@@ -155,6 +155,8 @@ impl Lsp {
 pub enum File {
     /// The language of the file a `Read`, `Edit`, `MultiEdit` or `Write` call named.
     Language(Lsp),
+    /// The call returned a result that wasn't an error.
+    Done,
     /// The call's result was an error, such as a read of a file that doesn't exist.
     Failed,
 }
@@ -192,8 +194,9 @@ pub struct Plugins {
     pub dir: Option<String>,
     /// `CLAUDE_CODE_PLUGIN_CACHE_DIR`, `~` expanded, when it is set.
     pub cache_dir: Option<String>,
-    /// Whether `CLAUDE_CONFIG_DIR` names the profile, so a step must set it to reach it.
-    pub explicit: bool,
+    /// Whether a step must set `CLAUDE_CONFIG_DIR` to reach the profile: it isn't the default
+    /// `~/.claude`, or the shell's variable names it, which keeps Claude Code's state inside.
+    pub named: bool,
     /// The `PATH` servers are looked for on; None when it isn't the one Claude Code starts
     /// with, as over `--ssh`.
     pub path: Option<String>,
@@ -201,6 +204,9 @@ pub struct Plugins {
     pub user: Map<String, Value>,
     /// `enabledPlugins` and the marketplace policy in managed settings.
     pub managed: Map<String, Value>,
+    /// Whether T3 left a session open between this profile and an owner on another line, such
+    /// as an instance now under another home, whose settings would decide it.
+    pub unsettled: bool,
     /// What [`discover`] read, or why it couldn't; None before it runs, or when no session
     /// touched a language.
     pub read: Option<Result<State, Unread>>,
@@ -283,7 +289,7 @@ pub struct Touches<'a> {
     pub since: Option<Millis>,
 }
 
-/// One file tool call that named a language and didn't fail.
+/// One file tool call that named a language and returned a result that wasn't an error.
 struct Touch<'a> {
     event: &'a StructuralEvent,
     lsp: Lsp,
@@ -306,10 +312,11 @@ pub fn parents<'a>(
 
 impl<'a> Touches<'a> {
     fn each(&self) -> impl Iterator<Item = Touch<'a>> + '_ {
-        let failed: HashSet<&Id> = self
+        // A call with no result, such as one interrupted, read or edited nothing either.
+        let done: HashSet<&Id> = self
             .events
             .iter()
-            .filter(|e| e.kind == EventKind::ToolEnd && e.file == Some(File::Failed))
+            .filter(|e| e.kind == EventKind::ToolEnd && e.file == Some(File::Done))
             .filter_map(|e| e.tool_id.as_ref())
             .collect();
         self.events.iter().filter_map(move |e| {
@@ -319,7 +326,7 @@ impl<'a> Touches<'a> {
             if e.kind != EventKind::ToolStart
                 || e.harness != Harness::Claude
                 || self.since.is_some_and(|s| e.time < s)
-                || e.tool_id.as_ref().is_some_and(|id| failed.contains(id))
+                || e.tool_id.as_ref().is_none_or(|id| !done.contains(id))
             {
                 return None;
             }
@@ -393,7 +400,7 @@ fn read(options: &DiscoveryOptions, profile: &Profile, seen: &Seen<'_>) -> Resul
             // Claude Code reads them lowest precedence first.
             for file in crate::discovery::claude_project_files(dir, options).map_err(invalid)? {
                 // A session in the home directory reads the user's own file as its project's.
-                if crate::discovery::same_file(&file, &profile.settings_file) {
+                if crate::discovery::same_file(&file, &profile.settings_file) || !regular(&file)? {
                     continue;
                 }
                 let config =
@@ -474,6 +481,21 @@ fn on(value: &Value) -> bool {
     matches!(value, Value::Bool(true) | Value::Array(_))
 }
 
+/// Whether `file` exists, checked before it is opened, since opening a named pipe or a device
+/// can block the scan; anything there but a file can't be read.
+fn regular(file: &str) -> Result<bool, Unread> {
+    let invalid = |problem: &str| Unread::Invalid {
+        file: file.into(),
+        problem: problem.into(),
+    };
+    match fs::metadata(file) {
+        Ok(meta) if meta.is_file() => Ok(true),
+        Ok(_) => Err(invalid("it is not a file")),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(invalid("it can't be read")),
+    }
+}
+
 /// Each language server plugin `installed_plugins.json` records, with each install. A missing
 /// file records none. The first version of the file holds one record per plugin, with no
 /// scope, which is the user's.
@@ -482,11 +504,10 @@ fn installs(file: &str) -> Result<IndexMap<String, Vec<Install>>, Unread> {
         file: file.into(),
         problem: problem.into(),
     };
-    let bytes = match fs::read(file) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(IndexMap::default()),
-        Err(_) => return Err(invalid("it can't be read")),
-    };
+    if !regular(file)? {
+        return Ok(IndexMap::default());
+    }
+    let bytes = fs::read(file).map_err(|_| invalid("it can't be read"))?;
     let value: Value =
         serde_json::from_slice(&bytes).map_err(|_| invalid("it is not valid JSON"))?;
     let Some(Value::Object(plugins)) = value.get("plugins") else {
@@ -721,12 +742,12 @@ fn enabled(plugins: &Plugins, place: Option<&Place>, id: &str) -> (bool, Decided
 /// What the sessions that ran without a language's plugin need for it to load.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Need {
-    /// No record of the official plugin applies where they started.
+    /// No record of a copy applies where they started.
     Install,
-    /// Installed, or about to be, but turned off by the user settings.
-    EnableUser,
-    /// Installed, or about to be, but turned off by this project or local settings file.
-    Enable(String),
+    /// This installed copy is turned off by the user settings.
+    EnableUser(String),
+    /// This copy, installed or about to be, is turned off by a project or local settings file.
+    Enable { id: String, file: String },
     /// Managed settings turn the official plugin off.
     Blocked,
     /// Managed marketplace policy forbids installing it; `known` is false when it may.
@@ -750,10 +771,11 @@ pub struct LspUse {
     pub plugins_dir: Option<String>,
     /// `CLAUDE_CODE_PLUGIN_CACHE_DIR`, when it moves the plugins directory.
     pub cache_dir: Option<String>,
-    /// Whether `CLAUDE_CONFIG_DIR` names the profile.
-    pub explicit: bool,
-    /// A T3 instance whose settings can be replaced by what token-max doesn't read.
-    pub unresolved: bool,
+    /// Whether a step must set `CLAUDE_CONFIG_DIR` to reach the profile.
+    pub named: bool,
+    /// Why settings token-max doesn't read may decide the plugin for these sessions, such as
+    /// a T3 instance's launch arguments.
+    pub unresolved: Option<&'static str>,
     /// Why the plugins can't be read, which leaves the card nothing else to say.
     pub unread: Option<Unread>,
 }
@@ -773,8 +795,25 @@ pub struct LanguageUse {
     pub installed_for: Vec<String>,
     /// What the other sessions need, with how many need it.
     pub needs: Vec<(Need, u64)>,
+    /// Of the sessions the user settings turned it off for, those whose project settings can't
+    /// be read, since the directory they started in is gone.
+    pub unknown: u64,
     /// Whether its server is on `PATH`; None when it wasn't checked.
     pub server: Option<bool>,
+}
+
+const SETTINGS_UNRESOLVED: &str = "the T3 instance's launch arguments, a secret environment value or machine policy can replace the settings it reads, and which apply is unresolved";
+const OWNERS_UNSETTLED: &str = "T3 can't tell whether some of these sessions ran under another Claude home, whose settings would decide them";
+
+/// The line a Claude profile's plugins put it on, its settings file and plugins directory;
+/// None without plugins to read.
+pub(crate) fn owner(p: &Profile) -> Option<String> {
+    let dir = p.plugins.as_ref()?.dir.as_deref();
+    Some(format!(
+        "{}:enabledPlugins\n{}",
+        p.settings_file,
+        dir.unwrap_or("unread plugins")
+    ))
 }
 
 /// One line per Claude settings file and plugins directory: its sessions from `since`, else
@@ -795,15 +834,7 @@ pub fn lsp_use(scan: &Scan, since: Option<Millis>, now: Millis) -> Vec<LspUse> {
             && p.plugins.is_some()
             && p.t3.as_ref().is_none_or(|t| t.enabled)
     });
-    let owner = |p: &Profile| {
-        let dir = p.plugins.as_ref().and_then(|c| c.dir.as_deref());
-        format!(
-            "{}:enabledPlugins\n{}",
-            p.settings_file,
-            dir.unwrap_or("unread plugins")
-        )
-    };
-    crate::rows::groups(claude, owner)
+    crate::rows::groups(claude, |p| owner(p).expect("filtered on its plugins"))
         .iter()
         .filter_map(|line| {
             // A record any other line may hold is left out, not counted twice.
@@ -835,8 +866,12 @@ pub fn lsp_use(scan: &Scan, since: Option<Millis>, now: Millis) -> Vec<LspUse> {
                     shared.entry(t.lsp).or_default().insert(t.session);
                 }
             }
-            if by_language.is_empty() {
+            if by_language.is_empty() && shared.is_empty() {
                 return None;
+            }
+            // A language only sessions of uncertain owner worked in still gets its card.
+            for &lsp in shared.keys() {
+                by_language.entry(lsp).or_default();
             }
             sessions.extend(by_language.values().flat_map(|s| s.keys().copied()));
             let lead = line.lead;
@@ -870,8 +905,18 @@ pub fn lsp_use(scan: &Scan, since: Option<Millis>, now: Millis) -> Vec<LspUse> {
                 root: lead.root.clone(),
                 plugins_dir: plugins.dir.clone(),
                 cache_dir: plugins.cache_dir.clone(),
-                explicit: plugins.explicit,
-                unresolved: lead.t3.as_ref().is_some_and(|t| t.settings_unresolved),
+                named: plugins.named,
+                unresolved: if lead.t3.as_ref().is_some_and(|t| t.settings_unresolved) {
+                    Some(SETTINGS_UNRESOLVED)
+                } else if line
+                    .members
+                    .iter()
+                    .any(|m| m.plugins.as_ref().is_some_and(|p| p.unsettled))
+                {
+                    Some(OWNERS_UNSETTLED)
+                } else {
+                    None
+                },
                 unread,
             })
         })
@@ -888,6 +933,7 @@ fn language(
     let official = lsp.official();
     let plugin = lsp.server().plugin;
     let mut loaded = 0;
+    let mut unknown = 0;
     let mut needs: IndexMap<Need, u64> = IndexMap::default();
     let mut projects: IndexMap<String, u64> = IndexMap::default();
     let mut installed_for: IndexSet<String> = IndexSet::default();
@@ -917,30 +963,60 @@ fn language(
             loaded += 1;
             continue;
         }
-        let (on, decided) = enabled(plugins, place, &official);
-        let installed = state
-            .installs
-            .get(&official)
-            .is_some_and(|i| i.iter().any(|i| applies(i, dir, place)));
+        let installed = |id: &str| {
+            state
+                .installs
+                .get(id)
+                .is_some_and(|i| i.iter().any(|i| applies(i, dir, place)))
+        };
+        // A copy installed there needs only turning on: the official one, else another's.
+        let copy = if installed(&official) {
+            Some(official.clone())
+        } else {
+            state
+                .installs
+                .keys()
+                // One that managed settings turn off is no use, unlike installing the official.
+                .find(|id| {
+                    name(id) == plugin
+                        && installed(id)
+                        && enabled(plugins, place, id).1 != Decided::Managed
+                })
+                .cloned()
+        };
         let mut add = |need: Need| *needs.entry(need).or_default() += 1;
-        match decided {
-            Decided::Managed if !on => add(Need::Blocked),
-            _ if !installed => {
-                match state.market {
-                    Some(true) => add(Need::Install),
-                    known => add(Need::Forbidden {
-                        known: known.is_some(),
-                    }),
-                }
-                // A user-scope install turns it on in the user settings, but not where a
-                // project's file turns it off.
-                if let (false, Decided::Project(file)) = (on, decided) {
-                    add(Need::Enable(file));
+        if let Some(id) = copy {
+            // Installed without loading, so whichever settings decide it turn it off.
+            match enabled(plugins, place, &id).1 {
+                Decided::Managed => add(Need::Blocked),
+                Decided::Project(file) => add(Need::Enable { id, file }),
+                _ => {
+                    if place.is_none_or(|p| p.settings.is_none()) {
+                        unknown += 1;
+                    }
+                    add(Need::EnableUser(id));
                 }
             }
-            Decided::Project(file) => add(Need::Enable(file)),
-            // Installed and off, so the user settings turned it off.
-            _ => add(Need::EnableUser),
+            continue;
+        }
+        let (on, decided) = enabled(plugins, place, &official);
+        if !on && decided == Decided::Managed {
+            add(Need::Blocked);
+        } else if state.market == Some(true) {
+            add(Need::Install);
+            // A user-scope install turns it on in the user settings, but not where a
+            // project's file turns it off.
+            if let (false, Decided::Project(file)) = (on, decided) {
+                add(Need::Enable {
+                    id: official.clone(),
+                    file,
+                });
+            }
+        } else {
+            // With no install, turning it on anywhere loads nothing.
+            add(Need::Forbidden {
+                known: state.market.is_some(),
+            });
         }
     }
     // The server matters for any copy that loads or that the advice would load; it was
@@ -957,6 +1033,7 @@ fn language(
         projects,
         installed_for,
         needs: needs.into_iter().collect(),
+        unknown,
         server,
     }
 }
@@ -1015,9 +1092,26 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
     let id = l.lsp.official();
     let has = |f: &dyn Fn(&Need) -> bool| l.needs.iter().any(|(n, _)| f(n));
     // The server starts for a copy that loads, or one the advice would load.
-    let served =
-        l.loaded > 0 || has(&|n| matches!(n, Need::Install | Need::EnableUser | Need::Enable(_)));
+    let served = l.loaded > 0
+        || has(&|n| matches!(n, Need::Install | Need::EnableUser(_) | Need::Enable { .. }));
     let missing = l.server == Some(false) && served;
+    let what = "A plugin that runs a language server for Claude: code navigation by symbol, and diagnostics after each edit.";
+    if l.sessions == 0 {
+        return Some(Item {
+            name: format!("{} code intelligence", s.language),
+            value: String::new(),
+            what: what.into(),
+            text: format!(
+                "{} files were read or edited in {} that may have been another profile's, so token-max can't tell which plugins they started with, and advises nothing on them.",
+                s.language,
+                plural(l.shared, "session"),
+            ),
+            sources: vec![COSTS.into(), GUIDE.into(), s.readme.into()],
+            how: None,
+            quiet: true,
+            after: vec![],
+        });
+    }
     if l.needs.is_empty() && !missing {
         return None;
     }
@@ -1057,7 +1151,16 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
             format!(" for {n} of them")
         }
     };
-    let mut enable: Vec<&str> = vec![];
+    // A copy by its ID: "rust-analyzer-lsp plugin", or "x@corp copy of the … plugin".
+    let copy = |c: &str| {
+        if c == id {
+            format!("{} plugin", s.plugin)
+        } else {
+            format!("{c} copy of the {} plugin", s.plugin)
+        }
+    };
+    // Each settings file to turn a copy on in, with its ID.
+    let mut enable: IndexSet<(&str, &str)> = IndexSet::default();
     for (need, n) in &l.needs {
         text += &match need {
             Need::Install if l.installed_for.is_empty() => {
@@ -1069,21 +1172,28 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
                 listed(&l.installed_for, &home),
                 of(*n)
             ),
-            Need::EnableUser => {
-                enable.push(&u.settings_file);
-                format!(
-                    " The {} plugin is installed, and enabledPlugins in {} turns it off{}.",
-                    s.plugin,
+            Need::EnableUser(c) => {
+                enable.insert((&u.settings_file, c));
+                let mut said = format!(
+                    " The {} is installed, and enabledPlugins in {} turns it off{}.",
+                    copy(c),
                     home(&u.settings_file),
                     of(*n)
-                )
+                );
+                if l.unknown > 0 {
+                    said += &format!(
+                        " For {} of those, the directory it started in is gone, so its project settings, which could turn it off too, can't be read.",
+                        l.unknown
+                    );
+                }
+                said
             }
-            Need::Enable(file) => {
-                enable.push(file);
+            Need::Enable { id: c, file } => {
+                enable.insert((file, c));
                 format!(
-                    " enabledPlugins in {} turns the {} plugin off{}.",
+                    " enabledPlugins in {} turns the {} off{}.",
                     home(file),
-                    s.plugin,
+                    copy(c),
                     of(*n)
                 )
             }
@@ -1132,27 +1242,23 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
     text += &format!(
         " With the plugin, Claude looks up a symbol's definition and references instead of searching text and reading each candidate file, and sees the errors an edit introduced. {advice}; what it saves is not measured."
     );
-    let setting = |file: &str| {
-        let edit = Edit {
-            path: vec!["enabledPlugins".into(), id.clone()],
-            value: Value::Bool(true),
-            op: Op::Set,
-        };
-        format!("set {} in {}", edit.text(Harness::Claude), home(file))
+    let on = |c: &str| Edit {
+        path: vec!["enabledPlugins".into(), c.into()],
+        value: Value::Bool(true),
+        op: Op::Set,
     };
     let install = has(&|n| *n == Need::Install);
-    // The one change the walk can write: turning the plugin on in the profile's own file.
-    let user = has(&|n| *n == Need::EnableUser);
-    let edit = !install && !u.unresolved && user && enable.len() == 1;
-    let how = if edit {
+    let user = enable.iter().all(|(f, _)| *f == u.settings_file);
+    // The one change the walk writes: turning a copy on in the profile's own file, when that
+    // alone is known to load it.
+    let edit = (!install && !missing && u.unresolved.is_none() && l.unknown == 0 && user)
+        .then(|| enable.first().filter(|_| enable.len() == 1))
+        .flatten();
+    let how = if let Some((_, c)) = edit {
         Some(How::Edit(Patch {
             file: u.settings_file.clone(),
             harness: Harness::Claude,
-            edits: vec![Edit {
-                path: vec!["enabledPlugins".into(), id.clone()],
-                value: Value::Bool(true),
-                op: Op::Set,
-            }],
+            edits: vec![on(c)],
         }))
     } else {
         let mut steps = vec![];
@@ -1173,15 +1279,19 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
                 shell(u, &home)
             ));
         }
-        steps.extend(enable.iter().map(|f| setting(f)));
-        let reason = if u.unresolved && user {
-            "the T3 instance's launch arguments, a secret environment value or machine policy can replace the settings it reads, and which apply is unresolved"
-        } else if install {
-            "no setting installs a plugin"
-        } else if enable.is_empty() {
-            "token-max installs no programs"
-        } else {
-            "a project's settings decide it there, which this card doesn't edit"
+        steps.extend(
+            enable
+                .iter()
+                .map(|(f, c)| format!("set {} in {}", on(c).text(Harness::Claude), home(f))),
+        );
+        let reason = match u.unresolved {
+            Some(why) if !enable.is_empty() => why,
+            _ if install => "no setting installs a plugin",
+            _ if !user => "a project's settings decide it there, which this card doesn't edit",
+            _ if l.unknown > 0 => {
+                "the project settings where some of these sessions started can't be read"
+            }
+            _ => "token-max installs no programs",
         };
         (!steps.is_empty()).then(|| How::Manual {
             step: if install || !enable.is_empty() {
@@ -1194,12 +1304,12 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
     };
     Some(Item {
         name: format!("{} code intelligence", s.language),
-        value: if edit {
+        value: if edit.is_some() {
             format!("off {} on", view.arrow)
         } else {
             String::new()
         },
-        what: "A plugin that runs a language server for Claude: code navigation by symbol, and diagnostics after each edit.".into(),
+        what: what.into(),
         text,
         sources: vec![COSTS.into(), GUIDE.into(), s.readme.into()],
         quiet: how.is_none(),
@@ -1213,7 +1323,7 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
 /// whichever Claude home and plugins directory the shell selects: "with CLAUDE_CONFIG_DIR set
 /// to ~/.claude-work and CLAUDE_CODE_PLUGIN_CACHE_DIR unset,".
 fn shell(u: &LspUse, home: &dyn Fn(&str) -> String) -> String {
-    match (u.explicit, &u.cache_dir) {
+    match (u.named, &u.cache_dir) {
         (false, None) => format!("with CLAUDE_CONFIG_DIR and {CACHE_DIR} unset,"),
         (true, None) => format!(
             "with CLAUDE_CONFIG_DIR set to {} and {CACHE_DIR} unset,",
@@ -1331,17 +1441,18 @@ mod tests {
         })
     }
 
-    /// The failed result of `request`'s first call.
-    fn failed(session: &str, cwd: &str, second: i64) -> Value {
+    /// The results of `request`'s first `calls` calls, each an error when `error` is.
+    fn results(session: &str, cwd: &str, second: i64, calls: usize, error: bool) -> Value {
+        let content: Vec<Value> = (0..calls)
+            .map(|i| json!({"type": "tool_result", "tool_use_id": format!("{session}-{second}-{i}"), "is_error": error, "content": "synthetic"}))
+            .collect();
         json!({
             "type": "user",
             "sessionId": session,
             "uuid": format!("{session}-{second}-result"),
             "timestamp": time(second + 1),
             "cwd": cwd,
-            "message": {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": format!("{session}-{second}-0"), "is_error": true, "content": "synthetic"},
-            ]},
+            "message": {"role": "user", "content": content},
         })
     }
 
@@ -1528,10 +1639,11 @@ mod tests {
         let plugins = |user: Value, managed: Value| Plugins {
             dir: None,
             cache_dir: None,
-            explicit: false,
+            named: false,
             path: None,
             user: user.as_object().unwrap().clone(),
             managed: managed.as_object().unwrap().clone(),
+            unsettled: false,
             read: None,
         };
         let place = |settings: Option<Vec<(&str, Value)>>| Place {
@@ -1642,8 +1754,10 @@ mod tests {
                         ("Grep", json!({"path": "/synthetic/x.go"})),
                     ],
                 ),
+                results("a", &repo_s, 1, 3, false),
                 // A later directory doesn't change the plugins the session started with.
                 request("a", &other_s, 6, &[("Read", file("z.rs"))]),
+                results("a", &other_s, 6, 1, false),
             ],
         );
         write(projects.join("b.jsonl"), &[request("b", &gone_s, 2, &[])]);
@@ -1655,21 +1769,35 @@ mod tests {
         );
         sidechain["isSidechain"] = json!(true);
         sidechain["sessionId"] = json!("b");
-        write(projects.join("b/subagents/agent-x.jsonl"), &[sidechain]);
+        let mut done = results("agent", &gone_s, 3, 2, false);
+        done["isSidechain"] = json!(true);
+        done["sessionId"] = json!("b");
+        write(
+            projects.join("b/subagents/agent-x.jsonl"),
+            &[sidechain, done],
+        );
         write(
             projects.join("c.jsonl"),
-            &[request("c", &other_s, 4, &[("Read", file("lib.rs"))])],
+            &[
+                request("c", &other_s, 4, &[("Read", file("lib.rs"))]),
+                results("c", &other_s, 4, 1, false),
+            ],
         );
         write(
             projects.join("d.jsonl"),
-            &[request("d", &wt_s, 5, &[("MultiEdit", file("x.py"))])],
+            &[
+                request("d", &wt_s, 5, &[("MultiEdit", file("x.py"))]),
+                results("d", &wt_s, 5, 1, false),
+            ],
         );
-        // A read of a file that isn't there is no Kotlin worked in.
+        // A read of a file that isn't there, or one interrupted before its result, is no
+        // Kotlin worked in.
         write(
             projects.join("e.jsonl"),
             &[
                 request("e", &other_s, 7, &[("Read", file("App.kt"))]),
-                failed("e", &other_s, 7),
+                results("e", &other_s, 7, 1, true),
+                request("e", &other_s, 9, &[("Read", file("Main.kt"))]),
             ],
         );
         let registry = w.claude.join("plugins/installed_plugins.json");
@@ -1721,9 +1849,17 @@ mod tests {
             got,
             [
                 ("Python", 3, 3, vec![], Some(false)),
-                ("Rust", 3, 1, vec![(Need::EnableUser, 2)], Some(true)),
+                (
+                    "Rust",
+                    3,
+                    1,
+                    vec![(Need::EnableUser(id.into()), 2)],
+                    Some(true)
+                ),
             ]
         );
+        // The subagent's directory is gone, so a project file there may turn it off too.
+        assert_eq!(u.languages[1].unknown, 1);
         // The removed worktree is the repository's.
         assert_eq!(
             u.languages[1].projects,
@@ -1745,12 +1881,21 @@ mod tests {
         assert_eq!(
             cards[1].text,
             format!(
-                "Rust files were read or edited in 3 of 5 sessions (60%), most in {} (2 sessions) and {} (1). 1 of them ran with a copy of the rust-analyzer-lsp plugin, and 2 without. The rust-analyzer-lsp plugin is installed, and enabledPlugins in {} turns it off. Its language server, rust-analyzer, is on the PATH token-max runs with. With the plugin, Claude looks up a symbol's definition and references instead of searching text and reading each candidate file, and sees the errors an edit introduced. Anthropic recommends it for typed languages; what it saves is not measured.",
+                "Rust files were read or edited in 3 of 5 sessions (60%), most in {} (2 sessions) and {} (1). 1 of them ran with a copy of the rust-analyzer-lsp plugin, and 2 without. The rust-analyzer-lsp plugin is installed, and enabledPlugins in {} turns it off. For 1 of those, the directory it started in is gone, so its project settings, which could turn it off too, can't be read. Its language server, rust-analyzer, is on the PATH token-max runs with. With the plugin, Claude looks up a symbol's definition and references instead of searching text and reading each candidate file, and sees the errors an edit introduced. Anthropic recommends it for typed languages; what it saves is not measured.",
                 home(&repo_s),
                 home(&other_s),
                 home(&native_path(&settings)),
             )
         );
+        assert!(
+            matches!(&cards[1].how, Some(How::Manual { reason, .. }) if reason == "the project settings where some of these sessions started can't be read"),
+            "{:?}",
+            cards[1].how
+        );
+        // Once each directory's settings can be read, the walk offers the edit.
+        fs::create_dir_all(&gone).unwrap();
+        let data = scan(&options).unwrap();
+        let cards = items(&lsp_use(&data, None, START + 3_600_000)[0], &view);
         assert_eq!(cards[1].value, "off -> on");
         assert!(!cards[1].quiet);
         // The walk writes the one edit, keeping the rest of the file.
@@ -1767,6 +1912,39 @@ mod tests {
             written,
             json!({"model": "opus", "enabledPlugins": {id: true}})
         );
+        // Another marketplace's copy that is installed needs only turning on.
+        let corp = "rust-analyzer-lsp@corp";
+        json_file(
+            registry.clone(),
+            json!({"version": 2, "plugins": {corp: [{"scope": "user"}]}}),
+        );
+        json_file(settings.clone(), json!({"enabledPlugins": {corp: false}}));
+        let data = scan(&options).unwrap();
+        let rust = |data: &Scan| {
+            let lines = lsp_use(data, None, START + 3_600_000);
+            lines[0]
+                .languages
+                .iter()
+                .find(|l| l.lsp.server().language == "Rust")
+                .unwrap()
+                .needs
+                .clone()
+        };
+        assert_eq!(rust(&data), [(Need::EnableUser(corp.into()), 3)]);
+        // With no copy installed and policy forbidding the install, a project file that
+        // turns it off is no step: turning it on would load nothing.
+        json_file(registry.clone(), json!({"version": 2, "plugins": {}}));
+        json_file(
+            other.join(".claude/settings.local.json"),
+            json!({"enabledPlugins": {id: false}}),
+        );
+        json_file(
+            w.managed_settings_file(),
+            json!({"strictKnownMarketplaces": []}),
+        );
+        let data = scan(&options).unwrap();
+        assert_eq!(rust(&data), [(Need::Forbidden { known: true }, 3)]);
+        fs::remove_file(w.managed_settings_file()).unwrap();
         // Loaded everywhere, but without its server.
         assert!(
             cards[0].text.contains(
@@ -1802,6 +1980,30 @@ mod tests {
         options.discovery.pretend_defaults();
         let data = scan(&options).unwrap();
         assert!(lsp_use(&data, None, START + 3_600_000).is_empty());
+
+        // The default home needs no variable to reach; any other does, set in the shell or not.
+        assert!(!u.named);
+        let work = w.home.join(".claude-work");
+        write(
+            work.join("projects/p/f.jsonl"),
+            &[
+                request("f", &other_s, 1, &[("Read", file("lib.rs"))]),
+                results("f", &other_s, 1, 1, false),
+            ],
+        );
+        let mut options = w.scan_options();
+        options.discovery.claude_dirs = vec![native_path(&work)];
+        let data = scan(&options).unwrap();
+        let line = lsp_use(&data, None, START + 3_600_000)
+            .into_iter()
+            .find(|u| u.root == native_path(&work))
+            .unwrap();
+        assert!(line.named);
+        assert!(
+            matches!(&items(&line, &view)[0].how, Some(How::Manual { step, .. }) if step.contains(&format!(" with CLAUDE_CONFIG_DIR set to {} and", home(&native_path(&work))))),
+            "{:?}",
+            items(&line, &view)[0].how
+        );
     }
 
     #[test]
@@ -1816,8 +2018,8 @@ mod tests {
             root: native_path("/synthetic/claude-work"),
             plugins_dir: Some(native_path("/synthetic/claude-work/plugins")),
             cache_dir: None,
-            explicit: false,
-            unresolved: false,
+            named: false,
+            unresolved: None,
             unread: None,
         };
         let usage = |needs: Vec<(Need, u64)>, loaded: u64, server: Option<bool>| LanguageUse {
@@ -1828,6 +2030,7 @@ mod tests {
             projects: vec![],
             installed_for: vec![],
             needs,
+            unknown: 0,
             server,
         };
         let view = View {
@@ -1865,7 +2068,7 @@ mod tests {
         );
         let named = items(
             &LspUse {
-                explicit: true,
+                named: true,
                 cache_dir: Some(native_path("/synthetic/cache")),
                 ..u(install(Some(true)))
             },
@@ -1908,34 +2111,82 @@ mod tests {
             "{}",
             partly.text
         );
-        // Turned off in the user settings: the one edit the walk writes.
-        let off = card(usage(vec![(Need::EnableUser, 10)], 0, Some(false))).remove(0);
+        // Turned off in the user settings: the one edit the walk writes, for the copy installed.
+        let user = |c: &str, server| usage(vec![(Need::EnableUser(c.into()), 10)], 0, server);
+        let off = card(user(id, Some(true))).remove(0);
         assert_eq!(off.value, "off -> on");
         assert!(matches!(&off.how, Some(How::Edit(p)) if p.file == settings));
-        // A T3 instance's other settings may decide it, so the change is by hand.
-        let unsettled = items(
+        let corp = card(user("rust-analyzer-lsp@corp", Some(true))).remove(0);
+        assert!(corp.text.contains(" The rust-analyzer-lsp@corp copy of the rust-analyzer-lsp plugin is installed, and enabledPlugins in"));
+        assert!(
+            matches!(&corp.how, Some(How::Edit(p)) if p.edits[0].path == ["enabledPlugins", "rust-analyzer-lsp@corp"])
+        );
+        // The edit alone wouldn't start a missing server, so both steps are by hand.
+        assert_eq!(
+            how(user(id, Some(false))),
+            Some(How::Manual {
+                step: format!(
+                    r#"install rust-analyzer, as the plugin's README says, then set "enabledPlugins": {{"{id}": true}} in {settings}, then start a new session"#
+                ),
+                reason: "token-max installs no programs".into(),
+            })
+        );
+        // A T3 instance's other settings may decide it, so the change is by hand, even in a
+        // project's file it may not read.
+        let local = native_path("/synthetic/repo/.claude/settings.local.json");
+        for need in [
+            Need::EnableUser(id.into()),
+            Need::Enable {
+                id: id.into(),
+                file: local.clone(),
+            },
+        ] {
+            let unsettled = items(
+                &LspUse {
+                    unresolved: Some(SETTINGS_UNRESOLVED),
+                    ..u(usage(vec![(need, 10)], 0, Some(true)))
+                },
+                &view,
+            )
+            .remove(0);
+            assert!(
+                matches!(&unsettled.how, Some(How::Manual { reason, .. }) if reason == SETTINGS_UNRESOLVED),
+                "{:?}",
+                unsettled.how
+            );
+            assert_eq!(unsettled.value, "");
+        }
+        // Sessions T3 may have run under another home leave the change by hand too.
+        let owners = items(
             &LspUse {
-                unresolved: true,
-                ..u(usage(vec![(Need::EnableUser, 10)], 0, Some(true)))
+                unresolved: Some(OWNERS_UNSETTLED),
+                ..u(user(id, Some(true)))
             },
             &view,
         )
         .remove(0);
         assert_eq!(
-            unsettled.how,
+            owners.how,
             Some(How::Manual {
                 step: format!(
                     r#"set "enabledPlugins": {{"{id}": true}} in {settings}, then start a new session"#
                 ),
-                reason: "the T3 instance's launch arguments, a secret environment value or machine policy can replace the settings it reads, and which apply is unresolved".into(),
+                reason: OWNERS_UNSETTLED.into(),
             })
         );
-        assert_eq!(unsettled.value, "");
         // A project's file decides it there; with sessions elsewhere needing an install, each
         // step is named, with the sessions it covers.
-        let local = native_path("/synthetic/repo/.claude/settings.local.json");
         let mixed = card(usage(
-            vec![(Need::Install, 3), (Need::Enable(local.clone()), 1)],
+            vec![
+                (Need::Install, 3),
+                (
+                    Need::Enable {
+                        id: id.into(),
+                        file: local.clone(),
+                    },
+                    1,
+                ),
+            ],
             0,
             Some(true),
         ))
@@ -1990,6 +2241,17 @@ mod tests {
         })
         .remove(0);
         assert!(tiny.text.contains("(under 1%)"));
+        // A language only such sessions worked in says so, with nothing to act on.
+        let unowned = card(LanguageUse {
+            sessions: 0,
+            shared: 2,
+            ..usage(vec![], 0, None)
+        })
+        .remove(0);
+        assert!(unowned.quiet && unowned.how.is_none());
+        assert!(unowned.text.starts_with(
+            "Rust files were read or edited in 2 sessions that may have been another profile's, so token-max can't tell"
+        ));
         // Plugins the card can't read: a secret is quiet, a broken file is not.
         let unread = |unread: Unread| {
             items(

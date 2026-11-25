@@ -2609,7 +2609,9 @@ pub(crate) fn profile(
                 None => join(&[&canonical, "plugins"]),
             }),
             cache_dir,
-            explicit,
+            // Without the variable, a shell reaches only the default home.
+            named: explicit
+                || !realpath(&join(&[&options.home, ".claude"])).is_ok_and(|d| d == canonical),
             path: options
                 .env
                 .iter()
@@ -2617,6 +2619,7 @@ pub(crate) fn profile(
                 .map(|(_, v)| v.clone()),
             user: members(user.get("enabledPlugins")).clone(),
             managed: crate::lsp::Plugins::policy(&managed),
+            unsettled: false,
             read: None,
         }
     });

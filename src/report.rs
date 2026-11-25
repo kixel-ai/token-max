@@ -10246,14 +10246,15 @@ mod tests {
                 projects: vec![],
                 installed_for: vec![],
                 needs: vec![(Need::Install, 1)],
+                unknown: 0,
                 server: Some(true),
             }],
             settings_file: format!("{ROOT}/settings.json"),
             root: ROOT.into(),
             plugins_dir: Some(plugins_dir.into()),
             cache_dir: None,
-            explicit: false,
-            unresolved: false,
+            named: false,
+            unresolved: None,
             unread: None,
         };
         report.lsp = vec![card(&format!("{ROOT}/plugins"))];

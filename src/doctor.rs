@@ -1296,6 +1296,9 @@ pub fn describe(fix: &Fix, home: Option<&str>) -> Described {
     Described { head, body }
 }
 
+/// The name the closing steps give removing servers that are off already by hand.
+const CLEANUP: &str = "MCP servers that are off";
+
 /// The settings-file edits and steps by hand left to make, which a report or walk lists once,
 /// at its end: each file's edits, then the steps.
 #[derive(Debug, Default)]
@@ -1336,14 +1339,19 @@ impl Remaining {
                         }
                     }
                 }
-                How::Manual { step, reason } => remaining.steps.push((
-                    fix.name.clone(),
-                    home_in(step, style.home.as_deref()),
-                    home_in(reason, style.home.as_deref()),
-                )),
+                How::Manual { step, reason } => remaining.step(&fix.name, step, reason, style),
             }
         }
         remaining
+    }
+
+    /// Add the step by hand `name` takes, and why the doctor cannot take it.
+    fn step(&mut self, name: &str, step: &str, reason: &str, style: &Style) {
+        self.steps.push((
+            name.into(),
+            home_in(step, style.home.as_deref()),
+            home_in(reason, style.home.as_deref()),
+        ));
     }
 
     /// The edits left in `file`, empty until one is added.
@@ -2724,13 +2732,7 @@ impl Selection {
     /// The edits and steps the walk left to make on the host whose changes are `offers`:
     /// each offer not accepted, every accepted one too unless `wrote`, and each step by hand.
     pub fn unwritten(&self, offers: &Offers, wrote: bool, style: &Style) -> Remaining {
-        let declined = offers
-            .offers
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| !(wrote && self.yes.contains(index)))
-            .map(|(_, offer)| &offer.fix);
-        let mut remaining = Remaining::of(declined.chain(&offers.by_hand), style);
+        let mut remaining = Remaining::of(&offers.by_hand, style);
         // What the walk wrote to a target, if anything.
         let written = |target: usize| {
             self.accepted
@@ -2738,6 +2740,20 @@ impl Selection {
                 .find(|(t, _, _)| wrote && *t == target)
                 .map(|(_, edits, removals)| (edits, removals))
         };
+        // Each edit not written, leaving out one a declined change shares with a written one.
+        for offer in &offers.offers {
+            let How::Edit(patch) = &offer.fix.how else {
+                unreachable!("offers are edits")
+            };
+            let unmade = remaining.file(&style.file(&patch.file), patch.harness);
+            for edit in &patch.edits {
+                let made = written(offer.target).is_some_and(|(edits, _)| edits.contains(edit));
+                if !made && !unmade.edits.contains(edit) {
+                    unmade.edits.push(edit.clone());
+                }
+            }
+        }
+        remaining.files.retain(|u| !u.edits.is_empty());
         // An entry is removed when its target lost its key, under whichever name for the file
         // the removal used, such as another profile's symlink.
         let removed =
@@ -2765,11 +2781,17 @@ impl Selection {
                     remaining.remove(entry, style);
                 }
             }
+            for (step, reason) in &offer.manual {
+                remaining.step(&offer.fix.name, step, reason, style);
+            }
         }
         for (target, entry) in &offers.cleanup {
             if !written(*target).is_some_and(|(_, removals)| removed(removals, entry)) {
                 remaining.remove(entry, style);
             }
+        }
+        for (step, reason) in &offers.cleanup_by_hand {
+            remaining.step(CLEANUP, step, reason, style);
         }
         remaining
     }
@@ -4756,11 +4778,12 @@ mod tests {
                 Harness::Claude,
                 vec![edit("a", false, false)],
             ),
+            // B shares A's edit, which writing A makes.
             change(
                 "B",
                 &settings,
                 Harness::Claude,
-                vec![edit("b", false, false)],
+                vec![edit("a", false, false), edit("b", false, false)],
             ),
             Fix {
                 how: How::Manual {
@@ -4817,12 +4840,26 @@ mod tests {
             step: "disconnect it at claude.ai".into(),
             reason: "it is a claude.ai connector".into(),
         });
+        let plugin = |name: &str| Definition::Manual {
+            step: format!("uninstall plugin {name}"),
+            reason: "token-max does not uninstall plugins".into(),
+        };
         let fixes = vec![
-            server("A", 6.0, &settings, vec![Definition::Entry(a), gmail]),
-            server("B", 2.0, &settings, vec![Definition::Entry(b)]),
+            server(
+                "A",
+                6.0,
+                &settings,
+                vec![Definition::Entry(a), gmail, plugin("a")],
+            ),
+            server("B", 2.0, &settings, vec![Definition::Entry(b), plugin("b")]),
         ];
         let off = entry(&config, Harness::Codex, &["mcp_servers", "off"]);
-        let owner = Owner::new(fixes, vec![Definition::Entry(off)], None, 0.0);
+        let owner = Owner::new(
+            fixes,
+            vec![Definition::Entry(off), plugin("off")],
+            None,
+            0.0,
+        );
         let mut selection = Selection::default();
         // A and the removal of its entry are accepted, not its block; B is declined, and so
         // is the cleanup of the server off already.
@@ -4868,6 +4905,21 @@ mod tests {
                 ],
                 vec!["remove mcpServers.A".into()],
                 vec!["remove [mcp_servers.off]".into()],
+            ]
+        );
+        // The accepted change's step by hand and the cleanup's are left; the declined B's is
+        // moot.
+        let steps: Vec<(String, String)> = selection
+            .unwritten(owner.offers(), true, &style)
+            .steps()
+            .iter()
+            .map(|(name, step, _)| (name.clone(), step.clone()))
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                ("A".to_string(), "uninstall plugin a".to_string()),
+                (CLEANUP.into(), "uninstall plugin off".into()),
             ]
         );
     }

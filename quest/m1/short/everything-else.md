@@ -16,13 +16,9 @@ section ran 233 to 394 lines.
 
 Recommendations:
 
-- Use the [sections](/quest/m1/short/sections.md)' kinds, plus one line for
+- Use the sections' kinds (`Section` in `src/doctor.rs`), plus one line for
   each checked setting with no kind, ranked by cost as now.
 - Each line names the setting that changes its kind, as the rule requires.
 - Keep the site's cut of this section in `assets/demo/site.py` while any
   line outside `--details` names a project file, which can belong to a
-  private repository; the site's runs never pass `--details`.
-
-## Required
-
-- [Sections](/quest/m1/short/sections.md) - the kinds each line summarizes
+  private repository; the page's shown run never passes `--details`.

@@ -308,6 +308,7 @@ struct Common<'a> {
     uncertainty: &'a [String],
     sources: &'a [String],
     usage_estimates: &'a [UsageEstimate],
+    upgrade: Option<&'a crate::version::Upgrade>,
 }
 
 fn base<'a, V>(
@@ -342,6 +343,7 @@ fn base<'a, V>(
         uncertainty: &b.uncertainty,
         sources: &b.sources,
         usage_estimates,
+        upgrade: b.upgrade.as_ref(),
     }
 }
 
@@ -532,8 +534,8 @@ fn default_item(e: &EffortCheck, profile: &str, how: Option<How>, out: &Out<'_>)
     })
 }
 
-/// The first Claude Code that reads `CLAUDE_CODE_SUBAGENT_EFFORT`, as `(minor, patch)` of 2.x.
-const SUBAGENT_EFFORT_SINCE: (u64, u64) = (1, 316);
+/// The first Claude Code that reads `CLAUDE_CODE_SUBAGENT_EFFORT`.
+const SUBAGENT_EFFORT_SINCE: crate::version::Needs = crate::version::Needs::claude(1, 316);
 
 /// The level the maintainer picks for a default subagent effort past `high`, which every
 /// model that takes effort accepts.
@@ -547,9 +549,9 @@ struct SubagentLine<'a> {
     lead: &'a Profile,
     /// The profile tag the card's name carries.
     profile: String,
-    /// The Claude Code each of the line's profiles last ran, by the name a card gives the
-    /// profile, empty when the line covers one; for those with a recorded request.
-    versions: Vec<(String, Option<&'a str>)>,
+    /// Every profile the line covers, the lead included.
+    members: Vec<&'a Profile>,
+    requests: &'a [crate::model::Request],
 }
 
 /// The default subagent effort as `vibes` shows it: the level and the model it pairs with,
@@ -577,31 +579,39 @@ fn subagent_item(line: &SubagentLine<'_>, out: &Out<'_>) -> Option<Item> {
             capitalize(why)
         );
     }
-    let (minor, patch) = SUBAGENT_EFFORT_SINCE;
-    // A profile's latest Claude Code before the variable arrived runs subagents at the
-    // main session's effort, whatever it says.
-    let ignored: Vec<(&str, &str)> = match p.harness {
-        Harness::Claude => line
-            .versions
-            .iter()
-            .filter_map(|(name, v)| Some((name.as_str(), (*v)?)))
-            .filter(|(_, v)| !crate::version::claude_at_least(Some(v), minor, patch))
-            .collect(),
-        Harness::Codex => vec![],
+    // A profile whose latest Claude Code predates the variable runs subagents at the main
+    // session's effort, whatever it says.
+    let ignored = match p.harness {
+        Harness::Claude => {
+            SUBAGENT_EFFORT_SINCE.unmet(crate::version::latest(&line.members, line.requests))
+        }
+        Harness::Codex => None,
     };
-    if !ignored.is_empty() {
-        let ran: Vec<String> = ignored
-            .iter()
-            .map(|(name, version)| match name {
-                &"" => format!("The latest session ran Claude Code {version}"),
-                name => format!("{name}'s latest session ran Claude Code {version}"),
-            })
-            .collect();
+    if let Some(ignored) = &ignored {
+        // An unrecorded or unreadable version may already read the variable.
+        let run = if ignored
+            .ran
+            .as_deref()
+            .and_then(crate::version::plain)
+            .is_some()
+        {
+            "run"
+        } else {
+            "may run"
+        };
         let _ = write!(
             text,
-            " {}, which ignores CLAUDE_CODE_SUBAGENT_EFFORT: it arrived in 2.{minor}.{patch}, so its subagents run at the main session's effort. Upgrade Claude Code to 2.{minor}.{patch} or later for the setting to apply.",
-            ran.join("; ")
+            " {}, so its subagents {run} at the main session's effort.",
+            capitalize(&ignored.why("CLAUDE_CODE_SUBAGENT_EFFORT"))
         );
+        // Only an old interactive install is worth upgrading; an SDK app pins its own.
+        if let Some(advice) = SUBAGENT_EFFORT_SINCE.advice(&line.members, line.requests) {
+            let _ = write!(
+                text,
+                " {} for the setting to apply.",
+                capitalize(&advice.step())
+            );
+        }
     }
     let guidance = past_high(level, p.harness);
     if let Some(guidance) = &guidance {
@@ -625,10 +635,10 @@ fn subagent_item(line: &SubagentLine<'_>, out: &Out<'_>) -> Option<Item> {
             OPENAI_REASONING.into(),
         ],
     };
-    if !ignored.is_empty() {
+    if ignored.is_some() {
         sources.push(CLAUDE_CHANGELOG.into());
     }
-    let quiet = how.is_none() && ignored.is_empty();
+    let quiet = how.is_none() && ignored.is_none();
     Some(Item {
         name: tagged("Subagent default".into(), &line.profile),
         value: if guidance.is_some() {
@@ -1561,6 +1571,19 @@ impl Listing {
             .iter()
             .find(|r| r.origin == Some(origin))
             .map(|r| r.what.clone())
+            .unwrap_or_default()
+    }
+
+    /// The settings file or profile a report line names when several profiles were read,
+    /// such as `~/.claude/settings.json`; empty otherwise.
+    pub fn profile(&self, origin: Origin) -> String {
+        self.rows
+            .iter()
+            .find(|r| r.origin == Some(origin))
+            .map(|r| {
+                let tag = r.profile.strip_prefix('[').unwrap_or(&r.profile);
+                tag.strip_suffix(']').unwrap_or(tag).to_string()
+            })
             .unwrap_or_default()
     }
 
@@ -3452,6 +3475,27 @@ fn keepalive_unresolved(k: &KeepaliveCheck, r: &Common<'_>) -> String {
     }
 }
 
+/// A verdict only an older harness holds back: the upgrade that would let it apply, then
+/// what the replay favors.
+fn held_back(r: &Common<'_>) -> Option<(String, String)> {
+    let upgrade = r.upgrade?;
+    let favors = match r.recommended? {
+        recommended if Some(recommended) == r.current => "the current value".to_string(),
+        recommended => setting_value(Some(recommended)),
+    };
+    Some((
+        format!(
+            "{}: {}.",
+            capitalize(&upgrade.why("this setting")),
+            upgrade.step()
+        ),
+        format!(
+            "The replay favors {favors}, which applies once {} is upgraded.",
+            upgrade.needs.harness.product()
+        ),
+    ))
+}
+
 /// One plain sentence on why a check could not reach a verdict.
 fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
     if r.uncertainty.iter().any(|s| s == TIER_SENSITIVITY) {
@@ -4313,12 +4357,35 @@ struct Row {
     origin: Option<Origin>,
     /// What it saves every 30 days, when measured.
     saving: Option<f64>,
+    /// What it cost over the window, when shown instead of a saving, and whether only as a
+    /// lower bound.
+    cost: Option<(Estimate, bool)>,
     /// How far `saving` may be off when extrapolated over unpriced requests.
     margin: Option<Margin>,
     /// How much was measured, such as the requests a replay covered, ahead of the evidence.
     stats: String,
     /// What the current value saves against its default, when the two differ.
     baseline: Option<crate::defaults::Baseline>,
+    /// The section it is listed in, for a change `doctor` offers as an edit.
+    section: Option<Membership>,
+    /// The settings `doctor`'s edit for it changes, any part naming this line alone starred,
+    /// such as `~/.claude/settings.json:skillOverrides.*`, which its section's row names.
+    key: String,
+    /// The harness upgrade that alone would let its verdict apply.
+    upgrade: Option<String>,
+}
+
+/// A change's place in its section: the changes `doctor` offers as one question, which the
+/// list shows as one row.
+#[derive(Clone)]
+struct Membership {
+    /// The first change of the section, which names it.
+    id: usize,
+    /// Its own change, which another line making the same edit shares.
+    fix: usize,
+    section: crate::doctor::Section,
+    /// What the section's kind of change does.
+    what: String,
 }
 
 impl Row {
@@ -4338,9 +4405,13 @@ impl Row {
             scopes: vec![],
             origin: None,
             saving: None,
+            cost: None,
             margin: None,
             stats: String::new(),
             baseline: None,
+            section: None,
+            key: String::new(),
+            upgrade: None,
         }
     }
 
@@ -4353,6 +4424,7 @@ impl Row {
     /// margin, and a lower bound when `at_least`, such as beside pieces nothing priced.
     fn costs(&mut self, estimate: Option<Estimate>, at_least: bool, spend: &Spend) {
         self.margin = estimate.and_then(|e| e.margin);
+        self.cost = estimate.map(|e| (e, at_least));
         self.amount = Some((
             "costs",
             match estimate {
@@ -4374,6 +4446,7 @@ impl Row {
         spend: &Spend,
     ) {
         self.saving = usd;
+        self.cost = None;
         self.margin = margin.filter(|_| usd.is_some());
         match usd {
             Some(usd) => {
@@ -4478,18 +4551,8 @@ fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
     }
     // A tag that names one settings file leaves the setting to name only what changes in it.
     for row in &mut rows {
-        let Some(file) = row
-            .profile
-            .strip_prefix('[')
-            .and_then(|t| t.strip_suffix(']'))
-            .filter(|f| !f.contains(", ") && !f.contains(": "))
-        else {
-            continue;
-        };
-        if let Some(edit) = row.setting.strip_suffix(&format!(" in {file}")) {
-            row.setting = edit.to_string();
-        } else if let Some(key) = row.setting.strip_prefix(&format!("{file}:")) {
-            row.setting = key.to_string();
+        if let Some(file) = one_file(&row.profile) {
+            row.setting = in_file(&row.setting, file);
         }
     }
     // Name what separates lines of one setting that read the same, such as the groups of
@@ -4517,7 +4580,58 @@ fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
     rows.sort_by_key(|r| r.mark);
     rows.sort_by(by_share);
     let (changes, rest): (Vec<Row>, Vec<Row>) = rows.into_iter().partition(Row::offered);
-    let all = || changes.iter().chain(&rest);
+    let mut groups: Vec<(Vec<&Row>, &str, bool)> = match review {
+        None => vec![(
+            changes.iter().collect(),
+            "CHANGES  biggest saving first",
+            true,
+        )],
+        Some(_) => {
+            let group = |want: fn(Option<&Choice>) -> bool| {
+                changes
+                    .iter()
+                    .filter(|r| want(choice(r)))
+                    .collect::<Vec<_>>()
+            };
+            vec![
+                (
+                    group(|c| c == Some(&Choice::Accepted)),
+                    "ACCEPTED  biggest saving first",
+                    true,
+                ),
+                (
+                    // A change the walk did not reach is unaccepted too.
+                    group(|c| matches!(c, None | Some(Choice::Declined))),
+                    "NOT ACCEPTED",
+                    true,
+                ),
+                // Each step by hand keeps its own line, naming the step.
+                (
+                    group(|c| matches!(c, Some(Choice::Manual(_)))),
+                    "BY HAND",
+                    false,
+                ),
+            ]
+        }
+    };
+    groups.push((
+        rest.iter().collect(),
+        "EVERYTHING ELSE  biggest cost first",
+        false,
+    ));
+    let groups: Vec<(Vec<Entry>, &str)> = groups
+        .into_iter()
+        .map(|(rows, heading, joined)| (entries(rows, joined, out), heading))
+        .collect();
+    let details = out.options.details;
+    // Every row printed, a section's members under --details.
+    let all = || {
+        groups.iter().flat_map(|(entries, _)| {
+            entries.iter().flat_map(move |e| {
+                std::iter::once(&e.row).chain(e.members.iter().filter(move |_| details))
+            })
+        })
+    };
     let color = out.options.color;
     let (dot, hollow) = out.dots();
     let indent = if color { 2 } else { WORD_CELLS };
@@ -4543,6 +4657,7 @@ fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
     let shares = |r: &Row| r.share.map_or_else(String::new, share_text);
     let share_cells = all().map(|r| cells(&shares(r))).max().unwrap_or(0);
     let tag_cells = column(all().map(|r| cells(&r.profile)), TAG_CELLS);
+    let tagged = all().any(|r| !r.profile.is_empty());
     let mut name_cells = column(all().map(|r| cells(&terminal_text(&r.name))), NAME_CELLS);
     // On a narrow terminal, the name column gives way so the columns up to the share still
     // fit on one row; the file and setting after them wrap to the next.
@@ -4550,78 +4665,71 @@ fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
         let rest = MARGIN + indent + value_cells + amount_cells + share_cells + 6;
         name_cells = name_cells.min(width.saturating_sub(rest));
     }
-    let mut groups: Vec<(Vec<&Row>, &str)> = match review {
-        None => vec![(changes.iter().collect(), "CHANGES  biggest saving first")],
-        Some(_) => {
-            let group = |want: fn(Option<&Choice>) -> bool| {
-                changes
-                    .iter()
-                    .filter(|r| want(choice(r)))
-                    .collect::<Vec<_>>()
-            };
-            vec![
-                (
-                    group(|c| c == Some(&Choice::Accepted)),
-                    "ACCEPTED  biggest saving first",
-                ),
-                (
-                    // A change the walk did not reach is unaccepted too.
-                    group(|c| matches!(c, None | Some(Choice::Declined))),
-                    "NOT ACCEPTED",
-                ),
-                (group(|c| matches!(c, Some(Choice::Manual(_)))), "BY HAND"),
-            ]
+    // A row, `nested` cells in, its name narrower by as much so the columns after it line up.
+    let print = |row: &Row, nested: usize, out: &mut Out<'_>| {
+        let marker = match (color, row.mark) {
+            (true, Mark::Unknown | Mark::Info) => format!("{hollow} "),
+            (true, _) => format!("{dot} "),
+            (false, mark) => pad(mark.word(), WORD_CELLS),
+        };
+        // A line without a verdict is dim throughout; one with a verdict keeps its name,
+        // value and figure bright, its saving green, and the rest dim.
+        let verdict = !matches!(row.mark, Mark::Unknown | Mark::Info);
+        let (bright, saving) = match (verdict, &row.amount) {
+            (false, _) => (DIM, DIM),
+            (true, Some((verb, _))) if verb.starts_with("saves") => (PLAIN, GREEN),
+            (true, _) => (PLAIN, PLAIN),
+        };
+        let mut columns = vec![
+            (
+                pad(&terminal_text(&row.name), name_cells.saturating_sub(nested)),
+                bright,
+            ),
+            (pad(&terminal_text(&row.value), value_cells), bright),
+            (pad(&amount(row), amount_cells), saving),
+            (pad_left(&shares(row), share_cells), DIM),
+        ];
+        if tagged {
+            columns.push((pad(&row.profile, tag_cells), DIM));
+        }
+        columns.push((row.setting.clone(), DIM));
+        while columns.last().is_some_and(|(t, _)| t.trim().is_empty()) {
+            columns.pop();
+        }
+        if let Some((last, _)) = columns.last_mut() {
+            last.truncate(last.trim_end().len());
+        }
+        let mut spans = vec![(marker, if verdict { row.mark.style() } else { DIM })];
+        for (i, (text, style)) in columns.into_iter().enumerate() {
+            let gap = if i == 0 { "" } else { "  " };
+            spans.push((format!("{gap}{text}"), style));
+        }
+        let spans: Vec<(&str, &str)> = spans.iter().map(|(t, s)| (t.as_str(), *s)).collect();
+        out.spans(&spans, nested, Some(nested + indent));
+        if let Some(baseline) = &row.baseline {
+            out.line(&baseline.text(), nested + indent, DIM);
+        }
+        if let Some(upgrade) = &row.upgrade {
+            out.line(upgrade, nested + indent, PLAIN);
+        }
+        if out.options.details {
+            out.line(&format!("What: {}", row.what), nested + indent, PLAIN);
+            if !row.evidence.is_empty() {
+                out.line(&row.evidence, nested + indent, PLAIN);
+            }
         }
     };
-    groups.push((rest.iter().collect(), "EVERYTHING ELSE  biggest cost first"));
-    for (index, (section, heading)) in groups.into_iter().enumerate() {
+    for (index, (section, heading)) in groups.iter().enumerate() {
         if section.is_empty() {
             continue;
         }
         out.section(heading);
-        for row in section {
-            let marker = match (color, row.mark) {
-                (true, Mark::Unknown | Mark::Info) => format!("{hollow} "),
-                (true, _) => format!("{dot} "),
-                (false, mark) => pad(mark.word(), WORD_CELLS),
-            };
-            // A line without a verdict is dim throughout; one with a verdict keeps its name,
-            // value and figure bright, its saving green, and the rest dim.
-            let verdict = !matches!(row.mark, Mark::Unknown | Mark::Info);
-            let (bright, saving) = match (verdict, &row.amount) {
-                (false, _) => (DIM, DIM),
-                (true, Some((verb, _))) if verb.starts_with("saves") => (PLAIN, GREEN),
-                (true, _) => (PLAIN, PLAIN),
-            };
-            let mut columns = vec![
-                (pad(&terminal_text(&row.name), name_cells), bright),
-                (pad(&terminal_text(&row.value), value_cells), bright),
-                (pad(&amount(row), amount_cells), saving),
-                (pad_left(&shares(row), share_cells), DIM),
-            ];
-            if all().any(|r| !r.profile.is_empty()) {
-                columns.push((pad(&row.profile, tag_cells), DIM));
-            }
-            columns.push((row.setting.clone(), DIM));
-            while columns.last().is_some_and(|(t, _)| t.trim().is_empty()) {
-                columns.pop();
-            }
-            if let Some((last, _)) = columns.last_mut() {
-                last.truncate(last.trim_end().len());
-            }
-            let mut spans = vec![(marker, if verdict { row.mark.style() } else { DIM })];
-            for (i, (text, style)) in columns.into_iter().enumerate() {
-                let gap = if i == 0 { "" } else { "  " };
-                spans.push((format!("{gap}{text}"), style));
-            }
-            let spans: Vec<(&str, &str)> = spans.iter().map(|(t, s)| (t.as_str(), *s)).collect();
-            out.spans(&spans, 0, Some(indent));
-            if let Some(baseline) = &row.baseline {
-                out.line(&baseline.text(), indent, DIM);
-            }
-            if out.options.details {
-                out.line(&format!("What: {}", row.what), indent, PLAIN);
-                out.line(&row.evidence, indent, PLAIN);
+        for entry in section {
+            print(&entry.row, 0, out);
+            if details {
+                for member in &entry.members {
+                    print(member, MEMBER_CELLS, out);
+                }
             }
         }
         if let (0, Some(review)) = (index, review) {
@@ -4634,6 +4742,211 @@ fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
         let sources: Vec<&str> = sources.into_iter().collect();
         out.blank();
         out.line(&format!("Sources: {}", sources.join(", ")), 0, PLAIN);
+    }
+}
+
+/// Cells a section's member is indented under its section's row.
+const MEMBER_CELLS: usize = 2;
+
+/// A row of the list: one line, or a section of changes with its members.
+struct Entry {
+    row: Row,
+    /// A section's changes, which `--details` lists under its row; none for one line.
+    members: Vec<Row>,
+}
+
+/// `rows` as the list shows them, ranked: when `joined`, each section of two changes or more
+/// as one row, the rest as they are.
+fn entries(rows: Vec<&Row>, joined: bool, out: &Out<'_>) -> Vec<Entry> {
+    let mut sections: Vec<Vec<Row>> = vec![];
+    let mut at = crate::collections::HashMap::<usize, usize>::default();
+    for row in rows {
+        match row.section.as_ref().filter(|_| joined) {
+            Some(m) => match at.get(&m.id) {
+                Some(&i) => sections[i].push(row.clone()),
+                None => {
+                    at.insert(m.id, sections.len());
+                    sections.push(vec![row.clone()]);
+                }
+            },
+            None => sections.push(vec![row.clone()]),
+        }
+    }
+    let mut entries: Vec<Entry> = vec![];
+    for members in sections {
+        let changes: IndexSet<usize> = members
+            .iter()
+            .filter_map(|r| r.section.as_ref().map(|m| m.fix))
+            .collect();
+        // Two lines making one edit are one change, so they stay lines of their own.
+        if changes.len() < 2 {
+            entries.extend(members.into_iter().map(|row| Entry {
+                row,
+                members: vec![],
+            }));
+            continue;
+        }
+        entries.push(Entry {
+            row: section_row(&members, out),
+            members,
+        });
+    }
+    // A stable sort keeps the verdict order among rows with the same figure.
+    entries.sort_by_key(|e| e.row.mark);
+    entries.sort_by(|a, b| by_share(&a.row, &b.row));
+    entries
+}
+
+/// A section's row: its heading, the member count and offered value, the members' savings
+/// together, with an "up to" saving apart from the measured, their verdict the strongest
+/// member's, and the files and settings they change.
+fn section_row(members: &[Row], out: &Out<'_>) -> Row {
+    let first = members[0].section.as_ref().expect("a section's members");
+    let mark = members
+        .iter()
+        .map(|r| r.mark)
+        .min()
+        .expect("a section has members");
+    let mut row = Row::new(mark, first.section.label.clone(), first.what.clone());
+    // Each change once, though two lines make it.
+    let mut seen = crate::collections::HashSet::default();
+    let changes: Vec<&Row> = members
+        .iter()
+        .filter(|r| r.section.as_ref().is_some_and(|m| seen.insert(m.fix)))
+        .collect();
+    row.value = crate::doctor::section_value(
+        changes.iter().map(|r| {
+            let m = r.section.as_ref().expect("filtered on a section");
+            // The member row's own tag, which names its profile as the walk card does.
+            let tag = r.profile.strip_prefix('[').unwrap_or(&r.profile);
+            (
+                &m.section,
+                tag.strip_suffix(']').unwrap_or(tag),
+                r.value.as_str(),
+            )
+        }),
+        out.arrow,
+    );
+    // The measured savings, then those that hold only when an unset default would otherwise
+    // be the other value.
+    let mut measured: Option<(f64, Option<Margin>)> = None;
+    let mut up_to: Option<(f64, Option<Margin>)> = None;
+    let mut partial = false;
+    for r in &changes {
+        let Some(usd) = r.saving else { continue };
+        let verb = r.amount.as_ref().map_or("saves", |(verb, _)| *verb);
+        partial |= verb == AT_LEAST;
+        let sum = if verb == UP_TO {
+            &mut up_to
+        } else {
+            &mut measured
+        };
+        let (total, margin) = sum.get_or_insert((0.0, None));
+        *total += usd;
+        *margin = Margin::plus(*margin, r.margin);
+    }
+    let verb = if partial { AT_LEAST } else { "saves" };
+    match (measured, up_to) {
+        // Members shown by what they cost, such as duplicate skill copies, keep that figure
+        // summed, rather than a saving no one measured.
+        (None, None) if changes.iter().all(|r| r.cost.is_some()) => {
+            let (cost, at_least) = changes.iter().filter_map(|r| r.cost).fold(
+                (
+                    Estimate {
+                        usd: 0.0,
+                        margin: None,
+                    },
+                    false,
+                ),
+                |(sum, at_least), (e, lower)| {
+                    let usd = sum.usd + e.usd;
+                    let margin = Margin::plus(sum.margin, e.margin);
+                    (Estimate { usd, margin }, at_least || lower)
+                },
+            );
+            row.costs(Some(cost), at_least, &out.spend);
+        }
+        (None, None) => row.saves("saves", None, None, &out.spend),
+        (Some((usd, margin)), None) => row.saves(verb, Some(usd), margin, &out.spend),
+        (None, Some((usd, margin))) => row.saves(UP_TO, Some(usd), margin, &out.spend),
+        (Some((usd, margin)), Some((more, more_margin))) => {
+            row.saves(
+                verb,
+                Some(usd + more),
+                Margin::plus(margin, more_margin),
+                &out.spend,
+            );
+            row.amount = Some((
+                verb,
+                format!(
+                    "{} + up to {}",
+                    approx(usd, margin, "/mo"),
+                    approx(more, more_margin, "/mo")
+                ),
+            ));
+        }
+    }
+    // The files or profiles its members name, and the settings they change in them.
+    let tags: IndexSet<&str> = members.iter().map(|r| r.profile.as_str()).collect();
+    row.profile = match tags.len() {
+        1 => tags[0].to_string(),
+        _ => format!(
+            "[{}]",
+            tags.iter()
+                .map(|t| t.trim_start_matches('[').trim_end_matches(']'))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+    let file = one_file(&row.profile);
+    // Each file named once, before the settings in it.
+    let mut keys: IndexMap<&str, IndexSet<&str>> = IndexMap::default();
+    for r in members {
+        let key = match file {
+            Some(f) => r.key.strip_prefix(f).and_then(|k| k.strip_prefix(':')),
+            None => None,
+        };
+        let (file, key) = match key {
+            Some(key) => ("", key),
+            None => r
+                .key
+                .rsplit_once(':')
+                .filter(|(_, k)| !k.starts_with(' ') && !k.contains(['/', '\\']))
+                .unwrap_or(("", &r.key)),
+        };
+        keys.entry(file).or_default().insert(key);
+    }
+    row.setting = keys
+        .into_iter()
+        .map(|(file, keys)| {
+            let keys = keys.into_iter().collect::<Vec<_>>().join(", ");
+            if file.is_empty() {
+                keys
+            } else {
+                format!("{file}:{keys}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    row
+}
+
+/// The one settings file a line's tag names, such as `~/.claude/settings.json` in
+/// `[~/.claude/settings.json]`.
+fn one_file(tag: &str) -> Option<&str> {
+    tag.strip_prefix('[')
+        .and_then(|t| t.strip_suffix(']'))
+        .filter(|f| !f.contains(", ") && !f.contains(": "))
+}
+
+/// A setting in `file`, named without it, as a line tagged with that file names it.
+fn in_file(setting: &str, file: &str) -> String {
+    if let Some(edit) = setting.strip_suffix(&format!(" in {file}")) {
+        edit.to_string()
+    } else if let Some(key) = setting.strip_prefix(&format!("{file}:")) {
+        key.to_string()
+    } else {
+        setting.to_string()
     }
 }
 
@@ -5201,10 +5514,25 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
     item.value = format!("{} {} {}", tokens(window), out.arrow, tokens(cap));
     item.quiet = false;
     item.how = Some(match &c.unsettable {
-        // As the line would, the change goes by hand where no edit is known to hold.
-        Some(reason) => crate::doctor::window_by_hand(c, c.capped.as_ref(), cap, profile, reason),
+        // As the line would, the change goes by hand where no edit is known to hold, after
+        // any upgrade the window control needs.
+        Some(reason) => match (
+            crate::doctor::window_by_hand(c, c.capped.as_ref(), cap, profile, reason),
+            &c.base.upgrade,
+        ) {
+            (How::Manual { step, reason }, Some(upgrade)) => How::Manual {
+                step: format!("{}, then {step}", upgrade.step()),
+                reason,
+            },
+            (how, _) => how,
+        },
         None => crate::doctor::window_change(c, c.capped.as_ref(), cap, profile),
     });
+    // A disabled or unresolved T3 instance has no active setting to change.
+    if c.base.uncertainty.iter().any(|u| u == crate::t3::UNOWNED) {
+        item.how = None;
+        item.text += " The T3 instance is disabled or the file that owns this setting for it is unresolved, so there is nothing to change.";
+    }
     item
 }
 
@@ -5322,7 +5650,7 @@ fn memory_item(line: MemoryLine<'_>, out: &Out<'_>) -> Item {
             String::new(),
             true,
             format!(
-                "{share} {REASON} {measured}, and already {} turning it off for its cost per use, so doctor asks and this card does not.",
+                "{share} {REASON} {measured}, and already {} turning it off for its cost per use, so doctor offers it and this card does not.",
                 if suggested { "suggests" } else { "recommends" }
             ),
         ),
@@ -5778,6 +6106,67 @@ fn piece_setting(c: &ContextCost, out: &Out<'_>) -> String {
     }
 }
 
+/// Each change `doctor` offers as an edit joins its section, which names the settings its
+/// edit changes; a step by hand stays its own line, naming the step.
+fn sectioned(rows: &mut [Row], fixes: &[crate::doctor::Fix], out: &Out<'_>) {
+    // The walk's own test, so an edit its file refuses stays a step by hand of its own.
+    let offered: Vec<bool> = fixes.iter().map(crate::doctor::offered).collect();
+    for row in rows {
+        let Some(origin) = row.origin.filter(|_| row.offered()) else {
+            continue;
+        };
+        let Some(fix) = fixes
+            .iter()
+            .enumerate()
+            .position(|(i, f)| offered[i] && f.origins.contains(&origin))
+        else {
+            continue;
+        };
+        let section = &fixes[fix].section;
+        if let crate::doctor::How::Edit(patch) = &fixes[fix].how {
+            // Each path the edit sets, the part naming this member alone starred.
+            let paths: IndexSet<String> = patch
+                .edits
+                .iter()
+                .map(|e| starred(&e.path, &section.member))
+                .collect();
+            row.key = format!(
+                "{}:{}",
+                out.home(&patch.file),
+                paths.into_iter().collect::<Vec<_>>().join(", ")
+            );
+        }
+        let id = fixes
+            .iter()
+            .enumerate()
+            .position(|(i, f)| offered[i] && f.joins(&fixes[fix]))
+            .expect("a change joins its own section");
+        row.section = Some(Membership {
+            id,
+            fix,
+            section: section.clone(),
+            what: crate::doctor::section_what(section, &row.what),
+        });
+    }
+}
+
+/// A setting's path with the part naming `member` starred, such as `skillOverrides.*`. Only
+/// the first match names it: `mcp_servers.enabled.enabled` ends in the setting's own key.
+fn starred(path: &[String], member: &str) -> String {
+    let mut found = false;
+    path.iter()
+        .map(|p| {
+            if !found && p == member {
+                found = true;
+                "*"
+            } else {
+                p.as_str()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 /// The sessions the selected requests ran in, each subagent counted with the session that
 /// spawned it.
 pub(crate) fn sessions(scan: &crate::model::Scan) -> u64 {
@@ -6064,10 +6453,15 @@ fn summary(
             None => String::new(),
         };
         let set_in = format!("{official}Set in {}.", out.home(r.owner));
+        let held = held_back(r);
+        row.upgrade = held.as_ref().map(|(upgrade, _)| upgrade.clone());
         let unknown = || {
             format!(
                 "{}{}{} {set_in}",
-                not_enough(&unresolved(result, r)),
+                held.as_ref().map_or_else(
+                    || not_enough(&unresolved(result, r)),
+                    |(_, favors)| favors.clone()
+                ),
                 context_sizes(report, result, r.profile),
                 context_rot(report, result)
             )
@@ -6553,7 +6947,7 @@ fn summary(
             .find(|f| f.origins.contains(&Origin::Check(*index)))
             .map(|f| Offered {
                 suggested: f.suggested,
-                asked: crate::doctor::takes_up(f),
+                asked: crate::doctor::takes_up(f, fixes),
             });
         let mut item = memory_item(
             MemoryLine {
@@ -6676,7 +7070,6 @@ fn summary(
         let split = by_model.len() > 1;
         for members in by_model.into_values() {
             let ids: Vec<String> = members.iter().map(|p| p.id.clone()).collect();
-            let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
             let profile = if split {
                 tag(&ids, &|_| String::new(), out)
             } else {
@@ -6685,21 +7078,8 @@ fn summary(
             let line = SubagentLine {
                 lead: members[0],
                 profile,
-                versions: refs
-                    .iter()
-                    .filter_map(|id| {
-                        let version = crate::doctor::claude_versions(report, &[id]).pop()?;
-                        // One profile's card names no profile.
-                        let name = match members.len() {
-                            1 => String::new(),
-                            _ => tags
-                                .get(id)
-                                .cloned()
-                                .unwrap_or_else(|| out.short_profile(id)),
-                        };
-                        Some((name, version))
-                    })
-                    .collect(),
+                members,
+                requests: &report.scan.requests,
             };
             vibes.extend(subagent_item(&line, out));
         }
@@ -7429,6 +7809,7 @@ fn summary(
             DIM,
         );
     }
+    sectioned(&mut rows, fixes, out);
     (title, head, rows, vibes, credit)
 }
 
@@ -7665,6 +8046,19 @@ mod tests {
     };
 
     #[test]
+    fn a_section_path_stars_only_the_part_naming_its_member() {
+        let path = |p: &[&str]| p.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            starred(&path(&["mcp_servers", "enabled", "enabled"]), "enabled"),
+            "mcp_servers.*.enabled"
+        );
+        assert_eq!(
+            starred(&path(&["permissions", "deny"]), "Bash"),
+            "permissions.deny"
+        );
+    }
+
+    #[test]
     fn retention_is_advised_only_where_its_settings_are_the_ones_in_force() {
         let mut native = make_profile("native", ROOT);
         assert!(!retention_settled(&native));
@@ -7730,6 +8124,7 @@ mod tests {
             assumptions: vec!["synthetic assumption".into()],
             uncertainty: vec!["synthetic uncertainty".into()],
             sources: vec!["https://example.invalid/source".into()],
+            upgrade: None,
         }
     }
 
@@ -8403,10 +8798,8 @@ mod tests {
         let listing = format_report(&report, &fixes, ReportOptions::default());
         let totals = crate::totals::Totals::new(&report, &fixes, listing.credit());
         let mut checked = crate::totals::Checked::new(1, report.scan.defaults);
-        for result in &report.checks {
-            checked.check(result, &report.scan);
-        }
-        checked.found.extend(context_tally(
+        checked.check(&report.checks, &report.scan);
+        checked.find(context_tally(
             &report.context,
             &report.scan,
             generated_at(&report),
@@ -9576,9 +9969,14 @@ mod tests {
         use serde_json::json;
         let file = format!("{ROOT}/settings.json");
         let variable = format!("{file}:env.CLAUDE_CODE_SUBAGENT_EFFORT");
-        // The card for a subagent effort set by `owner`, with the latest request on `version`.
+        // The card for a subagent effort set by `owner`, with the latest request on `version`
+        // from a native install's interactive client.
         let card = |harness: Harness, level: Option<&str>, owner: &str, version: &str| {
             let mut report = synthetic();
+            report.scan.profiles[0].updater = Some("claude update");
+            for r in &mut report.scan.requests {
+                r.client = Some("cli".into());
+            }
             report.checks.clear();
             report.context.clear();
             let p = &mut report.scan.profiles[0];
@@ -9614,7 +10012,7 @@ mod tests {
             "{text}"
         );
         assert!(text.contains(CLAUDE_MODEL_GUIDE), "{text}");
-        assert!(!text.contains("ignores"), "{text}");
+        assert!(!text.contains("needs Claude Code"), "{text}");
         let Some(How::Edit(patch)) = c.how else {
             panic!("expected an edit: {:?}", c.how)
         };
@@ -9649,16 +10047,88 @@ mod tests {
         let c = card(Harness::Claude, Some("medium"), &variable, "2.1.315").expect("a card");
         assert!(!c.quiet && c.how.is_none(), "{:?}", c.how);
         assert!(
-            c.text
-                .contains("The latest session ran Claude Code 2.1.315, which ignores")
-                && c.text.contains("Upgrade Claude Code to 2.1.316 or later"),
+            c.text.contains(
+                "CLAUDE_CODE_SUBAGENT_EFFORT needs Claude Code 2.1.316 or later, but its latest session ran 2.1.315, so its subagents run at the main session's effort. Upgrade Claude Code with `claude update` for the setting to apply."
+            ),
             "{}",
             c.text
         );
         assert!(c.sources.iter().any(|s| s == CLAUDE_CHANGELOG));
+        // An unrecorded version may already read the variable, so it advises no upgrade.
+        {
+            let mut report = synthetic();
+            report.checks.clear();
+            report.context.clear();
+            report.scan.profiles[0].updater = Some("claude update");
+            report.scan.profiles[0].agents.effort = Some(Owned {
+                value: "medium".into(),
+                owner: variable.clone(),
+            });
+            for r in &mut report.scan.requests {
+                r.client = Some("cli".into());
+                r.version = None;
+            }
+            let c = advice(&report, ReportOptions::default())
+                .into_iter()
+                .find(|i| i.name == "Subagent default")
+                .expect("a card");
+            assert!(
+                c.text.contains(
+                    "CLAUDE_CODE_SUBAGENT_EFFORT needs Claude Code 2.1.316 or later, but its latest session ran an unrecorded version, so its subagents may run at the main session's effort."
+                ),
+                "{}",
+                c.text
+            );
+            assert!(!c.text.contains("claude update"), "{}", c.text);
+        }
+        // An Agent SDK app pins its own Claude Code, so an old one names no upgrade, and
+        // neither does an interactive install while an SDK app on the file is also too old.
+        for sdk in ["2.1.315", "2.1.400"] {
+            let mut report = synthetic();
+            report.checks.clear();
+            report.context.clear();
+            report.scan.profiles[0].updater = Some("claude update");
+            report.scan.profiles[0].agents.effort = Some(Owned {
+                value: "medium".into(),
+                owner: variable.clone(),
+            });
+            for r in &mut report.scan.requests {
+                r.version = Some(sdk.into());
+            }
+            let mut cli = report.scan.requests[0].clone();
+            cli.id = "cli-request".into();
+            cli.client = Some("cli".into());
+            cli.version = Some("2.1.315".into());
+            cli.time = report
+                .scan
+                .requests
+                .iter()
+                .map(|r| r.time)
+                .max()
+                .expect("requests")
+                + 1;
+            report.scan.requests.push(cli);
+            let c = advice(&report, ReportOptions::default())
+                .into_iter()
+                .find(|i| i.name == "Subagent default")
+                .expect("a card");
+            assert!(
+                c.text
+                    .contains("so its subagents run at the main session's effort")
+            );
+            assert_eq!(
+                c.text.contains("Upgrade Claude Code with `claude update`"),
+                sdk == "2.1.400",
+                "{sdk}: {}",
+                c.text
+            );
+        }
         // Past high, the edit stays on offer beside the upgrade.
         let c = card(Harness::Claude, Some("max"), &variable, "2.1.300").expect("a card");
-        assert!(c.text.contains("ignores") && c.text.contains("prone to overthinking"));
+        assert!(
+            c.text.contains("needs Claude Code 2.1.316")
+                && c.text.contains("prone to overthinking")
+        );
         assert!(matches!(c.how, Some(How::Edit(_))), "{:?}", c.how);
 
         // A T3 instance's own environment entry is a step by hand naming its list.
@@ -9681,7 +10151,7 @@ mod tests {
         let c = card(Harness::Codex, Some("xhigh"), &toml, "0.1.0").expect("a card");
         let text = said(&c);
         assert!(text.contains("OpenAI's reasoning guide"), "{text}");
-        assert!(!text.contains("ignores"), "{text}");
+        assert!(!text.contains("needs Claude Code"), "{text}");
         let Some(How::Edit(patch)) = c.how else {
             panic!("expected an edit: {:?}", c.how)
         };
@@ -9690,8 +10160,8 @@ mod tests {
             ["agents", "default_subagent_reasoning_effort"]
         );
 
-        // Profiles sharing the setting and model get one card, naming each that runs a
-        // Claude Code too old to read it.
+        // Profiles sharing the setting and model get one card, naming the version of one
+        // that runs a Claude Code too old to read it.
         let mut report = synthetic();
         report.checks.clear();
         report.context.clear();
@@ -9718,10 +10188,7 @@ mod tests {
             .collect();
         assert_eq!(cards.len(), 1, "{cards:?}");
         assert!(
-            cards[0]
-                .text
-                .contains("other's latest session ran Claude Code 2.1.315")
-                && !cards[0].text.contains("ran Claude Code 2.1.316"),
+            cards[0].text.contains("but its latest session ran 2.1.315"),
             "{}",
             cards[0].text
         );
@@ -11356,7 +11823,13 @@ mod tests {
             what: String::new(),
             evidence: String::new(),
             origins: vec![super::Origin::Check(7)],
-            group: None,
+            section: crate::doctor::Section {
+                kind: crate::doctor::Kind::Setting,
+                label: "LSP".into(),
+                member: "LSP".into(),
+                location: None,
+            },
+            profile: String::new(),
             removal: vec![],
             how: How::Edit(crate::doctor::Patch {
                 file,
@@ -11460,12 +11933,23 @@ mod tests {
         let item = card(&report);
         assert!(item.quiet && item.how.is_none() && item.value.is_empty());
         assert!(
-            item.text.contains(", and already suggests turning it off for its cost per use, so doctor asks and this card does not."),
+            item.text.contains(", and already suggests turning it off for its cost per use, so doctor offers it and this card does not."),
             "{}",
             item.text
         );
-        // A change saving too little for doctor's walk to ask is the card's to offer.
+        // A change saving too little for doctor's walk to ask is the card's to offer, when its
+        // file takes the edit; one it refuses is a step by hand the walk names.
+        let w = crate::test_support::Workspace::new();
+        let settings = w.home.join("settings.json");
+        std::fs::write(&settings, "{}").unwrap();
+        let settings = settings.to_string_lossy().into_owned();
+        let synthetic =
+            std::mem::replace(&mut report.scan.profiles[0].settings_file, settings.clone());
         let m = memory(&mut report);
+        let owner = std::mem::replace(
+            &mut m.base.owner,
+            format!("{settings}:autoMemoryEnabled (default)"),
+        );
         let measured = m.base.monthly_savings_usd.replace(0.5);
         let item = card(&report);
         assert_eq!((item.value.as_str(), item.quiet), ("on -> off", false));
@@ -11475,6 +11959,9 @@ mod tests {
             "{}",
             item.text
         );
+        report.scan.profiles[0].settings_file = synthetic;
+        memory(&mut report).base.owner = owner;
+        assert!(card(&report).quiet);
         memory(&mut report).base.monthly_savings_usd = measured;
         // Half is not most, and a session nothing settles counts as without.
         let m = memory(&mut report);
@@ -12813,8 +13300,10 @@ mod tests {
         let groups: Vec<(String, Reason, String)> = fixes(&report, false)
             .into_iter()
             .map(|f| {
-                let g = f.group.expect("a feature is grouped");
-                (g.label, g.reason, g.member)
+                let crate::doctor::Kind::Feature(_, reason) = f.section.kind else {
+                    panic!("a feature joins a feature's section")
+                };
+                (f.section.label, reason, f.section.member)
             })
             .collect();
         let want = [
@@ -12834,5 +13323,183 @@ mod tests {
                 "{label}: {groups:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_section_of_members_shown_by_cost_sums_what_they_cost() {
+        let report = synthetic();
+        let out = Out::new(&report, ReportOptions::default());
+        let member = |fix: usize, usd: f64| {
+            let mut row = Row::new(Mark::Change, format!("copy {fix}"), String::new());
+            row.costs(
+                Some(Estimate {
+                    usd,
+                    margin: Some(Margin::Usd(0.5)),
+                }),
+                false,
+                &out.spend,
+            );
+            row.section = Some(Membership {
+                id: 0,
+                fix,
+                section: crate::doctor::Section {
+                    kind: crate::doctor::Kind::Feature(
+                        ContextKind::Skill,
+                        crate::doctor::Reason::Duplicate,
+                    ),
+                    label: "Duplicate copies of skills".into(),
+                    member: "review".into(),
+                    location: None,
+                },
+                what: String::new(),
+            });
+            row
+        };
+        let row = section_row(&[member(0, 2.0), member(1, 3.0)], &out);
+        assert_eq!(row.saving, None);
+        assert_eq!(row.amount, Some(("costs", "~$5 ± $1".into())));
+        // A member with a measured saving makes the row a saving again.
+        let mut saved = member(1, 3.0);
+        saved.saves("saves", Some(4.0), None, &out.spend);
+        let row = section_row(&[member(0, 2.0), saved], &out);
+        assert_eq!(row.amount, Some(("saves", "$4/mo".into())));
+    }
+
+    /// Moves each profile's settings file into a fresh workspace, with the TTL lines that
+    /// name it, so the walk's edits take; `shown` maps the report's text back.
+    fn writable(report: &mut Report) -> (Workspace, impl Fn(String) -> String + use<>) {
+        let w = Workspace::new();
+        let mut moved = vec![];
+        for p in &mut report.scan.profiles {
+            let dir = w.home.join(&p.id);
+            std::fs::create_dir_all(&dir).unwrap();
+            let file = dir.join("settings.json");
+            std::fs::write(&file, "{}").unwrap();
+            let file = file.to_string_lossy().into_owned();
+            let old = std::mem::replace(&mut p.settings_file, file.clone());
+            for c in &mut report.checks {
+                if let CheckResult::Ttl(t) = c
+                    && t.base.profile == p.id
+                {
+                    t.base.owner = t.base.owner.replace(&old, &file);
+                }
+            }
+            moved.push((file, old));
+        }
+        // The report shows a path under the real home from `~`, as a CI runner's temp dir is.
+        let home = std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned());
+        (w, move |text: String| {
+            moved.iter().fold(text, |text, (file, old)| {
+                let text = text.replace(file, old);
+                text.replace(&crate::doctor::home_in(file, home.as_deref()), old)
+            })
+        })
+    }
+
+    #[test]
+    fn a_section_of_changes_is_one_row_and_details_list_its_members() {
+        let mut report = synthetic();
+        // The subagents' cache moves the other way, so the section names each change.
+        let sub = report
+            .checks
+            .iter_mut()
+            .find_map(|c| match c {
+                CheckResult::Ttl(t) if t.bucket == Bucket::Subagent => Some(t),
+                _ => None,
+            })
+            .unwrap();
+        sub.base.action = Action::Change;
+        sub.base.recommended = Some(Ttl::FiveMinutes);
+        sub.base.monthly_savings_usd = Some(10.0);
+        sub.base.owner = format!("{ROOT}/settings.json:subagentPromptCacheTtl");
+        // While its file refuses the edits, as the walk would, each stays its own step.
+        let refused = text(&report, None, false);
+        assert_eq!(
+            refused
+                .lines()
+                .filter(|l| l.contains("prompt cache TTL") && l.contains("change"))
+                .count(),
+            2,
+            "{refused}"
+        );
+        let (_w, shown) = writable(&mut report);
+        let plain = shown(text(&report, None, false));
+        let changes: Vec<&str> = plain
+            .lines()
+            .skip_while(|l| !l.contains("CHANGES"))
+            .skip(1)
+            .take_while(|l| !l.is_empty())
+            .collect();
+        let ttl: Vec<&&str> = changes.iter().filter(|l| l.contains("cache TTL")).collect();
+        assert_eq!(ttl.len(), 1, "{plain}");
+        assert_eq!(
+            compact(ttl[0]),
+            compact(&format!(
+                "change Prompt cache TTL main 5m -> 1h, subagent 1h -> 5m saves ~$35/mo ± $1.25 2% {ROOT}/settings.json:promptCacheTtl, subagentPromptCacheTtl"
+            )),
+            "{plain}"
+        );
+        // An unset main TTL's saving, which holds only under one billing, stays apart.
+        let profile = report
+            .scan
+            .profiles
+            .iter_mut()
+            .find(|p| p.id == "profile")
+            .unwrap();
+        profile.ttl.main.value = None;
+        profile.ttl.main.reason = TTL_BILLING_UNKNOWN.into();
+        let unset = shown(text(&report, None, false));
+        let row = unset
+            .lines()
+            .find(|l| l.contains("Prompt cache TTL"))
+            .unwrap();
+        assert!(
+            compact(row).contains(&compact("saves $10/mo + up to ~$12/mo ± $1.25")),
+            "{unset}"
+        );
+        let details = shown(text(&report, None, true));
+        let member = details
+            .lines()
+            .find(|l| {
+                l.trim_start().starts_with("change") && l.contains("Main-agent prompt cache TTL")
+            })
+            .expect("details list the section's members");
+        assert!(member.starts_with("    change"), "{details}");
+        assert!(
+            details.contains(&format!("What: {}", crate::descriptions::CACHE_TTLS)),
+            "{details}"
+        );
+    }
+
+    #[test]
+    fn a_ttl_section_across_profiles_names_each_profile_in_its_row() {
+        let mut report = synthetic();
+        let other = make_profile("other", "/synthetic/other");
+        report.scan.profiles.push(other);
+        let main = report
+            .checks
+            .iter()
+            .find_map(|c| match c {
+                CheckResult::Ttl(t) if t.bucket == Bucket::Main => Some(t.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let mut copy = main.clone();
+        copy.base.profile = "other".into();
+        copy.base.profiles = vec!["other".into()];
+        copy.base.owner = "/synthetic/other/settings.json:promptCacheTtl".into();
+        report.checks.push(CheckResult::Ttl(copy));
+        let (_w, shown) = writable(&mut report);
+        let plain = shown(text(&report, None, false));
+        let row = plain
+            .lines()
+            .find(|l| l.contains("Prompt cache TTL"))
+            .expect("a TTL section row");
+        assert!(
+            row.contains(
+                "main (/synthetic/home/.claude/settings.json) 5m -> 1h, main (/synthetic/other/settings.json) 5m -> 1h"
+            ),
+            "{plain}"
+        );
     }
 }

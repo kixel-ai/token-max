@@ -415,6 +415,7 @@ fn check(
             .into(),
             uncertainty,
             sources: SOURCES.map(String::from).into(),
+            upgrade: None,
         },
         harness: profile.harness,
         off: control.off.clone(),

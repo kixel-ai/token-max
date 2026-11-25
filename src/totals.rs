@@ -130,7 +130,9 @@ pub struct Checked {
     pub done: usize,
     pub of: usize,
     /// The changes found so far.
-    pub found: Vec<Finding>,
+    found: Vec<Finding>,
+    /// What `found` saves together, summed as each check lands so a redraw only reads it.
+    savings: Total,
     /// What the settings checked so far save against the defaults; None under `--defaults`.
     /// The tools, skills and MCP servers already off join once the report is formatted.
     pub credit: Option<Credit>,
@@ -146,20 +148,35 @@ impl Checked {
         }
     }
 
-    /// One check's result in `scan`, counted as its report line and the walk count it.
-    pub fn check(&mut self, result: &CheckResult, scan: &Scan) {
-        let (baseline, found) = crate::report::check_tally(result, scan);
-        if let (Some(credit), Some(baseline)) = (&mut self.credit, &baseline) {
-            credit.add(baseline);
+    /// One check's `results` in `scan`, counted as their report lines and the walk count them.
+    pub fn check(&mut self, results: &[CheckResult], scan: &Scan) {
+        let mut found = vec![];
+        for result in results {
+            let (baseline, finding) = crate::report::check_tally(result, scan);
+            if let (Some(credit), Some(baseline)) = (&mut self.credit, &baseline) {
+                credit.add(baseline);
+            }
+            found.extend(finding);
         }
+        self.find(found);
+    }
+
+    /// Changes found, joining those found before.
+    pub fn find(&mut self, found: impl IntoIterator<Item = Finding>) {
         self.found.extend(found);
+        self.savings = self.sum();
     }
 
     /// What the changes found so far save together, their shares unknown until the spend is
-    /// summed, counted as the walk lists them: biggest saving first, an edit two lines make
-    /// once, with the first line's saving, and an edit that wants a setting another line
-    /// sets at another value as a step by hand.
+    /// summed.
     pub fn savings(&self) -> Total {
+        self.savings
+    }
+
+    /// The changes found so far counted as the walk lists them: biggest saving first, an
+    /// edit two lines make once, with the first line's saving, and an edit that wants a
+    /// setting another line sets at another value as a step by hand.
+    fn sum(&self) -> Total {
         let mut found: Vec<&Finding> = self.found.iter().collect();
         found.sort_by(|a, b| crate::report::by_saving(a.saved.saving, b.saved.saving));
         let manual = How::Manual {
@@ -355,23 +372,27 @@ mod tests {
             reason: "synthetic".into(),
         };
         let mut checked = Checked::new(2, false);
-        checked.found = vec![
+        checked.find(vec![
             finding(20.0, edit(400_000)),
             finding(50.0, edit(400_000)),
             finding(7.0, edit(300_000)),
             // Steps by hand are never the same edit.
             finding(3.0, manual()),
             finding(3.0, manual()),
-        ];
+        ]);
         let tallied = checked.savings().tally(true);
         assert_eq!(tallied.measured.as_deref(), Some("found $63/mo more"));
         // Two lines that want the window the bigger saving's line doesn't are each left by
-        // hand, so both count, as the walk lists them.
-        checked.found = vec![
-            finding(50.0, edit(400_000)),
+        // hand, so both count, as the walk lists them, even when a later check finds the
+        // bigger saving.
+        let mut checked = Checked::new(2, false);
+        checked.find(vec![
             finding(20.0, edit(300_000)),
             finding(10.0, edit(300_000)),
-        ];
+        ]);
+        let tallied = checked.savings().tally(true);
+        assert_eq!(tallied.measured.as_deref(), Some("found $20/mo more"));
+        checked.find(vec![finding(50.0, edit(400_000))]);
         let tallied = checked.savings().tally(true);
         assert_eq!(tallied.measured.as_deref(), Some("found $80/mo more"));
     }

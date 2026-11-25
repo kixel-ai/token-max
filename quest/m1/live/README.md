@@ -17,8 +17,8 @@ token-max doesn't flag anything new, it still gets some credit".
 
 The credit already exists: [#129](https://github.com/kixel-ai/token-max/pull/129)
 added the "Compared with defaults, your settings save about $945/mo" line
-(`src/defaults.rs`), but on a terminal it prints only in the report after the
-walk, where it is easy to miss.
+(`src/defaults.rs`), but on a terminal it printed only in the report after the
+walk, where it was easy to miss, until it also opened the walk.
 
 Measured 2026-11-24 on the maintainer's `fedora` host at main 3c30ba7
 (`doctor --defaults --offline`, 9.3 GB, 338,298 requests in 6,747 sessions

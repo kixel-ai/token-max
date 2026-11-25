@@ -22,7 +22,7 @@ use crate::model::{Billing, Location, Millis, Scan, Verdict};
 use crate::prices::{Catalog, PriceOptions, cancel_downloads, load_prices};
 use crate::reader::{Reading, ScanOptions, scan};
 use crate::replay::{AnalyzeOptions, analyze};
-use crate::report::{Listing, Origin, ReportOptions, format_report, totals_section};
+use crate::report::{Listing, Origin, ReportOptions, format_report, opening_note, totals_section};
 use crate::safe::{ScanError, display};
 use crate::sessions::{Session, export};
 use crate::ssh::{self, Reply, Scope};
@@ -1767,14 +1767,23 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
             Side::There { .. } => None,
         });
         let credit = match &sum {
-            Some(sum) if sections == 1 => sum.credit("this host's"),
+            Some(sum) if sections == 1 && !advice => sum.credit("this host's").map(|c| {
+                (
+                    opening_note(c.contains('~'), sum.partial && c.contains('%')),
+                    c,
+                )
+            }),
             _ => None,
         };
-        let head = format!(
-            "{head}{}{}",
-            title.unwrap_or_default(),
-            credit.map_or_else(String::new, |c| style.line(&c))
-        );
+        let credit = credit.map_or_else(String::new, |(note, credit)| {
+            let note = if note.is_empty() {
+                note
+            } else {
+                style.dim(&note)
+            };
+            style.line(&credit) + &note
+        });
+        let head = format!("{head}{}{credit}", title.unwrap_or_default());
         let walk = Walk {
             hosts,
             head,

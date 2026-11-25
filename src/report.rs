@@ -1293,12 +1293,15 @@ pub fn totals_section(
     text.push('\n');
     let saving = totals.savings.text("Changes offered", "these hosts'");
     let credit = totals.credit("these hosts'").unwrap_or_default();
-    for line in [saving, credit] {
+    let tilde = [&spent, &saving, &credit].iter().any(|t| t.contains('~'));
+    let shares = [&saving, &credit].iter().any(|t| t.contains('%'));
+    let note = opening_note(tilde, totals.partial && shares);
+    for (line, style) in [(saving, PLAIN), (credit, PLAIN), (note, DIM)] {
         if line.is_empty() {
             continue;
         }
         text.push_str(&wrap_spans(
-            &[(&line, PLAIN)],
+            &[(&line, style)],
             WrapOptions {
                 width: options.width,
                 indent: MARGIN,
@@ -1311,6 +1314,23 @@ pub fn totals_section(
     text
 }
 
+/// What a figure marked `~` assumes, said once.
+const TILDE: &str = "A ~ marks a figure extrapolated from the requests that could be priced to those that could not, assuming they resemble each other, followed by its 95% margin of error.";
+
+/// The note under the figures that open the walk, which its reports' footers say only after
+/// it: what a `~` assumes, when `tilde`, and that a percent leaves out the profiles that priced
+/// none of their requests, when `partial`. Empty when neither applies.
+pub(crate) fn opening_note(tilde: bool, partial: bool) -> String {
+    let mut notes = vec![];
+    if tilde {
+        notes.push(TILDE);
+    }
+    if partial {
+        notes.push("Each percent is of only the spend that could be priced, since a profile priced none of its requests, so a true share may be smaller.");
+    }
+    notes.join(" ")
+}
+
 /// Render every setting and feature on one line, the changes first, with each line's
 /// evidence and the evidence cards under details. `fixes` are `doctor::fixes` of the same
 /// report, so each change names the edit or step `doctor` offers for it.
@@ -1320,7 +1340,7 @@ pub fn format_report<'a>(
     options: ReportOptions<'a>,
 ) -> Listing {
     let mut out = Out::new(report, options);
-    let (title, head, rows, vibes) = summary(report, fixes, &mut out);
+    let (title, head, rows, vibes, credit) = summary(report, fixes, &mut out);
     if options.details {
         details(report, &mut out);
     }
@@ -1336,6 +1356,7 @@ pub fn format_report<'a>(
         },
         home: out.home,
         spend: out.spend,
+        credit,
     }
 }
 
@@ -1376,6 +1397,8 @@ pub struct Listing {
     options: ReportOptions<'static>,
     home: Option<String>,
     spend: Spend,
+    /// What the settings its lines name save against the defaults; None under `--defaults`.
+    credit: Option<crate::defaults::Credit>,
 }
 
 /// What became of a change in `doctor`'s walk, for the list printed after it.
@@ -1400,9 +1423,10 @@ impl Listing {
         &self.title
     }
 
-    /// What the settings its lines name save against the defaults.
-    pub fn credit(&self) -> crate::defaults::Credit {
-        crate::defaults::Credit::of(self.rows.iter().filter_map(|r| r.baseline.as_ref()))
+    /// What the settings its lines name save against the defaults, as its own line says;
+    /// None under `--defaults`.
+    pub fn credit(&self) -> Option<crate::defaults::Credit> {
+        self.credit.clone()
     }
 
     /// The report without its header, with its changes grouped by `choices`: the accepted
@@ -5397,12 +5421,19 @@ pub(crate) fn sessions(scan: &crate::model::Scan) -> u64 {
 
 /// The report: what was read, then every setting and feature on one line, the changes
 /// first, with each line's evidence under `--details`.
-/// Returns the text before the list and the list's rows; what follows them stays in `out`.
+/// Returns the text before the list, the list's rows, its advice and what the settings save
+/// against the defaults; what follows them stays in `out`.
 fn summary(
     report: &Report,
     fixes: &[crate::doctor::Fix],
     out: &mut Out<'_>,
-) -> (String, String, Vec<Row>, Vec<Item>) {
+) -> (
+    String,
+    String,
+    Vec<Row>,
+    Vec<Item>,
+    Option<crate::defaults::Credit>,
+) {
     let arrow = out.arrow;
     let coverage = &report.scan.coverage;
     let spend = out.spend;
@@ -6791,8 +6822,9 @@ fn summary(
     if !together.is_empty() {
         out.line(&together, 0, PLAIN);
     }
-    if !report.scan.defaults {
-        let credit = crate::defaults::Credit::of(rows.iter().filter_map(|r| r.baseline.as_ref()));
+    let credit = (!report.scan.defaults)
+        .then(|| crate::defaults::Credit::of(rows.iter().filter_map(|r| r.baseline.as_ref())));
+    if let Some(credit) = &credit {
         out.line(&credit.text(spend.monthly(), &host), 0, PLAIN);
     }
     out.blank();
@@ -6810,9 +6842,9 @@ fn summary(
     };
     // Said once, for every figure extrapolated over requests that could not be priced.
     let tilde = if spend.margin.is_some() || rows.iter().any(|r| r.margin.is_some()) {
-        " A ~ marks a figure extrapolated from the requests that could be priced to those that could not, assuming they resemble each other, followed by its 95% margin of error."
+        format!(" {TILDE}")
     } else {
-        ""
+        String::new()
     };
     out.line(
         &format!(
@@ -6879,7 +6911,7 @@ fn summary(
             DIM,
         );
     }
-    (title, head, rows, vibes)
+    (title, head, rows, vibes, credit)
 }
 
 /// What every piece of context cost, including pieces no longer sent.

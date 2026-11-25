@@ -40,8 +40,8 @@ pub struct Totals {
 
 impl Totals {
     /// One host's report, the changes it offers, and what its settings save against the
-    /// defaults.
-    pub fn new(report: &Report, fixes: &[Fix], credit: Credit) -> Self {
+    /// defaults, None under `--defaults`.
+    pub fn new(report: &Report, fixes: &[Fix], credit: Option<Credit>) -> Self {
         let spend = Spend::new(report);
         let mut savings = Total::of(fixes);
         savings.set_share(spend.monthly());
@@ -55,7 +55,7 @@ impl Totals {
             partial: spend.partial,
             monthly: spend.monthly(),
             savings,
-            credit: (!report.scan.defaults).then_some(credit),
+            credit,
         }
     }
 
@@ -149,6 +149,29 @@ mod tests {
             spend_text(total.spend, total.margin, total.floor, total.partial),
             "$100 plus at least $7"
         );
+    }
+
+    #[test]
+    fn credits_add_up_and_take_their_share_of_every_hosts_spend() {
+        use crate::defaults::{Baseline, Saving};
+        let host = |monthly, usd| Totals {
+            monthly,
+            credit: Some(Credit::of(&[Baseline {
+                default: "5m".into(),
+                saving: Saving::Saves(usd),
+                margin: None,
+            }])),
+            ..Totals::default()
+        };
+        // 10% of $1,000 and 3% of $3,000 are 5% of the $4,000 together.
+        let mut total = host(1000.0, 100.0);
+        total.merge(&host(3000.0, 100.0));
+        assert_eq!(
+            total.credit("these hosts'").unwrap(),
+            "Compared with defaults, your settings save about $200/mo, 5% of these hosts' spend. Overlapping settings may save less."
+        );
+        // Under --defaults no host has one.
+        assert_eq!(Totals::default().credit("this host's"), None);
     }
 
     #[test]

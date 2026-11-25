@@ -43,6 +43,8 @@ pub fn build() -> String {
             include_str!("sessions.rs"),
             include_str!("repository.rs"),
             include_str!("totals.rs"),
+            // Its `Credit` is a field of the totals a report carries.
+            include_str!("defaults.rs"),
             // Its `Total` is a field of the totals a report carries, and its offers and
             // answers cross for a walk, with `mcp.rs`'s entries and `report.rs`'s choices.
             include_str!("doctor.rs"),

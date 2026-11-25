@@ -392,10 +392,9 @@ fn a_remote_report_matches_running_there() {
     assert!(text.contains("\n  Changes offered: "), "{text}");
     // So does one credit, before any host's section.
     let (head, _) = text.split_once("\ntoken-max: this host  ").unwrap();
-    assert!(
-        flat(head).contains("Compared with defaults, ") && head.contains("these hosts'"),
-        "{text}"
-    );
+    let head = flat(head);
+    let (_, credit) = head.split_once("Compared with defaults, ").unwrap();
+    assert!(credit.contains("of these hosts' spend."), "{text}");
     assert!(text.contains("\ntoken-max: devbox  "), "{text}");
     assert!(text.contains("  Profiles: claude ~/.claude.\n"), "{text}");
     assert!(!text.contains("don't add amounts across hosts"), "{text}");

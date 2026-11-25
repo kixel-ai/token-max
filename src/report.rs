@@ -5254,7 +5254,7 @@ fn memory_item(line: MemoryLine<'_>, out: &Out<'_>) -> Item {
             "No main session ran in the window, so where the work happens is unknown.".to_string()
         }
         (0, left) => format!(
-            "No main session in the window is known to be this line's: T3 could not settle which of its instances or native Claude Code ran {}, so where the work happens is unknown.",
+            "No main session in the window is known to be this line's: T3 could not settle whether this line or another ran {}, so where the work happens is unknown.",
             plural(left, "session")
         ),
         (n, _) => format!(
@@ -11398,7 +11398,7 @@ mod tests {
         let item = card(&report);
         assert!(item.quiet && item.how.is_none());
         assert!(
-            item.text.starts_with("No main session in the window is known to be this line's: T3 could not settle which of its instances or native Claude Code ran 1 session, so where the work happens is unknown."),
+            item.text.starts_with("No main session in the window is known to be this line's: T3 could not settle whether this line or another ran 1 session, so where the work happens is unknown."),
             "{}",
             item.text
         );

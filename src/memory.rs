@@ -134,7 +134,12 @@ fn check(
             }
         }
     }
-    let places = places(line, &mine, &scan.exposure.project_files);
+    let places = places(
+        line,
+        profile.harness,
+        &scan.requests,
+        &scan.exposure.project_files,
+    );
     let on = control.value;
     // Unknown when a setting the scan cannot resolve, such as a Codex --profile
     // selection, could change it.
@@ -436,14 +441,19 @@ fn check(
 /// Where the line's main sessions ran, each at its latest request's directory: in a
 /// repository with a project instruction file when its transcript recorded loading one at or
 /// above that directory, of the files `loaded` holds for it, or its directory holds one now;
-/// unknown when neither settles it.
+/// unknown when neither settles it. That latest request, of all of the harness's `requests`,
+/// also decides whose the session is, so no session counts on two lines.
 fn places(
     line: &crate::rows::Group<'_>,
-    mine: &[&Request],
+    harness: Harness,
+    requests: &[Request],
     loaded: &crate::collections::IndexMap<crate::model::Text, crate::collections::IndexSet<String>>,
 ) -> SessionPlaces {
     let mut latest: HashMap<&str, &Request> = HashMap::default();
-    for r in mine.iter().filter(|r| r.agent == Agent::Main) {
+    for r in requests
+        .iter()
+        .filter(|r| r.harness == harness && r.agent == Agent::Main)
+    {
         let seen = latest.entry(&r.session).or_insert(r);
         if r.time >= seen.time {
             *seen = r;
@@ -451,10 +461,19 @@ fn places(
     }
     let mut places = SessionPlaces::default();
     for (session, r) in latest {
-        // T3 settled an owner on the line, or could not settle one but every candidate is
-        // on it; a session another line may have run is left out, and counted as such.
-        let unsettled = r.issues.iter().any(|i| i.starts_with(crate::t3::UNSETTLED));
-        if unsettled && !r.profiles.iter().all(|p| line.ids.contains(p)) {
+        if !line.covers(&r.profiles) {
+            continue;
+        }
+        // T3 settled an owner on the line, or could not settle one but every candidate,
+        // including any T3 names outside this home, is on it; a session another line may
+        // have run is left out, and counted as such.
+        let open = r
+            .issues
+            .iter()
+            .find(|i| i.starts_with(crate::t3::UNSETTLED));
+        if open.is_some_and(|i| {
+            i.contains(crate::t3::OUTSIDE) || !r.profiles.iter().all(|p| line.ids.contains(p))
+        }) {
             places.unsettled += 1;
             continue;
         }
@@ -675,7 +694,6 @@ mod tests {
             // A subagent's requests are no session of their own.
             request("subagent", 1, Some("/repo"), Agent::Subagent),
         ];
-        let mine: Vec<&Request> = requests.iter().collect();
         let loaded = [
             ("recorded", "/gone/AGENTS.md"),
             // Loaded where it ran before, then resumed in a plain directory.
@@ -685,7 +703,7 @@ mod tests {
         .map(|(session, file)| (session.into(), [file.to_string()].into_iter().collect()))
         .collect();
         let line = crate::rows::Group::one(&profile);
-        let p = places(&line, &mine, &loaded);
+        let p = places(&line, Harness::Claude, &requests, &loaded);
         assert_eq!(
             p,
             SessionPlaces {
@@ -740,8 +758,9 @@ mod tests {
             ids: vec!["native".into(), "t3-mine".into()],
             members: vec![&native, &mine_t3],
         };
-        let request = |session: &str, owners: &[&str], unsettled: bool| {
+        let request = |session: &str, time: Millis, owners: &[&str], issue: Option<&str>| {
             let mut r = crate::test_support::make_request();
+            r.time = time;
             r.session = session.into();
             r.cwd = Some("/repo".into());
             r.agent = Agent::Main;
@@ -750,34 +769,43 @@ mod tests {
                 .map(|o| o.to_string())
                 .collect::<Vec<_>>()
                 .into();
-            if unsettled {
-                r.issues = vec![format!("{}: synthetic", crate::t3::UNSETTLED).into()];
+            if let Some(cause) = issue {
+                r.issues = vec![format!("{}: {cause}", crate::t3::UNSETTLED).into()];
             }
             r
         };
+        let open = Some("synthetic");
+        let outside = format!("synthetic{}", crate::t3::OUTSIDE);
         let requests = [
-            request("settled", &["native"], false),
+            request("settled", 1, &["native"], None),
             // T3 settled it to the other instance: not this line's.
-            request("shared", &["t3-other"], false),
+            request("shared", 1, &["t3-other"], None),
             // Unsettled, but every candidate is on the line.
-            request("candidates", &["native", "t3-mine"], true),
+            request("candidates", 1, &["native", "t3-mine"], open),
             // Unsettled, and the other instance may have run it.
-            request("either", &["native", "t3-other"], true),
+            request("either", 1, &["native", "t3-other"], open),
             // One T3 marked unsettled with a single candidate on the line still counts.
-            request("single", &["native"], true),
+            request("single", 1, &["native"], open),
+            // Its candidates here are on the line, but T3 names another owner outside.
+            request("elsewhere", 1, &["native", "t3-mine"], Some(&outside)),
+            // Its latest request is the other instance's, so it counts on that line alone.
+            request("handed", 1, &["native"], None),
+            request("handed", 2, &["t3-other"], None),
+            // Another harness's session of the same name is no session of this line's.
+            {
+                let mut r = request("settled", 3, &["t3-other"], None);
+                r.harness = Harness::Codex;
+                r
+            },
         ];
-        let mine: Vec<&Request> = requests
-            .iter()
-            .filter(|r| line.covers(&r.profiles))
-            .collect();
-        let p = places(&line, &mine, &Default::default());
+        let p = places(&line, Harness::Claude, &requests, &Default::default());
         assert_eq!(
             p,
             SessionPlaces {
                 sessions: 3,
                 instructed: 3,
                 unknown: 0,
-                unsettled: 1,
+                unsettled: 2,
             }
         );
     }

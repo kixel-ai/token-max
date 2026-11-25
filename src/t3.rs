@@ -107,6 +107,9 @@ pub(crate) fn constrain<T>(base: &mut CheckBase<T>, profiles: &[Profile]) {
 /// How the issue on a request whose owner T3 could not settle begins.
 pub(crate) const UNSETTLED: &str = "T3/shared native history ownership is unresolved";
 
+/// What that issue adds when T3 names a possible owner outside the request's profiles.
+pub(crate) const OUTSIDE: &str = ", and T3 names an owner outside this home";
+
 /// Why a check of a T3 instance gives no verdict when the instance's settings owner is unknown.
 pub(crate) const UNOWNED: &str = "T3 instance is disabled or its effective control ownership is unresolved; retained historical costs do not establish an active setting to change";
 
@@ -2399,8 +2402,18 @@ pub(crate) fn enrich(
                 }
                 Some(c) => {
                     cause = Some(c);
+                    // T3's database may name an owner none of these profiles is,
+                    // such as an instance now under another home.
+                    let outside: Vec<String> = session_owners
+                        .into_iter()
+                        .flatten()
+                        .filter(|o| !r.profiles.contains(o))
+                        .cloned()
+                        .collect();
+                    let also = if outside.is_empty() { "" } else { OUTSIDE };
                     r.issues.push(
-                        format!("{UNSETTLED}: {c}; current control guidance is advisory").into(),
+                        format!("{UNSETTLED}: {c}{also}; current control guidance is advisory")
+                            .into(),
                     );
                     // Context before the window prices cache state but says nothing about
                     // which controls ran the selected requests.
@@ -2410,14 +2423,6 @@ pub(crate) fn enrich(
                         for state in states {
                             *unresolved.entry((state, c)).or_default() += 1;
                         }
-                        // T3's database may name an owner none of these profiles is,
-                        // such as an instance now under another home.
-                        let outside = session_owners
-                            .into_iter()
-                            .flatten()
-                            .filter(|o| !r.profiles.contains(o))
-                            .cloned()
-                            .collect();
                         unsettled.insert(Unsettled {
                             profiles: r.profiles.clone(),
                             outside,
@@ -3140,6 +3145,12 @@ mod tests {
             } else {
                 assert!(r.profiles.contains(&current.id));
                 assert!(t3.removed.is_empty());
+                // The request says T3 names an owner outside it, for checks that count it.
+                assert!(
+                    r.issues.iter().any(|i| i.contains(OUTSIDE)),
+                    "{:?}",
+                    r.issues
+                );
                 assert!(
                     t3.unresolved
                         .keys()

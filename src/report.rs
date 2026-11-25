@@ -6997,7 +6997,12 @@ fn summary(
             matches!(c, CheckResult::Compaction(c)
                 if c.scenarios.iter().chain(&c.cap).any(|s| s.margin.is_some()))
         });
-    let tilde = spend.margin.is_some() || rows.iter().any(|r| r.margin.is_some()) || windows;
+    // A switched-off feature's baseline can carry the only margin, in its line and the credit.
+    let tilde = spend.margin.is_some()
+        || rows
+            .iter()
+            .any(|r| r.margin.is_some() || r.baseline.as_ref().is_some_and(|b| b.margin.is_some()))
+        || windows;
     let left = left_out(report, conditional);
     // A blank line sets the notes and legend apart, when any follow.
     if out.options.details || out.options.color || tilde || !left.is_empty() {

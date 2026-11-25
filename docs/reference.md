@@ -1647,6 +1647,13 @@ sessions are read from the directory alone. A session with neither, because
 its directory is gone or unrecorded, counts as without one, and the card
 names how many did.
 
+A session counts for the line whose profile ran it. When a T3 instance shares
+native Claude Code's history, a session T3 settled to the instance counts for
+the instance's line, not the native one. A session whose owner T3 could not
+settle counts when every candidate owner is on the line, such as native Claude
+Code and an instance sharing its `settings.json`; otherwise the card leaves it
+out and says how many it left out.
+
 Where the advice doesn't hold, the card advises nothing: memory already off,
 or too few sessions in a repository, where memory may be the only place a fact
 is kept. It never repeats [`doctor`'s measured line](#reading-the-report),

@@ -449,11 +449,16 @@ fn places(
             *seen = r;
         }
     }
-    let mut places = SessionPlaces {
-        sessions: latest.len() as u64,
-        ..SessionPlaces::default()
-    };
+    let mut places = SessionPlaces::default();
     for (session, r) in latest {
+        // T3 settled an owner on the line, or could not settle one but every candidate is
+        // on it; a session another line may have run is left out, and counted as such.
+        let unsettled = r.issues.iter().any(|i| i.starts_with(crate::t3::UNSETTLED));
+        if unsettled && !r.profiles.iter().all(|p| line.ids.contains(p)) {
+            places.unsettled += 1;
+            continue;
+        }
+        places.sessions += 1;
         // A file loaded from where the session ran last, not from where it ran before.
         let recorded = r.cwd.as_deref().is_some_and(|cwd| {
             loaded
@@ -687,6 +692,7 @@ mod tests {
                 sessions: 5,
                 instructed: 2,
                 unknown: 2,
+                unsettled: 0,
             }
         );
         // Two of five is not most, though three are unknown or known to be in one.
@@ -695,7 +701,8 @@ mod tests {
             SessionPlaces {
                 sessions: 4,
                 instructed: 3,
-                unknown: 1
+                unknown: 1,
+                unsettled: 0,
             }
             .most()
         );
@@ -703,11 +710,76 @@ mod tests {
             !SessionPlaces {
                 sessions: 4,
                 instructed: 2,
-                unknown: 0
+                unknown: 0,
+                unsettled: 0,
             }
             .most()
         );
         assert!(!SessionPlaces::default().most());
+    }
+
+    #[test]
+    fn sessions_count_for_the_line_t3_settled_or_whose_candidates_it_holds() {
+        // Native Claude Code and one T3 instance share the line's settings file; another
+        // instance shares the native history but not the line.
+        let mut native = crate::test_support::make_profile("native", "/home/.claude");
+        native.memory = Some(crate::model::MemoryControl {
+            value: true,
+            owner: String::new(),
+            off: String::new(),
+            off_file: None,
+            directory: None,
+            unresolved: None,
+            overrides: vec![],
+            stored: false,
+            instructed: [("/repo".to_string(), Some(true))].into_iter().collect(),
+        });
+        let mine_t3 = crate::test_support::make_profile("t3-mine", "/home/.claude");
+        let line = crate::rows::Group {
+            lead: &native,
+            ids: vec!["native".into(), "t3-mine".into()],
+            members: vec![&native, &mine_t3],
+        };
+        let request = |session: &str, owners: &[&str], unsettled: bool| {
+            let mut r = crate::test_support::make_request();
+            r.session = session.into();
+            r.cwd = Some("/repo".into());
+            r.agent = Agent::Main;
+            r.profiles = owners
+                .iter()
+                .map(|o| o.to_string())
+                .collect::<Vec<_>>()
+                .into();
+            if unsettled {
+                r.issues = vec![format!("{}: synthetic", crate::t3::UNSETTLED).into()];
+            }
+            r
+        };
+        let requests = [
+            request("settled", &["native"], false),
+            // T3 settled it to the other instance: not this line's.
+            request("shared", &["t3-other"], false),
+            // Unsettled, but every candidate is on the line.
+            request("candidates", &["native", "t3-mine"], true),
+            // Unsettled, and the other instance may have run it.
+            request("either", &["native", "t3-other"], true),
+            // One T3 marked unsettled with a single candidate on the line still counts.
+            request("single", &["native"], true),
+        ];
+        let mine: Vec<&Request> = requests
+            .iter()
+            .filter(|r| line.covers(&r.profiles))
+            .collect();
+        let p = places(&line, &mine, &Default::default());
+        assert_eq!(
+            p,
+            SessionPlaces {
+                sessions: 3,
+                instructed: 3,
+                unknown: 0,
+                unsettled: 1,
+            }
+        );
     }
 
     #[test]

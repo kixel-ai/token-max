@@ -99,10 +99,13 @@ impl Needs {
             .collect();
         let command = commands[0].filter(|c| commands.iter().all(|o| *o == Some(*c)));
         // Native profiles that share a settings file share one install; each T3 instance
-        // may run its own.
-        let installs: std::collections::BTreeSet<Option<&str>> = old
+        // may run its own, and two T3 states can reuse an instance ID.
+        let installs: std::collections::BTreeSet<Option<(&str, &str)>> = old
             .iter()
-            .map(|(p, _)| p.t3.as_ref().map(|t| t.instance.as_str()))
+            .map(|(p, _)| {
+                p.t3.as_ref()
+                    .map(|t| (t.state.as_str(), t.instance.as_str()))
+            })
             .collect();
         Some(Upgrade {
             needs: self,
@@ -282,6 +285,19 @@ mod tests {
                 Some("2.1.200"),
                 "upgrade every Claude Code install that reads it"
             )
+        );
+        // Two T3 states may each run their own binary under the same instance ID.
+        let mut prod = make_t3_profile("prod", "/c");
+        let mut dev = make_t3_profile("dev", "/c");
+        prod.t3.as_mut().unwrap().instance = "claudeAgent".into();
+        dev.t3.as_mut().unwrap().instance = "claudeAgent".into();
+        dev.t3.as_mut().unwrap().state = "/dev".into();
+        let states = needs
+            .upgrade([(&prod, Some("2.1.200")), (&dev, Some("2.1.100"))])
+            .unwrap();
+        assert_eq!(
+            states.step(),
+            "upgrade every Claude Code install that reads it"
         );
         // A T3 instance runs its own binary, and an unknown install names no command.
         for profile in [&t3, &plain] {

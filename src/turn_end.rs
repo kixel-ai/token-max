@@ -20,7 +20,7 @@ use crate::prices::{
     Catalog, PRICE_SOURCES, Signs, Sum, TIER_SENSITIVITY, TIER_SIGNS, server_cost, tier_sensitive,
 };
 use crate::scenarios::{PartReplay, ReplayOptions, ReplayTtls};
-use crate::version::codex_at_least;
+use crate::version::Needs;
 
 const SOURCES: [&str; 3] = [
     "https://developers.openai.com/codex/config-reference (2026-11-23)",
@@ -29,7 +29,7 @@ const SOURCES: [&str; 3] = [
 ];
 
 /// The Codex release that added the setting, v0.156.0.
-const SINCE_MINOR: u64 = 156;
+const TURN_END: Needs = Needs::codex(156, 0);
 
 /// Inputs to the turn-end checks, which run after the window decisions.
 pub struct TurnEndOptions<'a> {
@@ -331,9 +331,13 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
         .map(|w| w.window)
         .or(losing.then_some(current))
         .filter(|_| settled);
-    let recent = selected.iter().max_by_key(|r| r.time);
-    let supported = recent.is_some_and(|r| codex_at_least(r.version.as_deref(), SINCE_MINOR, 0));
+    // Each profile's next session runs its latest install, and one file sets it for all.
+    let versions = crate::version::latest(&group.members, requests.iter().copied());
+    let supported = !versions.is_empty() && TURN_END.unmet(versions.iter().copied()).is_none();
     let applicable = control.unresolved.is_none() && supported;
+    let upgrade = TURN_END
+        .upgrade(versions.iter().copied())
+        .filter(|_| control.unresolved.is_none());
     let savings = winning
         .and_then(|w| w.savings_usd)
         .or(recommended.map(|_| 0.0))
@@ -353,7 +357,7 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
     uncertainty.extend(control.unresolved.clone());
     if !supported {
         uncertainty.insert(format!(
-            "current client support for {TURN_END_KEY} is not established (requires Codex v0.{SINCE_MINOR}.0)"
+            "current client support for {TURN_END_KEY} is not established (requires {TURN_END})"
         ));
     }
     let missing: Vec<&str> = models
@@ -454,6 +458,7 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
             assumptions,
             uncertainty: uncertainty.into_iter().collect(),
             sources: SOURCES.iter().chain(&PRICE_SOURCES).map(|s| s.to_string()).collect(),
+            upgrade,
         },
         unset: control.unset,
         usable,
@@ -1184,16 +1189,52 @@ mod tests {
             (c.base.action, c.base.recommended),
             (Action::Advisory, Some(100))
         );
-        assert!(c.base.uncertainty.iter().any(|u| u.contains("v0.156.0")));
+        assert!(
+            c.base
+                .uncertainty
+                .iter()
+                .any(|u| u.contains("Codex 0.156.0"))
+        );
+        let upgrade = c.base.upgrade.expect("only the version holds it back");
+        assert_eq!(
+            (upgrade.needs, upgrade.ran.as_deref(), upgrade.command),
+            (TURN_END, Some("0.155.0"), None)
+        );
 
         let mut shared = data(HOUR, limit());
         shared.profiles[0].turn_end.as_mut().unwrap().unresolved =
             Some("a named profile can set it".into());
+        for r in &mut shared.requests {
+            r.version = Some("0.155.0".into());
+        }
         let c = check(&shared);
         assert_eq!(
             (c.base.action, c.base.recommended),
             (Action::Advisory, Some(100))
         );
+        // An upgrade alone would not let it apply, so none is advised.
+        assert_eq!(c.base.upgrade, None);
+
+        // Another profile on the same file last ran an old install, though the latest
+        // request overall came from a supported one.
+        let mut grouped = data(HOUR, limit());
+        let mut second = grouped.profiles[0].clone();
+        second.id = "second".into();
+        grouped.profiles.push(second);
+        let resume = grouped
+            .requests
+            .iter_mut()
+            .find(|r| &*r.id == "resume")
+            .unwrap();
+        resume.profiles = vec!["second".into()].into();
+        resume.version = Some("0.155.0".into());
+        let c = check(&grouped);
+        assert_eq!(c.base.action, Action::Advisory);
+        let upgrade = c
+            .base
+            .upgrade
+            .expect("the second profile's install is too old");
+        assert_eq!(upgrade.ran.as_deref(), Some("0.155.0"));
     }
 
     #[test]

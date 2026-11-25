@@ -30,10 +30,10 @@ use crate::safe::{ScanError, identity, iso};
 use crate::scenarios::{
     AttemptScenario, ReplayOptions, ReplayTtls, ReplayedPart, cache_bucket, replay_parts,
 };
-use crate::version::claude_at_least;
+use crate::version::Needs;
 
 /// The v2.1 patch release that added TTL controls.
-const TTL_CONTROLS_PATCH: u64 = 242;
+const TTL_CONTROLS: Needs = Needs::claude(1, 242);
 
 const TTL_SOURCE: &str = "https://code.claude.com/docs/en/prompt-caching (2026-11-07)";
 
@@ -682,25 +682,18 @@ fn ttl_check(
         Some(_) => current.value,
     };
     // Each source's current client must honor the setting, since one file sets it for all.
-    fn latest<'r>(list: &[&'r Request], id: &String) -> Option<&'r str> {
-        list.iter()
-            .rev()
-            .find(|r| r.profiles.contains(id))
-            .and_then(|r| r.version.as_deref())
-    }
-    let versions: Vec<Option<&str>> = group
-        .ids
-        .iter()
-        .filter(|id| requests.iter().any(|r| r.profiles.contains(id)))
-        .map(|id| latest(&relevant, id).or_else(|| latest(requests, id)))
-        .collect();
-    let supported = !versions.is_empty()
-        && versions
-            .into_iter()
-            .all(|v| claude_at_least(v, 1, TTL_CONTROLS_PATCH));
+    let versions = crate::version::latest(&group.members, requests.iter().copied());
+    let upgrade = TTL_CONTROLS.unmet(versions.iter().copied());
+    let supported = !versions.is_empty() && upgrade.is_none();
     // An unset main TTL varies with billing, so pinning the replay's winner is a change either way.
     let pinnable = current.value.is_none() && current.reason == TTL_BILLING_UNKNOWN;
-    let applies = supported && (current.value.is_some() || pinnable);
+    let settable = current.value.is_some() || pinnable;
+    let applies = supported && settable;
+    // Advice names only the install an upgrade reaches, and none while an SDK app on the
+    // same file is also too old.
+    let upgrade = upgrade
+        .filter(|_| settable)
+        .and_then(|_| TTL_CONTROLS.advice(&group.members, requests.iter().copied()));
     let action = match recommended {
         Some(recommended) if applies => {
             if Some(recommended) != current.value {
@@ -826,6 +819,7 @@ fn ttl_check(
                 .chain(PRICE_SOURCES)
                 .map(String::from)
                 .collect(),
+            upgrade,
         },
         window_basis_kind: if input.since.is_some() {
             WindowBasisKind::Explicit
@@ -1559,10 +1553,37 @@ mod tests {
         assert!(pinned.base.recommended.is_some());
         assert_eq!(pinned.base.savings_usd, None);
         s.profiles[0].ttl.main.reason = "prompt caching is disabled".into();
-        assert_eq!(check(&s, None, 100).base.action, Action::Advisory);
-        s.profiles[0].ttl.main.value = Some(H1);
         s.requests[0].version = Some("2.1.100".into());
-        assert_eq!(check(&s, None, 100).base.action, Action::Advisory);
+        let disabled = check(&s, None, 100);
+        assert_eq!(disabled.base.action, Action::Advisory);
+        // An upgrade alone would not let it apply.
+        assert_eq!(disabled.base.upgrade, None);
+        s.profiles[0].ttl.main.value = Some(H1);
+        // An Agent SDK app pins its own Claude Code, so its old version names no upgrade.
+        let sdk = check(&s, None, 100);
+        assert_eq!(sdk.base.action, Action::Advisory);
+        assert_eq!(sdk.base.upgrade, None);
+        s.requests[0].client = Some("cli".into());
+        let old = check(&s, None, 100);
+        assert_eq!(old.base.action, Action::Advisory);
+        let upgrade = old.base.upgrade.expect("only the version holds it back");
+        assert_eq!(
+            (upgrade.needs, upgrade.ran.as_deref()),
+            (TTL_CONTROLS, Some("2.1.100"))
+        );
+        // An SDK app on the same file just as old would still hold it back after the
+        // install's upgrade, so neither names one; a new enough one leaves the advice.
+        let mut sdk = s.requests[0].clone();
+        sdk.id = "sdk".into();
+        sdk.time -= 1;
+        sdk.client = Some("sdk-ts".into());
+        s.requests.insert(0, sdk);
+        let both = check(&s, None, 100);
+        assert_eq!(both.base.action, Action::Advisory);
+        assert_eq!(both.base.upgrade, None);
+        s.requests[0].version = Some("2.1.242".into());
+        assert!(check(&s, None, 100).base.upgrade.is_some());
+        s.requests.remove(0);
         s.requests[0].parts[0].model = Some("private-internal".into());
         let result = check(&s, None, 100);
         assert_eq!(result.base.recommended, None);

@@ -718,17 +718,13 @@ fn definition<'a>(controls: &'a AgentControls, kind: &str) -> Option<&'a AgentDe
         .max_by_key(|d| d.project.as_ref().map_or(0, String::len))
 }
 
-/// The controls that decide a subagent's model, without its effort.
-fn model_controls(controls: &AgentControls) -> AgentControls {
+/// The controls that decided a run's model in `cwd`, without its effort.
+fn model_controls(controls: &AgentControls, cwd: Option<&str>) -> AgentControls {
     AgentControls {
         effort: None,
         effort_unresolved: None,
-        directories: controls
-            .directories
-            .iter()
-            .map(|(cwd, c)| (cwd.clone(), model_controls(c)))
-            .collect(),
-        ..controls.clone()
+        directories: IndexMap::default(),
+        ..scoped(controls, cwd).clone()
     }
 }
 
@@ -1199,11 +1195,6 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
             .iter()
             .filter(|p| profiles.contains(&p.id))
             .collect();
-        // Profiles that differ only in effort still agree on every run's model.
-        let shared = owners.first().filter(|first| {
-            let first = model_controls(&first.agents);
-            owners.iter().all(|p| model_controls(&p.agents) == first)
-        });
         let mut runs: IndexMap<&str, Vec<&Request>> = IndexMap::default();
         for r in &requests {
             runs.entry(&*r.session).or_default().push(r);
@@ -1231,6 +1222,19 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
                 cwd: all.iter().find_map(|r| r.cwd.as_deref()),
                 start,
             };
+            // Profiles sharing the run agree on its model when their controls in its
+            // directory differ only in effort, wherever else their settings differ.
+            let sharing: Vec<&Profile> = owners
+                .iter()
+                .copied()
+                .filter(|p| all.iter().any(|r| r.profiles.contains(&p.id)))
+                .collect();
+            let shared = sharing.first().filter(|first| {
+                let first = model_controls(&first.agents, run.cwd);
+                sharing
+                    .iter()
+                    .all(|p| model_controls(&p.agents, run.cwd) == first)
+            });
             let source = match shared {
                 None => (
                     ModelSource::Unknown,
@@ -1247,10 +1251,7 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
             };
             *sources.entry(source).or_default() += 1;
             // Each run's own profile names its agent file; members can hold different ones.
-            let own = owners
-                .iter()
-                .find(|p| all.iter().any(|r| r.profiles.contains(&p.id)))
-                .or(owners.first());
+            let own = sharing.first();
             // A run whose metadata doesn't say is built in only when no agent file of its
             // name replaces the built-in, as its model source decides.
             built_in &= subagent.is_some_and(|s| {
@@ -1265,10 +1266,7 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
                 effort_settings.insert(effort);
             }
             // Profiles sharing the history each record the run, and each needs its own file.
-            let sharing = owners
-                .iter()
-                .filter(|p| all.iter().any(|r| r.profiles.contains(&p.id)));
-            for profile in sharing.filter(|_| replaces) {
+            for profile in sharing.iter().filter(|_| replaces) {
                 let controls = scoped(&profile.agents, run.cwd);
                 forced |= controls.force;
                 if let Some(d) = definition(controls, kind) {
@@ -1825,6 +1823,31 @@ mod tests {
         assert_eq!(source(&shared), ModelSource::Unknown);
         shared.profiles[1].agents.unresolved = None;
         assert_eq!(source(&shared), ModelSource::Inherited);
+        // Each run compares the controls of its own directory: an effort-only override in
+        // another project leaves its model attributed; a model override where it ran doesn't.
+        for r in &mut shared.requests {
+            r.cwd = Some("/synthetic/run".into());
+        }
+        let mut elsewhere = shared.profiles[0].agents.clone();
+        elsewhere.effort = Some(Owned {
+            value: "low".into(),
+            owner: "/synthetic/other/.claude/settings.json".into(),
+        });
+        shared.profiles[0]
+            .agents
+            .directories
+            .insert("/synthetic/other".into(), elsewhere.clone());
+        assert_eq!(source(&shared), ModelSource::Inherited);
+        elsewhere.model = Some(Owned {
+            value: "claude-haiku-5-5".into(),
+            owner: "/synthetic/run/.claude/settings.json".into(),
+        });
+        shared.profiles[0]
+            .agents
+            .directories
+            .insert("/synthetic/run".into(), elsewhere);
+        assert_eq!(source(&shared), ModelSource::Unknown);
+        shared.profiles[0].agents.directories.clear();
         shared.profiles[1].agents.model = Some(Owned {
             value: "claude-haiku-5-5".into(),
             owner: "CLAUDE_CODE_SUBAGENT_MODEL".into(),

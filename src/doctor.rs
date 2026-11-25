@@ -56,9 +56,11 @@ pub struct Fix {
     pub how: How,
     /// The report lines it comes from: the first, and any other line making the same edit.
     pub origins: Vec<Origin>,
-    /// The changes of its kind and reason it is offered with when it saves little; none
-    /// for a change that stands alone, such as a check.
-    pub group: Option<Group>,
+    /// The section it is offered and listed in, with the changes of its kind and reason.
+    pub section: Section,
+    /// The settings file or profile its report line names, when several profiles were read;
+    /// empty otherwise.
+    pub profile: String,
     /// Where a never-used MCP server it turns off is configured, which the walk offers to
     /// remove after a yes; empty for any other change.
     pub removal: Vec<Definition>,
@@ -78,26 +80,87 @@ fn known<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<&'static s
         .ok_or_else(|| serde::de::Error::custom("unknown saving verb"))
 }
 
-/// Small changes the walk offers together: features of one kind changed for one reason,
-/// such as never-used MCP servers turned off.
+/// The section a change joins, which the walk asks as one question and the report lists as
+/// one row: features of one kind changed for one reason, such as never-used MCP servers
+/// turned off, both prompt cache TTLs, or one setting across profiles, such as auto memory.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Group {
-    pub kind: ContextKind,
-    pub reason: Reason,
-    /// The group's heading, such as "Never-used MCP servers".
+pub struct Section {
+    pub kind: Kind,
+    /// The section's heading, such as "Never-used MCP servers".
     pub label: String,
-    /// This member's name in the group's list, such as the server's name.
+    /// This member's name in the section's list, such as the server's name, or "main" for the
+    /// main agent's cache TTL.
     pub member: String,
     /// Where the member was found, such as a skill's SKILL.md, which tells apart two
     /// members with one name.
     pub location: Option<String>,
 }
 
-impl Group {
-    /// Whether two changes in these groups belong to one: the same kind and reason, and
-    /// so the same heading. Their changes must match too.
-    fn joins(&self, other: &Group) -> bool {
-        self.kind == other.kind && self.reason == other.reason && self.label == other.label
+/// What joins changes into a section.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Kind {
+    /// Tools, skills or MCP servers changed for one reason.
+    Feature(ContextKind, Reason),
+    /// The main-agent and subagent prompt cache TTLs, which may move to different values.
+    CacheTtl,
+    /// One setting with no kind, such as auto memory, across profiles.
+    Setting,
+}
+
+impl Fix {
+    /// Whether `other` joins this change's section: the same kind, reason and heading, the
+    /// same offered effect and, for a setting, the same verdict, and measured or not alike. The cache TTLs may move to different
+    /// values, which the section names each.
+    pub(crate) fn joins(&self, other: &Fix) -> bool {
+        let (a, b) = (&self.section, &other.section);
+        a.kind == b.kind
+            && a.label == b.label
+            && (a.kind == Kind::CacheTtl || target(&self.value) == target(&other.value))
+            // A setting recommended off, such as never-used auto memory, is asked apart from
+            // one only worth considering, such as auto memory used at a high cost.
+            && (a.kind != Kind::Setting || self.suggested == other.suggested)
+            && self.saving.is_some() == other.saving.is_some()
+    }
+}
+
+/// The value a change offers, such as "off" in "on -> off".
+fn target(value: &str) -> &str {
+    [" → ", " -> "]
+        .iter()
+        .filter_map(|arrow| value.rsplit_once(arrow))
+        .map(|(_, to)| to)
+        .next()
+        .unwrap_or(value)
+}
+
+/// A section's values as one: its member count and offered value, such as "19 -> typed only",
+/// or each cache TTL's own change, such as "main 5m -> 1h, subagent 1h -> 5m". `members`
+/// gives each change's section, profile and value, a change listed once.
+pub(crate) fn section_value<'a>(
+    members: impl IntoIterator<Item = (&'a Section, &'a str, &'a str)>,
+    arrow: &str,
+) -> String {
+    let members: Vec<(&Section, &str, &str)> = members.into_iter().collect();
+    match members.as_slice() {
+        [] => String::new(),
+        [(_, _, value)] => (*value).to_string(),
+        [(first, _, _), ..] if first.kind == Kind::CacheTtl => {
+            // A section spanning several profiles names each change's profile.
+            let profiles: IndexSet<&str> = members.iter().map(|(_, p, _)| *p).collect();
+            let spans = profiles.len() > 1;
+            members
+                .iter()
+                .map(|(s, profile, v)| {
+                    if spans && !profile.is_empty() {
+                        format!("{} ({profile}) {v}", s.member)
+                    } else {
+                        format!("{} {v}", s.member)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+        [(_, _, value), ..] => format!("{} {arrow} {}", members.len(), target(value)),
     }
 }
 
@@ -308,7 +371,7 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
         .iter()
         .filter_map(|id| report.scan.profiles.iter().find(|p| p.id == *id))
         .collect();
-    let group = group(report, &line);
+    let section = section(report, &line);
     let mut removal = vec![];
     let how = match (members.first(), line.source) {
         (None, _) => How::Manual {
@@ -319,9 +382,7 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
         (Some(_), Source::Piece(c)) => match &c.control {
             Some(control) => {
                 let how = switch(&members, control.into(), report.scan.defaults);
-                let unused = group.as_ref().is_some_and(|g| {
-                    g.kind == ContextKind::McpServer && g.reason == Reason::Unused
-                });
+                let unused = section.kind == Kind::Feature(ContextKind::McpServer, Reason::Unused);
                 if let (true, How::Edit(patch)) = (unused, &how) {
                     let whole = ends_at(&c.name, c.details.iter().map(|d| d.name.as_str()));
                     let own = holds_its_tools(&c.name);
@@ -360,7 +421,8 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
         evidence: String::new(),
         how,
         origins: vec![line.origin],
-        group,
+        section,
+        profile: String::new(),
         removal,
     }
 }
@@ -432,10 +494,25 @@ fn gate(
     crate::mcp::Deny { step, ..deny }.by_hand(&why)
 }
 
-/// The group a feature's change joins: its kind and why it is offered, as its verdict says.
-fn group(report: &Report, line: &Recommendation<'_>) -> Option<Group> {
-    let Source::Piece(c) = line.source else {
-        return None;
+/// The section a line's change joins: a feature's kind and why it is offered, as its verdict
+/// says; both cache TTLs; or, for any other setting, that setting across profiles.
+fn section(report: &Report, line: &Recommendation<'_>) -> Section {
+    let own = |kind, label: &str, member: &str| Section {
+        kind,
+        label: label.into(),
+        member: member.into(),
+        location: None,
+    };
+    let c = match line.source {
+        Source::Check(CheckResult::Ttl(t)) => {
+            let member = match t.bucket {
+                Bucket::Main => "main",
+                Bucket::Subagent => "subagent",
+            };
+            return own(Kind::CacheTtl, "Prompt cache TTL", member);
+        }
+        Source::Check(_) => return own(Kind::Setting, &line.name, &line.name),
+        Source::Piece(c) => c,
     };
     let kind = match c.kind {
         ContextKind::Tool => "tools",
@@ -447,18 +524,18 @@ fn group(report: &Report, line: &Recommendation<'_>) -> Option<Group> {
         ContextKind::Instructions
         | ContextKind::System
         | ContextKind::Memory
-        | ContextKind::Other => return None,
+        | ContextKind::Other => return own(Kind::Setting, &line.name, &line.name),
     };
     let duplicate = c
         .skill
         .as_ref()
         .is_some_and(|s| s.retained_path.is_some() && s.path != s.retained_path);
-    let reason = match (c.verdict?, c.calls) {
-        (Verdict::Off, _) if duplicate => Reason::Duplicate,
-        (Verdict::Off, _) => Reason::Unused,
-        (Verdict::Consider, Some(0)) => Reason::Unrecorded,
-        (Verdict::Consider, Some(_)) => Reason::Costly,
-        _ => return None,
+    let reason = match (c.verdict, c.calls) {
+        (Some(Verdict::Off), _) if duplicate => Reason::Duplicate,
+        (Some(Verdict::Off), _) => Reason::Unused,
+        (Some(Verdict::Consider), Some(0)) => Reason::Unrecorded,
+        (Some(Verdict::Consider), Some(_)) => Reason::Costly,
+        _ => return own(Kind::Setting, &line.name, &line.name),
     };
     let what = match reason {
         // A skill left typeable counts only the model's uses.
@@ -474,20 +551,20 @@ fn group(report: &Report, line: &Recommendation<'_>) -> Option<Group> {
         ),
         Reason::Duplicate => format!("Duplicate copies of {kind}"),
     };
-    Some(Group {
-        kind: c.kind,
-        reason,
+    Section {
+        kind: Kind::Feature(c.kind, reason),
         label: what,
         member: c.name.clone(),
         location: c.skill.as_ref().and_then(|s| s.path.clone()),
-    })
+    }
 }
 
-/// Fill each fix's description and evidence from the report lines it comes from.
+/// Fill each fix's description, evidence and profile from the report lines it comes from.
 pub fn explain(fixes: &mut [Fix], listing: &Listing) {
     for fix in fixes {
         fix.what = listing.what(fix.origins[0]);
         fix.evidence = listing.evidence(fix.origins[0]);
+        fix.profile = listing.profile(fix.origins[0]);
     }
 }
 
@@ -1411,7 +1488,7 @@ impl Standing {
     }
 }
 
-/// A prompt: its question, and whether it offers to split a group into its changes.
+/// A prompt: its question, and whether it offers to split a section into its changes.
 pub(crate) struct Prompt {
     text: String,
     split: bool,
@@ -1570,6 +1647,9 @@ impl Style {
         let mut rows = vec![];
         if let Some(host) = host {
             rows.push(("Host", host.to_string()));
+        }
+        if !fix.profile.is_empty() {
+            rows.push(("Profile", fix.profile.clone()));
         }
         if !fix.what.is_empty() {
             rows.push(("What", fix.what.clone()));
@@ -1933,11 +2013,33 @@ fn writable(path: &Path) -> bool {
 /// A question saving less than this every 30 days in total is not asked.
 pub(crate) const ASKED_USD: f64 = 1.0;
 
-/// Whether the walk takes up `fix`, a change no other joins in a group: it names a step by
-/// hand whatever it saves, and asks about an edit only as `ask` asks any question.
-pub(crate) fn takes_up(fix: &Fix) -> bool {
-    debug_assert!(fix.group.is_none(), "a grouped change shares its question");
-    !matches!(fix.how, How::Edit(_)) || Total::of(std::slice::from_ref(fix)).asked()
+/// Whether the walk offers `fix` as an edit: a member whose file refuses its edit becomes a
+/// step by hand, outside its section's question.
+pub(crate) fn offered(fix: &Fix) -> bool {
+    match &fix.how {
+        How::Edit(patch) => Target::open(&patch.file, patch.harness)
+            .is_ok_and(|target| apply(&target, &patch.edits, &[]).is_ok()),
+        How::Manual { .. } => false,
+    }
+}
+
+/// Whether the walk takes up `fix`, one of `fixes`: it names a step by hand whatever it
+/// saves, including an edit its file refuses, and asks about an edit only when its section
+/// saves enough to ask: `fix` and the other edits in `fixes` it joins whose files take them,
+/// as `Owner::new` checks each offer.
+pub(crate) fn takes_up(fix: &Fix, fixes: &[Fix]) -> bool {
+    if !offered(fix) {
+        return true;
+    }
+    let section: Vec<Fix> = std::iter::once(fix)
+        .chain(
+            fixes
+                .iter()
+                .filter(|f| *f != fix && f.joins(fix) && offered(f)),
+        )
+        .cloned()
+        .collect();
+    Total::of(&section).asked()
 }
 
 /// A file's accepted changes: settings to set, and MCP server entries to remove.
@@ -2184,7 +2286,7 @@ pub(crate) enum Answer {
     Yes,
     No,
     Quit,
-    /// Split a group, asking about each of its changes.
+    /// Split a section, asking about each of its changes.
     Split,
 }
 
@@ -2971,7 +3073,7 @@ struct Member<'a> {
     offer: &'a Offer,
 }
 
-/// One question of the walk: a change, or a group of one host's small ones.
+/// One question of the walk: a change, or a section of one host's changes.
 struct Question<'a> {
     members: Vec<Member<'a>>,
 }
@@ -2992,61 +3094,124 @@ impl Question<'_> {
         self.together().usd()
     }
 
-    /// What the members save together, such as ("saves $9.40/mo", "2%"): up to that
-    /// when one's saving depends on a default, at least that when one was measured in part.
+    /// What the members save together, such as ("saves $9.40/mo", "2%"): at least that
+    /// when one was measured in part, and a saving that depends on a default apart, as up to
+    /// that, such as "saves $3/mo + up to $9/mo".
     fn saving(&self) -> Option<(String, String)> {
         let total = self.together();
         let usd = self.usd()?;
-        let verb = if total.up_to.changes > 0 {
-            UP_TO
-        } else if total.partial > 0 {
-            AT_LEAST
-        } else {
-            "saves"
-        };
+        let verb = if total.partial > 0 { AT_LEAST } else { "saves" };
         let unknown = total.measured.unknown_share || total.up_to.unknown_share;
         let share = (!unknown).then_some(total.measured.share + total.up_to.share);
-        let margin = Margin::plus(total.measured.margin, total.up_to.margin);
-        saving(verb, Some(usd), margin, share)
+        let (measured, up_to) = (&total.measured, &total.up_to);
+        match (measured.changes, up_to.changes) {
+            (_, 0) => saving(verb, Some(usd), measured.margin, share),
+            (0, _) => saving(UP_TO, Some(usd), up_to.margin, share),
+            _ => Some((
+                format!(
+                    "{verb} {} + up to {}",
+                    approx(measured.usd, measured.margin, "/mo"),
+                    approx(up_to.usd, up_to.margin, "/mo")
+                ),
+                share.map_or_else(String::new, share_text),
+            )),
+        }
     }
 
-    /// A group as the walk offers it, its counter `counter`: what its kind of feature is,
-    /// then every member's name. Each member says what it does when the person splits
-    /// the group.
+    /// A section as the walk offers it, its counter `counter`: what its kind of change is,
+    /// then how many members and the largest of them by name. Each member says what it does
+    /// when the person splits the section.
     fn card(&self, counter: &str, host: Option<&str>, style: &Style) -> String {
-        let first = &self.members[0].offer.fix;
-        let group = first.group.as_ref().expect("only groups share a question");
-        let groups: Vec<&Group> = self
-            .members
-            .iter()
-            .filter_map(|m| m.offer.fix.group.as_ref())
-            .collect();
-        // A name two members share, such as a duplicate skill's, is followed by its location.
-        let names: Vec<String> = groups
-            .iter()
-            .map(|g| {
-                let shared = groups.iter().filter(|o| o.member == g.member).count() > 1;
-                match &g.location {
-                    Some(at) if shared => format!("{} ({})", g.member, style.path(at)),
-                    _ => g.member.clone(),
-                }
-            })
-            .collect();
+        let fixes: Vec<&Fix> = self.members.iter().map(|m| &m.offer.fix).collect();
+        let first = fixes[0];
         let mut rows = vec![];
         if let Some(host) = host {
             rows.push(("Host", host.to_string()));
         }
-        rows.push(("What", crate::descriptions::kind(group.kind).to_string()));
-        rows.push(("Which", format!("{}.", names.join(", "))));
+        rows.push(("What", section_what(&first.section, &first.what)));
+        rows.push(("Which", which(&fixes, style)));
+        let value = section_value(
+            fixes
+                .iter()
+                .map(|f| (&f.section, f.profile.as_str(), f.value.as_str())),
+            style.arrow(),
+        );
         style.card(&Card {
             counter: counter.into(),
-            name: &group.label,
+            name: &first.section.label,
             saving: self.saving(),
             no_saving: "savings not measured",
-            value: first.value.clone(),
-            standing: Standing::of(first.suggested),
+            value,
+            standing: Standing::of(fixes.iter().all(|f| f.suggested)),
             rows,
         })
+    }
+}
+
+/// How many members a section card names before counting the rest.
+const NAMED: usize = 3;
+
+/// A section's members by name, largest saving first: every one when there are few, else
+/// the largest few and how many more, such as "dataviz, code-review, run and 16 more".
+fn which(fixes: &[&Fix], style: &Style) -> String {
+    let mut fixes = fixes.to_vec();
+    // A stable sort keeps the report's order among equal and unmeasured savings.
+    fixes.sort_by(|a, b| match (a.saving, b.saving) {
+        (Some(a), Some(b)) => b.total_cmp(&a),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+    let names: Vec<String> = fixes
+        .iter()
+        .map(|f| {
+            let s = &f.section;
+            // A name two members share, such as a duplicate skill's, is followed by its
+            // location when the copies' locations differ, and by its profile when the
+            // location alone repeats, as two profiles' copies of one skill do; a setting's
+            // name is its profile.
+            let peers = |same: &dyn Fn(&Fix) -> bool| fixes.iter().filter(|o| same(o)).count() > 1;
+            let shared = peers(&|o| o.section.member == s.member);
+            let placed =
+                !peers(&|o| o.section.member == s.member && o.section.location == s.location);
+            let moved = fixes
+                .iter()
+                .any(|o| o.section.member == s.member && o.section.location != s.location);
+            match (&s.location, s.kind, f.profile.as_str()) {
+                (Some(at), Kind::Feature(..), profile) if shared && moved => {
+                    if placed || profile.is_empty() {
+                        format!("{} ({})", s.member, style.path(at))
+                    } else {
+                        format!("{} ({}, {profile})", s.member, style.path(at))
+                    }
+                }
+                (_, _, "") => s.member.clone(),
+                (_, Kind::Setting, profile) => profile.to_string(),
+                (_, _, profile) if shared => format!("{} ({profile})", s.member),
+                _ => s.member.clone(),
+            }
+        })
+        .collect();
+    let named = if names.len() > NAMED + 1 {
+        NAMED
+    } else {
+        names.len()
+    };
+    let mut text = names[..named].join(", ");
+    match names.len() - named {
+        0 => {}
+        rest => text += &format!(" and {rest} more"),
+    }
+    text + "."
+}
+
+/// What a section's kind of change does, in one sentence; for a section of one setting, that
+/// setting's own sentence, `what`.
+pub(crate) fn section_what(section: &Section, what: &str) -> String {
+    match section.kind {
+        Kind::Feature(kind, _) => crate::descriptions::kind(kind).into(),
+        Kind::CacheTtl => crate::descriptions::CACHE_TTLS.into(),
+        Kind::Setting => what.into(),
     }
 }
 
@@ -3157,9 +3322,9 @@ impl Walk<'_, '_> {
             }
         }
         for member in members {
-            // A group's step names its server.
-            let it = match (&member.offer.fix.group, members.len()) {
-                (Some(group), 2..) => group.member.as_str(),
+            // A section's step names its server.
+            let it = match members.len() {
+                2.. => member.offer.fix.section.member.as_str(),
                 _ => "it",
             };
             for (step, reason) in &member.offer.manual {
@@ -3289,9 +3454,9 @@ impl Walk<'_, '_> {
 }
 
 /// Walk through each host's changes, biggest saving first across hosts, and return what the
-/// person accepted on each, in the order of `hosts`. Features are offered in groups of one
-/// host's changes of one kind and reason, which the person can split to answer each, and a
-/// question saving under $1/mo in total is not asked. A yes to turning a never-used MCP
+/// person accepted on each, in the order of `hosts`. Changes are offered in sections of one
+/// host's changes of one kind and reason across its profiles, which the person can split to
+/// answer each, and a question saving under $1/mo in total is not asked. A yes to turning a never-used MCP
 /// server off is followed by an offer to remove its configuration, and each host's last
 /// question offers to remove the servers that are off already. Nothing is read or written
 /// here; end of input is a quit, which leaves the rest unaccepted.
@@ -3301,23 +3466,15 @@ pub fn ask(
     input: &mut impl BufRead,
     output: &mut impl Write,
 ) -> io::Result<Vec<Selection>> {
-    // A feature's change joins the others of its host, kind and reason, whatever it saves,
-    // measured apart from unmeasured; the person can split a group to answer each.
+    // A change joins the others of its host's section, whatever it saves, measured apart from
+    // unmeasured; the person can split a section to answer each.
     let mut questions: Vec<Question> = vec![];
     for (host, walking) in hosts.iter().enumerate() {
         for (index, offer) in walking.offers.offers.iter().enumerate() {
             let fix = &offer.fix;
             let joins = |q: &Question| {
                 let first = &q.members[0];
-                let first_fix = &first.offer.fix;
-                first.host == host
-                    && first_fix.value == fix.value
-                    && first_fix.saving.is_some() == fix.saving.is_some()
-                    && first_fix
-                        .group
-                        .as_ref()
-                        .zip(fix.group.as_ref())
-                        .is_some_and(|(a, b)| a.joins(b))
+                first.host == host && first.offer.fix.joins(fix)
             };
             let member = Member { host, index, offer };
             match questions.iter_mut().find(|q| joins(q)) {
@@ -3467,7 +3624,7 @@ pub fn ask(
             ("were", "they're")
         };
         let text = format!(
-            "{left}{more} change{} in groups saving under {}/mo {was} not asked; {they} in the list below.",
+            "{left}{more} change{} in sections saving under {}/mo {was} not asked; {they} in the list below.",
             if left == 1 { "" } else { "s" },
             about(ASKED_USD)
         );
@@ -4401,7 +4558,13 @@ mod tests {
             what: String::new(),
             evidence: String::new(),
             origins: vec![Origin::Check(usize::from(name.as_bytes()[0]))],
-            group: None,
+            section: crate::doctor::Section {
+                kind: crate::doctor::Kind::Setting,
+                label: name.into(),
+                member: name.into(),
+                location: None,
+            },
+            profile: String::new(),
             removal: vec![],
             how: How::Edit(Patch {
                 file: file.to_string_lossy().into_owned(),
@@ -4948,13 +5111,12 @@ mod tests {
             ..change(name, &settings, Harness::Claude, vec![edit(name, 1, false)])
         };
         let member = |name: &str, saving, reason, label: &str| Fix {
-            group: Some(Group {
-                kind: ContextKind::Skill,
-                reason,
+            section: Section {
+                kind: Kind::Feature(ContextKind::Skill, reason),
                 label: label.into(),
                 member: name.to_lowercase(),
                 location: None,
-            }),
+            },
             ..fix(name, saving)
         };
         let unused = "Never-used skills";
@@ -5006,13 +5168,13 @@ mod tests {
         );
         assert!(printed.contains("\n  5 questions about 8 changes, biggest saving first.\n"));
         assert!(printed.contains(
-            "\n  [2/5] Never-used skills  saves $11/mo  11%\n        on -> off  Recommended\n        What   Skills are packaged instructions the model can load when a task calls for one; each is listed by name and description in every request.\n        Which  b, s, t.\n  Accept all 3? [y]es, [n]o, [s]plit, [q]uit: "
+            "\n  [2/5] Never-used skills  saves $11/mo  11%\n        3 -> off  Recommended\n        What   Skills are packaged instructions the model can load when a task calls for one; each is listed by name and description in every request.\n        Which  b, s, t.\n  Accept all 3? [y]es, [n]o, [s]plit, [q]uit: "
         ), "{printed}");
         assert!(printed.contains(
-            "\n  [5/5] Never-used skills  savings not measured\n        on -> off  Recommended\n        What   Skills are packaged instructions the model can load when a task calls for one; each is listed by name and description in every request.\n        Which  k, l.\n"
+            "\n  [5/5] Never-used skills  savings not measured\n        2 -> off  Recommended\n        What   Skills are packaged instructions the model can load when a task calls for one; each is listed by name and description in every request.\n        Which  k, l.\n"
         ), "{printed}");
         assert!(printed.ends_with(
-            "\n  2 more changes in groups saving under $1/mo were not asked; they're in the list below.\n"
+            "\n  2 more changes in sections saving under $1/mo were not asked; they're in the list below.\n"
         ), "{printed}");
         for (name, want) in [
             ("A", Some(Choice::Accepted)),
@@ -5049,7 +5211,7 @@ mod tests {
         let (plan, printed) = walk(vec![fix("C", Some(0.3))], &w, "");
         assert_eq!(
             printed,
-            "\n  1 change in groups saving under $1/mo was not asked; it's in the list below.\n"
+            "\n  1 change in sections saving under $1/mo was not asked; it's in the list below.\n"
         );
         assert_eq!(choice(&plan, "C"), &Choice::Declined);
         assert_eq!(
@@ -5065,13 +5227,12 @@ mod tests {
         let home = w.home.to_string_lossy().into_owned();
         let copy = |line: &str, member: &str, at: Option<&str>| Fix {
             saving: Some(2.0),
-            group: Some(Group {
-                kind: ContextKind::Skill,
-                reason: Reason::Duplicate,
+            section: Section {
+                kind: Kind::Feature(ContextKind::Skill, Reason::Duplicate),
                 label: "Duplicate copies of skills".into(),
                 member: member.into(),
                 location: at.map(|at| format!("{home}/{at}/SKILL.md")),
-            }),
+            },
             ..change(line, &settings, Harness::Claude, vec![edit(line, 1, false)])
         };
         let (_, printed) = walk(
@@ -5088,6 +5249,170 @@ mod tests {
             printed.contains("  Which  review (~/a/SKILL.md), review (~/b/SKILL.md), lint.\n"),
             "{printed}"
         );
+        // Two profiles' copies of one skill at one path name their profiles instead.
+        let profiled = |line: &str, profile: &str| Fix {
+            profile: profile.into(),
+            ..copy(line, "review", Some("a"))
+        };
+        let (_, printed) = walk(
+            vec![profiled("A", "work"), profiled("B", "home")],
+            &w,
+            "n\n",
+        );
+        assert!(
+            printed.contains("  Which  review (work), review (home).\n"),
+            "{printed}"
+        );
+        // Two profiles each holding the same two copies name both the path and the profile.
+        let at = |line: &str, profile: &str, dir: &str| Fix {
+            profile: profile.into(),
+            ..copy(line, "review", Some(dir))
+        };
+        let (_, printed) = walk(
+            vec![
+                at("A", "work", "a"),
+                at("B", "work", "b"),
+                at("C", "home", "a"),
+                at("D", "home", "b"),
+            ],
+            &w,
+            "n\n",
+        );
+        // slash ok: the locations are formatted with / and abbreviated as given
+        let a = "~/a/SKILL.md";
+        // slash ok: as above
+        let b = "~/b/SKILL.md";
+        let expected = format!(
+            "  Which  review ({a}, work), review ({b}, work), review ({a}, home), \
+             review ({b}, home).\n"
+        );
+        assert!(printed.contains(&expected), "{printed}");
+    }
+
+    #[test]
+    fn a_section_card_names_its_largest_members_and_each_cache_ttl_its_own_change() {
+        let w = Workspace::new();
+        let settings = w.claude.join("settings.json");
+        let skill = |line: &str, saving: f64| Fix {
+            saving: Some(saving),
+            section: Section {
+                kind: Kind::Feature(ContextKind::Skill, Reason::Unused),
+                label: "Never-used skills".into(),
+                member: line.to_lowercase(),
+                location: None,
+            },
+            ..change(line, &settings, Harness::Claude, vec![edit(line, 1, false)])
+        };
+        let skills = ["A", "B", "C", "D", "E"]
+            .iter()
+            .zip([1.0, 5.0, 4.0, 3.0, 2.0])
+            .map(|(line, saving)| skill(line, saving))
+            .collect();
+        let (_, printed) = walk(
+            skills, &w, "n
+",
+        );
+        assert!(
+            printed.contains("        5 -> off  Recommended\n"),
+            "{printed}"
+        );
+        assert!(
+            printed.contains("  Which  b, c, d and 2 more.\n"),
+            "{printed}"
+        );
+        // The main agent's TTL moves up and the subagents' down; the unset main TTL's saving
+        // depends on the default, so it is counted apart. Split, each member names its profile.
+        let ttl = |line: &str, member: &str, value: &str, verb, suggested| Fix {
+            value: value.into(),
+            verb,
+            suggested,
+            profile: "~/.claude/settings.json".into(),
+            section: Section {
+                kind: Kind::CacheTtl,
+                label: "Prompt cache TTL".into(),
+                member: member.into(),
+                location: None,
+            },
+            ..change(line, &settings, Harness::Claude, vec![edit(line, 1, false)])
+        };
+        let (plan, printed) = walk(
+            vec![
+                ttl("M", "main", "unset -> 1h", UP_TO, false),
+                ttl("S", "subagent", "1h -> 5m", "saves", true),
+            ],
+            &w,
+            "s\ny\nn\n",
+        );
+        assert!(
+            printed.contains(
+                "  [1/1] Prompt cache TTL  saves $10/mo + up to $10/mo  20%\n        main unset -> 1h, subagent 1h -> 5m  Recommended\n"
+            ),
+            "{printed}"
+        );
+        assert!(
+            // slash ok: the profile is the report's tag, passed through as given
+            printed.contains("  Profile  ~/.claude/settings.json\n"),
+            "{printed}"
+        );
+        assert_eq!(choice(&plan, "M"), &Choice::Accepted);
+        assert_eq!(choice(&plan, "S"), &Choice::Declined);
+    }
+
+    #[test]
+    fn a_cache_ttl_changed_in_several_profiles_names_each_profile() {
+        let ttl = |member: &str| Section {
+            kind: Kind::CacheTtl,
+            label: "Prompt cache TTL".into(),
+            member: member.into(),
+            location: None,
+        };
+        let (main, sub) = (ttl("main"), ttl("subagent"));
+        assert_eq!(
+            section_value(
+                [
+                    (&main, "a", "5m -> 1h"),
+                    (&main, "b", "5m -> 1h"),
+                    (&main, "c", "1h -> 5m"),
+                    (&sub, "a", "1h -> 5m"),
+                ],
+                "->"
+            ),
+            "main (a) 5m -> 1h, main (b) 5m -> 1h, main (c) 1h -> 5m, subagent (a) 1h -> 5m"
+        );
+    }
+
+    #[test]
+    fn a_change_is_taken_up_when_its_section_saves_enough_to_ask() {
+        let w = Workspace::new();
+        let settings = w.claude.join("settings.json");
+        let elsewhere = w.home.join("other").join("settings.json");
+        std::fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
+        let memory = |line: &str, settings: &Path| Fix {
+            saving: Some(0.6),
+            section: Section {
+                kind: Kind::Setting,
+                label: "Auto memory".into(),
+                member: "Auto memory".into(),
+                location: None,
+            },
+            ..change(line, settings, Harness::Claude, vec![edit(line, 1, false)])
+        };
+        let (a, b) = (memory("A", &settings), memory("B", &elsewhere));
+        assert!(!takes_up(&a, std::slice::from_ref(&a)));
+        assert!(takes_up(&a, &[a.clone(), b.clone()]));
+        // Another member whose file refuses its edit becomes a step by hand, so it adds
+        // nothing to the section's question.
+        let refused = memory("R", Path::new("/nonexistent/token-max/settings.json"));
+        assert!(!takes_up(&a, &[a.clone(), refused.clone()]));
+        // The refused edit itself is a step by hand the walk names, whatever it saves.
+        assert!(takes_up(&refused, &[a.clone(), refused.clone()]));
+        // One only worth considering, such as memory used at a high cost, is its own section.
+        let considered = Fix {
+            suggested: true,
+            ..b
+        };
+        assert!(!a.joins(&considered));
+        assert!(!takes_up(&a, &[a.clone(), considered]));
     }
 
     #[test]
@@ -5198,20 +5523,19 @@ mod tests {
             ]),
             "Accepted: ~$25/mo, margin unknown, 25% of this host's spend; overlapping changes may save less."
         );
-        // A group's heading sums its members the same way.
+        // A section's heading sums its members the same way, the "up to" part apart.
         let w = Workspace::new();
         let settings = w.claude.join("settings.json");
         let small = |name: &str, verb, usd| Fix {
             verb,
             saving: Some(usd),
             share: Some(usd / 100.0),
-            group: Some(Group {
-                kind: ContextKind::Tool,
-                reason: Reason::Unused,
+            section: Section {
+                kind: Kind::Feature(ContextKind::Tool, Reason::Unused),
                 label: "Never-used tools".into(),
                 member: name.into(),
                 location: None,
-            }),
+            },
             ..change(name, &settings, Harness::Claude, vec![edit(name, 1, false)])
         };
         let (_, printed) = walk(
@@ -5219,9 +5543,8 @@ mod tests {
             &w,
             "y\n",
         );
-        // The heading's figure holds only up to its sum; the running total says which part.
         assert!(
-            printed.contains("  [1/1] Never-used tools  saves up to $4/mo  4%\n"),
+            printed.contains("  [1/1] Never-used tools  saves $1/mo + up to $3/mo  4%\n"),
             "{printed}"
         );
         assert!(printed.contains(
@@ -5448,13 +5771,12 @@ mod tests {
         Fix {
             saving: Some(usd),
             share: Some(usd / 100.0),
-            group: Some(Group {
-                kind: ContextKind::McpServer,
-                reason: Reason::Unused,
+            section: Section {
+                kind: Kind::Feature(ContextKind::McpServer, Reason::Unused),
                 label: "Never-used MCP servers".into(),
                 member: name.to_lowercase(),
                 location: None,
-            }),
+            },
             removal,
             ..change(
                 name,
@@ -5505,13 +5827,12 @@ mod tests {
             vec![
                 // Offered for another reason, so asked alone, and its removal too.
                 Fix {
-                    group: Some(Group {
-                        reason: Reason::Costly,
+                    section: Section {
+                        kind: Kind::Feature(ContextKind::McpServer, Reason::Costly),
                         label: "MCP servers over $1 per use".into(),
                         member: "a".into(),
-                        kind: ContextKind::McpServer,
                         location: None,
-                    }),
+                    },
                     ..server("A", 6.0, &settings, vec![Definition::Entry(a.clone())])
                 },
                 server(

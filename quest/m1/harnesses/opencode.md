@@ -56,5 +56,18 @@ Recommendations:
 - Exercise against the local host's real `~/.local/share/opencode/opencode.db`
   and `~/.config/opencode/opencode.jsonc` before review, and cover v1, v2, T3,
   `sessions`, and comment-preserving JSONC edits with synthetic fixtures.
+- Uncached system prompt (decided 2026-11-25, maintainer, /quest-plan over
+  [this post](https://x.com/TekonBurns/status/2123525121168314876)):
+  gpt-6.2-sol and gpt-6.2-astra never cache a Responses request's top-level
+  `instructions`, but they cache the same text sent as a leading developer
+  message ([openai/codex#62312](https://github.com/openai/codex/issues/62312),
+  open). The post says OpenCode v2.3.2 moved the prompt there. When the
+  latest OpenCode session on a profile ran an older version with a gpt-6.2
+  model, price the system prompt's uncached input and recommend upgrading.
+  Record OpenCode's version per request for that, and use the upgrade
+  wording from `quest/m1/harness-upgrades.md` if it has landed.
+  Codex itself shows no gap on the maintainer's host: since 2026-11-18,
+  gpt-6.2-sol cached 90.2% of input over 1,281 requests, and gpt-6.1-sol
+  88.9% over 7,960. So Codex gets no line.
 - Document OpenCode discovery, pricing, and caveats in `docs/reference.md`,
   `docs/semantics.md`, and `docs/t3.md`.

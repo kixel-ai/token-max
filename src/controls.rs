@@ -848,6 +848,28 @@ pub struct WindowLayers {
     instance: Option<InstanceLayer>,
 }
 
+impl WindowLayers {
+    /// Every window the settings files name, as the owner each would be, `"auto"` left out.
+    pub fn windows(&self) -> Vec<String> {
+        let named = |row: &Map<String, Value>| {
+            row.get("autoCompactWindow")
+                .is_some_and(|v| v.as_str() != Some("auto"))
+        };
+        let mut owners = vec![];
+        for (file, config) in &self.scopes {
+            if named(config) {
+                owners.push(format!("{file}:autoCompactWindow"));
+            }
+            for (model, row) in members(config.get("modelSettings")) {
+                if named(members(Some(row))) {
+                    owners.push(format!("{file}:modelSettings.{model}.autoCompactWindow"));
+                }
+            }
+        }
+        owners
+    }
+}
+
 /// What a T3 instance sets above the settings files: its own variables and its own window.
 #[derive(Clone, Debug, PartialEq)]
 struct InstanceLayer {

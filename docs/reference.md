@@ -937,10 +937,16 @@ model's latest observed automatic-compaction trigger, else Claude Code's
 documented default. A window larger than the model's context window replays
 at that context window, as Claude Code caps it. Unresolved defaults, disabled
 compaction, unsupported versions/scopes, and ambiguous named Codex profiles stay
-advisory. A Codex limit that is set still gets its line when no selected request
+advisory. A window that is set still gets its line when no selected request
 exists, such as under a `--since` that excludes every one: the value and its
-setting, with no verdict and no edit, since nothing replays it. An unset limit
-gets none.
+setting, with no verdict and no edit, since nothing replays it. An unset window,
+or Claude's `"auto"`, gets none. With no request to name a model, Claude gets one
+line per setting in force: the top-level `autoCompactWindow` and each
+`modelSettings` row that names a window, or the single override above them,
+such as `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, whose evidence names the settings it
+outranks. Under `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` each line still shows the
+window and its evidence says the trigger falls below it; with no model to
+resolve that trigger against, `vibes` gives no cap for it.
 
 `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` resolves into the replayed trigger from every
 environment the window reads, a T3 instance's included. An explicit window

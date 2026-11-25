@@ -6683,11 +6683,17 @@ fn summary(
             ..i
         };
         // A `doctor` line denying the LSP tool in this card's settings leaves the plugin only
-        // its diagnostics, so the card reads as denied once the walk writes it.
+        // its diagnostics, so the card reads as denied once the walk writes it. The file may
+        // be written through another name for it, such as a link.
+        let settings = crate::discovery::realpath(&u.settings_file).ok();
+        let same = |file: &str| {
+            file == u.settings_file
+                || settings.is_some() && crate::discovery::realpath(file).ok() == settings
+        };
         let denies: Vec<Origin> = fixes
             .iter()
             .filter(|f| {
-                matches!(&f.how, How::Edit(p) if p.file == u.settings_file
+                matches!(&f.how, How::Edit(p) if same(&p.file)
                     && p.edits.iter().any(|e| e.op == crate::doctor::Op::Append
                         && e.path == ["permissions", "deny"]
                         && e.value == "LSP"))
@@ -10356,6 +10362,23 @@ mod tests {
                 .after
                 .is_empty()
         );
+        // A deny written through a link to the card's settings file is the same file.
+        #[cfg(unix)]
+        {
+            let w = crate::test_support::Workspace::new();
+            let settings = w.home.join("settings.json");
+            std::fs::write(&settings, "{}").unwrap();
+            let link = w.home.join("linked.json");
+            std::os::unix::fs::symlink(&settings, &link).unwrap();
+            let fixes = [deny(link.to_string_lossy().into_owned())];
+            report.lsp[0].settings_file = settings.to_string_lossy().into_owned();
+            let linked = format_report(&report, &fixes, ReportOptions::default())
+                .vibes
+                .into_iter()
+                .find(|i| i.name.contains("code intelligence"))
+                .unwrap();
+            assert_eq!(linked.after.len(), 1);
+        }
     }
 
     #[test]

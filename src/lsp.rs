@@ -336,6 +336,23 @@ fn checkout(dir: &str) -> Option<String> {
 }
 
 /// `dir`, or its nearest ancestor that is still a directory.
+/// `dir` by its real path, from its nearest existing ancestor's, so two spellings of one
+/// directory match before it exists; a relative one stays as given.
+fn real(dir: &str) -> String {
+    let base = Path::new(dir)
+        .is_absolute()
+        .then(|| nearest(dir))
+        .flatten()
+        .and_then(|at| Some((at, realpath(at).ok()?)));
+    match base {
+        Some((at, base)) => match dir[at.len()..].trim_start_matches(['/', '\\']) {
+            "" => base,
+            rest => join(&[&base, rest]),
+        },
+        None => dir.into(),
+    }
+}
+
 fn nearest(dir: &str) -> Option<&str> {
     let mut at = dir;
     while !Path::new(at).is_dir() {
@@ -510,12 +527,20 @@ pub fn lsp_use(scan: &Scan, since: Option<Millis>, now: Millis) -> Vec<LspUse> {
     let window = |time: Millis| since.is_none_or(|s| time >= s) && time <= now;
     let parents = parents(scan);
     let touched = touches(scan, &parents, since, now);
+    // Each plugins directory by its real path, so profiles reaching one through a link share
+    // a card; read here rather than in discovery, which the `sessions` export runs too.
+    let dirs: HashMap<&str, Option<String>> = claude
+        .iter()
+        .map(|p| {
+            let dir = p.plugins.as_ref().and_then(|d| d.dir.as_deref());
+            (p.id.as_str(), dir.map(real))
+        })
+        .collect();
     let owner = |p: &Profile| {
-        let plugins = p.plugins.as_ref().expect("filtered on its plugins");
         format!(
             "{}:enabledPlugins\n{}",
             p.settings_file,
-            plugins.dir.as_deref().unwrap_or("unread plugins")
+            dirs[p.id.as_str()].as_deref().unwrap_or("unread plugins")
         )
     };
     let mut projects: HashMap<&Text, String> = HashMap::default();
@@ -584,7 +609,7 @@ pub fn lsp_use(scan: &Scan, since: Option<Millis>, now: Millis) -> Vec<LspUse> {
                 languages,
                 settings_file: lead.settings_file.clone(),
                 root: lead.root.clone(),
-                plugins_dir: plugins.dir.clone(),
+                plugins_dir: dirs[lead.id.as_str()].clone(),
                 cache_dir: plugins.cache_dir.clone(),
                 named: plugins.named,
                 unresolved: line
@@ -789,10 +814,16 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
                 .map_or_else(|| "its plugins directory".into(), home)
         );
     }
-    if let Some(file) = u.denied.as_deref().filter(|_| !blocked) {
+    let denied = u.denied.as_deref().filter(|_| !blocked);
+    if let Some(file) = denied {
         text += &format!(
-            " permissions.deny in {} turns off the LSP tool, which Claude looks symbols up with, so the plugin would give only diagnostics after edits.",
-            home(file)
+            " permissions.deny in {} turns off the LSP tool, which Claude looks symbols up with, so the plugin would give only diagnostics after edits{}.",
+            home(file),
+            if u.unresolved {
+                ", if the T3 instance reads that file"
+            } else {
+                ""
+            }
         );
     }
     // token-max can't know the PATH claude starts with, so it names the server without
@@ -803,7 +834,17 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
             s.binary
         );
     }
-    text += " With the plugin, Claude looks up a symbol's definition and references instead of searching text and reading each candidate file, and sees the errors an edit introduced. Anthropic recommends it for typed languages; what it saves is not measured.";
+    const LOOKUP: &str = "looks up a symbol's definition and references instead of searching text and reading each candidate file";
+    text += &match (denied, u.unresolved) {
+        (None, _) => {
+            format!(" With the plugin, Claude {LOOKUP}, and sees the errors an edit introduced.")
+        }
+        (Some(_), false) => " With the plugin, Claude sees the errors an edit introduced.".into(),
+        (Some(_), true) => format!(
+            " With the plugin, Claude sees the errors an edit introduced, and where the LSP tool is on, {LOOKUP}."
+        ),
+    };
+    text += " Anthropic recommends it for typed languages; what it saves is not measured.";
     let on = Edit {
         path: vec!["enabledPlugins".into(), id.clone()],
         value: Value::Bool(true),
@@ -825,7 +866,7 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
     } else if install && u.unresolved {
         Some(How::Manual {
             step: format!(
-                "{server}, then run `claude plugin install {id}` with the Claude home and plugins directory the T3 instance uses, then start a new session"
+                "{server}, then if the plugins directory the T3 instance uses lacks it, run `claude plugin install {id}` with the Claude home and plugins directory the instance uses, then start a new session"
             ),
             reason: UNRESOLVED.into(),
         })
@@ -1102,6 +1143,29 @@ mod tests {
                 problem: "it is not a file".into()
             })
         );
+    }
+
+    #[test]
+    fn a_plugins_directory_is_named_by_its_real_path_even_before_it_exists() {
+        let w = Workspace::new();
+        let root = realpath(&native_path(&w.home)).unwrap();
+        let target = join(&[&root, "claude"]);
+        fs::create_dir_all(&target).unwrap();
+        assert_eq!(
+            real(&join(&[&target, "plugins"])),
+            join(&[&target, "plugins"])
+        );
+        assert_eq!(real(".plugin-cache"), ".plugin-cache");
+        #[cfg(unix)]
+        {
+            let link = join(&[&root, "link"]);
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            assert_eq!(
+                real(&join(&[&link, "plugins"])),
+                join(&[&target, "plugins"])
+            );
+            assert_eq!(real(&link), target);
+        }
     }
 
     #[test]
@@ -1565,7 +1629,7 @@ mod tests {
             unresolved.how,
             Some(How::Manual {
                 step: format!(
-                    "{server}, then run `claude plugin install {id}` with the Claude home and plugins directory the T3 instance uses, then start a new session"
+                    "{server}, then if the plugins directory the T3 instance uses lacks it, run `claude plugin install {id}` with the Claude home and plugins directory the instance uses, then start a new session"
                 ),
                 reason: UNRESOLVED.into(),
             })
@@ -1583,6 +1647,32 @@ mod tests {
             " permissions.deny in {} turns off the LSP tool,",
             native_path("/synthetic/managed.json")
         )));
+        // ...and the card promises no symbol lookup, unless a T3 instance may not read it.
+        assert!(
+            denied
+                .text
+                .contains(" With the plugin, Claude sees the errors an edit introduced. Anthropic")
+        );
+        assert!(!denied.text.contains("looks up"));
+        let maybe = items(
+            &LspUse {
+                denied: Some(native_path("/synthetic/managed.json")),
+                unresolved: true,
+                ..u(usage(false, None))
+            },
+            &view,
+        )
+        .remove(0);
+        assert!(
+            maybe
+                .text
+                .contains("only diagnostics after edits, if the T3 instance reads that file. ")
+        );
+        assert!(
+            maybe
+                .text
+                .contains(", and where the LSP tool is on, looks up")
+        );
         // Turned off by managed settings: shown, with nothing to act on, installed or not.
         for installed in [true, false] {
             let blocked = card(usage(installed, Some(Off::Managed))).remove(0);

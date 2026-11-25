@@ -2611,17 +2611,10 @@ pub(crate) fn profile(
             .and_then(Value::as_str)
             .filter(|d| !d.is_empty())
             .map(|d| crate::lsp::expand(&options.home, d));
-        let dir = match &cache_dir {
-            Some(dir) => dir.clone(),
-            None => join(&[&canonical, "plugins"]),
-        };
         crate::lsp::Plugins {
-            // By its real path, so profiles reaching one directory through a link share a
-            // card. A relative one is read from wherever claude starts, so it stays as given.
-            dir: Some(if std::path::Path::new(&dir).is_absolute() {
-                realpath(&dir).unwrap_or(dir)
-            } else {
-                dir
+            dir: Some(match &cache_dir {
+                Some(dir) => dir.clone(),
+                None => join(&[&canonical, "plugins"]),
             }),
             cache_dir,
             // Without the variable, a shell reaches only the default home.

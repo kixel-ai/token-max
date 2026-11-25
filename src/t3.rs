@@ -3108,20 +3108,6 @@ mod tests {
                 w.home.join("plugin-cache")
             ))
         );
-        // A link to a directory is named by its target, so profiles reaching one directory
-        // share a card.
-        #[cfg(unix)]
-        {
-            let real = w.home.join("plugin-real");
-            fs::create_dir_all(&real).unwrap();
-            std::os::unix::fs::symlink(&real, w.home.join("plugin-link")).unwrap();
-            let linked =
-                instance(json!({"name":"CLAUDE_CODE_PLUGIN_CACHE_DIR","value":"~/plugin-link"}));
-            assert_eq!(
-                linked.plugins.unwrap().dir,
-                Some(crate::discovery::realpath(&crate::test_support::native_path(&real)).unwrap())
-            );
-        }
     }
     #[test]
     fn claude_exact_sdk_items_link_idle_runs_without_exporting_text() {

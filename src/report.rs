@@ -521,6 +521,118 @@ fn default_item(e: &EffortCheck, profile: &str, how: Option<How>, out: &Out<'_>)
     })
 }
 
+/// The first Claude Code that reads `CLAUDE_CODE_SUBAGENT_EFFORT`, as `(minor, patch)` of 2.x.
+const SUBAGENT_EFFORT_SINCE: (u64, u64) = (1, 316);
+
+/// The level the maintainer picks for a default subagent effort past `high`, which every
+/// model that takes effort accepts.
+const SUBAGENT_PICK: &str = "high";
+
+/// Claude Code's changelog, which dates when a setting arrived.
+const CLAUDE_CHANGELOG: &str = "https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md";
+
+/// One line of profiles whose default subagent effort the same setting decides.
+struct SubagentLine<'a> {
+    lead: &'a Profile,
+    /// The profile tag the card's name carries.
+    profile: String,
+    /// The Claude Code the line's profiles last ran, for those with a recorded request.
+    versions: Vec<Option<&'a str>>,
+}
+
+/// The default subagent effort as `vibes` shows it: the level and the model it pairs with,
+/// past `high` the provider's guidance and the maintainer's pick of `high`, and an upgrade
+/// when the latest Claude Code ignores the variable. None when no setting names one, as
+/// subagents then follow the main session, which its own card covers.
+fn subagent_item(line: &SubagentLine<'_>, out: &Out<'_>) -> Option<Item> {
+    let p = line.lead;
+    let effort = p.agents.effort.as_ref()?;
+    let level = effort.value.as_str();
+    let model = p
+        .agents
+        .model
+        .as_ref()
+        .map_or("the main session's model", |m| m.value.as_str());
+    let mut text = format!(
+        "Subagents default to {level} on {model} when neither the call nor the agent's definition names an effort. Set in {}.",
+        out.home(&effort.owner)
+    );
+    let (minor, patch) = SUBAGENT_EFFORT_SINCE;
+    // A profile's latest Claude Code before the variable arrived runs subagents at the
+    // main session's effort, whatever it says.
+    let ignored = match p.harness {
+        Harness::Claude => line
+            .versions
+            .iter()
+            .flatten()
+            .find(|v| !crate::version::claude_at_least(Some(v), minor, patch)),
+        Harness::Codex => None,
+    };
+    if let Some(version) = ignored {
+        let _ = write!(
+            text,
+            " The latest session ran Claude Code {version}, which ignores CLAUDE_CODE_SUBAGENT_EFFORT: it arrived in 2.{minor}.{patch}, so subagents run at the main session's effort until Claude Code is upgraded."
+        );
+    }
+    let guidance = past_high(level, p.harness);
+    if let Some(guidance) = &guidance {
+        let _ = write!(
+            text,
+            " {guidance} The maintainer's pick for subagents is {SUBAGENT_PICK}. A different effort changes the output tokens, so what {SUBAGENT_PICK} would cost is not measured."
+        );
+    }
+    let set = guidance
+        .is_some()
+        .then(|| crate::doctor::subagent_effort_how(&effort.owner, p, SUBAGENT_PICK));
+    let how = match (ignored, set) {
+        (Some(_), set) => {
+            let mut step = format!("upgrade Claude Code to 2.{minor}.{patch} or later");
+            if let Some(set) = set {
+                let set = match set {
+                    How::Manual { step, .. } => step,
+                    How::Edit(_) => format!("set {} to {SUBAGENT_PICK}", effort.owner),
+                };
+                let _ = write!(step, ", and {set}");
+            }
+            Some(How::Manual {
+                step,
+                reason: "token-max does not upgrade Claude Code".into(),
+            })
+        }
+        (None, set) => set,
+    };
+    let mut sources: Vec<String> = match p.harness {
+        Harness::Claude => vec![
+            "The maintainer's pick of a subagent default. Anthropic's guidance:".into(),
+            CLAUDE_MODEL_GUIDE.into(),
+            CLAUDE_EFFORT_DOCS.into(),
+        ],
+        Harness::Codex => vec![
+            "The maintainer's pick of a subagent default. OpenAI's guidance:".into(),
+            OPENAI_REASONING.into(),
+        ],
+    };
+    if ignored.is_some() {
+        sources.push(CLAUDE_CHANGELOG.into());
+    }
+    let quiet = how.is_none();
+    Some(Item {
+        name: tagged("Subagent default".into(), &line.profile),
+        value: if guidance.is_some() {
+            format!("{level} {} {SUBAGENT_PICK}", out.arrow)
+        } else {
+            String::new()
+        },
+        what: "The reasoning effort a subagent starts with when its call and definition name none."
+            .into(),
+        text,
+        sources,
+        how,
+        quiet,
+        after: vec![],
+    })
+}
+
 /// What each recorded main-session model and effort pair cost, the most-run first.
 fn effort_runs(e: &EffortCheck) -> String {
     if e.runs.is_empty() {
@@ -6316,6 +6428,26 @@ fn summary(
             vibes.extend(default_item(e, &profile, how, out));
         }
     }
+    let subagent_owner = |p: &Profile| {
+        p.agents
+            .effort
+            .as_ref()
+            .map_or_else(String::new, |e| e.owner.clone())
+    };
+    let set = report
+        .scan
+        .profiles
+        .iter()
+        .filter(|p| p.agents.effort.is_some());
+    for group in crate::rows::groups(set, subagent_owner) {
+        let ids: Vec<&str> = group.ids.iter().map(String::as_str).collect();
+        let line = SubagentLine {
+            lead: group.lead,
+            profile: tag(&group.ids, &subagent_owner, out),
+            versions: crate::doctor::claude_versions(report, &ids),
+        };
+        vibes.extend(subagent_item(&line, out));
+    }
     // Lines of one setting that split only because the controls they replay differ name the
     // same file; name their profiles as well, so no two read alike.
     let clashing: Vec<usize> = (0..rows.len())
@@ -9074,6 +9206,119 @@ mod tests {
         );
         let deny = all.iter().find(|f| edits(f) == "permissions.deny");
         assert!(matches!(deny.expect("a deny fix").how, How::Edit(_)));
+    }
+
+    #[test]
+    fn subagent_default_card_cites_the_guidance_past_high_and_gates_on_claude_code() {
+        use crate::doctor::Edit;
+        use crate::model::Owned;
+        use serde_json::json;
+        let file = format!("{ROOT}/settings.json");
+        let variable = format!("{file}:env.CLAUDE_CODE_SUBAGENT_EFFORT");
+        // The card for a subagent effort set by `owner`, with the latest request on `version`.
+        let card = |harness: Harness, level: Option<&str>, owner: &str, version: &str| {
+            let mut report = synthetic();
+            report.checks.clear();
+            report.context.clear();
+            let p = &mut report.scan.profiles[0];
+            p.harness = harness;
+            p.agents.effort = level.map(|value| Owned {
+                value: value.into(),
+                owner: owner.into(),
+            });
+            for r in &mut report.scan.requests {
+                r.version = Some(version.into());
+            }
+            advice(&report, ReportOptions::default())
+                .into_iter()
+                .find(|i| i.name == "Subagent default")
+        };
+        let said = |card: &Item| format!("{} {}", card.text, card.sources.join(" "));
+
+        // Unset, subagents follow the main session, which its own card covers.
+        assert!(card(Harness::Claude, None, "", "2.1.316").is_none());
+
+        // Past high: the provider's guidance, and the edit to high where the variable is set.
+        let c = card(Harness::Claude, Some("max"), &variable, "2.1.316").expect("a card");
+        assert!(!c.quiet);
+        assert_eq!(c.value, "max -> high");
+        let text = said(&c);
+        assert!(
+            text.starts_with("Subagents default to max on the main session's model"),
+            "{text}"
+        );
+        assert!(text.contains("prone to overthinking"), "{text}");
+        assert!(
+            text.contains("The maintainer's pick for subagents is high"),
+            "{text}"
+        );
+        assert!(text.contains(CLAUDE_MODEL_GUIDE), "{text}");
+        assert!(!text.contains("ignores"), "{text}");
+        let Some(How::Edit(patch)) = c.how else {
+            panic!("expected an edit: {:?}", c.how)
+        };
+        assert_eq!(patch.file, file);
+        assert_eq!(
+            patch.edits,
+            [Edit {
+                path: vec!["env".into(), "CLAUDE_CODE_SUBAGENT_EFFORT".into()],
+                value: json!("high"),
+                op: crate::doctor::Op::Set,
+            }]
+        );
+
+        // At or below high, a quiet card with no caution and no question.
+        for level in ["high", "low"] {
+            let c = card(Harness::Claude, Some(level), &variable, "2.1.316").expect("a card");
+            assert!(c.quiet && c.how.is_none() && c.value.is_empty(), "{level}");
+            assert!(!c.text.contains("model guide"), "{}", c.text);
+        }
+
+        // A shell variable outranks the file, so the change is a step by hand.
+        let c = card(
+            Harness::Claude,
+            Some("xhigh"),
+            "CLAUDE_CODE_SUBAGENT_EFFORT",
+            "2.1.316",
+        )
+        .expect("a card");
+        assert!(matches!(c.how, Some(How::Manual { .. })), "{:?}", c.how);
+
+        // Before 2.1.316, Claude Code ignores it, so the card recommends upgrading.
+        let c = card(Harness::Claude, Some("medium"), &variable, "2.1.315").expect("a card");
+        assert!(!c.quiet);
+        assert!(
+            c.text.contains("ran Claude Code 2.1.315, which ignores"),
+            "{}",
+            c.text
+        );
+        assert!(c.sources.iter().any(|s| s == CLAUDE_CHANGELOG));
+        let Some(How::Manual { step, .. }) = &c.how else {
+            panic!("expected a step: {:?}", c.how)
+        };
+        assert_eq!(step, "upgrade Claude Code to 2.1.316 or later");
+        let c = card(Harness::Claude, Some("max"), &variable, "2.1.300").expect("a card");
+        let Some(How::Manual { step, .. }) = &c.how else {
+            panic!("expected a step: {:?}", c.how)
+        };
+        assert_eq!(
+            step,
+            &format!("upgrade Claude Code to 2.1.316 or later, and set {variable} to high")
+        );
+
+        // Codex: its own guidance, the edit in config.toml, and no version gate.
+        let toml = format!("{file}:agents.default_subagent_reasoning_effort");
+        let c = card(Harness::Codex, Some("xhigh"), &toml, "0.1.0").expect("a card");
+        let text = said(&c);
+        assert!(text.contains("OpenAI's reasoning guide"), "{text}");
+        assert!(!text.contains("ignores"), "{text}");
+        let Some(How::Edit(patch)) = c.how else {
+            panic!("expected an edit: {:?}", c.how)
+        };
+        assert_eq!(
+            patch.edits[0].path,
+            ["agents", "default_subagent_reasoning_effort"]
+        );
     }
 
     #[test]

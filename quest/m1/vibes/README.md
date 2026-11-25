@@ -74,6 +74,6 @@ a card that advises nothing, which `doctor` does not offer `vibes` for.
 `docs/reference.md#vibes` lists every card.
 
 Expanded 2026-11-25 (maintainer, /quest-plan over five cost tips from
-@TekonBurns's posts): ✅ [a subagent default card](/quest/m1/vibes/subagent-default.md)
+@TekonBurns's posts): ✅ a subagent default card
 that offers `high` past `high` (rejected: guidance with no edit; a model and
 effort pick like the main-session card).

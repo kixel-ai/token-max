@@ -14,8 +14,9 @@ runs on a terminal too wide to wrap a row repeat it and answer every profile as 
 totals, which --ssh prints, and their changes fill the results section between index.html's
 <!-- results --> markers: the shown run's usage and saving on the subscription, the API run's
 saving at API rates, and both wide runs' changes ranked by setting. The
-EVERYTHING ELSE section is cut to one line: it is hundreds of lines long, and it names
-project files, which can belong to private repositories. Read the result before committing it.
+EVERYTHING ELSE section is cut to one line: a kind or setting with a single line, such as a
+project's only instruction file or subagent, still names its project files, which can belong
+to private repositories. Read the result before committing it.
 """
 
 import html

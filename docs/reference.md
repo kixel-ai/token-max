@@ -465,15 +465,28 @@ every call that ran leaves a result, so such a result shows a call is missing.
 That second case cannot say which feature the call used, so it holds back every
 never-used feature that transcript's profile carries. One miss is accepted: a call cut
 off inside its name whose client died before writing its result counts as
-unused, though it may have run; the default report's skipped-lines line says so,
-and `--details` repeats it on each red row beside unreadable lines. A deferred line always holds back the
+unused, though it may have run; `--details` says so on its skipped-lines line
+and on each red row beside unreadable lines. A deferred line always holds back the
 recommendation. Only hashes of the names and ids are kept in memory, never the
 text.
 
 ## Reading the report
 
-The default report says what was read and what it cost at API prices, then
-gives every setting and feature one line. Each line names its verdict, the
+The default report opens with a header line saying what was read and what it
+cost at API prices, the headline counting the changes, the line summing what
+they save together, and the [savings against the
+defaults](#savings-against-the-defaults). One dim line then counts what was left
+out or assumed: unsupported T3 instances, unattributed or removed T3 requests,
+requests with no recorded usage, unreadable lines, and requests priced at an
+assumed service tier, such as "Left out or assumed: 2 unsupported T3 instances,
+12 unreadable lines. --details says why." It is left out when there is nothing
+to count. When a figure carries a `~`, one more line says what it assumes, and
+on a terminal a legend names the dots. `--details` puts the rest before the
+headline instead of the count: the profiles read, each T3 state and its
+coverage, what the prices mean, each count with its reason, what each percent
+is of and which features the rules recommend off.
+
+Then the report gives every setting and feature one line. Each line names its verdict, the
 setting or feature, its current value (and the value to change to, for a
 change), what it saves per 30 days or costs over the window, that figure's
 share of this host's spend, the profile when several were read, and the
@@ -516,7 +529,7 @@ separate samples, and the title shows it as `~$9,392 ± $4.72`. An unpriced
 request is never extrapolated below what it is known to cost, such as its tokens
 beside an unknown server fee. A profile that priced none of its requests adds
 only its known part, a lower bound, shown as `~$9,392 ± $4.72 plus at least
-$120`, so a share can read high; the line explaining the percents says so.
+$120`, so a share can read high; `--details`' line explaining the percents says so.
 
 A `~` marks any figure extrapolated over requests that could not be priced, such
 as a saving of `~$3,270/mo ± $410`, followed by its 95% margin of error under the
@@ -663,7 +676,9 @@ Each MCP server a Codex file declares stays declared, without its `enabled`,
 rather than a setting's value. A T3 thread's model selection is T3's default,
 so fast mode is off.
 
-Every check then runs as it would for that user, and the headline counts the
+The header ends `as a default user (--defaults)`, and `--details` says under
+it what was pretended away. Every check then runs as it would for that user,
+and the headline counts the
 changes they would make. The line under it sums what those changes save from
 the defaults, as the walk's running total does, and says overlapping changes
 may save less; the [savings against the defaults](#savings-against-the-defaults)

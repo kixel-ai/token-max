@@ -5730,12 +5730,12 @@ mod tests {
             priced.margin = Some(crate::model::Margin::Unmeasured);
             priced.affected_requests = 1;
             // The details print the cap's extrapolated estimate, so they explain the `~`.
-            assert!(text(&report, None, true).contains("A ~ marks a figure extrapolated"));
+            assert!(text(&report, None, true).contains(crate::report::TILDE));
             let CheckResult::Compaction(c) = &mut report.checks[index] else {
                 unreachable!()
             };
             c.cap.as_mut().unwrap().margin = None;
-            assert!(!text(&report, None, true).contains("A ~ marks a figure extrapolated"));
+            assert!(!text(&report, None, true).contains(crate::report::TILDE));
             let CheckResult::Compaction(c) = &mut report.checks[index] else {
                 unreachable!()
             };

@@ -1173,6 +1173,8 @@ pub struct T3State {
     pub unresolved: IndexMap<String, u64>,
     /// Requests every T3 owner of which was removed from settings, counted by instance; billed but in no current profile's checks.
     pub removed: IndexMap<String, u64>,
+    /// Provider instances whose driver token-max can't read, whose spend is excluded.
+    pub unsupported: u64,
     /// Every instance the settings name, which tells a removed owner from one not selected.
     pub(crate) instances: HashSet<String>,
     /// The model T3 resolves for generated text; absent for a state that was not read.

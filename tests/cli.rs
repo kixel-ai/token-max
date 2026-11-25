@@ -324,12 +324,12 @@ fn conditional_codex_prices_keep_assumptions_in_the_analysis_and_text() {
                     .any(|s| s.tier == "flex" && s.cost.total_usd.is_none())
             );
         }
-        // The default report points to details, which show the assumption.
+        // The default report counts the assumption and points to details, which show it.
         let (status, stdout, stderr) = run(&mut command(&w, &args(&base, &[])));
         assert!((0..=1).contains(&status), "{stderr}");
         if expected.is_some() {
             assert!(
-                stdout.contains("--details shows each tier's cost"),
+                stdout.contains(" 1 request at an assumed service tier. --details says why."),
                 "{stdout}"
             );
         }
@@ -1630,12 +1630,8 @@ mod unix {
             plain.push_str(&part[skip..]);
         }
         let stdout = plain;
-        let unreadable = stdout.find("1 unreadable transcript").unwrap();
-        let rest = stdout[unreadable + "1 unreadable transcript".len()..]
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
-        assert!(rest.starts_with("lines in 1 files"), "{stdout}");
+        let words = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(words.contains("1 unreadable line"), "{stdout}");
         assert!(!format!("{stdout}{stderr}").contains("SYNTHETIC_PRIVATE"));
     }
 
@@ -1753,7 +1749,7 @@ mod unix {
         // Each card shows the saving, the change and its verdict, then what the setting does
         // and why; the window ends now, so its day count and the wrapping follow the clock.
         let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let entry = words(&stdout[ttl..at("\n  Profiles: ")]);
+        let entry = words(&stdout[ttl..report]);
         assert!(
             entry.starts_with("[1/1] Main-agent prompt cache TTL saves $N/mo 13% 5m -> 1h Recommended What How long the main conversation's prompt stays cached between requests: a 1h cache costs more to write than 5m but survives longer pauses. Why Measured on 2 requests over "),
             "{entry}"

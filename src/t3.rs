@@ -588,6 +588,7 @@ pub(crate) fn discover(
                     ambiguous_requests: 0,
                     unresolved: IndexMap::default(),
                     removed: IndexMap::default(),
+                    unsupported: 0,
                     instances: HashSet::default(),
                     text_generation: None,
                 });
@@ -654,6 +655,7 @@ pub(crate) fn discover(
             ambiguous_requests: 0,
             unresolved: IndexMap::default(),
             removed: IndexMap::default(),
+            unsupported: 0,
             instances: instances.keys().cloned().collect(),
             text_generation: Some(text_generation(&settings, &instances, &file)),
         };
@@ -663,6 +665,7 @@ pub(crate) fn discover(
                 "claudeAgent" => Harness::Claude,
                 "codex" => Harness::Codex,
                 _ => {
+                    state.unsupported += 1;
                     state.exclusions.push(if slug(&id) && slug(&instance.driver) {format!("T3 instance {id} ({}) is unsupported; its spend is excluded",instance.driver)} else {"T3 provider instance has an unsupported identity/driver; its spend is excluded".into()});
                     continue;
                 }

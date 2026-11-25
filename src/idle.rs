@@ -2251,8 +2251,15 @@ fn profile_checks<'a>(
         } else {
             FLAG_FREE
         };
-        let upgrade =
-            needs.upgrade([(group.recorder(&recent.profiles), recent.version.as_deref())]);
+        // The next session runs each profile's latest install, whatever its last request was for.
+        let versions = crate::version::latest(
+            &group.members,
+            requests
+                .iter()
+                .copied()
+                .filter(|r| scopes.control(scopes.scope(r)).owner == owner),
+        );
+        let upgrade = needs.upgrade(versions);
         let unlocked = c.resolved
             && c.value.is_some()
             && client(recent) == Client::Supported
@@ -4287,6 +4294,25 @@ mod tests {
                 assert_eq!(upgrade, None, "{mode}");
             }
         }
+    }
+
+    #[test]
+    fn the_latest_request_of_any_kind_sets_the_version_to_upgrade() {
+        let run = |main_version: &str, subagent_version: &str| {
+            let mut main = request("final", 100.0, 300_000);
+            main.version = Some(main_version.into());
+            let mut helper = request("helper", 150.0, 1_000);
+            helper.agent = Agent::Subagent;
+            helper.version = Some(subagent_version.into());
+            let c = check(&data(vec![main, helper], vec![]), 200.0);
+            c.base.upgrade.map(|u| (u.needs, u.ran))
+        };
+        // A later subagent shows the install was upgraded since the last main request.
+        assert_eq!(run("2.1.289", "2.1.314"), None);
+        assert_eq!(
+            run("2.1.314", "2.1.289"),
+            Some((FLAG_FREE, Some("2.1.289".into())))
+        );
     }
 
     #[test]

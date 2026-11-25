@@ -331,10 +331,10 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
         .map(|w| w.window)
         .or(losing.then_some(current))
         .filter(|_| settled);
-    let recent = selected.iter().max_by_key(|r| r.time);
-    let upgrade = recent
-        .and_then(|r| TURN_END.upgrade([(group.recorder(&r.profiles), r.version.as_deref())]));
-    let supported = recent.is_some() && upgrade.is_none();
+    // Each profile's next session runs its latest install, and one file sets it for all.
+    let versions = crate::version::latest(&group.members, requests.iter().copied());
+    let upgrade = TURN_END.upgrade(versions.iter().copied());
+    let supported = !versions.is_empty() && upgrade.is_none();
     let applicable = control.unresolved.is_none() && supported;
     let upgrade = upgrade.filter(|_| control.unresolved.is_none());
     let savings = winning
@@ -1212,6 +1212,27 @@ mod tests {
         );
         // An upgrade alone would not let it apply, so none is advised.
         assert_eq!(c.base.upgrade, None);
+
+        // Another profile on the same file last ran an old install, though the latest
+        // request overall came from a supported one.
+        let mut grouped = data(HOUR, limit());
+        let mut second = grouped.profiles[0].clone();
+        second.id = "second".into();
+        grouped.profiles.push(second);
+        let resume = grouped
+            .requests
+            .iter_mut()
+            .find(|r| &*r.id == "resume")
+            .unwrap();
+        resume.profiles = vec!["second".into()].into();
+        resume.version = Some("0.155.0".into());
+        let c = check(&grouped);
+        assert_eq!(c.base.action, Action::Advisory);
+        let upgrade = c
+            .base
+            .upgrade
+            .expect("the second profile's install is too old");
+        assert_eq!(upgrade.ran.as_deref(), Some("0.155.0"));
     }
 
     #[test]

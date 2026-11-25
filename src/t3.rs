@@ -642,7 +642,9 @@ pub(crate) fn discover(
                 // Only the variables that choose its home or its provider stay.
                 instance.environment.retain(|e| {
                     matches!(e.name.as_str(), "CLAUDE_CONFIG_DIR" | "CODEX_HOME")
-                        || crate::discovery::CLAUDE_PROVIDERS.contains(&e.name.as_str())
+                        || crate::controls::CLAUDE_PROVIDERS
+                            .iter()
+                            .any(|p| p.variable == e.name)
                 });
             }
         }

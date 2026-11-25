@@ -61,7 +61,7 @@ pub fn fable_use(
         spans.push((start.max(end - WEEK), end));
         end -= WEEK;
     }
-    // Bedrock, Vertex and Foundry bill per token; no plan limit applies there.
+    // Bedrock (or its Mantle endpoint), Vertex and Foundry bill per token; no plan limit applies there.
     let eligible: Vec<&str> = scan
         .profiles
         .iter()

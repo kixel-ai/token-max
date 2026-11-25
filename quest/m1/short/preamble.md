@@ -3,7 +3,8 @@
 ## Goal
 
 A report opens with its usage title, the headline counting changes and what
-they save, and one dim line counting what was left out or assumed, such as
+they save, the [savings against the defaults](/docs/reference.md#savings-against-the-defaults)
+line, and one dim line counting what was left out or assumed, such as
 unsupported T3 instances, unattributed or removed T3 requests, requests at
 an assumed service tier or with no usage, and unreadable lines, pointing to
 `--details`. The `--defaults` explanation, profiles, T3 state, pricing and
@@ -14,6 +15,12 @@ percent caveats print only under `--details`; the one-line legend stays.
 Settled in the [epic](/quest/m1/short/README.md): keep one left-out line
 rather than drop the caveats, since the project says plainly what it could
 not measure (rejected: title and headline only; trim the wording).
+
+Kept the savings-against-the-defaults line, which
+[kixel-ai/token-max#232](https://github.com/kixel-ai/token-max/pull/232)
+added after this plan to open the walk, so a run with nothing to change still
+shows what the settings save (agent's pick, 2026-11-25, rejected: move it
+under `--details`).
 
 Recommendations:
 

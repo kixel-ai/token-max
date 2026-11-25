@@ -2060,7 +2060,7 @@ fn ancestors_setting_codex_memory(
 }
 
 /// Whether two paths name one file, as recorded or once resolved.
-pub(crate) fn same_file(a: &str, b: &str) -> bool {
+fn same_file(a: &str, b: &str) -> bool {
     a == b || realpath(a).is_ok_and(|a| realpath(b).is_ok_and(|b| a == b))
 }
 
@@ -2596,7 +2596,8 @@ pub(crate) fn profile(
     // A shell's CLAUDE_CONFIG_DIR keeps Claude Code's state inside it, even when it names
     // the default directory.
     let explicit = options.env.contains_key(variable) && active == canonical;
-    let plugins = claude.then(|| {
+    // `--defaults`, whose report has no cards, reads no plugins.
+    let plugins = (claude && !options.defaults).then(|| {
         let cache_dir = environment
             .values
             .get(crate::lsp::CACHE_DIR)
@@ -2617,10 +2618,9 @@ pub(crate) fn profile(
                 .iter()
                 .find(|(k, _)| crate::lsp::is_path(k))
                 .map(|(_, v)| v.clone()),
-            user: members(user.get("enabledPlugins")).clone(),
-            managed: crate::lsp::Plugins::policy(&managed),
-            unsettled: false,
-            read: None,
+            home: options.home.clone(),
+            user: crate::lsp::enabled_entries(&user, &settings_file),
+            managed: crate::lsp::enabled_entries(&managed, managed_file),
         }
     });
     let claude_config = claude.then(|| claude_config(&options.home, &canonical, explicit));

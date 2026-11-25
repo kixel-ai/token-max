@@ -10233,7 +10233,7 @@ mod tests {
 
     #[test]
     fn code_intelligence_cards_sharing_a_settings_file_name_their_plugins_directory() {
-        use crate::lsp::{LanguageUse, Lsp, LspUse, Need};
+        use crate::lsp::{LanguageUse, Lsp, LspUse};
         let mut report = synthetic();
         let card = |plugins_dir: &str| LspUse {
             profiles: vec!["profile".into()],
@@ -10242,11 +10242,10 @@ mod tests {
                 lsp: Lsp::of("main.rs").unwrap(),
                 sessions: 1,
                 shared: 0,
-                loaded: 0,
                 projects: vec![],
+                installed: false,
                 installed_for: vec![],
-                needs: vec![(Need::Install, 1)],
-                unknown: 0,
+                off: None,
                 server: Some(true),
             }],
             settings_file: format!("{ROOT}/settings.json"),
@@ -10254,7 +10253,7 @@ mod tests {
             plugins_dir: Some(plugins_dir.into()),
             cache_dir: None,
             named: false,
-            unresolved: None,
+            unresolved: false,
             unread: None,
         };
         report.lsp = vec![card(&format!("{ROOT}/plugins"))];

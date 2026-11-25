@@ -2283,13 +2283,12 @@ pub(crate) fn enrich(
         crate::discovery::settle_ttls(p, directories.iter().copied());
     }
     let open = |control: Control| unsettled_for(profiles, &unsettled, control);
-    let [speed, main_ttl, subagent_ttl, compaction, bash, plugins] = [
+    let [speed, main_ttl, subagent_ttl, compaction, bash] = [
         Control::Speed,
         Control::Ttl(Bucket::Main),
         Control::Ttl(Bucket::Subagent),
         Control::Compaction,
         Control::Bash,
-        Control::Plugins,
     ]
     .map(open);
     const REASON: &str = "shared native history has unresolved T3 control ownership";
@@ -2322,9 +2321,6 @@ pub(crate) fn enrich(
         if let Some(cap) = p.bash.as_mut().filter(|_| bash.contains(&p.id)) {
             cap.unresolved = Some(REASON.into());
         }
-        if let Some(found) = p.plugins.as_mut().filter(|_| plugins.contains(&p.id)) {
-            found.unsettled = true;
-        }
     }
 }
 
@@ -2339,8 +2335,6 @@ enum Control {
     Compaction,
     /// The Bash cap, with the main TTL its check compares it with.
     Bash,
-    /// The plugins a Claude session loaded, read for the code intelligence card.
-    Plugins,
 }
 
 impl Control {
@@ -2352,7 +2346,6 @@ impl Control {
             Control::Ttl(bucket) => Some(crate::rows::ttl_owner(p, bucket)),
             Control::Compaction => Some(crate::rows::compaction_owner(p)),
             Control::Bash => crate::bash::owner(p),
-            Control::Plugins => crate::lsp::owner(p),
         }
     }
 }
@@ -2683,29 +2676,6 @@ mod tests {
             opened.contains("native") && !opened.contains("elsewhere"),
             "{opened:?}"
         );
-        // So does the home whose plugins a session loaded.
-        for p in &mut lines {
-            p.plugins = Some(crate::lsp::Plugins {
-                dir: Some(format!("{}/plugins", p.root)),
-                cache_dir: None,
-                named: false,
-                path: None,
-                user: serde_json::Map::new(),
-                managed: serde_json::Map::new(),
-                unsettled: false,
-                read: None,
-            });
-        }
-        let opened = unsettled_for(&lines, &unsettled, Control::Plugins);
-        assert!(
-            opened.contains("native") && opened.contains("agent"),
-            "{opened:?}"
-        );
-        let home = HashSet::from_iter([Unsettled {
-            profiles: Profiles::from_iter(["native".to_string(), "agent".to_string()]),
-            outside: vec![],
-        }]);
-        assert!(unsettled_for(&lines, &home, Control::Plugins).is_empty());
         // One no profile names is a line of its own.
         assert_eq!(
             open_with(&["native", "agent"], &[""]),

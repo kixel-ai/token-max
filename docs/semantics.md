@@ -238,7 +238,8 @@ excluded or assigned observed zero billing.
 
 Current TTL resolution follows disabled caching (no TTL), force-5m, bucket
 environment, bucket setting, enable-1h, then defaults: 5m for subagents, and for
-a main bucket on Bedrock (or its Mantle endpoint), Vertex or Foundry. Shell overrides apply only to the active config root;
+a main bucket on a cloud provider: any of the `CLAUDE_CODE_USE_*` provider
+variables `--defaults` keeps, with a true value. Shell overrides apply only to the active config root;
 each profile's settings environment is read separately. Whether a main request
 is within a Claude plan's included usage or paid by usage credits is not
 inferred from credential files, so its unset default is unknown, and the line

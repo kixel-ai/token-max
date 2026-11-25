@@ -315,7 +315,7 @@ pub fn claude_effort(
         control.picked = Some(Box::new(picked));
     }
     control.provider = crate::controls::claude_provider(&environment)
-        .and_then(|p| p.pricing)
+        .map(|p| p.pricing)
         .map(String::from);
     Ok(control)
 }

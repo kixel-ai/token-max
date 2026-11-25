@@ -58,7 +58,7 @@ pub fn control(scopes: &[SettingsScope], env: &Env, user_file: &str) -> AdvisorC
     };
     let provider = claude_provider(&environment);
     // A provider Anthropic runs serves the advisor without the flag; the others have none.
-    let flagless = provider.is_some_and(|p| p.pricing.is_none());
+    let flagless = provider.is_some_and(|p| p.pricing == "anthropic");
     let blocked = if invalid {
         Some(format!("{KEY} is no model name Claude Code recognizes"))
     } else if on("CLAUDE_CODE_DISABLE_ADVISOR_TOOL") {
@@ -66,7 +66,7 @@ pub fn control(scopes: &[SettingsScope], env: &Env, user_file: &str) -> AdvisorC
             "{} turns the advisor tool off",
             named("CLAUDE_CODE_DISABLE_ADVISOR_TOOL")
         ))
-    } else if let Some(p) = provider.filter(|p| p.pricing.is_some()) {
+    } else if let Some(p) = provider.filter(|p| p.pricing != "anthropic") {
         Some(format!(
             "{} sends requests to {}, which has no advisor tool",
             named(p.variable),

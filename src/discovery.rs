@@ -632,7 +632,7 @@ fn ttl_controls(sources: &TtlSources) -> PerBucket<TtlControl> {
         } else if subagent {
             value = Some(Ttl::FiveMinutes);
             reason = "documented default; agent frontmatter and server helpers may override";
-        } else if claude_provider(&environment).is_some_and(|p| p.pricing.is_some()) {
+        } else if claude_provider(&environment).is_some() {
             value = Some(Ttl::FiveMinutes);
             reason = "explicit cloud-provider billing default";
         } else if let Some(billing) = billing {
@@ -2512,7 +2512,7 @@ pub(crate) fn profile(
     );
     let provider = if claude {
         claude_provider(&environment)
-            .and_then(|p| p.pricing)
+            .map(|p| p.pricing)
             .map(String::from)
     } else {
         label(config.get("model_provider").unwrap_or(&Value::Null))
@@ -4023,23 +4023,28 @@ mod tests {
         let p = claude(&d);
         assert_eq!(p.provider.as_deref(), Some("google-vertex-anthropic"));
         assert_eq!(p.background[0].value, Some(false));
-        // Any true value selects a provider, as the advisor card reads it, and Mantle is Bedrock.
+        // Any true value selects a provider, as the advisor card reads it: Mantle is Bedrock, and
+        // Claude Platform on AWS is Anthropic's API, billed by AWS rather than a plan.
         for (file, provider) in [
             (
                 r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":"true"}}"#,
-                Some("amazon-bedrock"),
+                "amazon-bedrock",
             ),
             (
                 r#"{"env":{"CLAUDE_CODE_USE_MANTLE":"1"}}"#,
-                Some("amazon-bedrock"),
+                "amazon-bedrock",
             ),
-            (r#"{"env":{"CLAUDE_CODE_USE_ANTHROPIC_AWS":"1"}}"#, None),
+            (
+                r#"{"env":{"CLAUDE_CODE_USE_ANTHROPIC_AWS":"1"}}"#,
+                "anthropic",
+            ),
         ] {
             write(w.claude.join("settings.json"), file);
             let d = discover(&options(&w)).unwrap();
             let p = claude(&d);
-            assert_eq!(p.provider.as_deref(), provider, "{file}");
+            assert_eq!(p.provider.as_deref(), Some(provider), "{file}");
             assert_eq!(p.background[0].value, Some(false), "{file}");
+            assert_eq!(p.ttl.main.value, Some(Ttl::FiveMinutes), "{file}");
         }
     }
 

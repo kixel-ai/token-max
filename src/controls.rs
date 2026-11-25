@@ -195,8 +195,8 @@ pub(crate) struct ClaudeProvider {
     pub variable: &'static str,
     /// Its name in Claude Code's docs.
     pub name: &'static str,
-    /// The models.dev provider whose prices it bills at; None where Anthropic runs it.
-    pub pricing: Option<&'static str>,
+    /// The models.dev provider whose prices it bills at, `anthropic` where Anthropic runs it.
+    pub pricing: &'static str,
 }
 
 /// Claude Code's providers other than Anthropic's API, the first selected one winning.
@@ -204,32 +204,32 @@ pub(crate) const CLAUDE_PROVIDERS: [ClaudeProvider; 6] = [
     ClaudeProvider {
         variable: "CLAUDE_CODE_USE_BEDROCK",
         name: "Amazon Bedrock",
-        pricing: Some("amazon-bedrock"),
+        pricing: "amazon-bedrock",
     },
     ClaudeProvider {
         variable: "CLAUDE_CODE_USE_MANTLE",
         name: "Amazon Bedrock's Mantle endpoint",
-        pricing: Some("amazon-bedrock"),
+        pricing: "amazon-bedrock",
     },
     ClaudeProvider {
         variable: "CLAUDE_CODE_USE_VERTEX",
         name: "Google Cloud's Agent Platform",
-        pricing: Some("google-vertex-anthropic"),
+        pricing: "google-vertex-anthropic",
     },
     ClaudeProvider {
         variable: "CLAUDE_CODE_USE_FOUNDRY",
         name: "Microsoft Foundry",
-        pricing: Some("azure"),
+        pricing: "azure",
     },
     ClaudeProvider {
         variable: "CLAUDE_CODE_USE_ANTHROPIC_AWS",
         name: "Claude Platform on AWS",
-        pricing: None,
+        pricing: "anthropic",
     },
     ClaudeProvider {
         variable: "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
         name: "Claude Models on Google Cloud",
-        pricing: None,
+        pricing: "anthropic",
     },
 ];
 

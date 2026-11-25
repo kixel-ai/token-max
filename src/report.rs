@@ -5577,9 +5577,15 @@ fn memory_item(line: MemoryLine<'_>, out: &Out<'_>) -> Item {
     };
     let r = line.common;
     let p = m.places;
-    let mut share = match p.sessions {
-        0 => "No main session ran in the window, so where the work happens is unknown.".to_string(),
-        n => format!(
+    let mut share = match (p.sessions, p.unsettled) {
+        (0, 0) => {
+            "No main session ran in the window, so where the work happens is unknown.".to_string()
+        }
+        (0, left) => format!(
+            "No main session in the window is known to be this line's alone: {} ran under owners that may be this line's or another's, so where the work happens is unknown.",
+            plural(left, "session")
+        ),
+        (n, _) => format!(
             "{} of {} ({}%) in the window ran in a repository with a CLAUDE.md or AGENTS.md",
             count(p.instructed),
             plural(n, "main session"),
@@ -5591,6 +5597,13 @@ fn memory_item(line: MemoryLine<'_>, out: &Out<'_>) -> Item {
             share,
             ", counting as without {} whose transcript recorded loading none and whose directory is gone or unrecorded",
             plural(p.unknown, "session")
+        );
+    }
+    if p.sessions > 0 && p.unsettled > 0 {
+        let _ = write!(
+            share,
+            ", leaving out {} whose owners may be this line's or another's",
+            plural(p.unsettled, "session")
         );
     }
     if p.sessions > 0 {
@@ -11790,6 +11803,7 @@ mod tests {
             sessions: 4,
             instructed: 3,
             unknown: 0,
+            unsettled: 0,
         };
         // doctor keeps it on for its cost, so the card asks with doctor's own edit.
         let m = memory(&mut report);
@@ -11856,11 +11870,24 @@ mod tests {
             sessions: 4,
             instructed: 2,
             unknown: 1,
+            unsettled: 2,
         };
         let item = card(&report);
         assert!(item.quiet && item.how.is_none());
         assert!(
-            item.text.starts_with("2 of 4 main sessions (50%) in the window ran in a repository with a CLAUDE.md or AGENTS.md, counting as without 1 session whose transcript recorded loading none and whose directory is gone or unrecorded. Outside a repository, memory may be the only place a fact is kept, so turning it off is not advised."),
+            item.text.starts_with("2 of 4 main sessions (50%) in the window ran in a repository with a CLAUDE.md or AGENTS.md, counting as without 1 session whose transcript recorded loading none and whose directory is gone or unrecorded, leaving out 2 sessions whose owners may be this line's or another's. Outside a repository, memory may be the only place a fact is kept, so turning it off is not advised."),
+            "{}",
+            item.text
+        );
+        // Only sessions T3 could not settle: the card never says none ran.
+        memory(&mut report).places = SessionPlaces {
+            unsettled: 1,
+            ..SessionPlaces::default()
+        };
+        let item = card(&report);
+        assert!(item.quiet && item.how.is_none());
+        assert!(
+            item.text.starts_with("No main session in the window is known to be this line's alone: 1 session ran under owners that may be this line's or another's, so where the work happens is unknown."),
             "{}",
             item.text
         );

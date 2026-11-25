@@ -1185,24 +1185,33 @@ const OWNER_EVENT: &str = "SELECT EXISTS (SELECT 1 FROM orchestration_v2_project
    AND json_extract(e.payload_json,'$.providerInstanceId')=pt.provider_instance_id
    AND json_extract(e.payload_json,'$.nativeThreadRef.driver')=pt.driver
    AND json_extract(e.payload_json,'$.nativeThreadRef.nativeId')=json_extract(pt.payload_json,'$.nativeThreadRef.nativeId'))";
-// Provider turns with their native turn reference and provider thread, filtered by
-// `PROVIDER_TURNS` or `THREAD_TURNS`.
-macro_rules! provider_turns {
+// A provider turn's native turn reference: its driver, and its id when that is a string.
+macro_rules! native_turn_ref {
     () => {
-        "SELECT provider_turn_id,
- json_extract(payload_json,'$.nativeTurnRef.driver'),
+        "json_extract(payload_json,'$.nativeTurnRef.driver'),
  CASE WHEN json_type(payload_json,'$.nativeTurnRef.nativeId')='text'
- THEN json_extract(payload_json,'$.nativeTurnRef.nativeId') END, provider_thread_id
- FROM orchestration_v2_projection_provider_turns"
+ THEN json_extract(payload_json,'$.nativeTurnRef.nativeId') END"
     };
 }
 // One Codex provider thread's turns, which join by native turn id alone.
-const PROVIDER_TURNS: &str = concat!(provider_turns!(), " WHERE provider_thread_id=?1");
+const PROVIDER_TURNS: &str = concat!(
+    "SELECT provider_turn_id, ",
+    native_turn_ref!(),
+    " FROM orchestration_v2_projection_provider_turns WHERE provider_thread_id=?1"
+);
 // The T3 threads holding one Claude provider thread's turns, whose items the join reads.
 const TURN_THREADS: &str = "SELECT DISTINCT thread_id
  FROM orchestration_v2_projection_provider_turns WHERE provider_thread_id=?1";
-// One T3 thread's provider turns, of every provider thread; the join keeps the selected.
-const THREAD_TURNS: &str = concat!(provider_turns!(), " WHERE thread_id=?1");
+// One T3 thread's provider turns, of every provider thread. No payload is read, so an
+// unselected provider's turn past the value bound cannot fail the join.
+const THREAD_TURNS: &str = "SELECT provider_turn_id, provider_thread_id
+ FROM orchestration_v2_projection_provider_turns WHERE thread_id=?1";
+// A selected provider turn's native turn reference.
+const TURN_REF: &str = concat!(
+    "SELECT ",
+    native_turn_ref!(),
+    " FROM orchestration_v2_projection_provider_turns WHERE provider_turn_id=?1"
+);
 // A Claude turn's items join it by turn item id, which `item_key` decodes. Item rows hold
 // tool outputs, so the join reads two of T3's indexes instead: a provider turn's item rows,
 // and each item's id by row within its thread.
@@ -1714,6 +1723,7 @@ fn metadata(
         }
     }
     let mut thread_turns = tx.prepare(THREAD_TURNS)?;
+    let mut turn_ref = tx.prepare(TURN_REF)?;
     let mut turn_item_rows = tx.prepare(TURN_ITEM_ROWS)?;
     let mut thread_item_ids = tx.prepare(THREAD_ITEM_IDS)?;
     // Only item keys a selected request names are kept.
@@ -1736,14 +1746,16 @@ fn metadata(
         while let Some(row) = rows.next()? {
             let (Some(turn), Some(key)) = (
                 text_column(row, 0),
-                text_column(row, 3).and_then(|p| claude_threads.get(p.as_str()).copied()),
+                text_column(row, 1).and_then(|p| claude_threads.get(p.as_str()).copied()),
             ) else {
                 continue;
             };
-            if text_column(row, 1).as_deref() != Some(key.0) {
+            let (driver, native) =
+                turn_ref.query_row([&turn], |r| Ok((text_column(r, 0), text_column(r, 1))))?;
+            if driver.as_deref() != Some(key.0) {
                 continue;
             }
-            let mut natives: Vec<String> = text_column(row, 2).into_iter().collect();
+            let mut natives: Vec<String> = native.into_iter().collect();
             let mut items = turn_item_rows.query([&turn])?;
             while let Some(item) = items.next()? {
                 natives.extend(keys.get(&item.get::<_, i64>(0)?).cloned());
@@ -4303,17 +4315,19 @@ mod tests {
         // An item naming the turn from another thread is not the turn's.
         database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES(?1,'elsewhere','turn','assistant_message','completed','{}','2026-01-01T00:00:00Z',NULL,0)",[format!("{ITEM_PREFIX}stray-uuid")]).unwrap();
         // The selected provider thread's turns can sit in more than one T3 thread, and a
-        // walked T3 thread can hold an unselected provider thread's turns.
-        for (turn, thread, provider, native) in [
-            ("moved-turn", "moved", "pt", "moved-uuid"),
+        // walked T3 thread can hold an unselected provider thread's turns, whose payload
+        // past the length bound the join never reads.
+        for (turn, thread, provider, native, large) in [
+            ("moved-turn", "moved", "pt", "moved-uuid", ""),
             (
                 "unselected-turn",
                 "thread",
                 "pt-unselected",
                 "unselected-uuid",
+                &*"x".repeat(2_000_000),
             ),
         ] {
-            database.execute("INSERT INTO orchestration_v2_projection_provider_turns VALUES(?1,?2,?3,NULL,'completed',NULL,NULL,?4,2)",params![turn,thread,provider,json!({"nativeTurnRef":{"driver":"claudeAgent"}}).to_string()]).unwrap();
+            database.execute("INSERT INTO orchestration_v2_projection_provider_turns VALUES(?1,?2,?3,NULL,'completed',NULL,NULL,?4,2)",params![turn,thread,provider,json!({"nativeTurnRef":{"driver":"claudeAgent"},"large":large}).to_string()]).unwrap();
             database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES(?1,?2,?3,'assistant_message','completed','{}','2026-01-01T00:00:00Z',NULL,1)",params![format!("{ITEM_PREFIX}{native}"),thread,turn]).unwrap();
         }
         let request = NativeRequest {
@@ -4451,6 +4465,7 @@ mod tests {
             (PROVIDER_TURNS.to_string(), 0, false),
             (TURN_THREADS.to_string(), 0, false),
             (THREAD_TURNS.to_string(), 0, false),
+            (TURN_REF.to_string(), 0, false),
             (TURN_ITEM_ROWS.to_string(), 0, true),
             (THREAD_ITEM_IDS.to_string(), 0, true),
             (ATTEMPT.to_string(), 0, false),

@@ -827,6 +827,24 @@ long each has run. Reading T3 Code's database, which follows the transcripts,
 holds the line as the bar does, so under `--ssh` it shows over a later phase
 until it ends.
 
+Beside the bar and each phase after it, the line counts the requests,
+sessions, tokens and API-price spend read so far, as the report's header
+counts them: requests once across profiles that share a history and across a
+response's streamed chunks, only those in the window, and each subagent in the
+session that spawned it. The spend appears once public prices load, at first
+pricing everything already read, and is extrapolated per profile and marked
+`~` as the header's is. Some figures only settle after reading, such as a
+request record no response answers or a request T3 moves to another profile,
+so the scan counts again once those are known, and once the analysis has
+priced the scan the counts become the header's own. Each SSH host's totals
+join them as its report arrives. The line `doctor` clears shows the header's
+figures, or the total across hosts. Under `vibes --ssh` the destinations send
+no usage, so the line counts this host alone and says so. On a narrow
+terminal the line keeps the most useful figures that fit: the spend, the
+requests, the time left to read, the sessions, the tokens, then the bytes read.
+A figure too wide for the room left is skipped, and narrower ones after it
+still show.
+
 On a terminal, `doctor` opens with its name, says it is about to scan this
 host's transcripts, and lists each profile root it found with its transcript
 files and their size, then the SSH destinations it adds, or how to add one with

@@ -402,6 +402,7 @@ mod tests {
             since: None,
             now: START + 3_600_000,
             max_cost_per_use_usd: 1.0,
+            reading: None,
         })
         .unwrap();
         let fixes = crate::doctor::fixes(&report, false);

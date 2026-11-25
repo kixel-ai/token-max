@@ -866,6 +866,9 @@ pub struct AnalyzeOptions<'a> {
     pub now: Millis,
     /// Recommend turning off context that cost more than this per use.
     pub max_cost_per_use_usd: f64,
+    /// Where the report header's counts go once priced, before the checks run, for a
+    /// progress line.
+    pub reading: Option<&'a crate::reader::Reading>,
 }
 
 /// Build the shared report without summing savings from independent checks.
@@ -876,6 +879,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         since,
         now,
         max_cost_per_use_usd,
+        reading,
     } = options;
     if let (Some(scanned), Some(since)) = (scan.since, since)
         && since < scanned
@@ -897,7 +901,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         profiles.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
         groups.entry(profiles.join(":")).or_default().push(r);
     }
-    let historical = groups
+    let historical: Vec<crate::model::HistoricalCost> = groups
         .into_iter()
         .map(|(key, requests)| {
             let mut cost = Sum::new();
@@ -944,6 +948,13 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
             }
         })
         .collect();
+    if let Some(reading) = reading {
+        let counts = crate::totals::Counts::of(&scan, Some(&historical));
+        *reading
+            .counts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(counts);
+    }
     let boundaries = CacheBoundaries::new(scan.cache_context.boundaries.iter().chain(&scan.events));
     let input = TtlInput {
         scan: &scan,
@@ -1205,6 +1216,7 @@ mod tests {
             since,
             now,
             max_cost_per_use_usd: 1.0,
+            reading: None,
         })
         .unwrap();
         report.checks.retain(|c| matches!(c, CheckResult::Ttl(_)));
@@ -2580,6 +2592,7 @@ mod tests {
                 since: Some(since - 1),
                 now: NOW,
                 max_cost_per_use_usd: 1.0,
+                reading: None,
             })
             .unwrap_err();
             assert!(

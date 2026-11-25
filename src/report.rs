@@ -152,17 +152,27 @@ fn approx_estimate(value: Option<Estimate>) -> String {
 
 /// Bytes in decimal units, with one decimal below ten, such as `8.1 GB` or `512 kB`.
 pub(crate) fn size(bytes: u64) -> String {
-    let units = ["B", "kB", "MB", "GB", "TB"];
-    let mut value = bytes as f64;
+    scaled(bytes, [" B", " kB", " MB", " GB", " TB"])
+}
+
+/// A count with a decimal suffix, with one decimal below ten, such as `1.9B` or `345M`.
+pub(crate) fn short(value: u64) -> String {
+    scaled(value, ["", "k", "M", "B", "T"])
+}
+
+/// `value` scaled by thousands to the largest of `units` that keeps it under 1,000 once
+/// rounded, with one decimal below ten.
+fn scaled(value: u64, units: [&str; 5]) -> String {
+    let mut scaled = value as f64;
     let mut unit = 0;
-    while value >= 999.5 && unit < units.len() - 1 {
-        value /= 1000.0;
+    while scaled >= 999.5 && unit < units.len() - 1 {
+        scaled /= 1000.0;
         unit += 1;
     }
     match unit {
-        0 => format!("{bytes} B"),
-        _ if value < 9.95 => format!("{value:.1} {}", units[unit]),
-        _ => format!("{value:.0} {}", units[unit]),
+        0 => format!("{value}{}", units[0]),
+        _ if scaled < 9.95 => format!("{scaled:.1}{}", units[unit]),
+        _ => format!("{scaled:.0}{}", units[unit]),
     }
 }
 
@@ -899,38 +909,15 @@ pub(crate) struct Spend {
 
 impl Spend {
     pub(crate) fn new(report: &Report) -> Self {
-        let mut usd = 0.0;
-        // Each profile's history is a separate sample, so their errors are independent and
-        // their margins add in quadrature.
-        let mut variance = 0.0;
-        let (mut extrapolated, mut unmeasured, mut floor, mut partial) = (false, false, 0.0, false);
-        for group in &report.historical {
-            match group.estimate {
-                Some(estimate) => {
-                    usd += estimate.usd;
-                    match estimate.margin {
-                        None => {}
-                        Some(Margin::Usd(m)) => {
-                            extrapolated = true;
-                            variance += m * m;
-                        }
-                        Some(Margin::Unmeasured) => unmeasured = true,
-                    }
-                }
-                None => {
-                    usd += group.cost.known_usd.to_f64();
-                    floor += group.cost.known_usd.to_f64();
-                    partial = true;
-                }
-            }
-        }
+        let crate::totals::Spent {
+            usd,
+            margin,
+            floor,
+            partial,
+        } = crate::totals::Spent::of(&report.historical);
         Spend {
             usd,
-            margin: if unmeasured {
-                Some(Margin::Unmeasured)
-            } else {
-                extrapolated.then(|| Margin::Usd(variance.sqrt()))
-            },
+            margin,
             floor,
             partial,
             since: report
@@ -11233,6 +11220,7 @@ mod tests {
             since: None,
             now: instant("2026-11-02T00:00:00Z"),
             max_cost_per_use_usd: 1.0,
+            reading: None,
         })
         .unwrap();
         (report, file.to_string_lossy().into_owned())
@@ -11259,6 +11247,7 @@ mod tests {
             since: None,
             now: instant("2026-11-02T00:00:00Z"),
             max_cost_per_use_usd: 1.0,
+            reading: None,
         })
         .unwrap()
     }
@@ -11365,6 +11354,7 @@ mod tests {
                 since: None,
                 now: instant("2026-11-02T00:00:00Z"),
                 max_cost_per_use_usd: 1.0,
+                reading: None,
             })
             .unwrap();
             let ttl = main_ttl(&report);
@@ -11498,6 +11488,7 @@ mod tests {
                 since: None,
                 now: instant("2026-11-02T00:00:00Z"),
                 max_cost_per_use_usd: 1.0,
+                reading: None,
             })
             .unwrap()
         };

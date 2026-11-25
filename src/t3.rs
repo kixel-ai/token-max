@@ -2965,6 +2965,7 @@ mod tests {
                 since: None,
                 now: timestamp(&json!("2026-01-02T00:00:00Z")).unwrap(),
                 max_cost_per_use_usd: 1.0,
+                reading: None,
             })
             .unwrap();
             let bash = report.bash.iter().find(|b| b.suggested.is_none());

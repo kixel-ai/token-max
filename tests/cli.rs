@@ -260,6 +260,7 @@ fn analysis(
         since: None,
         now: NOW,
         max_cost_per_use_usd,
+        reading: None,
     })
     .unwrap()
 }
@@ -1158,6 +1159,7 @@ fn explicit_windows_match_the_library_replay() {
             since: Some(since),
             now: 21 * MIN,
             max_cost_per_use_usd: 1.0,
+            reading: None,
         })
         .unwrap();
         assert!(

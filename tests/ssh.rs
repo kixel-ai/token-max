@@ -255,6 +255,7 @@ fn analysis(home: &Path, since: Option<i64>, max_cost_per_use_usd: f64) -> Repor
         since,
         now: NOW,
         max_cost_per_use_usd,
+        reading: None,
     })
     .unwrap()
 }

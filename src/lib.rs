@@ -39,6 +39,7 @@ mod skills;
 mod ssh;
 mod subagents;
 mod t3;
+mod tally;
 mod terminal;
 mod totals;
 mod turn_end;

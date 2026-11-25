@@ -1361,6 +1361,7 @@ mod tests {
             since: None,
             now,
             max_cost_per_use_usd: 1.0,
+            reading: None,
         })
         .unwrap();
         let text = crate::report::rendered(

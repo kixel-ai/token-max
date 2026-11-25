@@ -123,12 +123,12 @@ fn service_tier<'a>(r: &'a Request, p: &'a BillingPart) -> Result<&'a str, &'sta
     }
     // An advisor call records no tier of its own, and Priority Tier needs a commitment on
     // each model, so under an executor at standard the call is too, barring a commitment on
-    // the advisor model alone.
+    // the advisor model alone. A summary request's executor iterations are compaction.
     if p.kind == PartKind::Advisor {
         let mut executor = r
             .parts
             .iter()
-            .filter(|e| e.kind == PartKind::Message)
+            .filter(|e| matches!(e.kind, PartKind::Message | PartKind::Compaction))
             .map(|e| e.tier.as_deref().map(tier_name));
         let first = executor.next().flatten();
         return match first {

@@ -1804,15 +1804,20 @@ mod tests {
     fn a_linked_summary_request_keeps_its_advisor_call() {
         let mut summary = make_request();
         summary.id = "summary".into();
+        summary.parts[0].tier = Some("standard".into());
         let mut advisor = summary.parts[0].clone();
         advisor.kind = PartKind::Advisor;
+        advisor.tier = None;
         summary.parts.push(advisor);
         let mut event = boundary("boundary", &summary.session, summary.time + 1);
         event.request = Some(summary.id.clone());
         let mut scan = data(vec![summary], vec![event]);
         compaction_charges(&mut scan, &prices());
-        let kinds: Vec<_> = scan.requests[0].parts.iter().map(|p| p.kind).collect();
+        let r = &scan.requests[0];
+        let kinds: Vec<_> = r.parts.iter().map(|p| p.kind).collect();
         assert_eq!(kinds, [PartKind::Compaction, PartKind::Advisor]);
+        // Still priced at its executor's standard tier, which is now the summary's.
+        assert!(price_part(&prices(), r, &r.parts[1]).total_usd.is_some());
     }
 
     #[test]

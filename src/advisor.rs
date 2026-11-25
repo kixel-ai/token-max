@@ -248,8 +248,10 @@ pub fn advisor_use(scan: &Scan, catalog: &Catalog, since: Option<Millis>) -> Vec
             .strip_suffix(&format!(":{KEY}"))
             .map(|f| crate::rows::canonical(&format!("{f}:")));
         let mut ids = line.ids.clone();
+        // Launch settings token-max can't resolve may replace the file.
         t3.retain(|p| {
-            let mine = owned.as_ref() == Some(&file(p));
+            let unresolved = p.t3.as_ref().is_some_and(|t| t.settings_unresolved);
+            let mine = !unresolved && owned.as_ref() == Some(&file(p));
             if mine {
                 ids.push(p.id.clone());
             }
@@ -744,6 +746,12 @@ mod tests {
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].profiles, ["a", "b"]);
         assert_eq!((lines[0].requests, lines[0].calls), (3, 4));
+        // Unless its launch settings, unresolved, may replace that file.
+        scan.profiles[2].t3.as_mut().unwrap().settings_unresolved = true;
+        let lines = advisor_use(&scan, &catalog, None);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1].profiles, ["t3"]);
+        scan.profiles[2].t3.as_mut().unwrap().settings_unresolved = false;
         // Only a line whose advisorModel the instance's own file owns takes its calls, not
         // one a project's file sets.
         scan.profiles[2].settings_file = "/synthetic/other/settings.json".into();

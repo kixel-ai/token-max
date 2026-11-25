@@ -1903,7 +1903,8 @@ was assumed. Like the subagent lines it is evidence with no verdict, since the
 advisor's alternative is a stronger main model, which a replay can't price
 the work of. A T3 instance's threads' calls count on the line whose
 `advisorModel` its settings file owns; an instance with no such line, as in a
-scan of only `--t3-dir`, gets a line of its own with no card, as does one
+scan of only `--t3-dir`, or whose launch settings token-max can't resolve,
+gets a line of its own with no card, as does one
 removed from T3's settings whose history the window still holds. A request that names
 profiles on two lines, as when two config roots read one `projects/`
 directory, counts once, on a shared line that says whose it was is unknown,

@@ -4868,7 +4868,7 @@ fn advisor_row(u: &AdvisorUse, control: Option<&AdvisorControl>, out: &Out<'_>) 
             (set, out.home(&control.owner))
         }
         AdvisorLine::T3 { owner } => (
-            "T3 Code threads made these calls, and no native profile reads their settings file, whose advisorModel is not read: T3 picks each thread's main model, so its instances get no advisor card.".into(),
+            "T3 Code threads made these calls, and no native advisor line is confirmed to name the advisorModel they read, which is not read here: T3 picks each thread's main model, so its instances get no advisor card.".into(),
             out.home(owner),
         ),
         AdvisorLine::Removed => (
@@ -7293,7 +7293,13 @@ fn summary(
                 row.profile = tag(&u.profiles, &advisor_owner, out);
                 row
             }
-            AdvisorLine::T3 { .. } | AdvisorLine::Removed | AdvisorLine::Shared { .. } => {
+            // A removed instance is named even beside a single current profile.
+            AdvisorLine::Removed => {
+                let mut row = advisor_row(u, None, out);
+                row.profile = format!("[{}]", out.profile_names(&u.profiles));
+                row
+            }
+            AdvisorLine::T3 { .. } | AdvisorLine::Shared { .. } => {
                 let mut row = advisor_row(u, None, out);
                 row.profile = tag(&u.profiles, &switch, out);
                 row

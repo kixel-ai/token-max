@@ -1513,12 +1513,14 @@ such line, then to the lines below. A request counts when it recorded an `adviso
 each iteration is a call, and only those iterations are priced, at the model
 the iteration names (one that names none stays unknown, never the
 executor's). An iteration records no service tier, so it is priced at
-standard when every executor iteration of its request is, since Priority
+standard when every executor iteration of its request, message or compaction,
+is, since Priority
 Tier is committed per model; otherwise it is unknown. Unpriced requests are
 extrapolated from the priced ones, never below what each is known to cost.
 A T3 instance's requests count on the first line whose `advisorModel` its
 settings file owns, since its threads read that file; a line whose owner is
-another file, such as a project's, takes none. The rest get a line per
+another file, such as a project's, takes none, nor does any line take an
+instance whose launch settings, unresolved, may replace that file. The rest get a line per
 settings file of their own, with no card, and a T3 instance removed from T3's
 settings a line of its own for the requests its history still names. A
 request naming profiles on several lines counts on none of them but once on a

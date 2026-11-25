@@ -2106,8 +2106,8 @@ pub struct SessionPlaces {
     pub instructed: u64,
     /// Those that recorded loading none and ran where no directory remains to read.
     pub unknown: u64,
-    /// Sessions left out of `sessions`: T3 could not settle their owner, and one of its
-    /// candidates is off the line.
+    /// Sessions left out of `sessions`: some owner T3 named for them, settled or not, is
+    /// off the line.
     pub unsettled: u64,
 }
 

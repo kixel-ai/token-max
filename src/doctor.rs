@@ -3166,15 +3166,23 @@ fn which(fixes: &[&Fix], style: &Style) -> String {
         .map(|f| {
             let s = &f.section;
             // A name two members share, such as a duplicate skill's, is followed by its
-            // location, unless they share that too, as two profiles' copies of one skill do,
-            // and a setting's by its profile.
+            // location when the copies' locations differ, and by its profile when the
+            // location alone repeats, as two profiles' copies of one skill do; a setting's
+            // name is its profile.
             let peers = |same: &dyn Fn(&Fix) -> bool| fixes.iter().filter(|o| same(o)).count() > 1;
             let shared = peers(&|o| o.section.member == s.member);
             let placed =
                 !peers(&|o| o.section.member == s.member && o.section.location == s.location);
+            let moved = fixes
+                .iter()
+                .any(|o| o.section.member == s.member && o.section.location != s.location);
             match (&s.location, s.kind, f.profile.as_str()) {
-                (Some(at), Kind::Feature(..), _) if shared && placed => {
-                    format!("{} ({})", s.member, style.path(at))
+                (Some(at), Kind::Feature(..), profile) if shared && moved => {
+                    if placed || profile.is_empty() {
+                        format!("{} ({})", s.member, style.path(at))
+                    } else {
+                        format!("{} ({}, {profile})", s.member, style.path(at))
+                    }
                 }
                 (_, _, "") => s.member.clone(),
                 (_, Kind::Setting, profile) => profile.to_string(),
@@ -5254,6 +5262,30 @@ mod tests {
             printed.contains("  Which  review (work), review (home).\n"),
             "{printed}"
         );
+        // Two profiles each holding the same two copies name both the path and the profile.
+        let at = |line: &str, profile: &str, dir: &str| Fix {
+            profile: profile.into(),
+            ..copy(line, "review", Some(dir))
+        };
+        let (_, printed) = walk(
+            vec![
+                at("A", "work", "a"),
+                at("B", "work", "b"),
+                at("C", "home", "a"),
+                at("D", "home", "b"),
+            ],
+            &w,
+            "n\n",
+        );
+        // slash ok: the locations are formatted with / and abbreviated as given
+        let a = "~/a/SKILL.md";
+        // slash ok: as above
+        let b = "~/b/SKILL.md";
+        let expected = format!(
+            "  Which  review ({a}, work), review ({b}, work), review ({a}, home), \
+             review ({b}, home).\n"
+        );
+        assert!(printed.contains(&expected), "{printed}");
     }
 
     #[test]

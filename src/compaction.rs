@@ -5619,7 +5619,9 @@ mod tests {
                 unreachable!()
             };
             let cap = c.cap.as_mut().unwrap();
-            cap.comparison_cost.unknown.push("synthetic unpriced part".into());
+            cap.comparison_cost
+                .unknown
+                .push("synthetic unpriced part".into());
             assert!(!card(&report).text.contains("costs the same"));
             // A cap the replay priced says what it costs against the current window.
             let CheckResult::Compaction(c) = &mut report.checks[index] else {

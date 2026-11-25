@@ -1095,25 +1095,11 @@ pub fn discover_inbound(
     let t3 = t3_instances(profiles);
     for profile in profiles.iter_mut().filter(|p| p.harness == Harness::Claude) {
         let user = options.settings(&profile.settings_file, Harness::Claude)?;
-        let mine: Vec<&Request> = requests
-            .iter()
-            .filter(|r| owned_by(r, profile, &t3))
-            .collect();
-        let latest = crate::memory::deciding_request(&mine).and_then(|r| r.cwd.as_deref());
-        let directory = match latest {
-            Some(cwd) if existing_directory(cwd)? => Some(cwd),
-            _ => None,
+        let directory = latest_settled(requests, profile, &t3)?.directory;
+        let repository = match directory {
+            Some(cwd) => claude_project_configs(options, profile, cwd)?,
+            None => vec![],
         };
-        let mut repository = vec![];
-        if let Some(cwd) = directory {
-            // A session in the home directory reads the user's own file as its project's.
-            for file in claude_project_files(cwd, options)? {
-                if !same_file(&file, &profile.settings_file) {
-                    let config = options.settings(&file, Harness::Claude)?;
-                    repository.push((file, config));
-                }
-            }
-        }
         let scopes: Vec<SettingsScope> = repository
             .iter()
             .map(|(file, config)| SettingsScope { config, file })
@@ -1162,6 +1148,74 @@ fn owned_by(r: &Request, profile: &Profile, t3: &HashSet<String>) -> bool {
     }
 }
 
+/// Where a profile's own settled main-session requests last ran, and the model they recorded.
+struct Latest<'a> {
+    /// The latest settled request's directory, when it still exists.
+    directory: Option<&'a str>,
+    /// The model the latest settled main session ran most.
+    model: Option<&'a str>,
+}
+
+/// Find where `profile`'s own latest main-session request ran, among those T3 settled to it:
+/// a T3 thread that shares the profile's history never decides, nor does a request whose
+/// owner T3 can't settle. It runs once T3 has attributed requests.
+fn latest_settled<'a>(
+    requests: &'a [Request],
+    profile: &Profile,
+    t3: &HashSet<String>,
+) -> Result<Latest<'a>, ScanError> {
+    let mine: Vec<&Request> = requests
+        .iter()
+        .filter(|r| r.agent == Agent::Main && owned_by(r, profile, t3))
+        .collect();
+    let latest = crate::memory::deciding_request(&mine).and_then(|r| r.cwd.as_deref());
+    Ok(Latest {
+        directory: match latest {
+            Some(cwd) if existing_directory(cwd)? => Some(cwd),
+            _ => None,
+        },
+        model: latest_model(&mine),
+    })
+}
+
+/// A model only requests T3 left unsettled recorded is no evidence for `profile`, but saying
+/// none was recorded would be wrong, so name the reason the default is unknown.
+fn note_unsettled_model(
+    effort: &mut crate::model::EffortControl,
+    profile: &Profile,
+    requests: &[Request],
+) {
+    if effort.unresolved.as_deref() == Some(crate::effort::NO_MODEL)
+        && requests.iter().any(|r| {
+            r.agent == Agent::Main
+                && r.model.is_some()
+                && r.profiles.iter().any(|p| **p == *profile.id)
+        })
+    {
+        effort.unresolved = Some(crate::effort::UNSETTLED_MODEL.into());
+    }
+}
+
+/// A settings file and what it holds.
+type SettingsFile = (String, Map<String, Value>);
+
+/// The Claude settings files `profile` reads at an existing `cwd`, besides its own: a session
+/// in the home directory reads the user's own file as its project's.
+fn claude_project_configs(
+    options: &DiscoveryOptions,
+    profile: &Profile,
+    cwd: &str,
+) -> Result<Vec<SettingsFile>, ScanError> {
+    let mut configs = vec![];
+    for file in claude_project_files(cwd, options)? {
+        if !same_file(&file, &profile.settings_file) {
+            let config = options.settings(&file, Harness::Claude)?;
+            configs.push((file, config));
+        }
+    }
+    Ok(configs)
+}
+
 /// Resolve each native Claude profile's auto memory, main-session effort and advisor at its
 /// latest main-session request's directory; without an existing one, the user and managed
 /// files decide. It runs once T3 has attributed requests, so a T3 thread that shares the
@@ -1192,26 +1246,11 @@ pub fn discover_latest_claude_controls(
     for profile in native {
         let user = options.settings(&profile.settings_file, Harness::Claude)?;
         let local_env = if active == profile.root { env } else { &empty };
-        let mine: Vec<&Request> = requests
-            .iter()
-            .filter(|r| r.agent == Agent::Main && owned_by(r, profile, &t3))
-            .collect();
-        let recorded = latest_model(&mine);
-        let latest = crate::memory::deciding_request(&mine).and_then(|r| r.cwd.as_deref());
-        let directory = match latest {
-            Some(cwd) if !cwd.is_empty() && existing_directory(cwd)? => Some(cwd),
-            _ => None,
+        let Latest { directory, model } = latest_settled(requests, profile, &t3)?;
+        let project = match directory {
+            Some(cwd) => claude_project_configs(options, profile, cwd)?,
+            None => vec![],
         };
-        let mut project = vec![];
-        if let Some(cwd) = directory {
-            // A session in the home directory reads the user's own file as its project's.
-            for file in claude_project_files(cwd, options)? {
-                if !same_file(&file, &profile.settings_file) {
-                    let config = options.settings(&file, Harness::Claude)?;
-                    project.push((file, config));
-                }
-            }
-        }
         let scopes: Vec<SettingsScope> = std::iter::once(SettingsScope {
             config: &user,
             file: &profile.settings_file,
@@ -1230,18 +1269,8 @@ pub fn discover_latest_claude_controls(
             directory: directory.map(Into::into),
             ..claude_memory(&scopes, local_env)?
         });
-        let mut effort = claude_effort(&scopes, &profile.settings_file, local_env, recorded)?;
-        // A model only requests T3 left unsettled recorded is no evidence for this profile,
-        // but saying none was recorded would be wrong.
-        if effort.unresolved.as_deref() == Some(crate::effort::NO_MODEL)
-            && requests.iter().any(|r| {
-                r.agent == Agent::Main
-                    && r.model.is_some()
-                    && r.profiles.iter().any(|p| **p == *profile.id)
-            })
-        {
-            effort.unresolved = Some(crate::effort::UNSETTLED_MODEL.into());
-        }
+        let mut effort = claude_effort(&scopes, &profile.settings_file, local_env, model)?;
+        note_unsettled_model(&mut effort, profile, requests);
         profile.effort = Some(effort);
         // Read where effort is: the advisor card ranks against that main-session default.
         profile.advisor = Some(crate::advisor::control(
@@ -1706,19 +1735,15 @@ pub fn discover_codex_controls(
                 "legacy profile configuration exists; current Codex removed it in 0.134.0, but installed version and launch selection are unresolved",
             );
         }
-        let mut marker_selection = legacy_selection;
+        let selected = codex_selected(options, profile, &user)?;
+        let memory_profiles = selected.memory;
+        let selected_memory = selected.memory_reason;
+        let marker_selection = legacy_selection || selected.markers;
         // Files that can replace the system and user instruction budget for some runs.
         let mut budget_overrides: Vec<String> = members(user.get("profiles"))
             .iter()
             .filter(|(_, p)| members(Some(p)).contains_key(AGENTS_BUDGET))
             .map(|(name, _)| format!("{}:profiles.{name}", profile.settings_file))
-            .collect();
-        // Profiles that set memories, which a --profile selection could apply.
-        let mut memory_profiles: Vec<String> = members(user.get("profiles"))
-            .values()
-            .any(|p| sets_codex_memory(members(Some(p))))
-            .then(|| profile.settings_file.clone())
-            .into_iter()
             .collect();
         let mut outranking: Vec<String> = vec![];
         // Other files that set the turn-end compaction threshold, which a --profile selection
@@ -1728,19 +1753,11 @@ pub fn discover_codex_controls(
             .filter(|(_, p)| members(Some(p)).contains_key(TURN_END_KEY))
             .map(|(name, _)| format!("{}:profiles.{name}", profile.settings_file))
             .collect();
-        // Named profile files that set the model or its effort, which a --profile selection could apply.
-        let mut effort_profile_files: Vec<String> = vec![];
         for name in named_profile_files(options, &profile.root)? {
             let file = join(&[&profile.root, &name]);
             let config = options.settings(&file, Harness::Codex)?;
             if !config.is_empty() {
                 outranking.push(file.clone());
-            }
-            if sets_codex_memory(&config) {
-                memory_profiles.push(file.clone());
-            }
-            if sets_codex_effort(&config) {
-                effort_profile_files.push(file.clone());
             }
             if config.contains_key(TURN_END_KEY) {
                 turn_end_files.push(file.clone());
@@ -1748,8 +1765,6 @@ pub fn discover_codex_controls(
             if config.contains_key(AGENTS_BUDGET) {
                 budget_overrides.push(file.clone());
             }
-            marker_selection |=
-                config.contains_key("project_root_markers") || config.contains_key("projects");
             if members(config.get("tui")).contains_key("auto_recap") {
                 // Validate only the allowlisted control; profile selection is not in history.
                 codex_background(&[SettingsScope {
@@ -1768,11 +1783,8 @@ pub fn discover_codex_controls(
             }
         }
         // Named profiles can set memories too, and which one launched is not recorded.
-        let profile_memory = (!memory_profiles.is_empty()).then_some(
-            "a named config profile sets memories, and --profile selection is not recorded",
-        );
         if let Some(memory) = &mut profile.memory {
-            memory.unresolved = profile_memory.map(String::from);
+            memory.unresolved = selected_memory.map(String::from);
             memory.overrides = memory_profiles.clone();
         }
         profile.background = base.clone();
@@ -1790,34 +1802,6 @@ pub fn discover_codex_controls(
             .iter()
             .filter(|r| r.profiles.contains(&profile.id))
             .collect();
-        // Memories' setting is read at the latest main-agent request's directory, as
-        // for Claude.
-        let latest = crate::memory::deciding_request(&mine).and_then(|r| r.cwd.clone());
-        // Effort is read where memories are, from the layers Codex trusts there.
-        let catalog = codex_catalog(&profile.root);
-        let recorded = latest_model(&mine);
-        let effort_profiles: Vec<String> = members(user.get("profiles"))
-            .iter()
-            .filter(|(_, p)| sets_codex_effort(members(Some(p))))
-            .map(|(name, _)| format!("{}:profiles.{name}", profile.settings_file))
-            .chain(effort_profile_files.iter().cloned())
-            .collect();
-        let effort_unresolved = |control: &mut crate::model::EffortControl, files: &[String]| {
-            if !files.is_empty() && control.unresolved.is_none() {
-                control.unresolved = Some(format!(
-                    "{} can set the model or model_reasoning_effort for some runs, and which applied is not recorded",
-                    files.join(", ")
-                ));
-            }
-        };
-        let mut effort = codex_effort(
-            &base_scopes,
-            &profile.settings_file,
-            catalog.as_ref(),
-            recorded,
-        )?;
-        effort_unresolved(&mut effort, &effort_profiles);
-        profile.effort = Some(effort);
         let cwds = directories(mine.iter().copied());
         for cwd in cwds {
             if !existing_directory(cwd)? {
@@ -1915,89 +1899,6 @@ pub fn discover_codex_controls(
                         .map(|(file, config)| SettingsScope { config, file }),
                 );
             }
-            if latest.as_deref() == Some(cwd) {
-                // Codex reads a project's config only once the project is trusted.
-                let trusted = if trust == Some("trusted") {
-                    &scopes[..]
-                } else {
-                    &base_scopes[..]
-                };
-                let untrusted: Vec<String> = layers
-                    .iter()
-                    .filter(|(_, config)| trust.is_none() && sets_codex_memory(config))
-                    .map(|(file, _)| file.clone())
-                    .collect();
-                let mut effort =
-                    codex_effort(trusted, &profile.settings_file, catalog.as_ref(), recorded)?;
-                let mut effort_files = effort_profiles.clone();
-                effort_files.extend(
-                    layers
-                        .iter()
-                        .filter(|(_, config)| trust.is_none() && sets_codex_effort(config))
-                        .map(|(file, _)| file.clone()),
-                );
-                // A named profile's project_root_markers or projects can change which
-                // project layers apply, as for memories.
-                if marker_selection {
-                    for file in ancestor_codex_configs(
-                        options,
-                        cwd,
-                        &profile.settings_file,
-                        &options.home,
-                        sets_codex_effort,
-                    )? {
-                        if !effort_files.iter().any(|f| same_file(f, &file)) {
-                            effort_files.push(file);
-                        }
-                    }
-                }
-                effort_unresolved(&mut effort, &effort_files);
-                profile.effort = Some(effort);
-                let untrusted_layer = !untrusted.is_empty();
-                // A named profile's project_root_markers or projects can change which
-                // project layers apply, which matters only where one sets memories.
-                let moved = if marker_selection {
-                    ancestors_setting_codex_memory(
-                        options,
-                        cwd,
-                        &profile.settings_file,
-                        &options.home,
-                    )?
-                } else {
-                    vec![]
-                };
-                let moved_layer = !moved.is_empty();
-                let mut overrides = memory_profiles.clone();
-                // The walk names files by resolved path, the project layers by the
-                // recorded one, so compare them resolved.
-                let same = |a: &str, b: &str| {
-                    a == b || realpath(a).is_ok_and(|a| realpath(b).is_ok_and(|b| a == b))
-                };
-                for file in untrusted.into_iter().chain(moved) {
-                    if !overrides.iter().any(|o| same(o, &file)) {
-                        overrides.push(file);
-                    }
-                }
-                let reasons: Vec<&str> = [
-                    untrusted_layer.then_some(
-                        "a project .codex/config.toml sets memories, but the project's trust is not recorded",
-                    ),
-                    moved_layer.then_some(
-                        "a .codex/config.toml above the latest session's directory sets memories, and a named config profile that can change which project config applies may have been selected",
-                    ),
-                    profile_memory,
-                ]
-                .into_iter()
-                .flatten()
-                .collect();
-                profile.memory = Some(MemoryControl {
-                    directory: Some(cwd.into()),
-                    unresolved: (!reasons.is_empty()).then(|| reasons.join("; ")),
-                    overrides,
-                    stored: codex_memory_stored(&profile.root),
-                    ..codex_memory(trusted, &profile.settings_file)?
-                });
-            }
             let has_override = trust != Some("untrusted")
                 && layers
                     .iter()
@@ -2054,6 +1955,205 @@ pub fn discover_codex_controls(
         });
     }
     pretend_t3_projects_on(options, profiles, requests, Harness::Codex)
+}
+
+/// What a Codex home's named profiles could change, since which one launched is not recorded.
+struct Selected {
+    /// Files that set memories, which a --profile selection could apply.
+    memory: Vec<String>,
+    /// Why memories are unresolved when one does.
+    memory_reason: Option<&'static str>,
+    /// Entries that set the model or its effort.
+    effort: Vec<String>,
+    /// Whether one sets the project root markers or trusted projects.
+    markers: bool,
+}
+
+fn codex_selected(
+    options: &DiscoveryOptions,
+    profile: &Profile,
+    user: &Map<String, Value>,
+) -> Result<Selected, ScanError> {
+    let named = members(user.get("profiles"));
+    let mut memory: Vec<String> = named
+        .values()
+        .any(|p| sets_codex_memory(members(Some(p))))
+        .then(|| profile.settings_file.clone())
+        .into_iter()
+        .collect();
+    let mut effort: Vec<String> = named
+        .iter()
+        .filter(|(_, p)| sets_codex_effort(members(Some(p))))
+        .map(|(name, _)| format!("{}:profiles.{name}", profile.settings_file))
+        .collect();
+    let mut markers = false;
+    for name in named_profile_files(options, &profile.root)? {
+        let file = join(&[&profile.root, &name]);
+        let config = options.settings(&file, Harness::Codex)?;
+        if sets_codex_memory(&config) {
+            memory.push(file.clone());
+        }
+        if sets_codex_effort(&config) {
+            effort.push(file);
+        }
+        markers |= config.contains_key("project_root_markers") || config.contains_key("projects");
+    }
+    Ok(Selected {
+        memory_reason: (!memory.is_empty()).then_some(
+            "a named config profile sets memories, and --profile selection is not recorded",
+        ),
+        memory,
+        effort,
+        markers,
+    })
+}
+
+/// Resolve each native Codex profile's memory and main-session default at its latest
+/// main-session request's directory, from the layers Codex trusts there; without an existing
+/// one, the user and system files decide. It runs once T3 has attributed requests, so a T3
+/// thread that shares the profile's history never decides them, nor does a request whose
+/// owner T3 can't settle.
+pub fn discover_latest_codex_controls(
+    options: &DiscoveryOptions,
+    profiles: &mut [Profile],
+    requests: &[Request],
+) -> Result<(), ScanError> {
+    let t3 = t3_instances(profiles);
+    for profile in profiles
+        .iter_mut()
+        .filter(|p| p.harness == Harness::Codex && p.t3.is_none())
+    {
+        let Latest { directory, model } = latest_settled(requests, profile, &t3)?;
+        let user = options.settings(&profile.settings_file, Harness::Codex)?;
+        let system = options.settings(&options.codex_system_config_file, Harness::Codex)?;
+        let base_scopes = [
+            SettingsScope {
+                config: &system,
+                file: &options.codex_system_config_file,
+            },
+            SettingsScope {
+                config: &user,
+                file: &profile.settings_file,
+            },
+        ];
+        let selected = codex_selected(options, profile, &user)?;
+        let marker_selection = selected.markers
+            || user.contains_key("profile")
+            || !members(user.get("profiles")).is_empty();
+        let catalog = codex_catalog(&profile.root);
+        let mut effort = codex_effort(
+            &base_scopes,
+            &profile.settings_file,
+            catalog.as_ref(),
+            model,
+        )?;
+        let mut effort_files = selected.effort.clone();
+        if let Some(cwd) = directory {
+            let markers = codex_markers(&base_scopes, &profile.settings_file)?;
+            let paths = project_directories(cwd, &markers)?;
+            let root = paths.last().expect("cwd is included");
+            let trust = codex_trust(&base_scopes, cwd, root);
+            let mut layers = Vec::new();
+            for path in &paths {
+                if trust == Some("untrusted") {
+                    continue;
+                }
+                let file = join(&[path, ".codex", "config.toml"]);
+                let config = options.settings(&file, Harness::Codex)?;
+                layers.push((file, config));
+            }
+            let mut scopes = base_scopes.to_vec();
+            if trust != Some("untrusted") {
+                scopes.extend(
+                    layers
+                        .iter()
+                        .rev()
+                        .map(|(file, config)| SettingsScope { config, file }),
+                );
+            }
+            // Codex reads a project's config only once the project is trusted.
+            let trusted = if trust == Some("trusted") {
+                &scopes[..]
+            } else {
+                &base_scopes[..]
+            };
+            let untrusted: Vec<String> = layers
+                .iter()
+                .filter(|(_, config)| trust.is_none() && sets_codex_memory(config))
+                .map(|(file, _)| file.clone())
+                .collect();
+            effort = codex_effort(trusted, &profile.settings_file, catalog.as_ref(), model)?;
+            effort_files.extend(
+                layers
+                    .iter()
+                    .filter(|(_, config)| trust.is_none() && sets_codex_effort(config))
+                    .map(|(file, _)| file.clone()),
+            );
+            // A named profile's project_root_markers or projects can change which
+            // project layers apply, as for memories.
+            if marker_selection {
+                for file in ancestor_codex_configs(
+                    options,
+                    cwd,
+                    &profile.settings_file,
+                    &options.home,
+                    sets_codex_effort,
+                )? {
+                    if !effort_files.iter().any(|f| same_file(f, &file)) {
+                        effort_files.push(file);
+                    }
+                }
+            }
+            let untrusted_layer = !untrusted.is_empty();
+            // A named profile's project_root_markers or projects can change which
+            // project layers apply, which matters only where one sets memories.
+            let moved = if marker_selection {
+                ancestors_setting_codex_memory(options, cwd, &profile.settings_file, &options.home)?
+            } else {
+                vec![]
+            };
+            let moved_layer = !moved.is_empty();
+            let mut overrides = selected.memory.clone();
+            // The walk names files by resolved path, the project layers by the
+            // recorded one, so compare them resolved.
+            let same = |a: &str, b: &str| {
+                a == b || realpath(a).is_ok_and(|a| realpath(b).is_ok_and(|b| a == b))
+            };
+            for file in untrusted.into_iter().chain(moved) {
+                if !overrides.iter().any(|o| same(o, &file)) {
+                    overrides.push(file);
+                }
+            }
+            let reasons: Vec<&str> = [
+                untrusted_layer.then_some(
+                    "a project .codex/config.toml sets memories, but the project's trust is not recorded",
+                ),
+                moved_layer.then_some(
+                    "a .codex/config.toml above the latest session's directory sets memories, and a named config profile that can change which project config applies may have been selected",
+                ),
+                selected.memory_reason,
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            profile.memory = Some(MemoryControl {
+                directory: Some(cwd.into()),
+                unresolved: (!reasons.is_empty()).then(|| reasons.join("; ")),
+                overrides,
+                stored: codex_memory_stored(&profile.root),
+                ..codex_memory(trusted, &profile.settings_file)?
+            });
+        }
+        note_unsettled_model(&mut effort, profile, requests);
+        if !effort_files.is_empty() && effort.unresolved.is_none() {
+            effort.unresolved = Some(format!(
+                "{} can set the model or model_reasoning_effort for some runs, and which applied is not recorded",
+                effort_files.join(", ")
+            ));
+        }
+        profile.effort = Some(effort);
+    }
+    Ok(())
 }
 
 /// Under `--defaults`, what a Codex home's named profile files turn off, which --defaults
@@ -2998,6 +3098,16 @@ pub fn discover(options: &DiscoveryOptions) -> Result<Discovery, ScanError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both Codex passes, as the reader runs them around T3's attribution.
+    fn codex_controls(
+        options: &DiscoveryOptions,
+        profiles: &mut [Profile],
+        requests: &[Request],
+    ) -> Result<(), ScanError> {
+        discover_codex_controls(options, profiles, requests)?;
+        discover_latest_codex_controls(options, profiles, requests)
+    }
     use crate::test_support::{Workspace, make_request, native_path};
     use std::path::Path;
 
@@ -3532,7 +3642,7 @@ mod tests {
             let requests: Vec<Request> =
                 d.profiles.iter().map(|p| request(p, Some(&repo))).collect();
             discover_claude_controls(&o, &mut d.profiles, &requests).unwrap();
-            discover_codex_controls(&o, &mut d.profiles, &requests).unwrap();
+            codex_controls(&o, &mut d.profiles, &requests).unwrap();
             let names = |harness| {
                 let p = d.profiles.iter().find(|p| p.harness == harness).unwrap();
                 p.pretended_on
@@ -3785,8 +3895,7 @@ mod tests {
                 built.harness = Harness::Codex;
                 built
             };
-            discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&r))
-                .unwrap();
+            codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&r)).unwrap();
             codex(&d).turn_end.unwrap()
         };
         let unset = resolve();
@@ -3953,7 +4062,7 @@ mod tests {
             },
             request(&profile, None),
         ];
-        discover_codex_controls(&options, &mut data.profiles, &requests).unwrap();
+        codex_controls(&options, &mut data.profiles, &requests).unwrap();
         let directories = data.profiles[0].speed_directories.as_ref().unwrap();
         assert_eq!(directories.len(), 1);
         let directory = &directories[&native_path(&nested)];
@@ -4244,7 +4353,7 @@ mod tests {
             .find(|p| p.harness == Harness::Codex)
             .unwrap();
         let r = request(p, Some(&cwd));
-        let error = discover_codex_controls(&o, &mut d.profiles, &[r]).unwrap_err();
+        let error = codex_controls(&o, &mut d.profiles, &[r]).unwrap_err();
         assert_eq!(error.message, "cannot inspect working directory");
     }
 
@@ -4343,7 +4452,7 @@ mod tests {
             built.harness = Harness::Codex;
             built
         };
-        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&r)).unwrap();
+        codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&r)).unwrap();
         let p = d
             .profiles
             .iter()
@@ -4360,7 +4469,7 @@ mod tests {
             w.codex.join("quiet.config.toml"),
             "project_root_markers = []\n",
         );
-        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&r)).unwrap();
+        codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&r)).unwrap();
         let p = d
             .profiles
             .iter()
@@ -4376,7 +4485,7 @@ mod tests {
                 serde_json::to_string(&native_path(&cwd)).unwrap()
             ),
         );
-        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&r)).unwrap();
+        codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&r)).unwrap();
         let p = d
             .profiles
             .iter()
@@ -4395,7 +4504,7 @@ mod tests {
                 serde_json::to_string(&native_path(&root)).unwrap()
             ),
         );
-        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&r)).unwrap();
+        codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&r)).unwrap();
         let p = d
             .profiles
             .iter()
@@ -4410,7 +4519,7 @@ mod tests {
             w.codex.join("config.toml"),
             "profile = 'quiet'\n[profiles.quiet.tui]\nauto_recap = false\n",
         );
-        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&r)).unwrap();
+        codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&r)).unwrap();
         let p = d
             .profiles
             .iter()
@@ -4453,7 +4562,7 @@ mod tests {
                 })
                 .collect();
             discover_claude_controls(&options(&w), &mut d.profiles, &requests).unwrap();
-            discover_codex_controls(&options(&w), &mut d.profiles, &requests).unwrap();
+            codex_controls(&options(&w), &mut d.profiles, &requests).unwrap();
             let p = d.profiles.iter().find(|p| p.harness == harness).unwrap();
             p.outranking_files.clone()
         };
@@ -4526,12 +4635,12 @@ mod tests {
             built.cwd = Some(native_path(&root).into());
             built
         };
-        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
+        codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
         assert_eq!(budget(&d).1, None);
         // A project layer at a recorded directory can replace it.
         let project = root.join(".codex/config.toml");
         write(&project, "project_doc_max_bytes = 4096\n");
-        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
+        codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
         let reason = budget(&d).1.unwrap();
         assert!(reason.starts_with(&native_path(&project)), "{reason}");
         // So can a named profile, whose selection no record names.
@@ -4540,10 +4649,10 @@ mod tests {
             w.codex.join("big.config.toml"),
             "project_doc_max_bytes = 1\n",
         );
-        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
+        codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
         assert!(budget(&d).1.unwrap().contains("big.config.toml"));
         fs::remove_file(w.codex.join("big.config.toml")).unwrap();
-        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
+        codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
         assert_eq!(budget(&d).1, None);
     }
 
@@ -4590,7 +4699,7 @@ mod tests {
                 .background_directories[&native_path(&cwd)][0]
                 .clone()
         };
-        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
+        codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
         assert_eq!(recap(&d).value, Some(true));
         assert_eq!(
             recap(&d).off_file.as_deref(),
@@ -4598,7 +4707,7 @@ mod tests {
         );
         assert!(!format!("{:?}", d.profiles).contains("SYNTHETIC_PRIVATE"));
         write(w.codex.join("config.toml"), "[tui]\nauto_recap = false\n");
-        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
+        codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
         assert_eq!(recap(&d).value, None);
         assert!(recap(&d).reason.contains("trust is unknown"));
         write(
@@ -4608,14 +4717,14 @@ mod tests {
                 serde_json::to_string(&native_path(&root)).unwrap()
             ),
         );
-        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
+        codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
         assert_eq!(recap(&d).value, Some(false));
         assert!(recap(&d).reason.contains("untrusted"));
         write(
             w.codex.join("quiet.config.toml"),
             "[tui]\nauto_recap = true\n",
         );
-        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
+        codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
         assert_eq!(recap(&d).value, None);
         assert!(recap(&d).reason.contains("--profile"));
         let gone = {
@@ -4628,7 +4737,7 @@ mod tests {
             built.cwd = None;
             built
         };
-        discover_codex_controls(&options(&w), &mut d.profiles, &[gone.clone(), absent]).unwrap();
+        codex_controls(&options(&w), &mut d.profiles, &[gone.clone(), absent]).unwrap();
         let p = d.profiles.iter().find(|p| p.id == id).unwrap();
         assert!(
             p.background_directories[""]
@@ -4974,5 +5083,90 @@ mod tests {
         single.issues = vec![format!("{}: synthetic", crate::t3::UNSETTLED).into()];
         discover_inbound(&options(&w), &mut data.profiles, &[single]).unwrap();
         assert_eq!(directory(&data, "t3"), None);
+    }
+
+    #[test]
+    fn only_a_codex_profiles_own_settled_latest_request_decides_its_controls() {
+        let w = Workspace::new();
+        let (mine, theirs) = (w.home.join("mine"), w.home.join("theirs"));
+        let mut user = String::new();
+        for (dir, memories) in [(&mine, "true"), (&theirs, "false")] {
+            fs::create_dir_all(dir.join(".git")).unwrap();
+            write(
+                dir.join(".codex/config.toml"),
+                &format!("[features]\nmemories = {memories}\n"),
+            );
+            user += &format!(
+                "[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+                native_path(dir)
+            );
+        }
+        write(w.codex.join("config.toml"), &user);
+        let fresh = || {
+            let mut data = discover(&options(&w)).unwrap();
+            data.profiles.push(crate::test_support::make_t3_profile(
+                "t3",
+                &native_path(w.home.join("t3")),
+            ));
+            data
+        };
+        let mut data = fresh();
+        let profile = data
+            .profiles
+            .iter()
+            .find(|p| p.harness == Harness::Codex)
+            .unwrap()
+            .clone();
+        let codex = |mut r: Request, time: i64, profiles: &[&str]| {
+            r.harness = Harness::Codex;
+            r.time = time;
+            r.profiles = profiles
+                .iter()
+                .map(|p| (*p).into())
+                .collect::<Vec<_>>()
+                .into();
+            r
+        };
+        let id = profile.id.to_string();
+        let earlier = codex(request(&profile, Some(&mine)), 1, &[&id]);
+        // Newer, but T3 attributed it to an instance of its own.
+        let later = codex(request(&profile, Some(&theirs)), 2, &["t3"]);
+        // Newest, but T3 couldn't settle its owner, so it names both: it decides for neither.
+        let unsettled = codex(request(&profile, Some(&theirs)), 3, &[&id, "t3"]);
+        let requests = [earlier, later, unsettled.clone()];
+        codex_controls(&options(&w), &mut data.profiles, &requests).unwrap();
+        let native = |data: &Discovery| {
+            data.profiles
+                .iter()
+                .find(|p| p.harness == Harness::Codex && p.t3.is_none())
+                .unwrap()
+                .clone()
+        };
+        let memory = native(&data).memory.unwrap();
+        assert_eq!(
+            memory.directory.as_deref(),
+            Some(native_path(&mine).as_str())
+        );
+        assert!(memory.value);
+        let effort = native(&data).effort.unwrap();
+        assert_eq!(
+            effort.model,
+            Some(requests[0].model.clone().unwrap().to_string())
+        );
+
+        // With only an unsettled request, the user and system files decide.
+        let mut data = fresh();
+        codex_controls(&options(&w), &mut data.profiles, &[unsettled]).unwrap();
+        let memory = native(&data).memory.unwrap();
+        assert_eq!(memory.directory, None);
+        assert!(!memory.value);
+        // Its recorded model is no evidence, and the reason says why rather than that none
+        // was recorded.
+        let effort = native(&data).effort.unwrap();
+        assert_eq!(effort.model, None);
+        assert_eq!(
+            effort.unresolved.as_deref(),
+            Some(crate::effort::UNSETTLED_MODEL)
+        );
     }
 }

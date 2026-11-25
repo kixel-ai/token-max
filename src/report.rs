@@ -505,11 +505,26 @@ fn default_item(e: &EffortCheck, profile: &str, how: Option<How>, out: &Out<'_>)
         .filter_map(|p| model_setting(&c.model_owner, &p.settings_file))
         .collect();
     let shared = |p: &Profile| {
+        // The files the profile reads, lowest precedence first: a session in the home
+        // directory reads another profile's user file as its project's.
+        let rank = |file: &str| {
+            std::iter::once(&p.settings_file)
+                .chain(&p.project_files)
+                .position(|r| crate::discovery::same_file(r, file))
+        };
         p.effort.as_ref().is_some_and(|o| {
             match model_setting(&o.model_owner, &p.settings_file) {
-                Some((g, l)) => written
-                    .iter()
-                    .any(|(f, k)| *k == l && crate::discovery::same_file(f, &g)),
+                // A write reaches it in the file and key that name its model, or in any file
+                // it reads when no setting names one, or above a file `model` that the
+                // write's own `model` or a model variable outranks.
+                Some((g, l)) => written.iter().any(|(f, k)| {
+                    (*k == l && crate::discovery::same_file(f, &g))
+                        || rank(f).is_some_and(|r| {
+                            o.model_owner == crate::effort::RECORDED
+                                || (l == "model"
+                                    && (k != "model" || rank(&g).is_some_and(|at| r > at)))
+                        })
+                }),
                 // An owner outside any file, such as the shell's ANTHROPIC_MODEL, matches by
                 // name.
                 None => o.model_owner == c.model_owner,
@@ -12031,11 +12046,12 @@ mod tests {
         // A Sonnet main with `advisor` set, under `allowlist`, and another profile with the
         // same model setting under `other`'s, its effort set where `other` names, and the two
         // profiles' model owners and the second's settings file, which `owners` names if not
-        // the file's `model` and `file`: the first default card and the advisor card.
+        // the file's `model` and `file`, and the project files it reads: the first default
+        // card and the advisor card.
         let line = |allowlist: Option<Allowlist>,
                     advisor: Option<&str>,
                     other: Option<(Option<Allowlist>, &str)>,
-                    owners: Option<(&str, &str, &str)>| {
+                    owners: Option<(&str, &str, &str, &[&str])>| {
             let mut report = synthetic();
             report.checks.clear();
             report.context.clear();
@@ -12068,11 +12084,13 @@ mod tests {
                 other.effort.as_mut().unwrap().owner = effort.into();
                 report.scan.profiles.push(other);
             }
-            if let Some((first, second, settings_file)) = owners {
+            if let Some((first, second, settings_file, project)) = owners {
                 for (p, owner) in report.scan.profiles.iter_mut().zip([first, second]) {
                     p.effort.as_mut().unwrap().model_owner = owner.into();
                 }
                 report.scan.profiles[1].settings_file = settings_file.into();
+                report.scan.profiles[1].project_files =
+                    project.iter().map(|f| f.to_string()).collect();
             }
             let checks = effort_checks(&EffortInput {
                 scan: &report.scan,
@@ -12187,7 +12205,8 @@ mod tests {
         }
         // So does one whose model the same setting names as a null the edit replaces, through
         // a symlink, or as a recorded model in the file the edit writes; one on another
-        // setting, or a recorded model in another file, does not.
+        // setting, or a recorded model in another file, does not. A profile that reads the
+        // edited file as its project's is reached unless a file above it names its model.
         let w = crate::test_support::Workspace::new();
         let real = w.home.join("settings.json");
         std::fs::write(&real, "{}").unwrap();
@@ -12195,14 +12214,21 @@ mod tests {
         let null = format!("{real}:model{}", crate::effort::NULL_MODEL);
         let recorded = crate::effort::RECORDED;
         let elsewhere = "/elsewhere/settings.json";
+        let local = "/elsewhere/.claude/settings.local.json";
+        let own = format!("{elsewhere}:model");
+        let above = format!("{local}:model");
+        let reads: &[&str] = &[file.as_str(), local];
         let mut cases = vec![
-            ((null.as_str(), null.as_str(), file.as_str()), true),
-            ((recorded, recorded, file.as_str()), true),
-            ((recorded, recorded, elsewhere), false),
+            ((null.as_str(), null.as_str(), file.as_str(), &[][..]), true),
+            ((recorded, recorded, file.as_str(), &[]), true),
+            ((recorded, recorded, elsewhere, &[]), false),
+            ((recorded, recorded, elsewhere, reads), true),
+            ((recorded, own.as_str(), elsewhere, reads), true),
+            ((recorded, above.as_str(), elsewhere, reads), false),
         ];
         let set = format!("{real}:model");
         let env = format!("{real}:env.ANTHROPIC_MODEL");
-        cases.push(((set.as_str(), env.as_str(), file.as_str()), false));
+        cases.push(((set.as_str(), env.as_str(), file.as_str(), &[]), false));
         #[cfg(unix)]
         let link = {
             let link = w.home.join("link.json");
@@ -12210,7 +12236,7 @@ mod tests {
             format!("{}:model", link.display())
         };
         #[cfg(unix)]
-        cases.push(((set.as_str(), link.as_str(), file.as_str()), true));
+        cases.push(((set.as_str(), link.as_str(), file.as_str(), &[]), true));
         for (owners, blocked) in cases {
             let other = Some((read(&["sonnet"]), "/elsewhere/settings.json:effortLevel"));
             let (default, _) = line(None, None, other, Some(owners));

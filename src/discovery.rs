@@ -1297,6 +1297,7 @@ pub fn discover_latest_claude_controls(
             advisor.blocked = Some(why);
         }
         profile.advisor = Some(advisor);
+        profile.project_files = project.into_iter().map(|(file, _)| file).collect();
     }
     Ok(())
 }
@@ -2861,6 +2862,7 @@ pub(crate) fn profile(
         effort: None,
         advisor: None,
         allowlist: None,
+        project_files: vec![],
         speed_directories: None,
         idle_directories: None,
         background,
@@ -5067,6 +5069,12 @@ mod tests {
         };
         let profile = resolve(&mut data);
         let user = profile.settings_file.clone();
+        // The default card checks the files it read beside its own.
+        assert!(
+            profile.project_files.contains(&local),
+            "{:?}",
+            profile.project_files
+        );
         assert_eq!(
             profile.allowlist,
             Some(Allowlist::Read {

@@ -1060,6 +1060,9 @@ pub struct Profile {
     /// Claude Code's `availableModels` allowlist, read where the advisor is; None when no
     /// settings file sets one.
     pub allowlist: Option<Allowlist>,
+    /// The project and local settings files Claude reads at its latest session's directory,
+    /// besides its own, where an edit to another profile's file can still reach it.
+    pub project_files: Vec<String>,
     pub speed_directories: Option<IndexMap<String, SpeedControl>>,
     /// Current project controls observed at recorded working directories.
     pub idle_directories: Option<IndexMap<String, IdleControl>>,

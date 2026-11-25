@@ -3608,6 +3608,7 @@ mod tests {
             effort: None,
             advisor: None,
             allowlist: None,
+            project_files: vec![],
             speed_directories: None,
             idle_directories: None,
             background: vec![],

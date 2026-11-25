@@ -19,8 +19,9 @@ Recommendations:
 - Use the [sections](/quest/m1/short/sections.md)' kinds, plus one line for
   each checked setting with no kind, ranked by cost as now.
 - Each line names the setting that changes its kind, as the rule requires.
-- Drop the site's cut of this section from `assets/demo/site.py` once it is
-  short.
+- Keep the site's cut of this section in `assets/demo/site.py` while any
+  line outside `--details` names a project file, which can belong to a
+  private repository; the site's runs never pass `--details`.
 
 ## Required
 

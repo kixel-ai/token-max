@@ -18,8 +18,9 @@ Recommendations:
 
 - Steps by hand, such as uninstalling a plugin, join the closing section
   under their file or profile rather than staying on rows.
-- After a walk, the closing section lists only the edits not written, so a
-  change declined can still be made by hand.
+- After a walk, the closing section prints after the confirm and lists
+  every edit not written, declined at its card or at the confirm, so it can
+  still be made by hand.
 - Name files as `host:path` under `--ssh`, as the confirm does.
 - Update `docs/reference.md` ("each change's line ends with its edit") and
   rerun `assets/demo/walk.tape` if the post-walk report changes.

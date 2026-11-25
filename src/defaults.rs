@@ -7,6 +7,7 @@ use crate::model::{
     Report, T3IdleMode, Ttl,
 };
 use crate::report::{approx, monthly, tokens};
+use serde::{Deserialize, Serialize};
 
 /// A setting whose current value differs from its default, and what that saves.
 #[derive(Clone, Debug, PartialEq)]
@@ -431,134 +432,174 @@ pub fn estimate(
     ))
 }
 
-/// The line under the report's headline: the summed saving of every setting that differs
-/// from its default. `share` gives a monthly saving's share of the spend of `host`, such as
-/// "this host's".
-pub fn headline<'a>(
-    baselines: impl IntoIterator<Item = &'a Baseline>,
-    share: impl Fn(f64) -> Option<f64>,
-    host: &str,
-) -> String {
-    #[derive(Default)]
-    struct Sum {
-        settings: usize,
-        usd: f64,
-        margin: Option<Margin>,
-        share: f64,
-        unknown_share: bool,
+/// What every setting that differs from its default saves together, summed apart by kind so
+/// that hosts add up before anything rounds.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Credit {
+    /// Savings replayed or estimated, whatever the defaults.
+    measured: Sum,
+    /// How many of `measured` are estimates for features that are now off.
+    estimated: usize,
+    /// Pinned main TTLs whose default depends on how usage is paid, saving or costing: each
+    /// profile's default can differ, so they bound apart and never net.
+    up_to: Sum,
+    up_to_more: Sum,
+    /// How many settings differ by an amount not measured.
+    unmeasured: usize,
+}
+
+/// Monthly savings of some settings added up.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+struct Sum {
+    settings: usize,
+    usd: f64,
+    margin: Option<Margin>,
+}
+
+impl Sum {
+    fn add(&mut self, usd: f64, margin: Option<Margin>) {
+        self.settings += 1;
+        self.usd += usd;
+        self.margin = Margin::plus(self.margin, margin);
     }
-    impl Sum {
-        fn add(&mut self, usd: f64, margin: Option<Margin>, share: Option<f64>) {
-            self.settings += 1;
-            self.usd += usd;
-            self.margin = Margin::plus(self.margin, margin);
-            match share {
-                Some(s) => self.share += s,
-                None => self.unknown_share = true,
-            }
-        }
-        /// Such as "save about $40/mo, 9% of this host's spend", or without its verb when
-        /// `lead` is false, such as "$40/mo more, 9% of this host's spend".
-        fn text(&self, about_word: &str, lead: bool, host: &str) -> String {
-            let (verb, usd, more) = if self.usd < 0.0 {
-                ("cost", -self.usd, " more")
-            } else {
-                ("save", self.usd, "")
-            };
-            let amount = approx(usd, self.margin, "/mo");
-            let about_word = if amount.starts_with(['<', '~']) {
-                ""
-            } else {
-                about_word
-            };
-            let share = if self.unknown_share {
-                String::new()
-            } else {
-                format!(
-                    ", {} of {host} spend",
-                    crate::report::share_text(self.share.abs())
-                )
-            };
-            let verb = if lead {
-                format!("{verb} ")
-            } else {
-                String::new()
-            };
-            format!("{verb}{about_word}{amount}{more}{share}")
-        }
+
+    /// Another host's sum: a separate sample, so the margins combine in quadrature.
+    fn merge(&mut self, other: &Sum) {
+        self.settings += other.settings;
+        self.usd += other.usd;
+        self.margin = Margin::independent(self.margin, other.margin);
     }
-    let settings = |n: usize| format!("{n} setting{}", if n == 1 { "" } else { "s" });
-    // "saves" for one setting, "save" for several.
-    let verb = |n: usize, plural: &str| {
-        if n == 1 {
-            format!("{plural}s")
+
+    /// Such as "save about $40/mo, 9% of this host's spend", or without its verb when `lead`
+    /// is false, such as "$40/mo more, 9% of this host's spend". The share is of `monthly`,
+    /// the spend every 30 days of `whose`, and left out when that is none.
+    fn text(&self, about_word: &str, lead: bool, monthly: f64, whose: &str) -> String {
+        let (verb, usd, more) = if self.usd < 0.0 {
+            ("cost", -self.usd, " more")
         } else {
-            plural.to_string()
-        }
-    };
-    // Each pinned main TTL's default can differ by profile, so "up to" savings and costs
-    // bound separately and never net.
-    let (mut measured, mut up_to, mut up_to_more, mut estimated, mut unmeasured) =
-        (Sum::default(), Sum::default(), Sum::default(), 0, 0);
-    for b in baselines {
-        match b.saving {
-            Saving::Saves(usd) => measured.add(usd, b.margin, share(usd)),
-            Saving::Estimated(usd) => {
-                measured.add(usd, b.margin, share(usd));
-                estimated += 1;
+            ("save", self.usd, "")
+        };
+        let amount = approx(usd, self.margin, "/mo");
+        let about_word = if amount.starts_with(['<', '~']) {
+            ""
+        } else {
+            about_word
+        };
+        let share = if monthly > 0.0 {
+            format!(
+                ", {} of {whose} spend",
+                crate::report::share_text(usd / monthly)
+            )
+        } else {
+            String::new()
+        };
+        let verb = if lead {
+            format!("{verb} ")
+        } else {
+            String::new()
+        };
+        format!("{verb}{about_word}{amount}{more}{share}")
+    }
+}
+
+impl Credit {
+    /// What the settings behind `baselines` save together.
+    pub fn of<'a>(baselines: impl IntoIterator<Item = &'a Baseline>) -> Self {
+        let mut credit = Credit::default();
+        for b in baselines {
+            match b.saving {
+                Saving::Saves(usd) => credit.measured.add(usd, b.margin),
+                Saving::Estimated(usd) => {
+                    credit.measured.add(usd, b.margin);
+                    credit.estimated += 1;
+                }
+                Saving::UpTo(usd) if usd < 0.0 => credit.up_to_more.add(usd, b.margin),
+                Saving::UpTo(usd) => credit.up_to.add(usd, b.margin),
+                Saving::NotMeasured => credit.unmeasured += 1,
             }
-            Saving::UpTo(usd) if usd < 0.0 => up_to_more.add(usd, b.margin, share(usd)),
-            Saving::UpTo(usd) => up_to.add(usd, b.margin, share(usd)),
-            Saving::NotMeasured => unmeasured += 1,
         }
+        credit
     }
-    if measured.settings + up_to.settings + up_to_more.settings + unmeasured == 0 {
-        return "No setting was found to differ from its Claude Code or Codex default.".into();
+
+    /// How many settings have a saving priced, in full or "up to".
+    fn priced(&self) -> usize {
+        self.measured.settings + self.up_to.settings + self.up_to_more.settings
     }
-    let mut sentences = vec![];
-    if measured.settings > 0 {
-        let mut text = format!("your settings {}", measured.text("about ", true, host));
-        if estimated > 0 {
-            text += &match estimated {
+
+    /// Another host's credit added to this one.
+    pub fn merge(&mut self, other: &Credit) {
+        self.measured.merge(&other.measured);
+        self.estimated += other.estimated;
+        self.up_to.merge(&other.up_to);
+        self.up_to_more.merge(&other.up_to_more);
+        self.unmeasured += other.unmeasured;
+    }
+
+    /// The line under the report's headline, each percent of `monthly`, the spend every 30
+    /// days of `whose`, such as "this host's".
+    pub fn text(&self, monthly: f64, whose: &str) -> String {
+        let (measured, up_to, up_to_more) = (&self.measured, &self.up_to, &self.up_to_more);
+        if self.priced() + self.unmeasured == 0 {
+            return "No setting was found to differ from its Claude Code or Codex default.".into();
+        }
+        let settings = |n: usize| format!("{n} setting{}", if n == 1 { "" } else { "s" });
+        // "saves" for one setting, "save" for several.
+        let verb = |n: usize, plural: &str| {
+            if n == 1 {
+                format!("{plural}s")
+            } else {
+                plural.to_string()
+            }
+        };
+        let mut sentences = vec![];
+        if measured.settings > 0 {
+            let mut text = format!(
+                "your settings {}",
+                measured.text("about ", true, monthly, whose)
+            );
+            text += &match self.estimated {
+                0 => String::new(),
                 1 => ", including an estimate for 1 feature that is now off".to_string(),
                 n => format!(", including estimates for {n} features that are now off"),
             };
+            sentences.push(text);
         }
-        sentences.push(text);
-    }
-    for (sum, action) in [(&up_to, "save"), (&up_to_more, "cost")] {
-        if sum.settings > 0 {
-            sentences.push(format!(
-                "{} whose default depends on how usage is paid {} up to {}",
-                settings(sum.settings),
-                verb(sum.settings, action),
-                sum.text("", false, host)
-            ));
+        for (sum, action) in [(up_to, "save"), (up_to_more, "cost")] {
+            if sum.settings > 0 {
+                sentences.push(format!(
+                    "{} whose default depends on how usage is paid {} up to {}",
+                    settings(sum.settings),
+                    verb(sum.settings, action),
+                    sum.text("", false, monthly, whose)
+                ));
+            }
         }
-    }
-    if unmeasured > 0 {
-        let more = if sentences.is_empty() { "" } else { " more" };
-        sentences.push(match unmeasured {
-            1 => format!("1{more} setting differs by an amount not measured"),
-            n => format!("{n}{more} settings differ by amounts not measured"),
-        });
-    }
-    // Each saving holds every other setting constant, so two may count the same requests.
-    if measured.settings + up_to.settings + up_to_more.settings > 1 {
-        sentences.push("overlapping settings may save less".into());
-    }
-    let mut text = String::from("Compared with defaults, ");
-    for (i, sentence) in sentences.iter().enumerate() {
-        if i > 0 {
-            text += ". ";
-            let mut chars = sentence.chars();
-            text.extend(chars.next().map(|c| c.to_ascii_uppercase()));
-            text.extend(chars);
-        } else {
-            text += sentence;
+        if self.unmeasured > 0 {
+            let more = if sentences.is_empty() { "" } else { " more" };
+            sentences.push(match self.unmeasured {
+                1 => format!("1{more} setting differs by an amount not measured"),
+                n => format!("{n}{more} settings differ by amounts not measured"),
+            });
         }
+        // Each saving holds every other setting constant, so two may count the same requests,
+        // as can one on two hosts sharing a copied history.
+        if self.priced() > 1 {
+            sentences.push("overlapping settings may save less".into());
+        }
+        let mut text = String::from("Compared with defaults, ");
+        for (i, sentence) in sentences.iter().enumerate() {
+            if i > 0 {
+                text += ". ";
+                let mut chars = sentence.chars();
+                text.extend(chars.next().map(|c| c.to_ascii_uppercase()));
+                text.extend(chars);
+            } else {
+                text += sentence;
+            }
+        }
+        text + "."
     }
-    text + "."
 }
 
 #[cfg(test)]
@@ -620,54 +661,79 @@ mod tests {
     }
 
     #[test]
-    fn the_headline_sums_what_was_measured_and_counts_the_rest() {
-        let share = |usd: f64| Some(usd / 10_000.0);
+    fn the_credit_sums_what_was_measured_and_counts_the_rest() {
+        let text =
+            |baselines: &[Baseline], monthly, whose| Credit::of(baselines).text(monthly, whose);
         assert_eq!(
-            headline([], share, "this host's"),
+            text(&[], 10_000.0, "this host's"),
             "No setting was found to differ from its Claude Code or Codex default."
         );
         assert_eq!(
-            headline(
+            text(
                 &[b(Saving::Saves(900.0)), b(Saving::Estimated(45.0))],
-                share,
+                10_000.0,
                 "devbox's"
             ),
             "Compared with defaults, your settings save about $945/mo, 9% of devbox's spend, including an estimate for 1 feature that is now off. Overlapping settings may save less."
         );
+        // No spend leaves the share out.
         assert_eq!(
-            headline(
+            text(
                 &[
                     b(Saving::Saves(100.0)),
                     b(Saving::UpTo(50.0)),
                     b(Saving::NotMeasured),
                     b(Saving::NotMeasured)
                 ],
-                |_| None,
+                0.0,
                 "this host's"
             ),
             "Compared with defaults, your settings save about $100/mo. 1 setting whose default depends on how usage is paid saves up to $50/mo. 2 more settings differ by amounts not measured. Overlapping settings may save less."
         );
         // Conditional savings and costs bound apart, since each profile's default may differ.
         assert_eq!(
-            headline(
+            text(
                 &[b(Saving::UpTo(100.0)), b(Saving::UpTo(-90.0))],
-                |_| None,
+                0.0,
                 "this host's"
             ),
             "Compared with defaults, 1 setting whose default depends on how usage is paid saves up to $100/mo. 1 setting whose default depends on how usage is paid costs up to $90/mo more. Overlapping settings may save less."
         );
         assert_eq!(
-            headline(&[b(Saving::NotMeasured)], share, "this host's"),
+            text(&[b(Saving::NotMeasured)], 10_000.0, "this host's"),
             "Compared with defaults, 1 setting differs by an amount not measured."
         );
         assert_eq!(
-            headline(&[b(Saving::UpTo(-12.0))], share, "this host's"),
+            text(&[b(Saving::UpTo(-12.0))], 10_000.0, "this host's"),
             "Compared with defaults, 1 setting whose default depends on how usage is paid costs up to $12/mo more, <1% of this host's spend."
         );
         assert_eq!(
-            headline(&[b(Saving::Saves(-20.0))], share, "this host's"),
+            text(&[b(Saving::Saves(-20.0))], 10_000.0, "this host's"),
             "Compared with defaults, your settings cost about $20/mo more, <1% of this host's spend."
         );
+    }
+
+    #[test]
+    fn hosts_credits_add_before_rounding_with_shares_of_their_combined_spend() {
+        let with = |usd, margin| Baseline {
+            margin: Some(Margin::Usd(margin)),
+            ..b(Saving::Saves(usd))
+        };
+        // 10% of one host's $1,000 and 3% of another's $3,000 are 5% of the $4,000 together.
+        let mut credit = Credit::of(&[with(100.0, 30.0), b(Saving::UpTo(10.4))]);
+        credit.merge(&Credit::of(&[
+            with(100.0, 40.0),
+            b(Saving::UpTo(10.4)),
+            b(Saving::NotMeasured),
+        ]));
+        // $10.40 twice is $21, not $10 twice; margins of 30 and 40 combine as 3-4-5.
+        assert_eq!(
+            credit.text(4_000.0, "these hosts'"),
+            "Compared with defaults, your settings save ~$200/mo ± $50, 5% of these hosts' spend. 2 settings whose default depends on how usage is paid save up to $21/mo, 1% of these hosts' spend. 1 more setting differs by an amount not measured. Overlapping settings may save less."
+        );
+        // It crosses SSH as a destination's figures.
+        let wire = serde_json::to_string(&credit).unwrap();
+        assert_eq!(serde_json::from_str::<Credit>(&wire).unwrap(), credit);
     }
 
     #[test]

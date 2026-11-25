@@ -390,7 +390,11 @@ fn a_remote_report_matches_running_there() {
         "{text}"
     );
     assert!(text.contains("\n  Changes offered: "), "{text}");
-    assert!(text.contains("\ntoken-max: this host  "), "{text}");
+    // So does one credit, before any host's section.
+    let (head, _) = text.split_once("\ntoken-max: this host  ").unwrap();
+    let head = flat(head);
+    let (_, credit) = head.split_once("Compared with defaults, ").unwrap();
+    assert!(credit.contains("of these hosts' spend."), "{text}");
     assert!(text.contains("\ntoken-max: devbox  "), "{text}");
     assert!(text.contains("  Profiles: claude ~/.claude.\n"), "{text}");
     assert!(!text.contains("don't add amounts across hosts"), "{text}");
@@ -1599,6 +1603,10 @@ fn doctor_hands_every_host_to_vibes_from_the_same_scan() {
     assert_eq!(stderr, "");
     std::fs::remove_file(hosts.root.join("ssh.args")).unwrap();
     let mut terminal = hosts.walk_ready("doctor");
+    // One credit for every host opens the walk, before this host's header.
+    terminal.wait("token-max: total over 3 hosts  ");
+    terminal.wait("Compared with defaults, ");
+    terminal.wait("token-max: this host  ");
     // Nothing measured to change, so doctor's walk ends with each host's report.
     terminal.wait("token-max: devbox  ");
     terminal.wait("token-max: laptop  ");
@@ -1635,6 +1643,37 @@ fn doctor_hands_every_host_to_vibes_from_the_same_scan() {
     let args = std::fs::read_to_string(hosts.root.join("ssh.args")).unwrap();
     assert_eq!(args.matches("--ssh-scan").count(), 2, "{args}");
     assert_eq!(output.matches("paid for?").count(), 3, "{output}");
+    // Each host saves the same with its 1h TTL and counts one setting not measured; the
+    // credit adds them, its share of the three hosts' spend together, and each report keeps
+    // its own.
+    let flat = flat(&output);
+    assert!(flat.contains("$0.03 at API prices Compared with defaults, your settings save <$0.01/mo, 13% of these hosts' spend. 3 more settings differ by amounts not measured. Overlapping settings may save less. token-max: this host "), "{output}");
+    for host in ["this host's", "devbox's", "laptop's"] {
+        let own = format!(
+            "No changes recommended or worth considering. Compared with defaults, your settings save <$0.01/mo, 13% of {host} spend. 1 more setting differs by an amount not measured."
+        );
+        assert!(flat.contains(&own), "{host}: {output}");
+    }
+}
+
+#[test]
+fn one_hosts_walk_opens_with_its_credit() {
+    let hosts = Hosts::new();
+    std::fs::write(hosts.settings("local"), HOME_SETTINGS).unwrap();
+    let mut command = hosts.command(&[]);
+    command.env("NO_COLOR", "1");
+    let mut terminal = Terminal::spawn(command);
+    terminal.answer("How is ~/.claude paid for?", "a");
+    // Nothing to change, yet the header is followed by the credit before the report.
+    terminal.wait("token-max  2 requests in 1 session");
+    terminal.wait("at API prices\n  Compared with defaults, your settings save <$0.01/mo");
+    terminal.wait("Profiles: claude ~/.claude.");
+    terminal.answer("can't price. Show it?", "n");
+    let (code, output, stderr) = terminal.finish();
+    assert_eq!((code, stderr.as_str()), (0, ""), "{output}");
+    // The report after the walk keeps its own line.
+    let credit = "Compared with defaults, your settings save <$0.01/mo, 13% of this host's spend. 1 more setting differs by an amount not measured.";
+    assert_eq!(flat(&output).matches(credit).count(), 2, "{output}");
 }
 
 #[test]
@@ -1828,6 +1867,8 @@ fn each_destination_prices_its_main_ttl_by_the_answer_given_for_it() {
         let section = flat(section(&output, host));
         assert!(section.contains(line), "{host}: {section}");
     }
+    // Every setting is its default, so neither the total nor any host compares with them.
+    assert!(!output.contains("Compared with defaults"), "{output}");
 }
 
 #[test]

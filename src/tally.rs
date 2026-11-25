@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, VecDeque};
 use crate::collections::{HashMap, HashSet, IndexMap};
 use crate::model::{Estimate, Harness, Millis, Profile, Profiles, Request, Subagent, Text, Usd};
 use crate::prices::{Catalog, Sample, price_request};
+use crate::reader::Reading;
 use crate::totals::{Counts, Spent};
 
 /// What one request adds to the counts.
@@ -104,9 +105,39 @@ pub(crate) struct Basis<'a> {
     /// The totals modern Codex records have recorded, which supersede legacy records.
     pub modern: &'a HashSet<String>,
     pub subagents: &'a IndexMap<Text, Subagent>,
-    pub profiles: &'a [Profile],
+    /// The profiles that fill in the provider of a request whose record named none; None once
+    /// the scan has filled them in, or left them unknown.
+    pub profiles: Option<&'a [Profile]>,
     /// Public prices, once loaded.
     pub catalog: Option<&'a Catalog>,
+}
+
+/// Count `requests`, which the scan has reconciled as the report will read them, all in the
+/// window, into `reading`'s counts, priced if its prices have loaded.
+pub(crate) fn recount(
+    reading: &Reading,
+    requests: &mut [Request],
+    subagents: &IndexMap<Text, Subagent>,
+) {
+    let mut tally = Tally::default();
+    for index in 0..requests.len() {
+        tally.touch(index);
+    }
+    let counts = tally.count(
+        requests,
+        &mut [],
+        &Basis {
+            since: None,
+            modern: &HashSet::default(),
+            subagents,
+            profiles: None,
+            catalog: reading.catalog.get(),
+        },
+    );
+    *reading
+        .counts
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(counts);
 }
 
 impl Tally {
@@ -269,7 +300,7 @@ impl Tally {
             })
             .clone();
         let cost = basis.catalog.map(|catalog| {
-            let cost = match provider(r, basis.profiles) {
+            let cost = match basis.profiles.and_then(|profiles| provider(r, profiles)) {
                 // Priced as the scan will fill it in once reading ends, then put back.
                 Some(provider) => {
                     let mut meta = (*r.meta).clone();
@@ -394,7 +425,7 @@ mod tests {
             since: Some(10),
             modern: &modern,
             subagents: &subagents,
-            profiles: &[],
+            profiles: None,
             catalog,
         };
         let mut requests = vec![Request {
@@ -443,7 +474,7 @@ mod tests {
                 since: None,
                 modern,
                 subagents: &subagents,
-                profiles: &[],
+                profiles: None,
                 catalog: None,
             };
             tally.count(&mut [], records, &basis).requests
@@ -492,7 +523,7 @@ mod tests {
                 since: None,
                 modern: &modern,
                 subagents,
-                profiles: &[],
+                profiles: None,
                 catalog: None,
             };
             tally.count(&mut requests, &mut [], &basis).sessions

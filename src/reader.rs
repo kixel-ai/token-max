@@ -72,6 +72,16 @@ pub struct Reading {
     pub catalog: OnceLock<Catalog>,
 }
 
+impl Reading {
+    /// Whether the counts hold a spend.
+    pub(crate) fn priced(&self) -> bool {
+        self.counts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some_and(|counts| counts.spend.is_some())
+    }
+}
+
 /// Records read between updates of a [`Reading`]'s counts.
 const COUNT_EVERY: u64 = 1024;
 
@@ -1085,7 +1095,7 @@ impl Reader {
                 since: self.since,
                 modern: &self.modern_totals,
                 subagents: &self.subagents,
-                profiles,
+                profiles: Some(profiles),
                 catalog: reading.catalog.get(),
             },
         );
@@ -2181,7 +2191,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
                 since,
                 modern: &modern_totals,
                 subagents: &subagents,
-                profiles: &profiles,
+                profiles: Some(&profiles),
                 catalog: reading.catalog.get(),
             },
         );
@@ -2306,28 +2316,11 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         since,
     );
     // T3 can move a shared request to another profile, which changes the group its spend is
-    // extrapolated in, so count once more as the header will, with prices that may have
-    // loaded since the last count.
+    // extrapolated in, so count the window once more as the header will, with prices that
+    // may have loaded since the last count.
     if let Some(reading) = &options.reading {
-        let mut tally = Tally::default();
-        for index in 0..requests.len() {
-            tally.touch(index);
-        }
-        let counts = tally.count(
-            &mut requests,
-            &mut [],
-            &Basis {
-                since,
-                modern: &HashSet::default(),
-                subagents: &subagents,
-                profiles: &profiles,
-                catalog: reading.catalog.get(),
-            },
-        );
-        *reading
-            .counts
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(counts);
+        let split = requests.partition_point(|r| since.is_some_and(|since| r.time < since));
+        crate::tally::recount(reading, &mut requests[split..], &subagents);
     }
     // After T3 attribution, so each instance reads its own sessions' directory.
     crate::discovery::discover_inbound(&options.discovery, &mut profiles, &requests)?;
@@ -2393,6 +2386,13 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         skipped_files: snapshots.iter().filter(|s| s.skipped_lines > 0).count() as u64,
         issues: issues.into_iter().map(|issue| issue.to_string()).collect(),
     };
+    // Prices that loaded since the last count price the window's requests now.
+    if let Some(reading) = &options.reading
+        && reading.catalog.get().is_some()
+        && !reading.priced()
+    {
+        crate::tally::recount(reading, &mut requests, &subagents);
+    }
     Ok(Scan {
         snapshot_started_at,
         snapshot_finished_at,

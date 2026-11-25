@@ -1664,23 +1664,35 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
             let Some(catalog) = &catalog else { continue };
             for (index, scanned) in scanned.drain(..) {
                 replies[index] = Some(match scanned {
-                    Scanned::Local(scan) => match &local_job {
+                    Scanned::Local(mut scan) => match &local_job {
                         Job::Report {
                             max_cost_per_use_usd,
                             format,
                             ..
-                        } => Reply::Here(Box::new(render(
-                            *scan,
-                            Render {
-                                catalog,
-                                since,
-                                now: crate::reader::now(),
-                                max_cost_per_use_usd: *max_cost_per_use_usd,
-                                format,
-                                home: home.as_deref(),
-                                reading: meter.as_ref().map(|_| &*reading),
-                            },
-                        )?)),
+                        } => {
+                            // Prices that loaded after the scan last counted price its counts
+                            // while the analysis works up to settling them.
+                            if meter.is_some() && !reading.priced() {
+                                let subagents = scan
+                                    .subagents
+                                    .iter()
+                                    .map(|s| (s.session.clone(), s.clone()))
+                                    .collect();
+                                crate::tally::recount(&reading, &mut scan.requests, &subagents);
+                            }
+                            Reply::Here(Box::new(render(
+                                *scan,
+                                Render {
+                                    catalog,
+                                    since,
+                                    now: crate::reader::now(),
+                                    max_cost_per_use_usd: *max_cost_per_use_usd,
+                                    format,
+                                    home: home.as_deref(),
+                                    reading: meter.as_ref().map(|_| &*reading),
+                                },
+                            )?))
+                        }
                         Job::Sessions => Reply::Sessions(export(&scan, catalog)?),
                     },
                     Scanned::Remote(reply) => reply,

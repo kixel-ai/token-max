@@ -61,7 +61,7 @@ code mode's `wait` polling
 user-controllable, which would make it a `doctor` line. Then whether Claude
 Code moved a subagent's cache breakpoint before its per-spawn brief
 ([anthropics/claude-code#112089](https://github.com/anthropics/claude-code/issues/112089)),
-or added a setting for it: a setting is a `doctor` line; a fix needs nothing.
+or added a setting for it; a fix needs nothing.
 
 Decided 2026-11-25 (maintainer, /quest-plan over three posts):
 

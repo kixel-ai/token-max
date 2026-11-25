@@ -22,10 +22,10 @@ use crate::model::{
 use crate::prices::{Catalog, Sample, Sum, price_part, price_request, server_cost};
 use crate::reader::UNRECORDED;
 use crate::safe::{ScanError, label};
-use crate::version::{claude_at_least, plain};
+use crate::version::{Needs, plain};
 
 /// Claude Code 2.1.198 made the built-in Explore inherit the main model; it ran on Haiku before.
-const EXPLORE_INHERITS_PATCH: u64 = 198;
+const EXPLORE_INHERITS: Needs = Needs::claude(1, 198);
 
 /// Model families that rank above Opus, whose Explore runs are capped at Opus.
 const ABOVE_OPUS: [&str; 2] = ["fable", "mythos"];
@@ -383,6 +383,7 @@ fn claude_controls(
     scopes: &[SettingsScope],
     env: &Env,
     definitions: Vec<AgentDefinition>,
+    t3: Option<&crate::model::T3Instance>,
 ) -> AgentControls {
     let environment = scoped_environment(scopes, env);
     let owned = |key: &str| {
@@ -394,7 +395,7 @@ fn claude_controls(
             },
         )
     };
-    AgentControls {
+    let mut controls = AgentControls {
         model: owned("CLAUDE_CODE_SUBAGENT_MODEL"),
         effort: owned("CLAUDE_CODE_SUBAGENT_EFFORT"),
         force: enabled(environment.values.get("CLAUDE_CODE_SUBAGENT_MODEL_FORCE")),
@@ -405,6 +406,59 @@ fn claude_controls(
         ),
         definitions,
         ..AgentControls::default()
+    };
+    if let Some(t3) = t3 {
+        t3_owned(&mut controls, t3, &environment.owners);
+    }
+    controls
+}
+
+/// Name the T3 settings entry that sets a subagent variable from the instance's own
+/// environment, which otherwise reads as an exported variable.
+fn t3_owned(
+    controls: &mut AgentControls,
+    t3: &crate::model::T3Instance,
+    owners: &HashMap<String, String>,
+) {
+    let file = join(&[&t3.state, "settings.json"]);
+    // An entry the instance sets with no readable value, such as a secret or one under
+    // settings that don't resolve, unless a settings file's `env`, which wins, sets it too,
+    // even to `inherit` or empty. The merged environment owns every key it can read.
+    let (effort, secret): (Vec<&str>, Vec<&str>) = t3
+        .environment
+        .iter()
+        .map(String::as_str)
+        .filter(|key| crate::t3::SUBAGENT_ENVIRONMENT.contains(key) && !owners.contains_key(*key))
+        .partition(|key| *key == "CLAUDE_CODE_SUBAGENT_EFFORT");
+    let unreadable = |keys: &[&str]| match t3.env {
+        Some(_) => format!(
+            "T3 instance {} sets {} with a value token-max cannot read",
+            t3.instance,
+            keys.join(", ")
+        ),
+        None => format!(
+            "T3 instance {} sets {}, but its settings do not resolve",
+            t3.instance,
+            keys.join(", ")
+        ),
+    };
+    // A secret effort leaves only the effort unknown; the others decide the model.
+    if !effort.is_empty() && controls.effort_unresolved.is_none() {
+        controls.effort_unresolved = Some(unreadable(&effort));
+    }
+    if !secret.is_empty() && controls.unresolved.is_none() {
+        controls.unresolved = Some(unreadable(&secret));
+    }
+    for owned in [&mut controls.model, &mut controls.effort]
+        .into_iter()
+        .flatten()
+    {
+        if t3.environment.contains(&owned.owner) {
+            owned.owner = format!(
+                "{file}:providerInstances.{}.environment.{}",
+                t3.instance, owned.owner
+            );
+        }
     }
 }
 
@@ -446,10 +500,11 @@ pub fn discover(
                 let user = options.settings(&profile.settings_file, Harness::Claude)?;
                 let managed_file = options.managed_settings_file.as_str();
                 let managed = settings(managed_file, Harness::Claude)?;
-                let local_env = if profile.t3.is_none() && active == profile.root {
-                    env
-                } else {
-                    &empty
+                // A T3 instance launches Claude Code under its own environment.
+                let local_env = match &profile.t3 {
+                    Some(t3) => t3.env.as_ref().unwrap_or(&empty),
+                    None if active == profile.root => env,
+                    None => &empty,
                 };
                 let user_scope = SettingsScope {
                     config: &user,
@@ -460,7 +515,12 @@ pub fn discover(
                     file: managed_file,
                 };
                 let own = claude_definitions(&join(&[&profile.root, "agents"]), None)?;
-                let agents = claude_controls(&[user_scope, managed_scope], local_env, own.clone());
+                let agents = claude_controls(
+                    &[user_scope, managed_scope],
+                    local_env,
+                    own.clone(),
+                    profile.t3.as_ref(),
+                );
                 for cwd in existing {
                     let [project_file, legacy_file, local_file] =
                         crate::discovery::claude_project_files(&cwd, options)?;
@@ -494,7 +554,8 @@ pub fn discover(
                         }
                         definitions.extend(project_agents[&dir].iter().cloned());
                     }
-                    let scoped = claude_controls(&scopes, local_env, definitions);
+                    let scoped =
+                        claude_controls(&scopes, local_env, definitions, profile.t3.as_ref());
                     if scoped != agents {
                         scoped_dirs.insert(cwd, scoped);
                     }
@@ -669,6 +730,16 @@ fn definition<'a>(controls: &'a AgentControls, kind: &str) -> Option<&'a AgentDe
         .max_by_key(|d| d.project.as_ref().map_or(0, String::len))
 }
 
+/// The controls that decided a run's model in `cwd`, without its effort.
+fn model_controls(controls: &AgentControls, cwd: Option<&str>) -> AgentControls {
+    AgentControls {
+        effort: None,
+        effort_unresolved: None,
+        directories: IndexMap::default(),
+        ..scoped(controls, cwd).clone()
+    }
+}
+
 /// The controls a run in `cwd` used: its directory's, else the profile's.
 fn scoped<'a>(controls: &'a AgentControls, cwd: Option<&str>) -> &'a AgentControls {
     cwd.and_then(|cwd| controls.directories.get(cwd))
@@ -775,7 +846,7 @@ fn claude_source(run: &Run<'_>, controls: &AgentControls, kind: &str) -> (ModelS
     if builtin.name == "Explore" {
         return match run.version.filter(|v| plain(v).is_some()) {
             None => unknown("the Claude Code version is not recorded as plain digits".into()),
-            Some(v) if !claude_at_least(Some(v), 1, EXPLORE_INHERITS_PATCH) => decided((
+            Some(v) if !EXPLORE_INHERITS.met(Some(v)) => decided((
                 ModelSource::Definition,
                 "built-in Explore ran on Haiku before Claude Code 2.1.198".into(),
                 Expect::Model("haiku"),
@@ -1028,6 +1099,9 @@ fn settings_text(
             *text += &format!("; unresolved: {reason}");
         }
     }
+    if let Some(reason) = &controls.effort_unresolved {
+        texts.1 += &format!("; unresolved: {reason}");
+    }
     texts
 }
 
@@ -1133,9 +1207,6 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
             .iter()
             .filter(|p| profiles.contains(&p.id))
             .collect();
-        let shared = owners
-            .first()
-            .filter(|first| owners.iter().all(|p| p.agents == first.agents));
         let mut runs: IndexMap<&str, Vec<&Request>> = IndexMap::default();
         for r in &requests {
             runs.entry(&*r.session).or_default().push(r);
@@ -1163,6 +1234,19 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
                 cwd: all.iter().find_map(|r| r.cwd.as_deref()),
                 start,
             };
+            // Profiles sharing the run agree on its model when their controls in its
+            // directory differ only in effort, wherever else their settings differ.
+            let sharing: Vec<&Profile> = owners
+                .iter()
+                .copied()
+                .filter(|p| all.iter().any(|r| r.profiles.contains(&p.id)))
+                .collect();
+            let shared = sharing.first().filter(|first| {
+                let first = model_controls(&first.agents, run.cwd);
+                sharing
+                    .iter()
+                    .all(|p| model_controls(&p.agents, run.cwd) == first)
+            });
             let source = match shared {
                 None => (
                     ModelSource::Unknown,
@@ -1179,10 +1263,7 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
             };
             *sources.entry(source).or_default() += 1;
             // Each run's own profile names its agent file; members can hold different ones.
-            let own = owners
-                .iter()
-                .find(|p| all.iter().any(|r| r.profiles.contains(&p.id)))
-                .or(owners.first());
+            let own = sharing.first();
             // A run whose metadata doesn't say is built in only when no agent file of its
             // name replaces the built-in, as its model source decides.
             built_in &= subagent.is_some_and(|s| {
@@ -1197,10 +1278,7 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
                 effort_settings.insert(effort);
             }
             // Profiles sharing the history each record the run, and each needs its own file.
-            let sharing = owners
-                .iter()
-                .filter(|p| all.iter().any(|r| r.profiles.contains(&p.id)));
-            for profile in sharing.filter(|_| replaces) {
+            for profile in sharing.iter().filter(|_| replaces) {
                 let controls = scoped(&profile.agents, run.cwd);
                 forced |= controls.force;
                 if let Some(d) = definition(controls, kind) {
@@ -1310,6 +1388,81 @@ mod tests {
     use super::*;
     use crate::model::{CacheContext, ExposureScan, ScanCoverage};
     use crate::test_support::{Workspace, make_profile, make_request, prices};
+    use serde_json::Map;
+
+    #[test]
+    fn a_t3_instances_own_variable_names_its_settings_entry() {
+        let profile = crate::test_support::make_t3_profile("agent", "/root");
+        let mut t3 = profile.t3.clone().expect("a T3 instance");
+        t3.environment = vec!["CLAUDE_CODE_SUBAGENT_EFFORT".into()];
+        // The shell T3 started from sets the model, which its settings don't own.
+        let env: Env = [
+            ("CLAUDE_CODE_SUBAGENT_EFFORT", "max"),
+            ("CLAUDE_CODE_SUBAGENT_MODEL", "sonnet"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.into(), v.into()))
+        .collect();
+        let none = Map::new();
+        let file = "/root/settings.json";
+        let scope = |config| [SettingsScope { config, file }];
+        let controls = claude_controls(&scope(&none), &env, vec![], Some(&t3));
+        assert_eq!(
+            controls.effort.unwrap().owner,
+            format!(
+                "{}:providerInstances.agent.environment.CLAUDE_CODE_SUBAGENT_EFFORT",
+                join(&[&t3.state, "settings.json"])
+            )
+        );
+        assert_eq!(controls.model.unwrap().owner, "CLAUDE_CODE_SUBAGENT_MODEL");
+        // A key the instance sets that its readable environment lacks is a secret. When the
+        // model and effort are both secret, the effort text names both entries.
+        t3.environment = crate::t3::SUBAGENT_ENVIRONMENT
+            .iter()
+            .map(|k| (*k).into())
+            .collect();
+        t3.env = Some(Env::default());
+        let empty = Env::default();
+        let secret = claude_controls(&scope(&none), &empty, vec![], Some(&t3));
+        let (model, effort) = settings_text(&profile, &secret, "Explore", false, false);
+        assert!(
+            model.contains("sets CLAUDE_CODE_SUBAGENT_MODEL, CLAUDE_CODE_SUBAGENT_MODEL_FORCE"),
+            "{model}"
+        );
+        assert!(
+            !model.contains("sets CLAUDE_CODE_SUBAGENT_EFFORT"),
+            "{model}"
+        );
+        for key in ["CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CODE_SUBAGENT_EFFORT"] {
+            assert!(effort.contains(key), "{effort}");
+        }
+        // A settings file's `env` wins over every secret it sets, even to `inherit`, empty
+        // or a disabled flag, whether or not the instance's own settings resolve.
+        let overrides: Map<String, Value> = serde_json::from_value(serde_json::json!({"env": {
+            "CLAUDE_CODE_SUBAGENT_EFFORT": "high",
+            "CLAUDE_CODE_SUBAGENT_MODEL": "inherit",
+            "CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "",
+            "CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP": "0",
+        }}))
+        .unwrap();
+        for env in [Some(Env::default()), None] {
+            t3.env = env;
+            let overridden = claude_controls(&scope(&overrides), &empty, vec![], Some(&t3));
+            assert_eq!(overridden.effort_unresolved, None);
+            assert_eq!(overridden.unresolved, None);
+        }
+        // One the settings file leaves unset stays unread.
+        let mut partial = overrides.clone();
+        partial["env"]
+            .as_object_mut()
+            .unwrap()
+            .remove("CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP");
+        let unread = claude_controls(&scope(&partial), &empty, vec![], Some(&t3));
+        assert_eq!(unread.effort_unresolved, None);
+        assert!(unread.unresolved.is_some_and(|why| why.contains(
+            "sets CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP, but its settings do not resolve"
+        )));
+    }
 
     fn spawn(kind: &str) -> Subagent {
         Subagent {
@@ -1649,7 +1802,7 @@ mod tests {
         let lines = subagent_costs(
             &scan(
                 vec![
-                    main,
+                    main.clone(),
                     child("a", "child", "claude-opus-5-5", Some("medium")),
                     child("b", "child", "claude-opus-5-5", None),
                     child("c", "fetch", "claude-haiku-5-5", Some("low")),
@@ -1686,6 +1839,60 @@ mod tests {
         );
         assert!(explore.model_setting.contains("omitClaudeMd: true"));
         assert_eq!(lines[1].sources[0].source, ModelSource::Unknown);
+        // Profiles sharing the history that differ only in effort, such as a T3 instance's
+        // secret effort, keep the model's attribution; a different model setting doesn't.
+        let mut shared = scan(
+            vec![
+                main.clone(),
+                child("a", "child", "claude-opus-5-5", Some("medium")),
+            ],
+            vec![spawn("Explore")],
+        );
+        for r in &mut shared.requests {
+            r.profiles = vec!["profile".into(), "t3".into()].into();
+        }
+        let mut t3 = make_profile("t3", "/home/.claude-t3");
+        t3.agents.effort_unresolved = Some("T3 instance t3 sets a secret".into());
+        t3.agents.unresolved = Some("T3 instance t3 sets another secret".into());
+        shared.profiles.push(t3);
+        shared.profiles[0].agents.effort = Some(Owned {
+            value: "max".into(),
+            owner: "CLAUDE_CODE_SUBAGENT_EFFORT".into(),
+        });
+        let source = |scan: &Scan| subagent_costs(scan, &prices())[0].sources[0].source;
+        assert_eq!(source(&shared), ModelSource::Unknown);
+        shared.profiles[1].agents.unresolved = None;
+        assert_eq!(source(&shared), ModelSource::Inherited);
+        // Each run compares the controls of its own directory: an effort-only override in
+        // another project leaves its model attributed; a model override where it ran doesn't.
+        for r in &mut shared.requests {
+            r.cwd = Some("/synthetic/run".into());
+        }
+        let mut elsewhere = shared.profiles[0].agents.clone();
+        elsewhere.effort = Some(Owned {
+            value: "low".into(),
+            owner: "/synthetic/other/.claude/settings.json".into(),
+        });
+        shared.profiles[0]
+            .agents
+            .directories
+            .insert("/synthetic/other".into(), elsewhere.clone());
+        assert_eq!(source(&shared), ModelSource::Inherited);
+        elsewhere.model = Some(Owned {
+            value: "claude-haiku-5-5".into(),
+            owner: "/synthetic/run/.claude/settings.json".into(),
+        });
+        shared.profiles[0]
+            .agents
+            .directories
+            .insert("/synthetic/run".into(), elsewhere);
+        assert_eq!(source(&shared), ModelSource::Unknown);
+        shared.profiles[0].agents.directories.clear();
+        shared.profiles[1].agents.model = Some(Owned {
+            value: "claude-haiku-5-5".into(),
+            owner: "CLAUDE_CODE_SUBAGENT_MODEL".into(),
+        });
+        assert_eq!(source(&shared), ModelSource::Unknown);
         // Already on the cheapest model: nothing to reprice.
         assert_eq!(lines[2].reprice, None);
         // With no agent file of its name, an unflagged run is the built-in; an unrecorded

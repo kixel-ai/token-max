@@ -254,6 +254,7 @@ pub fn make_ttl_check(profile: &str, bucket: Bucket, action: Action, recommended
             assumptions: vec![],
             uncertainty: vec![],
             sources: vec![],
+            upgrade: None,
         },
         window_basis_kind: WindowBasisKind::Available,
         bucket,
@@ -288,6 +289,7 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
         outranking_files: vec![],
         ttl_directories: IndexMap::default(),
         claude_config: None,
+        updater: None,
         codex_system_config: None,
         switched_off: vec![],
         pretended_on: vec![],
@@ -331,6 +333,7 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
         retention: None,
         turn_end: None,
         effort: None,
+        advisor: None,
         speed_directories: None,
         idle_directories: None,
         background: vec![],
@@ -377,6 +380,8 @@ pub struct ReportLine {
     /// The line under it naming its default and what the current value saves against it;
     /// empty when the setting is at its default.
     pub default: String,
+    /// The line after any default advising a harness upgrade; empty when there is none.
+    pub upgrade: String,
     /// What the setting or feature does, the first line after any default in a details
     /// report; empty otherwise.
     pub what: String,
@@ -478,6 +483,10 @@ pub fn report_lines(text: &str) -> Vec<ReportLine> {
             .filter(|l| l.starts_with("default "))
             .unwrap_or_default();
         let skip = usize::from(!default.is_empty());
+        let upgrade = Some(under(1 + skip))
+            .filter(|l| !l.starts_with("What: "))
+            .unwrap_or_default();
+        let skip = skip + usize::from(!upgrade.is_empty());
         let what = under(1 + skip).strip_prefix("What: ").unwrap_or_default();
         let evidence = if what.is_empty() { "" } else { under(2 + skip) };
         rows.push(ReportLine {
@@ -486,6 +495,7 @@ pub fn report_lines(text: &str) -> Vec<ReportLine> {
             head: collapse(head),
             setting: collapse(setting),
             default: default.into(),
+            upgrade: upgrade.into(),
             what: what.into(),
             evidence: evidence.into(),
         });

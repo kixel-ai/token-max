@@ -30,6 +30,8 @@ Each run:
   transcripts goes to `doctor`, not measurable to `vibes`, and anything an
   existing check reads gets checked against that check. Skips what an earlier
   run rejected, listed below, unless the release changed it.
+- Plans a new version gate through `Needs` in `src/version.rs`, so its line
+  or card recommends the upgrade as the others do.
 - Diffs the Code intelligence card's `SERVERS` table (`src/lsp.rs`) against
   the language server entries of
   [anthropics/claude-plugins-official](https://github.com/anthropics/claude-plugins-official)'s
@@ -58,7 +60,29 @@ not cost or capability), `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS` tuning
 Check first: whether Codex's catalog still forces code mode, and whether
 code mode's `wait` polling
 ([openai/codex#38495](https://github.com/openai/codex/issues/38495)) became
-user-controllable, which would make it a `doctor` line.
+user-controllable, which would make it a `doctor` line. Then whether Claude
+Code moved a subagent's cache breakpoint before its per-spawn brief
+([anthropics/claude-code#112089](https://github.com/anthropics/claude-code/issues/112089)),
+or added a setting for it; a fix needs nothing.
+
+Decided 2026-11-25 (maintainer, /quest-plan over three posts):
+
+- Subagent spawns rewriting start-up context to cache (#112089, filed on
+  2.1.332): ✅ watch it here (rejected: evidence on the `Subagent models`
+  lines with a replay of a breakpoint before the brief; drop it). No setting
+  changes it, and on the maintainer's host a spawn's first request writes a
+  median 12K tokens, not the issue's 67K, so the cost depends on each
+  user's start-up context.
+- ✅ Drop an advisor recommendation beyond the `Advisor model` card
+  and the doctor line its `advisor-accounting.md` quest plans, both in
+  [#217](https://github.com/kixel-ai/token-max/pull/217) (rejected: quoting the
+  advisor-strategy blog's BrowseComp figure on the card). The advisor page
+  the card cites already says toggling it keeps the cache.
+- ✅ Drop a caveat for GPT-6.2's `configuration_update` effort changes
+  (rejected: a line pricing cache rebuilds after a mid-session model or
+  effort switch, which m0's 2026-11-17 no-habit-lines decision rules out).
+  token-max has no switch-cost line to caveat, models.dev already lists
+  `gpt-6.2-astra` and `gpt-6.2-sol`, and no card offers effort `none`.
 
 ## Scheduled
 

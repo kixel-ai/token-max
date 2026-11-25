@@ -54,6 +54,10 @@ const ENVIRONMENT: &[&str] = &[
     "ENABLE_PROMPT_CACHING_1H",
     "CLAUDE_CODE_PROMPT_CACHE_TTL",
     "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+    "CLAUDE_CODE_SUBAGENT_EFFORT",
+    "CLAUDE_CODE_SUBAGENT_MODEL_FORCE",
+    "CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP",
     "CLAUDE_CODE_DISABLE_FAST_MODE",
     "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
@@ -62,6 +66,15 @@ const ENVIRONMENT: &[&str] = &[
     "MAX_MCP_OUTPUT_TOKENS",
     "BASH_MAX_TIMEOUT_MS",
     "BASH_DEFAULT_TIMEOUT_MS",
+];
+
+/// The variables only subagent discovery reads, whose secret value leaves just the subagent
+/// controls unresolved.
+pub(crate) const SUBAGENT_ENVIRONMENT: &[&str] = &[
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+    "CLAUDE_CODE_SUBAGENT_EFFORT",
+    "CLAUDE_CODE_SUBAGENT_MODEL_FORCE",
+    "CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP",
 ];
 
 /// The profile id of a T3 instance, which a removed instance keeps for its retained history.
@@ -87,9 +100,17 @@ pub(crate) fn constrain<T>(base: &mut CheckBase<T>, profiles: &[Profile]) {
         base.recommended = None;
         base.savings_usd = None;
         base.monthly_savings_usd = None;
+        // Upgrading would not give the instance an active setting either.
+        base.upgrade = None;
         base.uncertainty.push(UNOWNED.into());
     }
 }
+
+/// How the issue on a request whose owner T3 could not settle begins.
+pub(crate) const UNSETTLED: &str = "T3/shared native history ownership is unresolved";
+
+/// What that issue adds when T3 names a possible owner outside the request's profiles.
+pub(crate) const OUTSIDE: &str = ", and T3 names an owner outside this home";
 
 /// Why a check of a T3 instance gives no verdict when the instance's settings owner is unknown.
 pub(crate) const UNOWNED: &str = "T3 instance is disabled or its effective control ownership is unresolved; retained historical costs do not establish an active setting to change";
@@ -710,6 +731,14 @@ pub(crate) fn discover(
                                 own_environment.push(entry.name.clone());
                             }
                             env.insert(entry.name, value);
+                        }
+                        // A secret subagent variable leaves only the subagent controls
+                        // unresolved, which their discovery reads from the owned name.
+                        None if SUBAGENT_ENVIRONMENT.contains(&entry.name.as_str()) => {
+                            env.remove(&entry.name);
+                            if !own_environment.contains(&entry.name) {
+                                own_environment.push(entry.name.clone());
+                            }
                         }
                         None => {
                             env.remove(&entry.name);
@@ -2398,7 +2427,19 @@ pub(crate) fn enrich(
                 }
                 Some(c) => {
                     cause = Some(c);
-                    r.issues.push(format!("T3/shared native history ownership is unresolved: {c}; current control guidance is advisory").into());
+                    // T3's database may name an owner none of these profiles is,
+                    // such as an instance now under another home.
+                    let outside: Vec<String> = session_owners
+                        .into_iter()
+                        .flatten()
+                        .filter(|o| !r.profiles.contains(o))
+                        .cloned()
+                        .collect();
+                    let also = if outside.is_empty() { "" } else { OUTSIDE };
+                    r.issues.push(
+                        format!("{UNSETTLED}: {c}{also}; current control guidance is advisory")
+                            .into(),
+                    );
                     // Context before the window prices cache state but says nothing about
                     // which controls ran the selected requests.
                     if selected {
@@ -2410,14 +2451,6 @@ pub(crate) fn enrich(
                         for state in states {
                             *unresolved.entry((state, c)).or_default() += 1;
                         }
-                        // T3's database may name an owner none of these profiles is,
-                        // such as an instance now under another home.
-                        let outside = session_owners
-                            .into_iter()
-                            .flatten()
-                            .filter(|o| !r.profiles.contains(o))
-                            .cloned()
-                            .collect();
                         unsettled.insert(Unsettled {
                             profiles: r.profiles.clone(),
                             outside,
@@ -2990,6 +3023,7 @@ mod tests {
                 since: None,
                 now: timestamp(&json!("2026-01-02T00:00:00Z")).unwrap(),
                 max_cost_per_use_usd: 1.0,
+                reading: None,
             })
             .unwrap();
             let bash = report.bash.iter().find(|b| b.suggested.is_none());
@@ -3196,6 +3230,12 @@ mod tests {
                     (scan.coverage.t3_removed, scan.coverage.t3_unattributed),
                     (0, 1)
                 );
+                // The request says T3 names an owner outside it, for checks that count it.
+                assert!(
+                    r.issues.iter().any(|i| i.contains(OUTSIDE)),
+                    "{:?}",
+                    r.issues
+                );
                 assert!(
                     t3.unresolved
                         .keys()
@@ -3360,6 +3400,90 @@ mod tests {
                 .any(|t| t.settings_unresolved)
         );
         assert!(!format!("{scan:?}").contains("PRIVATE_HOME"));
+    }
+    #[test]
+    fn an_instances_subagent_variables_are_its_own_and_a_secret_one_leaves_only_them_unresolved() {
+        let w = Workspace::new();
+        native(&w);
+        state(
+            &w,
+            json!({"providerInstances":{"claudeAgent":{"driver":"claudeAgent","environment":[
+                {"name":"CLAUDE_CODE_SUBAGENT_EFFORT","value":"max"},
+                {"name":"CLAUDE_CODE_SUBAGENT_MODEL","value":"PRIVATE_MODEL","sensitive":true}
+            ]}}}),
+        );
+        let scan = scan(&w.scan_options()).unwrap();
+        let p = scan
+            .profiles
+            .iter()
+            .find(|p| p.t3.as_ref().is_some_and(|t| t.instance == "claudeAgent"))
+            .expect("the instance's profile");
+        assert_eq!(
+            p.t3.as_ref().unwrap().settings_unresolved,
+            managed_policy_unresolved()
+        );
+        if managed_policy_unresolved() {
+            // Unread machine policy, as on Windows, leaves every entry the instance sets unread.
+            assert!(p.agents.effort.is_none() && p.agents.model.is_none());
+            for (why, key) in [
+                (&p.agents.effort_unresolved, "CLAUDE_CODE_SUBAGENT_EFFORT"),
+                (&p.agents.unresolved, "CLAUDE_CODE_SUBAGENT_MODEL"),
+            ] {
+                assert!(why.as_deref().is_some_and(|w| w.contains(key)), "{why:?}");
+            }
+            assert!(!format!("{scan:?}").contains("PRIVATE_MODEL"));
+            return;
+        }
+        let effort = p.agents.effort.as_ref().expect("the instance's effort");
+        assert_eq!(effort.value, "max");
+        assert!(
+            effort
+                .owner
+                .ends_with("settings.json:providerInstances.claudeAgent.environment.CLAUDE_CODE_SUBAGENT_EFFORT"),
+            "{}",
+            effort.owner
+        );
+        assert!(p.agents.model.is_none());
+        assert!(
+            p.agents
+                .unresolved
+                .as_deref()
+                .is_some_and(|why| why.contains("CLAUDE_CODE_SUBAGENT_MODEL")),
+            "{:?}",
+            p.agents.unresolved
+        );
+        assert!(!format!("{scan:?}").contains("PRIVATE_MODEL"));
+        assert_eq!(p.agents.effort_unresolved, None);
+
+        // A secret effort leaves only the effort unknown; the model still attributes runs.
+        state(
+            &w,
+            json!({"providerInstances":{"claudeAgent":{"driver":"claudeAgent","environment":[
+                {"name":"CLAUDE_CODE_SUBAGENT_EFFORT","value":"PRIVATE_EFFORT","sensitive":true},
+                {"name":"CLAUDE_CODE_SUBAGENT_MODEL","value":"claude-haiku-5-5"}
+            ]}}}),
+        );
+        let secret = crate::reader::scan(&w.scan_options()).unwrap();
+        let p = secret
+            .profiles
+            .iter()
+            .find(|p| p.t3.as_ref().is_some_and(|t| t.instance == "claudeAgent"))
+            .expect("the instance's profile");
+        assert!(p.agents.effort.is_none());
+        assert_eq!(p.agents.unresolved, None);
+        assert_eq!(
+            p.agents.model.as_ref().map(|m| m.value.as_str()),
+            Some("claude-haiku-5-5")
+        );
+        assert!(
+            p.agents
+                .effort_unresolved
+                .as_deref()
+                .is_some_and(|why| why.contains("CLAUDE_CODE_SUBAGENT_EFFORT")),
+            "{:?}",
+            p.agents.effort_unresolved
+        );
+        assert!(!format!("{secret:?}").contains("PRIVATE_EFFORT"));
     }
     #[test]
     fn a_secret_plugins_directory_leaves_only_the_plugins_unread() {

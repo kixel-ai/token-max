@@ -118,9 +118,10 @@ HOME="$TEST_ROOT/homes/$host" PATH="$TEST_ROOT/remote/$host:$TEST_PATH" exec sh 
         let project = home.join(".claude/projects/my project");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::copy(fixture("claude.jsonl"), project.join("main.jsonl")).unwrap();
+        // An advisor already set, so its `vibes` card advises nothing and asks nothing.
         std::fs::write(
             home.join(".claude/settings.json"),
-            r#"{"promptCacheTtl":"1h","cleanupPeriodDays":365}"#,
+            r#"{"promptCacheTtl":"1h","advisorModel":"fable","cleanupPeriodDays":365}"#,
         )
         .unwrap();
         home
@@ -254,6 +255,7 @@ fn analysis(home: &Path, since: Option<i64>, max_cost_per_use_usd: f64) -> Repor
         since,
         now: NOW,
         max_cost_per_use_usd,
+        reading: None,
     })
     .unwrap()
 }
@@ -485,7 +487,7 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     let home = hosts.host("devbox");
     std::fs::write(
         home.join(".claude/settings.json"),
-        r#"{"promptCacheTtl":"1h","cleanupPeriodDays":365,"env":{"BASH_MAX_TIMEOUT_MS":"7200000"}}"#,
+        r#"{"promptCacheTtl":"1h","advisorModel":"fable","cleanupPeriodDays":365,"env":{"BASH_MAX_TIMEOUT_MS":"7200000"}}"#,
     )
     .unwrap();
     let transcript = home.join(".claude/projects/my project/main.jsonl");
@@ -541,7 +543,7 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     );
     // Each host's card names its host, its own waits and the edit to make there, in its home.
     let here = flat(cards[1]);
-    assert!(here.starts_with("[1/8] Bash timeout cap not measured 10m -> 55m Host this host"));
+    assert!(here.starts_with("[1/10] Bash timeout cap not measured 10m -> 55m Host this host"));
     assert!(
         here.contains("No foreground Bash wait outlasted the cache."),
         "{here}"
@@ -554,27 +556,36 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     );
     // Each host's memory card follows its cap, then its window card, its edit in that
     // host's home.
-    assert!(flat(cards[2]).starts_with("[2/8] Auto memory not measured Host this host"));
-    assert!(flat(cards[6]).starts_with("[6/8] Auto memory not measured Host devbox"));
+    assert!(flat(cards[2]).starts_with("[2/10] Auto memory not measured Host this host"));
+    assert!(flat(cards[7]).starts_with("[7/10] Auto memory not measured Host devbox"));
     let window = flat(cards[3]);
     assert!(
         window.starts_with(
-            "[3/8] Auto-compact window (claude-opus-5-5) not measured 967k -> 400k Host this host"
+            "[3/10] Auto-compact window (claude-opus-5-5) not measured 967k -> 400k Host this host"
         ) && window.ends_with(r#"in ~/.claude/settings.json"#),
         "{window}"
     );
-    let window = flat(cards[7]);
+    let window = flat(cards[8]);
     assert!(
         window.starts_with(
-            "[7/8] Auto-compact window (claude-opus-5-5) not measured 967k -> 400k Host devbox"
+            "[8/10] Auto-compact window (claude-opus-5-5) not measured 967k -> 400k Host devbox"
         ) && window.ends_with(r#"in devbox:~/.claude/settings.json"#),
         "{window}"
     );
     // Each host's default has its own card, which advises nothing on the pick.
-    assert!(flat(cards[4]).starts_with("[4/8] Main-session default not measured Host this host"));
-    assert!(flat(cards[8]).starts_with("[8/8] Main-session default not measured Host devbox"));
-    let there = flat(cards[5]);
-    assert!(there.starts_with("[5/8] Bash timeout cap not measured 2h -> 55m Host devbox"));
+    assert!(flat(cards[4]).starts_with("[4/10] Main-session default not measured Host this host"));
+    assert!(flat(cards[9]).starts_with("[9/10] Main-session default not measured Host devbox"));
+    // Each host's advisor card, already set, advises nothing.
+    assert!(
+        flat(cards[5]).starts_with("[5/10] Advisor model not measured Host this host What"),
+        "{stdout}"
+    );
+    assert!(
+        flat(cards[10]).starts_with("[10/10] Advisor model not measured Host devbox What"),
+        "{stdout}"
+    );
+    let there = flat(cards[6]);
+    assert!(there.starts_with("[6/10] Bash timeout cap not measured 2h -> 55m Host devbox"));
     assert!(
         there.contains(
             "1 foreground Bash wait outlasted the cache (1 hit the timeout, 1 polled in a loop)"
@@ -593,7 +604,7 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     let alone = flat(alone.split("\n\n").nth(1).unwrap());
     assert_eq!(
         there
-            .replace("[5/8]", "[1/4]")
+            .replace("[6/10]", "[1/5]")
             .replace(" Host devbox", "")
             .replace("devbox:~", "~"),
         alone
@@ -909,7 +920,15 @@ fn background_controls_and_estimates_keep_their_remote_history() {
     let (status, there, stderr) = run(hosts.command(&args).env("HOME", &home));
     assert_eq!(status, 1, "{stderr}");
     assert_eq!(stderr, "");
-    assert_eq!(timeless(section(&stdout, "devbox")), timeless(&there));
+    // The same report, but for its closing edits naming their files after the host, as `scp`
+    // would, and its steps by hand naming the host.
+    let devbox = section(&stdout, "devbox");
+    assert!(devbox.contains("\n  EDITS  devbox:~"), "{devbox}");
+    assert!(devbox.contains("\n  STEPS BY HAND  devbox\n"), "{devbox}");
+    let devbox = devbox
+        .replace("\n  EDITS  devbox:~", "\n  EDITS  ~")
+        .replace("\n  STEPS BY HAND  devbox\n", "\n  STEPS BY HAND\n");
+    assert_eq!(timeless(&devbox), timeless(&there));
     // Why a cost is unknown is evidence, which only details show.
     let (_, text, stderr) = hosts.run(&["--ssh", "devbox", "--details"]);
     assert_eq!(stderr, "");
@@ -1509,11 +1528,11 @@ fn flat(text: &str) -> String {
 
 /// Each walked home's settings: a 1h TTL, and a Bash cap that outlasts it, which `vibes`
 /// offers to lower on every host with a saving not measured. The compaction window is at the
-/// maintainer's cap, so its card asks nothing.
-const HOME_SETTINGS: &str = r#"{"promptCacheTtl":"1h","autoCompactWindow":400000,"cleanupPeriodDays":365,"env":{"BASH_MAX_TIMEOUT_MS":"7200000"}}"#;
+/// maintainer's cap and an advisor is set, so their cards ask nothing.
+const HOME_SETTINGS: &str = r#"{"promptCacheTtl":"1h","autoCompactWindow":400000,"advisorModel":"fable","cleanupPeriodDays":365,"env":{"BASH_MAX_TIMEOUT_MS":"7200000"}}"#;
 
 /// [`HOME_SETTINGS`] with the cap lowered under the TTL, as accepting its change writes them.
-const CAP_LOWERED: &str = "{\n  \"promptCacheTtl\": \"1h\",\n  \"autoCompactWindow\": 400000,\n  \"cleanupPeriodDays\": 365,\n  \"env\": {\n    \"BASH_MAX_TIMEOUT_MS\": \"3300000\"\n  }\n}";
+const CAP_LOWERED: &str = "{\n  \"promptCacheTtl\": \"1h\",\n  \"autoCompactWindow\": 400000,\n  \"advisorModel\": \"fable\",\n  \"cleanupPeriodDays\": 365,\n  \"env\": {\n    \"BASH_MAX_TIMEOUT_MS\": \"3300000\"\n  }\n}";
 
 impl Hosts {
     /// `vibes` on this host, devbox and laptop, walked on a terminal after the billing questions.

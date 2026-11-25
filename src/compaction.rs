@@ -24,7 +24,7 @@ use crate::prices::{
     write_billing, zero_cost,
 };
 use crate::scenarios::{PartReplay, ReplayOptions, ReplayTtls, ReplayedPart, replay_parts};
-use crate::version::claude_at_least;
+use crate::version::Needs;
 
 const SOURCES: [&str; 8] = [
     "https://code.claude.com/docs/en/model-config#context-window-and-auto-compaction (2026-11-07)",
@@ -1867,6 +1867,8 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             .chain(&scan.events)
             .filter(|e| in_profile(&e.profiles))
             .collect();
+        // What each profile's next session runs, whichever model it last used.
+        let versions = crate::version::latest(&group.members, requests.iter().copied());
         let selected: Vec<&Request> = requests
             .iter()
             .copied()
@@ -2050,14 +2052,9 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 .iter()
                 .filter(|(m, _)| m.is_none() || models.contains(m))
                 .collect();
-            let Some(recent) = relevant
-                .iter()
-                .filter_map(|(_, facts)| facts.last)
-                .max_by_key(|&(at, _)| at)
-                .map(|(_, r)| r)
-            else {
+            if relevant.iter().all(|(_, facts)| facts.last.is_none()) {
                 continue;
-            };
+            }
             let claude = profile.harness == Harness::Claude;
             let minimum = if claude { CLAUDE_WINDOW_MINIMUM } else { 1 };
             let ceiling = control
@@ -2188,9 +2185,13 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                     None
                 })
                 .filter(|_| settled);
-            let patch = control.minimum_claude_patch.unwrap_or(288);
-            let per_model_supported =
-                !claude || claude_at_least(recent.version.as_deref(), 1, patch);
+            let needs = Needs::claude(1, control.minimum_claude_patch.unwrap_or(288));
+            let upgrade = if claude {
+                needs.unmet(versions.iter().copied())
+            } else {
+                None
+            };
+            let supported = upgrade.is_none();
             let window_key = if claude {
                 "autoCompactWindow"
             } else {
@@ -2232,21 +2233,23 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                     r.unkept.join("; ")
                 )
             });
-            let applicable = control.applicable
-                && per_model_supported
-                && (!claude || !models.contains(&None))
-                && unpinned.is_none();
+            let unlocked =
+                control.applicable && (!claude || !models.contains(&None)) && unpinned.is_none();
+            let applicable = unlocked && supported;
             let unsettable = if !control.applicable {
                 Some(control.reason.clone())
-            } else if !per_model_supported {
-                Some(format!(
-                    "the recorded Claude Code is older than v2.1.{patch}, which this window control needs"
-                ))
+            } else if let Some(upgrade) = &upgrade {
+                Some(upgrade.why("this window control"))
             } else if claude && models.contains(&None) {
                 Some("requests with no recorded model ran on this line, and no setting is known to hold their window".into())
             } else {
                 None
             };
+            // Advice names only the install an upgrade reaches, and none while an SDK app on the
+            // same file is also too old.
+            let upgrade = upgrade
+                .filter(|_| unlocked)
+                .and_then(|_| needs.advice(&group.members, requests.iter().copied()));
             let profiles: IndexSet<&String> =
                 selected.iter().flat_map(|r| r.profiles.iter()).collect();
             let savings = winning
@@ -2269,9 +2272,9 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 uncertainty.insert(control.reason.clone());
             }
             uncertainty.extend(unpinned);
-            if !per_model_supported {
+            if !supported {
                 uncertainty.insert(format!(
-                    "current client support for this window control is not established (requires Claude v2.1.{patch})"
+                    "current client support for this window control is not established (requires {needs})"
                 ));
             }
             if historical_conflict {
@@ -2356,6 +2359,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                     .collect(),
                     uncertainty: uncertainty.into_iter().collect(),
                     sources: SOURCES.iter().chain(&PRICE_SOURCES).map(|s| s.to_string()).collect(),
+                    upgrade,
                 },
                 bucket: "all",
                 model,
@@ -2843,6 +2847,7 @@ mod tests {
             outranking_files: vec![],
             ttl_directories: IndexMap::default(),
             claude_config: None,
+            updater: None,
             codex_system_config: None,
             switched_off: vec![],
             pretended_on: vec![],
@@ -2873,6 +2878,7 @@ mod tests {
             retention: None,
             turn_end: None,
             effort: None,
+            advisor: None,
             speed_directories: None,
             idle_directories: None,
             background: vec![],
@@ -5454,6 +5460,7 @@ mod tests {
                 since: None,
                 now: NOW,
                 max_cost_per_use_usd: 1.0,
+                reading: None,
             })
             .unwrap()
         }
@@ -5783,6 +5790,37 @@ mod tests {
                 ),
                 "{text}"
             );
+            // A Claude Code too old for the per-model window names the upgrade first.
+            let mut old = scan.clone();
+            for r in &mut old.requests {
+                r.version = Some("2.1.287".into());
+                r.client = Some("cli".into());
+            }
+            let Some(How::Manual { step, reason }) = card(&self::report(&old)).how else {
+                panic!("an old Claude Code's cap goes by hand")
+            };
+            assert_eq!(
+                step, // slash ok: the owner is the file name the test passed in, unchanged
+                "upgrade Claude Code, then set synthetic/settings.json:modelSettings.claude-opus-5-5.autoCompactWindow to 400000"
+            );
+            assert_eq!(
+                reason,
+                "this window control needs Claude Code 2.1.288 or later, but its latest session ran 2.1.287"
+            );
+            // A disabled or unresolved T3 line has no setting to change, upgraded or not.
+            let mut unowned = self::report(&old);
+            let CheckResult::Compaction(c) = &mut unowned.checks[index] else {
+                unreachable!()
+            };
+            c.base.uncertainty.push(crate::t3::UNOWNED.into());
+            c.base.upgrade = None;
+            let item = card(&unowned);
+            assert_eq!(item.how, None);
+            assert!(
+                item.text.ends_with("so there is nothing to change."),
+                "{}",
+                item.text
+            );
             // A window already under the cap advises nothing, and `doctor` does not offer it.
             scan.profiles[0].compaction = controls(
                 Harness::Claude,
@@ -6018,15 +6056,76 @@ mod tests {
             let unknown_current = check(&s);
             assert_eq!(unknown_current.base.recommended, Some(100000));
             assert_eq!(unknown_current.base.action, Action::Advisory);
+            assert_eq!(unknown_current.base.upgrade, None);
             let mut old = data(4);
+            old.profiles[0].updater = Some("claude update");
             for r in &mut old.requests {
                 r.version = Some("2.1.287".into());
             }
-            assert_eq!(check(&old).base.action, Action::Advisory);
+            // An Agent SDK app pins its own Claude Code, so its old version names no upgrade.
+            let sdk = check(&old);
+            assert_eq!(sdk.base.action, Action::Advisory);
+            assert_eq!(sdk.base.upgrade, None);
+            for r in &mut old.requests {
+                r.client = Some("claude-vscode".into());
+            }
+            // An SDK app on the same file just as old would still hold it back after the
+            // install's upgrade, so neither names one.
+            old.requests[0].client = Some("sdk-ts".into());
+            assert_eq!(check(&old).base.upgrade, None);
+            // Once only the interactive install is too old, upgrading it unlocks the window.
+            old.requests[0].version = Some("2.1.288".into());
+            let c = check(&old);
+            assert_eq!(c.base.action, Action::Advisory);
+            let upgrade = c.base.upgrade.expect("only the version holds it back");
+            assert_eq!(
+                (upgrade.needs, upgrade.ran.as_deref(), upgrade.command),
+                (
+                    crate::version::Needs::claude(1, 288),
+                    Some("2.1.287"),
+                    Some("claude update")
+                )
+            );
+            assert_eq!(
+                c.unsettable.as_deref(),
+                Some(
+                    "this window control needs Claude Code 2.1.288 or later, but its latest session ran 2.1.287"
+                )
+            );
+            let text = text(&report(&old), None, true);
+            let line = crate::test_support::report_line(&text, "Auto-compact window");
+            assert_eq!(line.mark, "unknown", "{text}");
+            assert_eq!(
+                line.upgrade,
+                "This setting needs Claude Code 2.1.288 or later, but its latest session ran 2.1.287: upgrade Claude Code with `claude update`."
+            );
+            assert!(
+                line.evidence.starts_with(
+                    "The replay favors 100,000 tokens, which applies once Claude Code is upgraded. "
+                ),
+                "{}",
+                line.evidence
+            );
+            // The default report shows the upgrade too, though not the evidence.
+            let brief = self::text(&report(&old), None, false);
+            assert_eq!(
+                crate::test_support::report_line(&brief, "Auto-compact window").upgrade,
+                line.upgrade
+            );
             for r in &mut old.requests {
                 r.version = Some("3.unverified".into());
+                r.client = Some("claude-vscode".into());
             }
-            assert_eq!(check(&old).base.action, Action::Advisory);
+            let c = check(&old);
+            assert_eq!(c.base.action, Action::Advisory);
+            // An unreadable version holds the window back but may already meet it.
+            assert_eq!(c.base.upgrade, None);
+            assert_eq!(
+                c.unsettable.as_deref(),
+                Some(
+                    "this window control needs Claude Code 2.1.288 or later, but its latest session ran a version token-max cannot read"
+                )
+            );
             let mut unsupported = data(4);
             unsupported.requests[2].parts[0].model = Some("unknown-model".into());
             assert!(check(&unsupported).scenarios[0].margin.is_some());

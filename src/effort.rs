@@ -182,8 +182,23 @@ pub(crate) const MODEL_DEFAULT: &str = " (the model's default)";
 /// The model owner when no setting names the model.
 pub(crate) const RECORDED: &str = "the latest recorded main-session model";
 
+/// Follows a `model` owner whose value is null, which falls back to the recorded model.
+pub(crate) const NULL_MODEL: &str = " (null, so the latest recorded main-session model)";
+
+/// Whether `model_owner` takes the model from the latest session rather than a setting.
+pub(crate) fn recorded(model_owner: &str) -> bool {
+    model_owner == RECORDED || model_owner.ends_with(NULL_MODEL)
+}
+
+/// Why the main-session default is unknown when nothing names or recorded a model.
+pub(crate) const NO_MODEL: &str =
+    "no setting names the model and no main-session request recorded one";
+
+/// Why it is unknown when only requests whose owner T3 could not settle recorded one.
+pub(crate) const UNSETTLED_MODEL: &str = "no setting names the model, and the main-session requests that recorded one may be a T3 thread's, since T3 could not settle their owner";
+
 /// The setting's value at `key` in the highest scope that sets it, with that scope.
-fn highest<'a>(scopes: &[SettingsScope<'a>], key: &str) -> Option<(&'a Value, &'a str)> {
+pub(crate) fn highest<'a>(scopes: &[SettingsScope<'a>], key: &str) -> Option<(&'a Value, &'a str)> {
     scopes
         .iter()
         .rev()
@@ -233,7 +248,7 @@ pub fn claude_effort(
         _ => match highest(scopes, "model") {
             Some((Value::String(m), file)) => (Some(m.as_str()), format!("{file}:model")),
             // A null outranks the files below it, so it owns the model the session falls back to.
-            Some((Value::Null, file)) => (recorded, format!("{file}:model")),
+            Some((Value::Null, file)) => (recorded, format!("{file}:model{NULL_MODEL}")),
             None => (recorded, RECORDED.to_string()),
             Some((_, file)) => return Err(invalid("invalid model", file)),
         },
@@ -353,9 +368,7 @@ fn claude_on(
         |model: &str| format!("{user_file}:modelSettings.{model}.effortLevel{MODEL_DEFAULT}");
     let Some(model) = model else {
         let why = match named {
-            None => {
-                "no setting names the model and no main-session request recorded one".to_string()
-            }
+            None => NO_MODEL.to_string(),
             Some(m) => {
                 format!("the model {m} cannot be resolved to a model in Claude Code's effort table")
             }
@@ -584,7 +597,7 @@ fn codex_on(
         None => (default.clone(), format!("{user_file}:{key}{MODEL_DEFAULT}")),
     };
     let unresolved = level.is_none().then(|| match (&model, catalog) {
-        (None, _) => "no setting names the model and no main-session request recorded one".to_string(),
+        (None, _) => NO_MODEL.to_string(),
         (Some(_), None) => "model_reasoning_effort is unset and Codex's model catalog, models_cache.json, cannot be read for the model's default".to_string(),
         (Some(m), Some(_)) => format!("model_reasoning_effort is unset and Codex's model catalog does not list {m}"),
     });
@@ -731,6 +744,7 @@ fn check(
             ],
             uncertainty,
             sources: SOURCES.map(String::from).into(),
+            upgrade: None,
         },
         harness: profile.harness,
         control: control.clone(),

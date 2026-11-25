@@ -1046,6 +1046,7 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
                 max_cost_per_use_usd,
                 format,
                 home: home.as_deref(),
+                reading: None,
             },
         )?;
         // A walk of `vibes` alone reads only the files its own changes name.

@@ -106,22 +106,34 @@ same scan, with nothing read or asked again, and with its own confirm before
 anything more is written. Without a terminal, the report ends with one line
 naming `token-max vibes`.
 
-A tool, skill or MCP server's change joins a group of its kind and reason, such
-as never-used skills or MCP servers over $1 per use, whatever it saves. The
-reasons are never used, no use recorded where the window cannot rule one out,
-over `--max-cost-per-use` per use, and a redundant copy of a Codex catalog
-skill whose most-used copy stays. Each reason is its own group, so a yes to
-never-used features never also removes one in use. A group is one question
-ranked by its combined saving, which names every member and takes `y` for all,
-`n` for none, `q` to quit or `s` to split it and answer each member, as
-`git add -p` splits a hunk; a group of one is asked as that change. Features whose
-savings were not measured, such as Codex catalog skills, are grouped the same
-way after the measured questions. A group saving under $1/mo in total,
-including a lone small change such as a check, is not asked: one dim line says
-how many changes were left out, and the list after the walk shows them among
-those not accepted.
+Each change joins a section, which the walk asks as one question and the
+report lists as one row. A tool, skill or MCP server's change joins the
+section of its kind and reason, across every profile, such as never-used
+skills or MCP servers over $1 per use, whatever it saves. The reasons are
+never used, no use recorded where the window cannot rule one out, over
+`--max-cost-per-use` per use, and a redundant copy of a Codex catalog skill
+whose most-used copy stays. Each reason is its own section, so a yes to
+never-used features never also removes one in use, and so is each offered
+value: skills set to typed only and skills turned off are two sections. The
+main-agent and subagent prompt cache TTLs are one section, whose value names
+each change, such as `main 5m -> 1h, subagent 1h -> 5m`. Any other setting,
+such as auto memory, is a section of its own across profiles.
 
-Each question takes `y`, `n` or `q`, and a group also `s`; anything else asks
+A section is one question ranked by its combined saving. Its card names how
+many changes it holds and the largest few, such as `dataviz, code-review, run
+and 16 more`, and takes `y` for all, `n` for none, `q` to quit or `s` to split
+it and answer each member, as `git add -p` splits a hunk; a section of one is
+asked as that change. A member's card names its settings file or profile when
+several profiles were read. Features whose savings were not measured, such as
+Codex catalog skills, form sections of their own after the measured questions.
+A section saving under $1/mo in total, including a lone small change such as
+a check, is not asked: one dim line says how many changes were left out, and
+the list after the walk shows them among those not accepted. `vibes`' card
+that says the walk skips a change too small to ask, such as auto memory's,
+judges its section's total, not the one change's, leaving out a member whose
+file refuses its edit, which the walk lists as a step by hand.
+
+Each question takes `y`, `n` or `q`, and a section also `s`; anything else asks
 again. An answer only selects: after each yes, a running total sums the
 accepted changes' own savings, in dollars and as a percent of this host's
 spend, and says that overlapping changes may save less, since each saving holds
@@ -135,8 +147,11 @@ unaccepted.
 
 The report follows, its list grouped: the accepted changes first with the
 total, then the ones not accepted, then the steps to take by hand, such as a
-change something else would override, each saying why, then every other line,
-each group ranked as the report ranks it. Then the confirm shows how each settings file would change, as
+change something else would override, whose steps and reasons the closing
+`STEPS BY HAND` section gives, then every other line,
+each group ranked as the report ranks it. A section split in the walk shows
+its accepted members as one row and the rest as another, and each step by
+hand keeps its own line. Then the confirm shows how each settings file would change, as
 a diff with a line of context around each change, removed lines in red and
 added ones in green. Values that may be secrets show as `••••` (`****`
 without Unicode), keeping their keys: each variable or header of an MCP server
@@ -145,9 +160,12 @@ variable in a Claude settings file's `env` block that no accepted change sets,
 and each in Codex's `shell_environment_policy.set`. Then one question asks whether to write the accepted
 changes, naming each file; nothing is written before that yes, end of input is a no,
 and a no says nothing was written. Each file is then written once, with every
-edit accepted for it. A change not accepted keeps its edit in the list, to
-make by hand, which also suits a file another tool rewrites, such as a dotfiles
-manager. Either answer exits 0.
+edit accepted for it. After the confirm, a **Not written** section per file
+lists every edit left unwritten, whether declined at its question or at the
+confirm, one line per key as the report's closing sections show them, including
+the MCP server removals and `deniedMcpServers` entries offered after a yes and
+the cleanup of servers off already, then the steps by hand, so each can still be made by hand, which also suits a file
+another tool rewrites, such as a dotfiles manager. Either answer exits 0.
 
 Only a profile's own `settings.json` or Codex `config.toml` is edited,
 including Claude's `env` block. An edit sets the setting that decides the
@@ -258,7 +276,8 @@ name holds another `__` after the server's, the Claude Code is older, or
 `deniedMcpServers` is not a list, the walk names
 the step to take by hand instead: remove it from `.mcp.json`, uninstall the
 plugin, disconnect the connector at claude.ai, or remove it where it is
-configured. `disableClaudeAiConnectors` is never offered, since it turns off
+configured. Where only the Claude Code is older, the step also offers
+[upgrading it](#harness-upgrades). `disableClaudeAiConnectors` is never offered, since it turns off
 every connector, including ones added later.
 
 A server whose name holds `__` or ends in `_`, known from its MCP
@@ -284,14 +303,16 @@ takes it over itself. Claude Code re-reads the file under that lock before each 
 so the removal survives sessions already running, which keep the server until
 they restart.
 
-Without a terminal, `doctor` changes nothing: each change's line ends with its
-edit and file, or its step by hand.
+Without a terminal, `doctor` changes nothing: the report ends with the edits
+its changes name, as [Reading the report](#reading-the-report) describes. A
+section's row names the settings its members change, such as
+`skillOverrides.*`, and `--details` lists each member under it.
 
 ### On SSH hosts
 
 With `--ssh`, the walk offers every host's changes in one list, biggest saving
 first across hosts. A card for another host's change, or any card when the run
-covers several hosts, names its host under `Host`, and a group only gathers one
+covers several hosts, names its host under `Host`, and a section only gathers one
 host's changes. Each host's last question offers to remove its servers that are
 off already. The running total sums the accepted changes of every host, as a
 percent of the hosts' spend together. Each host's report follows the walk,
@@ -492,8 +513,19 @@ Then the report gives every setting and feature one line. Each line names its ve
 setting or feature, its current value (and the value to change to, for a
 change), what it saves per 30 days or costs over the window, that figure's
 share of this host's spend, the profile when several were read, and the
-setting that changes it. For a change `doctor` offers,
-that last column is the exact edit and file, or the step to take by hand.
+setting that changes it. A section's row names the settings its members
+change, such as `skillOverrides.*`, and `--details` lists each member under it.
+
+The report ends with the edits its changes name, so the lines above stay one
+row each: an **Edits** section per settings file, named as `host:path` under
+`--ssh`, with one line per key. A list's added members share one line with
+their count, such as `permissions.deny += ScheduleWakeup, ReportFindings (2)`,
+and settings under one parent set to one value share one too, such as
+`skillOverrides.{a, b} = "off" (2)` for two skills turned off. `--details`
+shows each edit's exact JSON or TOML instead. Steps to take by hand, such as
+one a shell variable would override, follow in a **Steps by hand** section,
+named after its host under `--ssh`, each naming its line and why token-max
+can't take it.
 
 Every line is measured: replayed or priced from your own transcripts at public
 API prices, or marked unknown where they can't price it. No verdict rests on
@@ -510,8 +542,15 @@ measured after the rest. A feature turned off saves what it cost, assuming
 nothing else changes. **Everything else** follows, ranked by what it costs,
 biggest first, with lines whose cost is unknown or that have no figure after.
 When several profiles were read, each line also names the settings file that
-owns it, or the profile when no file does (see [Profiles](#profiles)).
-The headline counts both kinds of change. The line under it sums what they
+owns it, or the profile when no file does (see [Profiles](#profiles)); a
+section's row names every file its members' lines name.
+Changes the walk would ask as one question, a [section](#applying-changes), share one
+row: its heading, how many changes it holds and the value they move to, such
+as `19 -> typed only`, what they save together with its `~` and margin, and the
+strongest member's verdict. A saving that holds only under one default, such
+as an unset main-agent cache TTL's, stays apart, such as `saves ~$12/mo + up
+to $30/mo`. `--details` lists each member under its section's row. A change
+only taken by hand keeps its own row. The headline counts both kinds of change. The line under it sums what they
 save together, as the walk's running total would if every change were
 accepted, such as "Together, these changes save about $40/mo, 9% of this
 host's spend; overlapping changes may save less", since each saving holds
@@ -601,6 +640,44 @@ including those no longer sent.
 
 A run with no histories or no requests in the selected window gives a next step;
 no applicable changes does not imply complete visibility or optimal settings.
+
+### Harness upgrades
+
+Some settings need a newer Claude Code or Codex than the profile's latest
+session ran: the cache TTLs Claude Code 2.1.242, the idle compaction toggle
+2.1.290 (2.1.314 without the server flag that earlier versions needed), a
+per-model compaction window 2.1.288 (2.1.304 for a `k` or `m` suffix), a
+`deniedMcpServers` entry 2.1.0 to 2.1.330 by the server's kind,
+`CLAUDE_CODE_SUBAGENT_EFFORT` 2.1.316, and Codex's turn-end compaction
+threshold 0.156.0. When the version is the only thing
+holding a verdict back, its line keeps its unknown mark and exit code, and the
+line under it says which version the setting needs, which version the latest
+session ran, and to upgrade. `vibes`' window cap and
+subagent default cards and a step by hand to block an MCP server say so too. token-max never upgrades a
+harness itself. A version the session didn't record, or one that isn't plain
+digits, still holds the setting back but advises no upgrade and names no
+command, since that release may already meet it: a `doctor` line then gets no
+upgrade line, and a card or step by hand that explains the wait calls it "an
+unrecorded version" or "a version token-max cannot read".
+
+Every request on a settings file counts toward whether its setting applies,
+but only Claude Code's interactive clients (`cli`, `claude-vscode` and
+`ssh-remote`, main agent or subagent) say which version to upgrade: an Agent
+SDK app, remote session or MCP client on the same file pins its own Claude
+Code, which `claude update` doesn't reach. Such a client holds the line back
+without advising an upgrade, and while its own latest version is also too old
+the line advises none at all, since upgrading the interactive install alone
+would still leave it held back. The idle compaction toggle, which only an
+interactive client runs, is judged by interactive requests alone. A T3
+instance's own requests and every Codex request count.
+
+It names an upgrade command only when it knows how the harness was installed:
+`claude update` when Claude Code's state file records a native install
+(`"installMethod": "native"`). An npm, Nix or Homebrew install, Codex, and a
+T3 instance, which runs the binary its settings name or `claude` or `codex`
+on its own PATH, get the version alone. A version gate that explains a past
+request, such as which model a built-in Explore ran on, uses that request's
+own version and advises nothing.
 
 ## Savings against the defaults
 
@@ -788,9 +865,9 @@ Every line says in one sentence what its setting or feature does, such as
 "Lets Claude publish an HTML or Markdown file to claude.ai as an artifact: a
 private, interactive page you can share" for the Artifact tool that
 `enableArtifact` turns off. `--details` prints it under the line as `What:`,
-and the walk opens each change with it. A grouped question opens with what its
+and the walk opens each change with it. A section's question opens with what its
 kind of feature is, such as what skills are, and each member's own sentence
-shows when you split the group. The default report keeps each line to one
+shows when you split the section. The default report keeps each line to one
 line.
 
 Checked settings, built-in Claude Code tools, subagent types and the other
@@ -839,10 +916,51 @@ Unicode decorations require a UTF-8 locale. Progress is one line that shows each
 phase in turn and clears itself before the report. While this host's
 transcripts are read it is a bar of the bytes read out of the total discovery
 found, with the time left to read them at the rate so far; the analysis after
-reading has no measured fraction, so its phases show only a spinner and how
-long each has run. Reading T3 Code's database, which follows the transcripts,
+reading has no measured fraction, so its phases show a spinner and how long
+each has run, and checking settings also counts the checks done. Reading T3 Code's database, which follows the transcripts,
 holds the line as the bar does, so under `--ssh` it shows over a later phase
 until it ends.
+
+Beside the bar and each phase after it, the line counts the requests,
+sessions, tokens and API-price spend read so far, as the report's header
+counts them: requests once across profiles that share a history and across a
+response's streamed chunks, only those in the window, and each subagent in the
+session that spawned it. The spend appears once public prices load, at first
+pricing everything already read, and is extrapolated per profile and marked
+`~` as the header's is. Some figures only settle after reading, such as a
+request record no response answers or a request T3 moves to another profile,
+so the scan counts again once those are known, and once the analysis has
+priced the scan the counts become the header's own. Each SSH host's totals
+join them as its report arrives. The line `doctor` clears shows the header's
+figures, or the total across hosts. Under `vibes --ssh` the destinations send
+no usage, so the line counts this host alone and says so. On a narrow
+terminal the line keeps the most useful figures that fit: while reading, the
+spend, the requests, the time left to read, the sessions, the tokens, then
+the bytes read.
+A figure too wide for the room left is skipped, and narrower ones after it
+still show.
+
+While `doctor` checks settings, the line also counts the checks done, such as
+`7/11 checks`, one per kind of check however long each runs, and tallies two
+figures as each check lands: what the current
+settings save against the Claude Code and Codex defaults, as the report's
+"Compared with defaults" line sums them, and what the changes found so far
+save, as the total under the report's headline sums them. Each figure keeps
+the report's kinds apart: a saving that depends on how usage is paid, such as
+a pinned main-agent TTL, has its own "up to" figure, an estimate for a feature
+that is off is counted beside the saving it joins, a change priced only in
+part says so, and so does a setting or change whose amount wasn't measured.
+An edit two lines make counts once, as the walk lists it. A figure whose
+qualifier doesn't fit the row is dropped whole.
+The tools, skills and MCP servers a settings file already turns off join the
+defaults figure once the report is formatted, and the line then ends on the
+report's own figures; each SSH host's figures join when its report arrives.
+Under `--defaults` there is no comparison with the defaults, so the line
+tallies only the changes. `vibes` counts its checks but tallies nothing, since
+its advice is unmeasured. While checking, a narrow terminal keeps the count of
+checks, the defaults figure, the changes found, the spend, the requests, the
+"up to" figures, the sessions, the tokens, then a count of what wasn't
+measured when nothing beside it was.
 
 On a terminal, `doctor` opens with its name, says it is about to scan this
 host's transcripts, and lists each profile root it found with its transcript
@@ -1412,9 +1530,11 @@ an exit code.
 | [Transcript retention](#transcript-retention) | A Claude profile whose `cleanupPeriodDays` is under 365, the default of 30 included: the disk its transcripts take, and the change to 365. |
 | [Auto-compact window](#auto-compact-window-cap) | Every compaction window line: the maintainer's cap of 400K for Claude and 240K for Codex, beside `doctor`'s replay of it. |
 | [Main-session default](#main-session-default) | Every resolved main-session default: the maintainer's pick of a model and effort beside what each recorded pair cost, and past `high` the provider's guidance. |
+| [Subagent default](#subagent-default) | A profile that sets `CLAUDE_CODE_SUBAGENT_EFFORT` or Codex's `agents.default_subagent_reasoning_effort`: past `high` the provider's guidance and the change to `high`, and an upgrade when the latest Claude Code ignores the variable. |
 | An instruction file | A CLAUDE.md of 200 lines or more, past Claude Code's [guidance](https://code.claude.com/docs/en/memory#write-effective-instructions), or an AGENTS.md at or above the byte budget Codex [loads](https://learn.chatgpt.com/docs/agent-configuration/agents-md), with what each 100 lines of it costs. |
 | Explore subagent | Claude's built-in Explore ran off Haiku: what it cost, the same tokens on the cheapest model, the model guide's tip, and the agent file that follows it as a step by hand. |
 | Fable weekly use | Any Fable request in the window: what they cost, and Anthropic's [plan rule](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan). |
+| [Advisor model](#advisor-model) | Every Claude settings file: with no `advisorModel`, the advisor one rank above the main-session default, citing Claude Code's [advisor page](https://code.claude.com/docs/en/advisor). |
 | [Auto memory](#auto-memory-in-vibes) | Every auto memory or Codex memories line: off is advised when most main sessions ran in a repository with a CLAUDE.md or AGENTS.md. |
 | [Code intelligence](#code-intelligence) | Claude sessions read or edited files of a typed language whose official language server plugin a new session wouldn't load: Anthropic's [costs page](https://code.claude.com/docs/en/costs#install-code-intelligence-plugins-for-typed-languages). |
 
@@ -1585,6 +1705,45 @@ the whole change is a step by hand naming each setting; so is a new model on
 a cloud provider, such as Bedrock, which spells model IDs its own way, whether
 the profile's or the project's settings turn it on. A Codex level with no model set or recorded has no card.
 
+### Subagent default
+
+A profile that sets a default subagent effort, Claude Code's
+`CLAUDE_CODE_SUBAGENT_EFFORT` or Codex's
+`agents.default_subagent_reasoning_effort`, gets a card naming the level and
+the model it pairs with: `CLAUDE_CODE_SUBAGENT_MODEL` or
+`agents.default_subagent_model` when set, else the main session's model. It
+applies when neither the Agent call nor the agent's definition names an
+effort. Unset, subagents follow the main session, which the
+[`Main-session default`](#main-session-default) card covers, so there is no
+card.
+
+Past `high`, the card quotes the same provider guidance as the main-session
+card and offers the maintainer's pick, `high`, which every model that takes
+effort accepts. The edit sets the variable where it is set now: `env` in the
+profile's Claude `settings.json` or the key in its Codex `config.toml`. A
+shell variable, a T3 instance's own `environment` entry, or another file that
+sets it makes the change a step by hand naming that setting.
+An agent file's `effort:` or an Agent call's effort overrides the default and
+is left alone; the [subagent lines](#subagent-models) show it. At or below
+`high` the card advises nothing.
+
+Claude Code reads `CLAUDE_CODE_SUBAGENT_EFFORT` from 2.1.316
+([changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md)).
+When a profile's latest request ran an older Claude Code, the card says the
+variable is ignored and, under the [harness upgrade](#harness-upgrades) rules,
+advises upgrading; past `high` it still offers the change to `high`, which
+applies once Claude Code is upgraded. Profiles that
+share the setting but pair it with different subagent models get a card each.
+Only the profile's own settings and environment, or a T3 instance's, are
+read; a project's settings that set the variable are not.
+
+A T3 instance can set these variables as secret or sensitive entries, which
+token-max never reads. A secret subagent model, `_MODEL_FORCE` or Explore cap
+gets its own card that names the model as one token-max cannot resolve and
+says which entry it couldn't read. A secret effort gives no card, and the
+[subagent lines](#subagent-models) mark only the effort unresolved, keeping
+their model attribution.
+
 ### Auto memory in vibes
 
 The maintainer's pick: a lasting fact about a project belongs in its
@@ -1605,6 +1764,15 @@ the file is not read. Codex records its AGENTS.md text without a path, so its
 sessions are read from the directory alone. A session with neither, because
 its directory is gone or unrecorded, counts as without one, and the card
 names how many did.
+
+A session counts for the line whose profile ran it. When a T3 instance shares
+native Claude Code's history, a session T3 settled to the instance counts for
+the instance's line, not the native one. A session whose owner T3 could not
+settle counts when every candidate owner is on the line, such as native Claude
+Code and an instance sharing its `settings.json`; otherwise, including when T3
+names an owner outside the home, the card leaves it out and says how many it
+left out. So does a session whose turns T3 matched to profiles on different
+lines, so no session counts on two.
 
 Where the advice doesn't hold, the card advises nothing: memory already off,
 or too few sessions in a repository, where memory may be the only place a fact
@@ -1793,6 +1961,69 @@ with `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` or
 `CLAUDE_CODE_USE_FOUNDRY` is billed by its cloud provider and gets no line.
 Change the model with `/model` or the `model` setting.
 See [Fable weekly use](semantics.md#fable-weekly-use).
+
+## Advisor model
+
+Claude Code's [advisor](https://code.claude.com/docs/en/advisor) is a
+second model Claude consults at decision points, which reads the whole
+conversation at its own rates. Each Claude settings file gets a
+[`vibes`](#vibes) card for it, ranked against the main-session default that
+[effort](semantics.md#main-session-effort) resolves: the `model` setting or
+`ANTHROPIC_MODEL`, else the latest recorded main-session model.
+
+With no `advisorModel` set, the card suggests one rank above that default,
+the maintainer's pick: `opus` for a Haiku or Sonnet main, `fable` for an Opus
+main, and none for a Fable main, which Claude Code pairs only with a Fable
+advisor. It cites the page's claim that a faster main model with a stronger
+advisor "typically costs less than running the stronger model throughout",
+and offers to write `advisorModel` to the profile's settings file, saying
+that a project whose own settings pick another main model takes it too, since
+the edit pairs the advisor with every project's model. When no setting names
+the main model, or `model` is null, the card ranks against the latest recorded
+main-session model and says a session's `/model` or `--model` choice may run
+another one. When a project's settings file sets the main model, in `model`
+or `env.ANTHROPIC_MODEL`, the card offers no edit, since an advisor in the
+profile's file would pair with every project's model. The card doesn't read
+other recorded projects' settings for a model they set; its caveat covers
+them. What the
+pairing saves or costs is not measured. A main model Claude Code attaches no
+advisor to (Sonnet or Opus before 4.6, Haiku before 4.5), or one token-max
+can't resolve, gets a card that advises nothing.
+
+The card says no advisor would load, and offers no edit, when the settings or
+environment read set `CLAUDE_CODE_DISABLE_ADVISOR_TOOL`, send requests to
+Amazon Bedrock (or its Mantle endpoint), Google Cloud's Agent Platform or
+Microsoft Foundry, or turn off the feature flag the advisor needs:
+`DISABLE_TELEMETRY` or `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` with any
+value, or a true `DO_NOT_TRACK`, `CLAUDE_CODE_DISABLE_FEATURE_FLAGS` or
+`DISABLE_GROWTHBOOK`. Claude Platform on AWS and Claude Models on Google
+Cloud (Anthropic managed) need no flag. An `ANTHROPIC_BASE_URL` gateway must
+pass the advisor tool on intact, and a Fable advisor needs Fable access and,
+on plans that bill Fable to usage credits, the consent `/model fable` asks
+for; the card says both. An `advisorModel` already set gets a card that
+advises nothing, unless one of those stops it loading, its value is no model
+name Claude Code recognizes (an alias, or a Claude model ID of a family that
+can advise; the card names only its kind, never the value, which could be a
+pasted credential), the main model takes no
+advisor, or Claude Code's [pairing table](https://code.claude.com/docs/en/advisor#choose-an-advisor-model)
+rejects the pair; then it says so and offers no edit. The table is checked for
+a full model ID such as `claude-sonnet-5-5`, in any case and with or without a
+`[1m]` or `[2m]` suffix, as Claude Code reads it. An alias such as `opus` resolves
+to a version that changes with Claude Code releases, so only a Fable main
+model, which takes no other family, judges one. The card doesn't yet read an
+`availableModels` allowlist, which can disable a set advisor or block the one
+it suggests.
+
+T3 Code picks each thread's main model, so T3 instances get no card; when an
+enabled one reads the same settings file, the card says each of its threads whose model
+and provider take the advisor would use it, unless the instance's launch arguments, secret
+environment or machine policy, which token-max can't resolve, override that
+file. `doctor` has no advisor line. An advisor call
+whose iteration records no service tier leaves its request with no price of its
+own: that request is extrapolated from its profile's priced requests like any
+other unpriced one, or, when none of them priced, adds only its known part as a
+lower bound ([spend](#reading-the-report)). No line says how many calls ran or
+what they cost.
 
 ## Messages from other sessions
 

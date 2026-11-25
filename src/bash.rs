@@ -366,6 +366,7 @@ mod tests {
             since: None,
             now: START + 60 * MIN,
             max_cost_per_use_usd: 1.0,
+            reading: None,
         })
         .unwrap()
     }
@@ -418,6 +419,7 @@ mod tests {
             since: None,
             now: START + 60 * MIN,
             max_cost_per_use_usd: 1.0,
+            reading: None,
         })
         .unwrap();
         let verdict = report

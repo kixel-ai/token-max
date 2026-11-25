@@ -727,8 +727,25 @@ fn manual(owner: &str, profile: &Profile, step: String) -> How {
 }
 
 /// How to set `advisorModel` to `model` where `owner` names it, in `profile`'s settings.
-pub(crate) fn advisor_how(owner: &str, model: &str, profile: &Profile) -> How {
+/// `main` owns the main model it ranks against: when that is a project's settings file, the
+/// advisor belongs beside it, since the user's file would pair it with every project's model.
+pub(crate) fn advisor_how(owner: &str, model: &str, main: &str, profile: &Profile) -> How {
     let key = "advisorModel";
+    let main_file = main.strip_suffix(":model").unwrap_or(main);
+    let project = main_file != profile.settings_file
+        && std::path::Path::new(main_file)
+            .parent()
+            .and_then(|dir| dir.file_name())
+            .is_some_and(|dir| dir == ".claude");
+    if project {
+        return How::Manual {
+            step: format!("set \"{key}\": \"{model}\" in {main_file}"),
+            reason: format!(
+                "{main} sets the main model for that project only, and {} would set the advisor for every project",
+                profile.settings_file
+            ),
+        };
+    }
     owned(
         owner,
         profile,

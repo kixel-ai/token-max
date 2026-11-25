@@ -1140,9 +1140,12 @@ fn t3_instances(profiles: &[Profile]) -> HashSet<String> {
 
 /// Whether T3 settled that `profile` owns `r`. A request whose owner T3 can't settle keeps
 /// every candidate, so a native profile counts only requests that name no T3 instance, and
-/// an instance only those that name it alone.
+/// an instance only those that name it alone. One T3 marked unsettled decides for no one,
+/// even when it names a single candidate.
 fn owned_by(r: &Request, profile: &Profile, t3: &HashSet<String>) -> bool {
-    if !r.profiles.iter().any(|p| **p == *profile.id) {
+    if !r.profiles.iter().any(|p| **p == *profile.id)
+        || r.issues.iter().any(|i| i.starts_with(crate::t3::UNSETTLED))
+    {
         return false;
     }
     if profile.t3.is_some() {
@@ -1168,6 +1171,8 @@ pub fn discover_latest_claude_controls(
     let active = realpath(&resolve(configured)).unwrap_or_default();
     let managed_file = options.managed_settings_file.as_str();
     let t3 = t3_instances(profiles);
+    // T3 resolves its instances' controls itself, and they get no advisor: T3 picks each
+    // thread's main model, which an advisor ranks against.
     for profile in profiles
         .iter_mut()
         .filter(|p| p.harness == Harness::Claude && p.t3.is_none())
@@ -4883,5 +4888,12 @@ mod tests {
             format!("{}:advisorModel", profile.settings_file)
         );
         assert_eq!(profile.effort.as_ref().unwrap().model, None);
+
+        // One T3 marked unsettled decides for no one, even when it names a single candidate.
+        let mut single = request(&profile.clone(), Some(&theirs));
+        single.profiles = vec!["t3".into()].into();
+        single.issues = vec![format!("{}: synthetic", crate::t3::UNSETTLED).into()];
+        discover_inbound(&options(&w), &mut data.profiles, &[single]).unwrap();
+        assert_eq!(directory(&data, "t3"), None);
     }
 }

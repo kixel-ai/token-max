@@ -940,6 +940,8 @@ pub struct AdvisorUse {
     pub calls: u64,
     /// The advisor models the calls ran on, most calls first.
     pub models: Vec<Share>,
+    /// What the calls are known to cost, with what could not be priced and what was assumed.
+    pub cost: Cost,
     /// What the calls cost, extrapolated from the priced requests to every one; None when
     /// none was priced.
     pub estimate: Option<Estimate>,

@@ -1942,10 +1942,14 @@ fn add(requests: &mut Requests, strings: &mut Interner, r: Request) -> Option<Te
             && end_time >= previous.end_time)
     {
         for (index, p) in parts.iter_mut().enumerate() {
+            // A later snapshot that omits a model the earlier one recorded is the same part.
             if let Some(old) = previous.parts.get(index)
                 && old.kind == p.kind
-                && old.model == p.model
+                && (old.model == p.model || p.model.is_none())
             {
+                if p.model.is_none() {
+                    p.model = old.model.clone();
+                }
                 fill(&mut p.usage, &old.usage);
                 if p.tier.is_none() {
                     p.tier = old.tier.clone();
@@ -2542,6 +2546,34 @@ mod tests {
         let data = scan(&options(&w)).unwrap();
         assert_eq!(data.requests.len(), 1);
         assert_eq!(data.requests[0].effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn a_later_snapshot_keeps_the_advisor_model_an_earlier_one_recorded() {
+        let w = Workspace::new();
+        let snapshot = |model: Option<&str>, output: i64| {
+            let mut advisor = json!({"type": "advisor_message", "input_tokens": 9, "output_tokens": output, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0});
+            if let Some(m) = model {
+                advisor["model"] = m.into();
+            }
+            let mut record = assistant("session", "message");
+            record["message"]["usage"]["iterations"] = json!([
+                {"type": "message", "input_tokens": 1, "output_tokens": 2, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                advisor,
+            ]);
+            record
+        };
+        write(
+            w.claude.join("projects/project/main.jsonl"),
+            jsonl(&[snapshot(Some("claude-fable-5-2"), 1), snapshot(None, 3)]),
+        );
+        let data = scan(&options(&w)).unwrap();
+        assert_eq!(data.requests.len(), 1);
+        let advisor = &data.requests[0].parts[1];
+        assert_eq!(
+            (advisor.model.as_deref(), advisor.usage.output),
+            (Some("claude-fable-5-2"), Some(3))
+        );
     }
 
     #[test]

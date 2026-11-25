@@ -1733,6 +1733,25 @@ fn details(report: &Report, out: &mut Out<'_>) {
         }
     }
 
+    if report.advisor.iter().any(|u| u.calls > 0) {
+        out.section("Advisor model");
+        for u in report.advisor.iter().filter(|u| u.calls > 0) {
+            out.blank();
+            let names: Vec<String> = u.profiles.iter().map(|p| out.profile_name(p)).collect();
+            out.line(&names.join(", "), 0, BOLD);
+            out.field(
+                "Calls",
+                &format!(
+                    "{} on {}",
+                    plural(u.calls, "advisor call"),
+                    plural(u.requests, "request")
+                ),
+            );
+            out.estimate("Cost", &u.cost, u.estimate);
+            out.field("Prices", CLAUDE_PRICING);
+        }
+    }
+
     if !report.inbound.is_empty() {
         out.section("Messages from other sessions");
         for u in &report.inbound {
@@ -4667,7 +4686,7 @@ fn advisor_row(u: &AdvisorUse, control: &AdvisorControl, out: &Out<'_>) -> Row {
     row.sources = vec![crate::advisor::DOCS];
     let set = match (&control.model, &control.blocked) {
         (Some(m), None) => format!("Set to {m}."),
-        (Some(m), Some(b)) => format!("Set to {m}, but no advisor loads: {b}."),
+        (Some(m), Some(b)) => format!("Set to {m}, but none would load from these settings: {b}."),
         (None, _) => {
             "No settings file read sets it now; a session's --advisor flag or /advisor turns it on."
                 .into()
@@ -4695,11 +4714,15 @@ fn advisor_item(u: &AdvisorUse, p: &Profile, profile: &str, out: &Out<'_>) -> It
     let (value, text, how, quiet) = match (&control.model, &control.blocked, main) {
         (Some(m), Some(b), _) => (
             String::new(),
-            format!("Set to {m} in {file}, but no advisor loads: {b}. {calls}"),
+            format!("Set to {m} in {file}, but none would load from these settings: {b}. {calls}"),
             None,
             false,
         ),
         (Some(m), None, _) => quiet(format!("Set to {m} in {file}. {calls}")),
+        // A recorded call shows the advisor loaded where the blocker did not reach.
+        (None, Some(b), _) if u.calls > 0 => quiet(format!(
+            "No advisor is suggested, since none would load from these settings: {b}. {calls}"
+        )),
         (None, Some(b), _) => quiet(format!(
             "No advisor is suggested, since none would load: {b}."
         )),
@@ -4734,7 +4757,7 @@ fn advisor_item(u: &AdvisorUse, p: &Profile, profile: &str, out: &Out<'_>) -> It
                 (
                     format!("none {} {pick}", out.arrow),
                     text,
-                    Some(crate::doctor::advisor_how(&control.owner, pick, p)),
+                    Some(crate::doctor::advisor_how(&control.owner, pick, owner, p)),
                     false,
                 )
             }
@@ -10381,6 +10404,7 @@ mod tests {
             requests: 0,
             calls: 0,
             models: vec![],
+            cost: Cost::default(),
             estimate: Some(Estimate {
                 usd: 0.0,
                 margin: None,
@@ -10422,6 +10446,17 @@ mod tests {
                         .collect::<Vec<_>>(),
                     ["\"advisorModel\": \"opus\""]
                 );
+            }
+            other => panic!("{other:?}"),
+        }
+        // A main model a project sets gets its advisor beside it, as a step by hand: the
+        // user's file would pair it with every project's model.
+        let project = "/synthetic/repo/.claude/settings.json";
+        report.scan.profiles[0].effort.as_mut().unwrap().model_owner = format!("{project}:model");
+        match card(&report).how {
+            Some(How::Manual { step, reason }) => {
+                assert_eq!(step, format!("set \"advisorModel\": \"opus\" in {project}"));
+                assert!(reason.contains("for that project only"), "{reason}");
             }
             other => panic!("{other:?}"),
         }
@@ -10469,13 +10504,20 @@ mod tests {
                 name: "claude-opus-5-5".into(),
                 count: 4,
             }],
+            cost: Cost::default(),
             estimate: Some(Estimate {
                 usd: 2.5,
                 margin: None,
             }),
         };
         set(&mut report, Some("opus"), None, Some("claude-sonnet-5-5"));
-        let row = report_line(&text(&report, None, true), "Advisor model");
+        let details = text(&report, None, true);
+        // --details names the calls and the cost behind the line.
+        assert!(
+            details.contains("Calls: 4 advisor calls on 3 requests"),
+            "{details}"
+        );
+        let row = report_line(&details, "Advisor model");
         assert_eq!(row.mark, "info");
         assert!(
             row.head == "Advisor model opus costs $2.50 <1%",
@@ -10504,8 +10546,9 @@ mod tests {
         let c = card(&report);
         assert_eq!((c.how, c.quiet), (None, false));
         assert!(
-            c.text
-                .contains("but no advisor loads: CLAUDE_CODE_DISABLE_ADVISOR_TOOL")
+            c.text.contains(
+                "but none would load from these settings: CLAUDE_CODE_DISABLE_ADVISOR_TOOL"
+            )
         );
     }
 

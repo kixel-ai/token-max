@@ -6,7 +6,7 @@ use serde_json::Value;
 use crate::collections::IndexMap;
 use crate::controls::{Env, SettingsScope, js_string, scoped_environment};
 use crate::model::{
-    AdvisorControl, AdvisorUse, Estimate, Harness, Millis, PartKind, Profile, Scan, Share,
+    AdvisorControl, AdvisorUse, Cost, Estimate, Harness, Millis, PartKind, Profile, Scan, Share,
 };
 use crate::prices::{Catalog, Sample, add_costs, price_part, request_evidence};
 use crate::safe::ScanError;
@@ -48,13 +48,13 @@ pub fn control(
     env: &Env,
     user_file: &str,
 ) -> Result<AdvisorControl, ScanError> {
-    let set = scopes.iter().rev().find_map(|s| {
-        s.config
-            .get(KEY)
-            .filter(|v| !v.is_null())
-            .map(|v| (v, s.file))
-    });
+    // A null outranks the files below it, as settings merge.
+    let set = scopes
+        .iter()
+        .rev()
+        .find_map(|s| s.config.get(KEY).map(|v| (v, s.file)));
     let (model, owner) = match set {
+        Some((Value::Null, file)) => (None, format!("{file}:{KEY}")),
         Some((Value::String(m), file)) => (
             Some(m.trim().to_string()).filter(|m| !m.is_empty()),
             format!("{file}:{KEY}"),
@@ -166,6 +166,7 @@ pub fn advisor_use(scan: &Scan, catalog: &Catalog, since: Option<Millis>) -> Vec
             // What each partly priced request is known to cost, which its extrapolated
             // share never falls below.
             let mut floors: Vec<f64> = vec![];
+            let mut total: Vec<Cost> = vec![];
             for r in scan.requests.iter().filter(|r| {
                 r.harness == Harness::Claude
                     && r.profiles.iter().any(|p| ids.contains(p))
@@ -191,6 +192,7 @@ pub fn advisor_use(scan: &Scan, catalog: &Catalog, since: Option<Millis>) -> Vec
                     floors.push(cost.known_usd.to_f64());
                 }
                 sample.add_cost(&cost);
+                total.push(cost);
             }
             let mut models: Vec<Share> = models
                 .into_iter()
@@ -202,6 +204,7 @@ pub fn advisor_use(scan: &Scan, catalog: &Catalog, since: Option<Millis>) -> Vec
                 requests,
                 calls,
                 models,
+                cost: add_costs(&total),
                 estimate: sample.estimate(requests).map(|e| {
                     let mean = e.usd / requests as f64;
                     let raise: f64 = floors.iter().map(|&k| (k - mean).max(0.0)).sum();
@@ -291,9 +294,19 @@ mod tests {
         );
         assert_eq!(a.model.as_deref(), Some("fable"));
         assert_eq!(a.owner, "/p/.claude/settings.json:advisorModel");
-        // Null is unset; an empty name sets no advisor where it is written.
+        // Null is unset, and outranks the files below it; an empty name sets no advisor
+        // where it is written.
         let a = resolve(json!({"advisorModel": null}), json!({}), &[]);
         assert_eq!((a.model, a.blocked), (None, None));
+        let a = resolve(
+            json!({"advisorModel": "opus"}),
+            json!({"advisorModel": null}),
+            &[],
+        );
+        assert_eq!(
+            (a.model, a.owner.as_str()),
+            (None, "/p/.claude/settings.json:advisorModel")
+        );
         let a = resolve(json!({}), json!({"advisorModel": " "}), &[]);
         assert_eq!(a.model, None);
         assert_eq!(a.owner, "/p/.claude/settings.json:advisorModel");

@@ -59,7 +59,8 @@ advisor iterations. An absent or empty iteration list uses the top-level usage;
 an empty list is a valid older client shape, not zero spend. When nonempty
 iterations exist, pricing uses that list alone, with
 each iteration's model. Advisor service tier is independent; an omitted tier stays
-unknown. Unsupported iteration kinds stay unpriced. These semantics come from
+unknown unless every executor iteration on the request is standard, as
+[Advisor model](#advisor-model) explains. Unsupported iteration kinds stay unpriced. These semantics come from
 [threshold compaction](https://platform.claude.com/docs/en/build-with-claude/compaction-threshold)
 and [advisor billing](https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool),
 checked 2026-11-07. The metadata-only local sample had 4,180 usage records whose
@@ -1489,9 +1490,9 @@ and the sources.
 `Profile.advisor` is resolved where `Profile.effort` is: the user and managed
 settings, plus the project and local files of the profile's latest
 main-session request's directory once T3 has attributed requests, with the active profile's shell environment, settings
-`env` overriding it. `advisorModel` comes from the highest scope that sets it
-to anything but null; a non-string is an error, and an empty name sets no
-advisor. What stops an advisor loading is checked in Claude Code's order: the
+`env` overriding it. `advisorModel` comes from the highest scope that sets it;
+a null there sets no advisor, as a settings merge does, a non-string is an
+error, and an empty name sets no advisor. What stops an advisor loading is checked in Claude Code's order: the
 tool turned off, then an unsupported provider, then a variable that turns off
 feature-flag fetching, which Claude Platform on AWS and Claude Models on
 Google Cloud (Anthropic managed) don't need. T3 instances have none.

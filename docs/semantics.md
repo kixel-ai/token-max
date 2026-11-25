@@ -190,7 +190,8 @@ priced while predecessor attribution remains unknown. This is an evidence test,
 not a demand that every sensitivity scenario favor the aggregate winner.
 
 The cache comparison contains cache charges. The fixed cost contains ordinary input,
-output, server fees and unmatched summary proxies. TTL changes preserve total
+output, server fees, unmatched summary proxies and the unknown summary of a linked
+request that recorded only advisor calls. TTL changes preserve total
 input/context tier and output under the fixed-behavior assumption, so these fixed
 terms cancel even when their price or token count is unknown. Full scenario totals
 stay unknown with the reason. Recorded zero cache reads/writes need no cache price;

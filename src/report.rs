@@ -2993,7 +2993,7 @@ fn card(result: &CheckResult, action: Option<Action>, out: &mut Out<'_>) {
                     &format!("{name} cache comparison"),
                     t.comparison_cost.get(ttl),
                 );
-                out.cost(&format!("{name} summary proxies"), t.summary_cost.get(ttl));
+                out.cost(&format!("{name} summary costs"), t.summary_cost.get(ttl));
             }
             out.cost("Identical fixed costs", &t.fixed_cost);
             out.field(

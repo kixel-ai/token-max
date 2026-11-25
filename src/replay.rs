@@ -818,7 +818,7 @@ fn ttl_check(
                 "latest recorded client version is assumed to remain applicable to current profile controls",
                 "1h writes use documented 2x input; first visible request keeps observed reads from prefixes warmed before the window",
                 "reuse conversions are limited to the previously cached prefix; new input stays a write",
-                "ordinary input, output, server fees and unmatched summary proxies are held identical under fixed behavior and cancel; comparisonCost contains cache charges only, even when fixedCost is unknown",
+                "ordinary input, output, server fees and unmatched summary proxies and unrecorded linked summaries are held identical under fixed behavior and cancel; comparisonCost contains cache charges only, even when fixedCost is unknown",
                 "unlinked-attempt estimates are comparison-only; original usage/coverage and historical spend remain unknown, never excluded or assigned zero billing",
                 "cache evidence retains known, estimated and unknown predecessor witnesses, including pre-window attempts and possible cohorts with missing metadata; request counts and charges cover only the selected window",
                 "per-check savings share baselines and must not be summed",

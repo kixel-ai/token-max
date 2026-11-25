@@ -1520,8 +1520,11 @@ specific entries is `Narrowed`, since it runs on the newest permitted
 version; an entry that is neither a family nor a well-formed Claude model ID
 leaves any model it may permit `Unknown`, a narrowed alias included, and is
 never quoted. The Main-session default card checks the lists of every
-profile whose `model` setting the edit writes, matched by resolved file and
-key, a null and a recorded model's own settings file included.
+profile whose effective model the edit would change: one whose `model`
+setting the edit writes, matched by resolved file and key, a null included,
+and one that reads the edited file, such as a home-directory session reading
+another profile's user file as its project's, unless a file above it names
+its model. A file the edit would create matches through its directory.
 
 `vibes` gives one card to each group of profiles that share the
 `advisorModel` owner, the resolved main-session default and the setting that

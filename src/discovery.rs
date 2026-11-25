@@ -2274,9 +2274,18 @@ fn ancestors_setting_codex_memory(
     ancestor_codex_configs(options, cwd, user, home, sets_codex_memory)
 }
 
-/// Whether two paths name one file, as recorded or once resolved.
+/// Whether two paths name one file, as recorded or once resolved; a file that does not
+/// exist yet, such as one an edit would create, resolves through its directory.
 pub(crate) fn same_file(a: &str, b: &str) -> bool {
-    a == b || realpath(a).is_ok_and(|a| realpath(b).is_ok_and(|b| a == b))
+    let resolve = |path: &str| {
+        realpath(path).ok().or_else(|| {
+            let path = std::path::Path::new(path);
+            let dir = path.parent().filter(|d| !d.as_os_str().is_empty())?;
+            let dir = realpath(dir.to_str()?).ok()?;
+            Some(join(&[&dir, path.file_name()?.to_str()?]))
+        })
+    };
+    a == b || resolve(a).is_some_and(|a| resolve(b).is_some_and(|b| a == b))
 }
 
 /// Every `.codex/config.toml` from `cwd` up to the user's home, or the filesystem root
@@ -5047,6 +5056,22 @@ mod tests {
             profile.effort.as_ref().unwrap().model_owner,
             format!("{}:model", profile.settings_file)
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_file_matches_through_a_symlinked_directory() {
+        let w = Workspace::new();
+        let real = w.home.join("real");
+        fs::create_dir_all(&real).unwrap();
+        let link = w.home.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let path = |dir: &Path| native_path(dir.join("settings.json"));
+        assert!(same_file(&path(&link), &path(&real)));
+        assert!(!same_file(
+            &path(&link),
+            &native_path(real.join("other.json"))
+        ));
     }
 
     #[test]

@@ -493,7 +493,9 @@ setting or feature, its current value (and the value to change to, for a
 change), what it saves per 30 days or costs over the window, that figure's
 share of this host's spend, the profile when several were read, and the
 setting that changes it. For a change `doctor` offers,
-that last column is the exact edit and file, or the step to take by hand.
+that last column is the exact edit and file, or the step to take by hand; a
+section's row names the settings its members' edits change, such as
+`skillOverrides.*`, and `--details` shows each member's exact edit.
 
 Every line is measured: replayed or priced from your own transcripts at public
 API prices, or marked unknown where they can't price it. No verdict rests on
@@ -510,7 +512,8 @@ measured after the rest. A feature turned off saves what it cost, assuming
 nothing else changes. **Everything else** follows, ranked by what it costs,
 biggest first, with lines whose cost is unknown or that have no figure after.
 When several profiles were read, each line also names the settings file that
-owns it, or the profile when no file does (see [Profiles](#profiles)).
+owns it, or the profile when no file does (see [Profiles](#profiles)); a
+section's row names every file its members' lines name.
 Changes the walk would ask as one question, a [section](#applying-changes), share one
 row: its heading, how many changes it holds and the value they move to, such
 as `19 -> typed only`, what they save together with its `~` and margin, and the

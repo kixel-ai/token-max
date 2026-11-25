@@ -4227,8 +4227,8 @@ struct Row {
     baseline: Option<crate::defaults::Baseline>,
     /// The section it is listed in, for a change `doctor` offers as an edit.
     section: Option<Membership>,
-    /// The setting that changes it, any part naming this line alone starred, such as
-    /// `~/.claude/settings.json:skillOverrides.*`, which its section's row names.
+    /// The settings `doctor`'s edit for it changes, any part naming this line alone starred,
+    /// such as `~/.claude/settings.json:skillOverrides.*`, which its section's row names.
     key: String,
 }
 
@@ -5688,25 +5688,9 @@ fn piece_setting(c: &ContextCost, out: &Out<'_>) -> String {
     }
 }
 
-/// The setting a piece's section names: its switch, with each part naming the piece alone
-/// starred, such as `~/.claude/settings.json:skillOverrides.*`.
-fn piece_key(c: &ContextCost, out: &Out<'_>) -> String {
-    match &c.control {
-        Some(control) if c.skill.as_ref().is_none_or(|s| s.path.is_some()) => {
-            let path: Vec<&str> = control
-                .path
-                .iter()
-                .map(|p| if *p == c.name { "*" } else { p.as_str() })
-                .collect();
-            format!("{}:{}", piece_file(c, out), path.join("."))
-        }
-        _ => piece_setting(c, out),
-    }
-}
-
-/// Each change `doctor` offers as an edit joins its section; a step by hand stays its own
-/// line, naming the step.
-fn sectioned(rows: &mut [Row], fixes: &[crate::doctor::Fix]) {
+/// Each change `doctor` offers as an edit joins its section, which names the settings its
+/// edit changes; a step by hand stays its own line, naming the step.
+fn sectioned(rows: &mut [Row], fixes: &[crate::doctor::Fix], out: &Out<'_>) {
     let edit = |f: &crate::doctor::Fix| matches!(f.how, crate::doctor::How::Edit(_));
     for row in rows {
         let Some(origin) = row.origin.filter(|_| row.offered()) else {
@@ -5719,6 +5703,32 @@ fn sectioned(rows: &mut [Row], fixes: &[crate::doctor::Fix]) {
             continue;
         };
         let section = &fixes[fix].section;
+        if let crate::doctor::How::Edit(patch) = &fixes[fix].how {
+            // Each path the edit sets, the part naming this member alone starred.
+            let paths: IndexSet<String> = patch
+                .edits
+                .iter()
+                .map(|e| {
+                    let path: Vec<&str> = e
+                        .path
+                        .iter()
+                        .map(|p| {
+                            if *p == section.member {
+                                "*"
+                            } else {
+                                p.as_str()
+                            }
+                        })
+                        .collect();
+                    path.join(".")
+                })
+                .collect();
+            row.key = format!(
+                "{}:{}",
+                out.home(&patch.file),
+                paths.into_iter().collect::<Vec<_>>().join(", ")
+            );
+        }
         let id = fixes
             .iter()
             .position(|f| edit(f) && f.joins(&fixes[fix]))
@@ -6363,15 +6373,11 @@ fn summary(
                 _ => {}
             }
         }
-        // Why nothing can be set is evidence, under details.
-        row.key = if r.owner.starts_with("no setting") {
-            "no setting".into()
-        } else {
-            out.home(r.owner)
-        };
         row.setting = match offer(Origin::Check(*index), out) {
             Some(setting) if row.offered() => setting,
-            _ => row.key.clone(),
+            // Why nothing can be set is evidence, under details.
+            _ if r.owner.starts_with("no setting") => "no setting".into(),
+            _ => out.home(r.owner),
         };
         row
     };
@@ -6457,7 +6463,6 @@ fn summary(
         }
         text += &server_notes(c);
         row.evidence = text;
-        row.key = piece_key(c, out);
         row.setting = match offer(Origin::Context(*index), out) {
             Some(setting) if row.offered() => setting,
             _ => piece_setting(c, out),
@@ -7323,7 +7328,7 @@ fn summary(
             DIM,
         );
     }
-    sectioned(&mut rows, fixes);
+    sectioned(&mut rows, fixes, out);
     (title, head, rows, vibes, credit)
 }
 

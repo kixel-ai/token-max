@@ -108,13 +108,16 @@ pub enum Kind {
 
 impl Fix {
     /// Whether `other` joins this change's section: the same kind, reason and heading, the
-    /// same offered effect, and measured or not alike. The cache TTLs may move to different
+    /// same offered effect and, for a setting, the same verdict, and measured or not alike. The cache TTLs may move to different
     /// values, which the section names each.
     pub(crate) fn joins(&self, other: &Fix) -> bool {
         let (a, b) = (&self.section, &other.section);
         a.kind == b.kind
             && a.label == b.label
             && (a.kind == Kind::CacheTtl || target(&self.value) == target(&other.value))
+            // A setting recommended off, such as never-used auto memory, is asked apart from
+            // one only worth considering, such as auto memory used at a high cost.
+            && (a.kind != Kind::Setting || self.suggested == other.suggested)
             && self.saving.is_some() == other.saving.is_some()
     }
 }
@@ -5261,7 +5264,14 @@ mod tests {
         };
         let (a, b) = (memory("A"), memory("B"));
         assert!(!takes_up(&a, std::slice::from_ref(&a)));
-        assert!(takes_up(&a, &[a.clone(), b]));
+        assert!(takes_up(&a, &[a.clone(), b.clone()]));
+        // One only worth considering, such as memory used at a high cost, is its own section.
+        let considered = Fix {
+            suggested: true,
+            ..b
+        };
+        assert!(!a.joins(&considered));
+        assert!(!takes_up(&a, &[a.clone(), considered]));
     }
 
     #[test]

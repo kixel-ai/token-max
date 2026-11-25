@@ -1475,6 +1475,23 @@ impl TurnRow {
     }
 }
 
+/// Records a provider turn under each of its native ids a selected request names.
+fn add_turn(
+    found: &mut HashMap<String, Vec<String>>,
+    wanted: &HashSet<&str>,
+    turn: String,
+    natives: Vec<String>,
+) {
+    for native in natives {
+        if wanted.contains(native.as_str()) {
+            let turns = found.entry(native).or_default();
+            if !turns.contains(&turn) {
+                turns.push(turn.clone());
+            }
+        }
+    }
+}
+
 fn text_column(row: &rusqlite::Row<'_>, index: usize) -> Option<String> {
     row.get::<_, Option<String>>(index).ok().flatten()
 }
@@ -1648,16 +1665,9 @@ fn metadata(
     // Provider turns per native turn/item id, within each selected session's threads.
     let mut refs: HashMap<&(&str, String), HashMap<String, Vec<String>>> = HashMap::default();
     let mut provider_turns = tx.prepare(PROVIDER_TURNS)?;
-    let mut turn_item_rows = tx.prepare(TURN_ITEM_ROWS)?;
-    let mut thread_item_ids = tx.prepare(THREAD_ITEM_IDS)?;
-    // Each thread's Claude item keys by row, read once for all of its provider turns. Only
-    // keys a selected request names are kept, so the map grows with the selected history.
-    let claude: HashSet<&str> = wanted
-        .iter()
-        .filter(|((driver, _), _)| *driver == "claudeAgent")
-        .flat_map(|(_, natives)| natives.iter().copied())
-        .collect();
-    let mut item_keys: HashMap<String, HashMap<i64, String>> = HashMap::default();
+    // Codex joins by turn id alone; Claude turns join by their items, grouped by T3 thread
+    // so each thread's item ids are read once and released before the next thread's.
+    let mut claude_turns: HashMap<String, Vec<_>> = HashMap::default();
     for (key, list) in &threads {
         let found = refs.entry(key).or_default();
         let wanted = &wanted[&(key.0, key.1.as_str())];
@@ -1670,41 +1680,47 @@ fn metadata(
                 if text_column(row, 1).as_deref() != Some(key.0) {
                     continue;
                 }
-                let mut natives: Vec<String> = text_column(row, 2).into_iter().collect();
-                // Codex joins by turn id alone, so only Claude reads items.
+                let natives: Vec<String> = text_column(row, 2).into_iter().collect();
                 if key.0 == "claudeAgent"
                     && let Some(thread) = text_column(row, 3)
                 {
-                    if !item_keys.contains_key(&thread) {
-                        let mut keys = HashMap::default();
-                        let mut items = thread_item_ids.query([&thread])?;
-                        while let Some(item) = items.next()? {
-                            if let Some(native) = text_column(item, 1).and_then(|i| item_key(&i))
-                                && claude.contains(native.as_str())
-                            {
-                                keys.insert(item.get(0)?, native);
-                            }
-                        }
-                        item_keys.insert(thread.clone(), keys);
-                    }
-                    let keys = &item_keys[&thread];
-                    let mut items = turn_item_rows.query([&turn])?;
-                    while let Some(item) = items.next()? {
-                        natives.extend(keys.get(&item.get::<_, i64>(0)?).cloned());
-                    }
-                }
-                for native in natives {
-                    if wanted.contains(native.as_str()) {
-                        let turns = found.entry(native).or_default();
-                        if !turns.contains(&turn) {
-                            turns.push(turn.clone());
-                        }
-                    }
+                    claude_turns
+                        .entry(thread)
+                        .or_default()
+                        .push((key, turn, natives));
+                } else {
+                    add_turn(found, wanted, turn, natives);
                 }
             }
         }
     }
-    drop(item_keys);
+    let mut turn_item_rows = tx.prepare(TURN_ITEM_ROWS)?;
+    let mut thread_item_ids = tx.prepare(THREAD_ITEM_IDS)?;
+    // Only item keys a selected request names are kept.
+    let claude: HashSet<&str> = wanted
+        .iter()
+        .filter(|((driver, _), _)| *driver == "claudeAgent")
+        .flat_map(|(_, natives)| natives.iter().copied())
+        .collect();
+    for (thread, turns) in claude_turns {
+        let mut keys: HashMap<i64, String> = HashMap::default();
+        let mut items = thread_item_ids.query([&thread])?;
+        while let Some(item) = items.next()? {
+            if let Some(native) = text_column(item, 1).and_then(|i| item_key(&i))
+                && claude.contains(native.as_str())
+            {
+                keys.insert(item.get(0)?, native);
+            }
+        }
+        for (key, turn, mut natives) in turns {
+            let mut items = turn_item_rows.query([&turn])?;
+            while let Some(item) = items.next()? {
+                natives.extend(keys.get(&item.get::<_, i64>(0)?).cloned());
+            }
+            let wanted = &wanted[&(key.0, key.1.as_str())];
+            add_turn(refs.entry(key).or_default(), wanted, turn, natives);
+        }
+    }
     let mut attempt_query = tx.prepare(ATTEMPT)?;
     let mut selections_query = tx.prepare(SELECTIONS)?;
     let mut selections: HashMap<String, Selections> = HashMap::default();

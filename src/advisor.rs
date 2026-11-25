@@ -129,7 +129,10 @@ pub fn control(
 /// default and control the line's card reads. None without an advisor control.
 pub(crate) fn owner(p: &Profile) -> Option<String> {
     let a = p.advisor.as_ref()?;
-    let main = p.effort.as_ref().map(|e| (&e.model, &e.unresolved));
+    let main = p
+        .effort
+        .as_ref()
+        .map(|e| (&e.model, &e.model_owner, &e.unresolved));
     Some(format!(
         "{}\nmain {main:?}\n{:?} {:?} {:?}",
         a.owner, a.model, a.blocked, a.gateway

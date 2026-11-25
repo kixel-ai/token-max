@@ -1498,8 +1498,8 @@ feature-flag fetching, which Claude Platform on AWS and Claude Models on
 Google Cloud (Anthropic managed) don't need. T3 instances have none.
 
 `Report.advisor` gives one entry per line of profiles that share the
-`advisorModel` owner, the resolved main-session default and what stops the
-advisor. A request counts when it recorded an `advisor_message` iteration,
+`advisorModel` owner, the resolved main-session default and the setting that
+names it, and what stops the advisor. A request counts when it recorded an `advisor_message` iteration,
 each iteration is a call, and only those iterations are priced, at the model
 the iteration names (one that names none stays unknown, never the
 executor's). An iteration records no service tier, so it is priced at

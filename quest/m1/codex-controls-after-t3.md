@@ -15,3 +15,5 @@ request naming the profile.
 Recommendation: move Codex's latest-directory pass after `t3::enrich` with
 the same `owned_by` filter, sharing one helper that returns the settled
 latest directory and its scopes for both harnesses and `discover_inbound`.
+When it leaves a profile no settled request, say so where the main-session
+default is unknown, rather than that no request recorded a model.

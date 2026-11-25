@@ -2067,23 +2067,22 @@ mod unix {
             assert_eq!(releases.downloads(), before);
             assert_eq!(names(&locked), ["token-max"]);
         }
-        // A binary in crabx's cache is crabx's: no question, no probe, the same bytes. The cache
+        // A binary in crabx's cache is crabx's: no question, no probe, the same bytes. Its entry
         // is moved and symlinked back, so the binary resolves to a path naming no crabx.
-        let cache = w.home.join(if cfg!(target_os = "macos") {
-            "Library/Caches"
-        } else {
-            ".cache"
-        });
         let moved = w.home.join("moved");
-        let entry = "v1/x86_64-unknown-linux-musl/author/token-max/0.1.0/bin";
-        std::fs::create_dir_all(moved.join(entry)).unwrap();
-        std::fs::create_dir_all(&cache).unwrap();
-        std::os::unix::fs::symlink(&moved, cache.join("crabx")).unwrap();
-        let bin = cache.join("crabx").join(entry).join("token-max");
+        std::fs::create_dir_all(moved.join("bin")).unwrap();
+        std::fs::write(moved.join("record.json"), "{}").unwrap();
+        let versions = w
+            .home
+            .join(".cache/crabx/v1/x86_64-unknown-linux-musl/author/token-max");
+        std::fs::create_dir_all(&versions).unwrap();
+        std::os::unix::fs::symlink(&moved, versions.join("0.1.0")).unwrap();
+        let bin = versions.join("0.1.0/bin/token-max");
         std::fs::hard_link(BIN, &bin).unwrap();
         let mut c = command_at(&bin, &w, &doctor);
         c.env("TOKEN_MAX_RELEASES", &releases.url);
-        let (status, stdout, stderr) = typed(&mut c, b"s\nq\nn\n");
+        // Enough answers to finish even if it asks, which then fails below instead of hanging.
+        let (status, stdout, stderr) = typed(&mut c, b"s\nq\nn\ns\nq\nn\n");
         assert_eq!(status, code, "{stderr}");
         let (before_opening, _) = stdout.split_once(&opening).expect(&stdout);
         assert_eq!(

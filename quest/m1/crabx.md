@@ -59,12 +59,14 @@ Recommendations:
   and answer a question on Linux, macOS and Windows; run
   `npx @kixel/crabx install token-max`, then `token-max --version` from a new
   shell; and run `crabx token-max@0.1.0 --version` to check that pinned runs
-  work. Once a release newer than 0.1.0 is out, run
-  `crabx token-max@0.1.0 doctor` and the installed `token-max doctor`: the
-  pinned run's upgrade offer names crabx and leaves its cache entry's SHA-256
-  unchanged. If `crabx install` links into crabx's cache, that installed
-  binary gets the same crabx line, which suits a `crabx token-max` run but not
-  a plain `token-max` one, so word the line for both.
+  work. Check the upgrade guard against a real crabx cache: with
+  `TOKEN_MAX_RELEASES` pointed at a local server whose `/latest` redirects to
+  a higher tag, `crabx token-max@0.1.0 doctor` names crabx instead of
+  offering the upgrade, and the cache entry's SHA-256 is unchanged; run the
+  installed `token-max doctor` the same way. If `crabx install` links into
+  crabx's cache, that installed binary gets the same crabx line, which suits a
+  `crabx token-max` run but not a plain `token-max` one, so word the line for
+  both.
 
 ## Waiting
 

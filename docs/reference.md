@@ -62,11 +62,11 @@ or `~/.cargo/bin`), belongs to that tool, so doctor prints the command that
 upgrades it instead of asking; so does one in the run scripts' cache, which
 names each binary for its release. One in the cache of
 [crabx](https://github.com/kixel-ai/crabx), which runs a crate's prebuilt
-binaries (`crabx` under the user cache directory, symlinks resolved, or any
-`crabx/v<n>` directory on the binary's path), is crabx's: doctor says an
-unpinned `crabx token-max` picks up the release on its own and a pinned one
-stays on its version, and never replaces the file crabx verified. A binary in a directory this user cannot
-write, such as a root-owned `/usr/local/bin`, or on a platform with no
+binaries, is crabx's: a binary in a `bin` directory beside crabx's
+`record.json`, wherever symlinks put it, or under any `crabx/v<n>` directory.
+Doctor says an unpinned `crabx token-max` picks up the release on its own and
+a pinned one stays on its version, and never replaces the file crabx
+verified. A binary in a directory this user cannot write, such as a root-owned `/usr/local/bin`, or on a platform with no
 prebuilt release, gets a link to the install methods instead. Telling that
 directory apart means creating and deleting a file in it, so only a terminal
 run about to ask does. Without a terminal, the same news is one line on

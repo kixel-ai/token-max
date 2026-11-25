@@ -1188,7 +1188,8 @@ const OWNER_EVENT: &str = "SELECT EXISTS (SELECT 1 FROM orchestration_v2_project
 // One provider thread's turns, each with its native turn reference and its thread.
 const PROVIDER_TURNS: &str = "SELECT provider_turn_id,
  json_extract(payload_json,'$.nativeTurnRef.driver'),
- json_extract(payload_json,'$.nativeTurnRef.nativeId'), thread_id
+ CASE WHEN json_type(payload_json,'$.nativeTurnRef.nativeId')='text'
+ THEN json_extract(payload_json,'$.nativeTurnRef.nativeId') END, thread_id
  FROM orchestration_v2_projection_provider_turns WHERE provider_thread_id=?1";
 // A Claude turn's items join it by turn item id, which `item_key` decodes. Item rows hold
 // tool outputs, so the join reads two of T3's indexes instead: a provider turn's item rows,
@@ -1680,7 +1681,11 @@ fn metadata(
                 if text_column(row, 1).as_deref() != Some(key.0) {
                     continue;
                 }
-                let natives: Vec<String> = text_column(row, 2).into_iter().collect();
+                // Only ids a selected request names are kept, so a queued Claude turn holds no more.
+                let natives: Vec<String> = text_column(row, 2)
+                    .filter(|n| wanted.contains(n.as_str()))
+                    .into_iter()
+                    .collect();
                 if key.0 == "claudeAgent"
                     && let Some(thread) = text_column(row, 3)
                 {

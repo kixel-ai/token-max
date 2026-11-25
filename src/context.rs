@@ -77,7 +77,7 @@ pub fn setting_text(path: &[String], value: Value, append: bool, harness: Harnes
 }
 
 /// A TOML key, quoted unless it is bare.
-fn toml_key(key: &str) -> String {
+pub(crate) fn toml_key(key: &str) -> String {
     let bare = !key.is_empty()
         && key
             .chars()

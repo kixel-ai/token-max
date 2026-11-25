@@ -147,7 +147,8 @@ unaccepted.
 
 The report follows, its list grouped: the accepted changes first with the
 total, then the ones not accepted, then the steps to take by hand, such as a
-change something else would override, each saying why, then every other line,
+change something else would override, whose steps and reasons the closing
+`STEPS BY HAND` section gives, then every other line,
 each group ranked as the report ranks it. A section split in the walk shows
 its accepted members as one row and the rest as another, and each step by
 hand keeps its own line. Then the confirm shows how each settings file would change, as
@@ -159,9 +160,12 @@ variable in a Claude settings file's `env` block that no accepted change sets,
 and each in Codex's `shell_environment_policy.set`. Then one question asks whether to write the accepted
 changes, naming each file; nothing is written before that yes, end of input is a no,
 and a no says nothing was written. Each file is then written once, with every
-edit accepted for it. A change not accepted keeps its edit in the list, to
-make by hand, which also suits a file another tool rewrites, such as a dotfiles
-manager. Either answer exits 0.
+edit accepted for it. After the confirm, a **Not written** section per file
+lists every edit left unwritten, whether declined at its question or at the
+confirm, one line per key as the report's closing sections show them, including
+the MCP server removals and `deniedMcpServers` entries offered after a yes and
+the cleanup of servers off already, then the steps by hand, so each can still be made by hand, which also suits a file
+another tool rewrites, such as a dotfiles manager. Either answer exits 0.
 
 Only a profile's own `settings.json` or Codex `config.toml` is edited,
 including Claude's `env` block. An edit sets the setting that decides the
@@ -299,10 +303,10 @@ takes it over itself. Claude Code re-reads the file under that lock before each 
 so the removal survives sessions already running, which keep the server until
 they restart.
 
-Without a terminal, `doctor` changes nothing: each change's line ends with its
-edit and file, or its step by hand. A section's row names the settings its
-members change, such as `skillOverrides.*`, and `--details` lists each member
-with its edit.
+Without a terminal, `doctor` changes nothing: the report ends with the edits
+its changes name, as [Reading the report](#reading-the-report) describes. A
+section's row names the settings its members change, such as
+`skillOverrides.*`, and `--details` lists each member under it.
 
 ### On SSH hosts
 
@@ -494,10 +498,19 @@ gives every setting and feature one line. Each line names its verdict, the
 setting or feature, its current value (and the value to change to, for a
 change), what it saves per 30 days or costs over the window, that figure's
 share of this host's spend, the profile when several were read, and the
-setting that changes it. For a change `doctor` offers,
-that last column is the exact edit and file, or the step to take by hand; a
-section's row names the settings its members' edits change, such as
-`skillOverrides.*`, and `--details` shows each member's exact edit.
+setting that changes it. A section's row names the settings its members
+change, such as `skillOverrides.*`, and `--details` lists each member under it.
+
+The report ends with the edits its changes name, so the lines above stay one
+row each: an **Edits** section per settings file, named as `host:path` under
+`--ssh`, with one line per key. A list's added members share one line with
+their count, such as `permissions.deny += ScheduleWakeup, ReportFindings (2)`,
+and settings under one parent set to one value share one too, such as
+`skillOverrides.{a, b} = "off" (2)` for two skills turned off. `--details`
+shows each edit's exact JSON or TOML instead. Steps to take by hand, such as
+one a shell variable would override, follow in a **Steps by hand** section,
+named after its host under `--ssh`, each naming its line and why token-max
+can't take it.
 
 Every line is measured: replayed or priced from your own transcripts at public
 API prices, or marked unknown where they can't price it. No verdict rests on
@@ -886,8 +899,8 @@ Unicode decorations require a UTF-8 locale. Progress is one line that shows each
 phase in turn and clears itself before the report. While this host's
 transcripts are read it is a bar of the bytes read out of the total discovery
 found, with the time left to read them at the rate so far; the analysis after
-reading has no measured fraction, so its phases show only a spinner and how
-long each has run. Reading T3 Code's database, which follows the transcripts,
+reading has no measured fraction, so its phases show a spinner and how long
+each has run, and checking settings also counts the checks done. Reading T3 Code's database, which follows the transcripts,
 holds the line as the bar does, so under `--ssh` it shows over a later phase
 until it ends.
 
@@ -904,10 +917,33 @@ priced the scan the counts become the header's own. Each SSH host's totals
 join them as its report arrives. The line `doctor` clears shows the header's
 figures, or the total across hosts. Under `vibes --ssh` the destinations send
 no usage, so the line counts this host alone and says so. On a narrow
-terminal the line keeps the most useful figures that fit: the spend, the
-requests, the time left to read, the sessions, the tokens, then the bytes read.
+terminal the line keeps the most useful figures that fit: while reading, the
+spend, the requests, the time left to read, the sessions, the tokens, then
+the bytes read.
 A figure too wide for the room left is skipped, and narrower ones after it
 still show.
+
+While `doctor` checks settings, the line also counts the checks done, such as
+`7/11 checks`, one per kind of check however long each runs, and tallies two
+figures as each check lands: what the current
+settings save against the Claude Code and Codex defaults, as the report's
+"Compared with defaults" line sums them, and what the changes found so far
+save, as the total under the report's headline sums them. Each figure keeps
+the report's kinds apart: a saving that depends on how usage is paid, such as
+a pinned main-agent TTL, has its own "up to" figure, an estimate for a feature
+that is off is counted beside the saving it joins, a change priced only in
+part says so, and so does a setting or change whose amount wasn't measured.
+An edit two lines make counts once, as the walk lists it. A figure whose
+qualifier doesn't fit the row is dropped whole.
+The tools, skills and MCP servers a settings file already turns off join the
+defaults figure once the report is formatted, and the line then ends on the
+report's own figures; each SSH host's figures join when its report arrives.
+Under `--defaults` there is no comparison with the defaults, so the line
+tallies only the changes. `vibes` counts its checks but tallies nothing, since
+its advice is unmeasured. While checking, a narrow terminal keeps the count of
+checks, the defaults figure, the changes found, the spend, the requests, the
+"up to" figures, the sessions, the tokens, then a count of what wasn't
+measured when nothing beside it was.
 
 On a terminal, `doctor` opens with its name, says it is about to scan this
 host's transcripts, and lists each profile root it found with its transcript

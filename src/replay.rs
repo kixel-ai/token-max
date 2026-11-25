@@ -848,6 +848,47 @@ fn ttl_check(
     })
 }
 
+/// How many checks an analysis runs, each counted on a progress line once it lands.
+const CHECKS: usize = 11;
+
+/// What an analysis has checked so far, which a progress line watching it shows.
+struct Checking<'a> {
+    reading: Option<&'a crate::reader::Reading>,
+    checked: crate::totals::Checked,
+}
+
+impl Checking<'_> {
+    /// Show what was checked so far on the progress line, if one watches.
+    fn show(&self) {
+        if let Some(reading) = self.reading {
+            *reading
+                .checked
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(self.checked.clone());
+        }
+    }
+
+    /// One check done, its `results` in `scan` tallied.
+    fn land(&mut self, results: &[CheckResult], scan: &Scan) {
+        self.checked.done += 1;
+        if self.reading.is_some() {
+            self.checked.check(results, scan);
+        }
+        self.show();
+    }
+
+    /// The context check done, the changes its lines offer tallied: `scan`'s, in a report
+    /// generated at `now`.
+    fn land_context(&mut self, context: &[crate::model::ContextCost], scan: &Scan, now: Millis) {
+        self.checked.done += 1;
+        if self.reading.is_some() {
+            let found = crate::report::context_tally(context, scan, now);
+            self.checked.find(found);
+        }
+        self.show();
+    }
+}
+
 /// Inputs to one report.
 pub struct AnalyzeOptions<'a> {
     /// The scanned histories; the report keeps them, with linked summaries marked as compaction.
@@ -949,6 +990,11 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(counts);
     }
+    let mut checking = Checking {
+        reading,
+        checked: crate::totals::Checked::new(CHECKS, scan.defaults),
+    };
+    checking.show();
     let boundaries = CacheBoundaries::new(scan.cache_context.boundaries.iter().chain(&scan.events));
     let input = TtlInput {
         scan: &scan,
@@ -981,7 +1027,15 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     for check in &mut ttls {
         crate::t3::constrain(&mut check.base, &scan.profiles);
     }
-    let ttl_refs: Vec<&TtlCheck> = ttls.iter().collect();
+    let ttls: Vec<CheckResult> = ttls.into_iter().map(CheckResult::Ttl).collect();
+    checking.land(&ttls, &scan);
+    let ttl_refs: Vec<&TtlCheck> = ttls
+        .iter()
+        .filter_map(|c| match c {
+            CheckResult::Ttl(t) => Some(t),
+            _ => None,
+        })
+        .collect();
     let mut windows = compaction_checks(&CompactionOptions {
         scan: &scan,
         catalog,
@@ -994,7 +1048,15 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     for check in &mut windows {
         crate::t3::constrain(&mut check.base, &scan.profiles);
     }
-    let window_refs: Vec<_> = windows.iter().collect();
+    let windows: Vec<CheckResult> = windows.into_iter().map(CheckResult::Compaction).collect();
+    checking.land(&windows, &scan);
+    let window_refs: Vec<_> = windows
+        .iter()
+        .filter_map(|c| match c {
+            CheckResult::Compaction(c) => Some(c),
+            _ => None,
+        })
+        .collect();
     let mut turn_ends = crate::turn_end::turn_end_checks(&crate::turn_end::TurnEndOptions {
         scan: &scan,
         catalog,
@@ -1007,7 +1069,9 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     for check in &mut turn_ends {
         crate::t3::constrain(&mut check.base, &scan.profiles);
     }
-    let idle = idle_checks(&IdleOptions {
+    let turn_ends: Vec<CheckResult> = turn_ends.into_iter().map(CheckResult::TurnEnd).collect();
+    checking.land(&turn_ends, &scan);
+    let idle: Vec<CheckResult> = idle_checks(&IdleOptions {
         scan: &scan,
         catalog,
         summaries: &compactions,
@@ -1016,9 +1080,19 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         windows: &window_refs,
         since,
         now,
-    });
-    let idle_refs: Vec<_> = idle.iter().collect();
-    let keepalive = keepalive_checks(&KeepaliveOptions {
+    })
+    .into_iter()
+    .map(CheckResult::Idle)
+    .collect();
+    checking.land(&idle, &scan);
+    let idle_refs: Vec<_> = idle
+        .iter()
+        .filter_map(|c| match c {
+            CheckResult::Idle(i) => Some(i),
+            _ => None,
+        })
+        .collect();
+    let keepalive: Vec<CheckResult> = keepalive_checks(&KeepaliveOptions {
         scan: &scan,
         catalog,
         ttls: &ttl_refs,
@@ -1028,26 +1102,39 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         estimates: &estimates,
         since,
         now,
-    });
-    let speed = speed_checks(&SpeedInput {
+    })
+    .into_iter()
+    .map(CheckResult::Keepalive)
+    .collect();
+    checking.land(&keepalive, &scan);
+    let speed: Vec<CheckResult> = speed_checks(&SpeedInput {
         scan: &scan,
         catalog,
         since,
         now,
-    });
-    let background = background_checks(&BackgroundInput {
+    })
+    .into_iter()
+    .map(CheckResult::Speed)
+    .collect();
+    checking.land(&speed, &scan);
+    let background: Vec<CheckResult> = background_checks(&BackgroundInput {
         scan: &scan,
         catalog,
         since,
         now,
         max_cost_per_use_usd,
-    });
+    })
+    .into_iter()
+    .map(CheckResult::Background)
+    .collect();
+    checking.land(&background, &scan);
+    // The Bash timeout cap is advice `vibes` gives, not a check.
     let bash = bash_caps(&BashInput {
         scan: &scan,
         catalog,
         since,
     });
-    let t3_idle = crate::idle::t3_idle_checks(&IdleOptions {
+    let t3_idle: Vec<CheckResult> = crate::idle::t3_idle_checks(&IdleOptions {
         scan: &scan,
         catalog,
         summaries: &compactions,
@@ -1056,7 +1143,11 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         windows: &window_refs,
         since,
         now,
-    });
+    })
+    .into_iter()
+    .map(CheckResult::T3Idle)
+    .collect();
+    checking.land(&t3_idle, &scan);
     let context = context_costs(&ContextInput {
         scan: &scan.exposure,
         requests: &scan.requests,
@@ -1065,33 +1156,37 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         snapshots: &scan.snapshots,
         max_cost_per_use_usd,
     });
-    let memory = memory_checks(&MemoryInput {
+    checking.land_context(&context, &scan, now);
+    let memory: Vec<CheckResult> = memory_checks(&MemoryInput {
         scan: &scan,
         context: &context,
         catalog,
         since,
         now,
         max_cost_per_use_usd,
-    });
-    let effort = crate::effort::effort_checks(&crate::effort::EffortInput {
+    })
+    .into_iter()
+    .map(CheckResult::Memory)
+    .collect();
+    checking.land(&memory, &scan);
+    let effort: Vec<CheckResult> = crate::effort::effort_checks(&crate::effort::EffortInput {
         scan: &scan,
         catalog,
         since,
         now,
-    });
-    let checks = ttls
-        .into_iter()
-        .map(CheckResult::Ttl)
-        .chain(windows.into_iter().map(CheckResult::Compaction))
-        .chain(turn_ends.into_iter().map(CheckResult::TurnEnd))
-        .chain(idle.into_iter().map(CheckResult::Idle))
-        .chain(t3_idle.into_iter().map(CheckResult::T3Idle))
-        .chain(keepalive.into_iter().map(CheckResult::Keepalive))
-        .chain(speed.into_iter().map(CheckResult::Speed))
-        .chain(background.into_iter().map(CheckResult::Background))
-        .chain(memory.into_iter().map(CheckResult::Memory))
-        .chain(effort.into_iter().map(CheckResult::Effort))
-        .collect();
+    })
+    .into_iter()
+    .map(CheckResult::Effort)
+    .collect();
+    checking.land(&effort, &scan);
+    debug_assert_eq!(checking.checked.done, CHECKS, "every check counted once");
+    drop((ttl_refs, window_refs, idle_refs));
+    let checks = [
+        ttls, windows, turn_ends, idle, t3_idle, keepalive, speed, background, memory, effort,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     let exposure = ExposureSummary {
         calibration: calibrate(&scan.exposure, &scan.requests),
         assumptions: [

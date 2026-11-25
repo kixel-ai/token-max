@@ -914,21 +914,23 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
 /// whichever Claude home and plugins directory the shell selects: "with CLAUDE_CONFIG_DIR set
 /// to ~/.claude-work and CLAUDE_CODE_PLUGIN_CACHE_DIR unset,".
 fn shell(u: &LspUse, home: &dyn Fn(&str) -> String) -> String {
-    match (u.named, &u.cache_dir) {
-        (false, None) => format!("with CLAUDE_CONFIG_DIR and {CACHE_DIR} unset,"),
-        (true, None) => format!(
-            "with CLAUDE_CONFIG_DIR set to {} and {CACHE_DIR} unset,",
-            home(&u.root)
-        ),
-        (false, Some(dir)) => format!(
-            "with CLAUDE_CONFIG_DIR unset and {CACHE_DIR} set to {},",
-            home(dir)
-        ),
-        (true, Some(dir)) => format!(
-            "with CLAUDE_CONFIG_DIR set to {} and {CACHE_DIR} set to {},",
-            home(&u.root),
-            home(dir)
-        ),
+    let cache_dir = u.cache_dir.as_deref().map(home);
+    format!(
+        "with {},",
+        variables(u.named, &home(&u.root), cache_dir.as_deref())
+    )
+}
+
+/// The variables that reach a Claude profile and its plugins directory from a shell, such as
+/// "CLAUDE_CONFIG_DIR set to ~/.claude-work and CLAUDE_CODE_PLUGIN_CACHE_DIR unset".
+pub(crate) fn variables(named: bool, root: &str, cache_dir: Option<&str>) -> String {
+    match (named, cache_dir) {
+        (false, None) => format!("CLAUDE_CONFIG_DIR and {CACHE_DIR} unset"),
+        (true, None) => format!("CLAUDE_CONFIG_DIR set to {root} and {CACHE_DIR} unset"),
+        (false, Some(dir)) => format!("CLAUDE_CONFIG_DIR unset and {CACHE_DIR} set to {dir}"),
+        (true, Some(dir)) => {
+            format!("CLAUDE_CONFIG_DIR set to {root} and {CACHE_DIR} set to {dir}")
+        }
     }
 }
 

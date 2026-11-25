@@ -230,7 +230,7 @@ fn days(since: Option<Millis>, until: Option<Millis>) -> String {
 }
 
 /// Share to one decimal, rounded down so a partial share never reads as 100%.
-fn percent(part: u64, whole: u64) -> String {
+pub(crate) fn percent(part: u64, whole: u64) -> String {
     js_number(((part as f64 / whole as f64) * 1000.0).floor() / 10.0)
 }
 
@@ -2958,11 +2958,17 @@ fn card(result: &CheckResult, action: Option<Action>, out: &mut Out<'_>) {
         CheckResult::Compaction(c) => {
             out.cost("Current-window baseline", &c.baseline_cost);
             out.cost("Existing summaries", &c.observed_summary_cost);
-            for scenario in &c.scenarios {
+            for scenario in c.scenarios.iter().chain(&c.cap) {
+                // `vibes`' cap is listed for its card's figure, never weighed for the verdict.
+                let cap = if c.cap.as_ref().is_some_and(|k| k.window == scenario.window) {
+                    "; vibes' cap, priced for its card and never recommended"
+                } else {
+                    ""
+                };
                 out.field(
                     "Candidate window",
                     &format!(
-                        "{} tokens; {} affected requests; {} added compactions",
+                        "{} tokens; {} affected requests; {} added compactions{cap}",
                         scenario.window,
                         scenario.affected_requests,
                         scenario.added.len()
@@ -4846,22 +4852,35 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
     // The line's own replay of the cap, against the window it compared every candidate with.
     // A cap priced at an assumed service tier is unmeasured even when the line's winner is
     // settled, since no tier reversing the winner says nothing of the cap.
-    let priced = c
-        .scenarios
-        .iter()
-        .find(|s| s.window == cap)
-        .filter(|s| {
-            !crate::prices::tier_sensitive(&s.comparison_cost)
-                && !crate::prices::tier_sensitive(&s.baseline_comparison_cost)
-        })
-        .and_then(|s| Some((s.savings_usd?, s.margin)));
+    let replayed = c.scenarios.iter().chain(&c.cap).find(|s| s.window == cap);
+    // An unpriced replay says so first: recording the tier would not price it.
+    let saving = replayed.and_then(|s| s.savings_usd);
+    let assumed = saving.is_some()
+        && replayed.is_some_and(|s| {
+            crate::prices::tier_sensitive(&s.comparison_cost)
+                || crate::prices::tier_sensitive(&s.baseline_comparison_cost)
+        });
+    let priced = replayed.filter(|_| !assumed).and_then(|s| {
+        // Equal only when the replay changed nothing and left nothing unpriced.
+        let same = s.savings_usd == Some(0.0)
+            && s.affected_requests == 0
+            && s.added.is_empty()
+            && s.comparison_cost.unknown.is_empty()
+            && s.baseline_comparison_cost.unknown.is_empty();
+        Some((s.savings_usd?, s.margin, same))
+    });
     let against = match (doctor, c.base.current) {
         (Doctor::Wrote(_), Some(w)) => format!("the {} window before that change", tokens(w)),
         (_, Some(w)) => format!("the {} window", tokens(w)),
         (_, None) => "the recorded requests".into(),
     };
     let cost = match priced {
-        Some((usd, margin)) => {
+        // Every recorded context stayed under the cap, so its replay is the window's own.
+        Some((_, _, true)) => format!(
+            "Against {against}, its replay of a {} window changes no recorded request, so it costs the same at API prices.",
+            tokens(cap)
+        ),
+        Some((usd, margin, false)) => {
             let scale = monthly(1.0, c.base.since, c.base.until);
             let margin = margin.map(|m| m.scale(scale));
             let usd = usd * scale;
@@ -4870,11 +4889,31 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
             } else {
                 format!("saves {}", approx(usd, margin, "/mo"))
             };
+            // Both windows replay the TTL doctor's TTL line recommends, which may not be today's.
+            let ttl = match (c.ttls.main, c.ttls.subagent) {
+                (Some(main), Some(sub)) if sub == main => {
+                    format!(", both at a {} cache TTL,", main.as_str())
+                }
+                (Some(main), Some(sub)) => format!(
+                    ", both at a {} main-session and {} subagent cache TTL,",
+                    main.as_str(),
+                    sub.as_str()
+                ),
+                (Some(main), None) => {
+                    format!(", both at a {} main-session cache TTL,", main.as_str())
+                }
+                (None, Some(sub)) => format!(", both at a {} subagent cache TTL,", sub.as_str()),
+                (None, None) => ",".into(),
+            };
             format!(
-                "Against {against}, its replay of a {} window {amount} at API prices.",
+                "Against {against}{ttl} its replay of a {} window {amount} at API prices.",
                 tokens(cap)
             )
         }
+        None if assumed => format!(
+            "Its replay of a {} window rests on an assumed service tier, so what the cap costs is not measured.",
+            tokens(cap)
+        ),
         None => format!(
             "Its replay did not price a {} window, so what the cap costs is not measured.",
             tokens(cap)
@@ -5764,7 +5803,7 @@ fn summary(
                         )
                     }
                     Mark::Keep => format!(
-                        "No other window was cheaper, replayed assuming the same sessions.{}{} {set_in}",
+                        "No other candidate window was cheaper, replayed assuming the same sessions.{}{} {set_in}",
                         assumed_tier(r),
                         context_rot(report, result)
                     ),
@@ -6699,6 +6738,68 @@ fn summary(
             .to_string();
         rows.push(row);
     }
+    for u in &report.lsp {
+        let mut profile = tag(&u.profiles, &switch, out);
+        // This card's settings file, also when named another way, such as through a link.
+        let settings = crate::discovery::realpath(&u.settings_file).ok();
+        let same = |file: &str| {
+            file == u.settings_file
+                || settings.is_some() && crate::discovery::realpath(file).ok() == settings
+        };
+        // Profiles that share a settings file but not a plugins directory get a card each.
+        if report
+            .lsp
+            .iter()
+            .any(|o| same(&o.settings_file) && o.plugins_dir != u.plugins_dir)
+        {
+            let dir = u
+                .plugins_dir
+                .as_deref()
+                .map_or_else(|| "a secret directory".into(), |d| out.home_in(d));
+            profile = tagged(profile, &format!("(plugins in {dir})"));
+        }
+        let view = crate::lsp::View {
+            home: out.home.as_deref(),
+            arrow: out.arrow,
+        };
+        let named = |i: Item| Item {
+            name: tagged(i.name.clone(), &profile),
+            ..i
+        };
+        // A `doctor` line denying the LSP tool in this card's settings leaves the plugin only
+        // its diagnostics, so the card reads as denied once the walk writes it. The file may
+        // be written through another name for it, such as a link.
+        let denies: Vec<Origin> = fixes
+            .iter()
+            .filter(|f| {
+                matches!(&f.how, How::Edit(p) if same(&p.file)
+                    && p.edits.iter().any(|e| e.op == crate::doctor::Op::Append
+                        && e.path == ["permissions", "deny"]
+                        && e.value == "LSP"))
+            })
+            .flat_map(|f| f.origins.iter().copied())
+            .collect();
+        let denied = (u.denied.is_none() && !denies.is_empty()).then(|| {
+            crate::lsp::items(
+                &crate::lsp::LspUse {
+                    denied: Some(u.settings_file.clone()),
+                    ..u.clone()
+                },
+                &view,
+            )
+        });
+        let cards = crate::lsp::items(u, &view);
+        for (i, card) in cards.into_iter().enumerate() {
+            let mut card = named(card);
+            if let Some(after) = denied.as_ref().and_then(|d| d.get(i)) {
+                card.after.push(crate::vibes::After {
+                    origins: denies.clone(),
+                    item: Box::new(named(after.clone())),
+                });
+            }
+            vibes.push(card);
+        }
+    }
     for u in &report.inbound {
         let mut row = inbound_row(u, out);
         let owner = |p: &Profile| {
@@ -6839,7 +6940,13 @@ fn summary(
         )
     };
     // Said once, for every figure extrapolated over requests that could not be priced.
-    let tilde = if spend.margin.is_some() || rows.iter().any(|r| r.margin.is_some()) {
+    // The details also print every compaction window's estimate, the cap's included.
+    let windows = out.options.details
+        && report.checks.iter().any(|c| {
+            matches!(c, CheckResult::Compaction(c)
+                if c.scenarios.iter().chain(&c.cap).any(|s| s.margin.is_some()))
+        });
+    let tilde = if spend.margin.is_some() || rows.iter().any(|r| r.margin.is_some()) || windows {
         format!(" {TILDE}")
     } else {
         String::new()
@@ -7328,6 +7435,7 @@ mod tests {
                     reread_break_even_usd: Some(1.005),
                 },
             }],
+            cap: None,
             usage_estimates: vec![],
             cache_evidence: vec![],
             reowned: None,
@@ -7688,6 +7796,7 @@ mod tests {
             fable: vec![],
             bash: vec![],
             inbound: vec![],
+            lsp: vec![],
             generated_at: "2026-12-01T00:00:00.000Z".into(),
             scan: Scan {
                 subagents: vec![],
@@ -10238,6 +10347,119 @@ mod tests {
             !cards.iter().any(|i| i.name.starts_with("Fable")),
             "{cards:?}"
         );
+    }
+
+    #[test]
+    fn code_intelligence_cards_sharing_a_settings_file_name_their_plugins_directory() {
+        use crate::lsp::{LanguageUse, Lsp, LspUse};
+        let mut report = synthetic();
+        let card = |plugins_dir: &str| LspUse {
+            profiles: vec!["profile".into()],
+            sessions: 1,
+            languages: vec![LanguageUse {
+                lsp: Lsp::of("main.rs").unwrap(),
+                sessions: 1,
+                shared: 0,
+                projects: vec![],
+                installed: false,
+                installed_for: vec![],
+                off: None,
+            }],
+            settings_file: format!("{ROOT}/settings.json"),
+            root: ROOT.into(),
+            plugins_dir: Some(plugins_dir.into()),
+            cache_dir: None,
+            named: false,
+            unresolved: false,
+            denied: None,
+            unread: None,
+        };
+        report.lsp = vec![card(&format!("{ROOT}/plugins"))];
+        let names = |report: &Report| -> Vec<String> {
+            advice(report, ReportOptions::default())
+                .into_iter()
+                .map(|i| i.name)
+                .filter(|n| n.contains("code intelligence"))
+                .collect()
+        };
+        let plain = names(&report);
+        assert_eq!(plain.len(), 1);
+        assert!(!plain[0].contains("plugins in"), "{plain:?}");
+        // A T3 instance split off for its unresolved settings shares the directory: no tag.
+        report.lsp.push(card(&format!("{ROOT}/plugins")));
+        assert!(names(&report).iter().all(|n| !n.contains("plugins in")));
+        report.lsp[1] = card("/synthetic/cache");
+        let both = names(&report);
+        assert_eq!(both.len(), 2);
+        assert_ne!(both[0], both[1]);
+        assert!(
+            both[1].ends_with("(plugins in /synthetic/cache)"),
+            "{both:?}"
+        );
+
+        // A `doctor` line denying the LSP tool in the card's settings gives it an after-state
+        // that says the plugin would give only diagnostics; one for another file doesn't.
+        report.lsp.truncate(1);
+        let deny = |file: String| crate::doctor::Fix {
+            name: "LSP".into(),
+            value: "on -> off".into(),
+            suggested: false,
+            saving: None,
+            margin: None,
+            verb: "saves",
+            share: None,
+            what: String::new(),
+            evidence: String::new(),
+            origins: vec![super::Origin::Check(7)],
+            group: None,
+            removal: vec![],
+            how: How::Edit(crate::doctor::Patch {
+                file,
+                harness: Harness::Claude,
+                edits: vec![crate::doctor::Edit {
+                    path: vec!["permissions".into(), "deny".into()],
+                    value: serde_json::Value::String("LSP".into()),
+                    op: crate::doctor::Op::Append,
+                }],
+            }),
+        };
+        let card = |fixes: &[crate::doctor::Fix]| {
+            format_report(&report, fixes, ReportOptions::default())
+                .vibes
+                .into_iter()
+                .find(|i| i.name.contains("code intelligence"))
+                .unwrap()
+        };
+        let after = card(&[deny(format!("{ROOT}/settings.json"))]).after;
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].origins, [super::Origin::Check(7)]);
+        assert!(
+            after[0].item.text.contains(" turns off the LSP tool,"),
+            "{}",
+            after[0].item.text
+        );
+        assert!(
+            card(&[deny("/synthetic/other.json".into())])
+                .after
+                .is_empty()
+        );
+        // A deny written through a link to the card's settings file is the same file.
+        #[cfg(unix)]
+        {
+            let w = crate::test_support::Workspace::new();
+            let settings = w.home.join("settings.json");
+            std::fs::write(&settings, "{}").unwrap();
+            let link = w.home.join("linked.json");
+            std::os::unix::fs::symlink(&settings, &link).unwrap();
+            let fixes = [deny(link.to_string_lossy().into_owned())];
+            report.lsp[0].settings_file = settings.to_string_lossy().into_owned();
+            let linked = format_report(&report, &fixes, ReportOptions::default())
+                .vibes
+                .into_iter()
+                .find(|i| i.name.contains("code intelligence"))
+                .unwrap();
+            assert_eq!(linked.after.len(), 1);
+        }
     }
 
     #[test]

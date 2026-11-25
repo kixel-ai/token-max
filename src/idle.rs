@@ -3467,6 +3467,7 @@ mod tests {
             settings: Default::default(),
             idle_attribution: IdleAttribution::Unknown,
             shell: None,
+            file: None,
             meta: crate::model::EventMeta {
                 harness: Harness::Claude,
                 session: "sample".into(),
@@ -3591,6 +3592,7 @@ mod tests {
             background_requests: IndexMap::default(),
             memory: None,
             inbound: None,
+            plugins: None,
             t3: None,
         }
     }
@@ -4285,6 +4287,7 @@ mod tests {
             observed_summary_cost: zero_cost(),
             ttls: PerBucket::default(),
             scenarios: vec![],
+            cap: None,
             usage_estimates: vec![],
             cache_evidence: vec![],
             reowned: None,

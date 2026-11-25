@@ -104,7 +104,7 @@ fn newer(tag: &str, version: &str) -> Check {
 pub enum Install {
     /// Put the release for `target` in place of the binary at `exe`.
     Replace { exe: PathBuf, target: &'static str },
-    /// A package manager owns the binary, and this command upgrades it.
+    /// A package manager owns the binary, and this sentence says how it upgrades.
     Manager(&'static str),
     /// Why the binary cannot be replaced here, such as a platform with no release, so it must
     /// be installed again.
@@ -150,20 +150,34 @@ impl Paths {
             .is_some_and(|dir| dir.ends_with("token-max/run"))
         {
             return Install::Manager(if cfg!(windows) {
-                "irm https://max.kixel.me/run.ps1 | iex"
+                "Upgrade with irm https://max.kixel.me/run.ps1 | iex."
             } else {
-                "curl -LsSf https://max.kixel.me/run.sh | sh"
+                "Upgrade with curl -LsSf https://max.kixel.me/run.sh | sh."
             });
         }
+        // crabx keeps each version it verified under `<cache dir>/crabx/v1/`, and an unpinned
+        // `crabx token-max` moves to a new release on its own schedule, so saying when would
+        // be a guess. Each entry is `<version>/bin/<binary>` beside `<version>/record.json`,
+        // whose `bins` crabx writes to name each binary, so it marks the entry wherever a
+        // symlink above it points. Any `crabx/v<n>` on the path also matches, so a later cache
+        // format keeps its binary too. A false match only withholds the offer. Layouts crabx
+        // never creates, such as an entry whose `bin` alone is symlinked elsewhere, or an
+        // unrelated install under `crabx/v<n>`, are accepted misses and false matches.
+        if crabx_record_names(&self.exe) || self.exe.ancestors().any(crabx_cache_format) {
+            return Install::Manager(
+                "crabx manages this binary: an unpinned crabx token-max picks up the new release \
+                 on its own, and a pinned one stays on its version.",
+            );
+        }
         if self.exe.starts_with("/nix/store") {
-            return Install::Manager("nix run github:kixel-ai/token-max -- doctor");
+            return Install::Manager("Upgrade with nix run github:kixel-ai/token-max -- doctor.");
         }
         let cargo_bin = self.cargo.map(|home| home.join("bin"));
         // Canonical, as `exe` is, so a symlinked Cargo home still matches.
         let cargo_bin = cargo_bin.map(|bin| bin.canonicalize().unwrap_or(bin));
         if cargo_bin.is_some_and(|bin| self.exe.parent() == Some(bin.as_path())) {
             return Install::Manager(
-                "cargo binstall token-max or cargo install --locked token-max",
+                "Upgrade with cargo binstall token-max or cargo install --locked token-max.",
             );
         }
         let Some(target) = TARGET else {
@@ -174,6 +188,52 @@ impl Paths {
             target,
         }
     }
+}
+
+/// Whether `exe` is in a `bin` directory beside a crabx `record.json` whose `bins` names it.
+fn crabx_record_names(exe: &Path) -> bool {
+    /// The part of crabx's record that lists the entry's binaries, extension included.
+    #[derive(serde::Deserialize)]
+    struct Record {
+        bins: Vec<String>,
+    }
+    let Some(entry) = exe
+        .parent()
+        .filter(|bin| bin.file_name() == Some("bin".as_ref()))
+        .and_then(Path::parent)
+    else {
+        return false;
+    };
+    let Some(name) = exe.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    // Only a regular file, checked on the open handle. A named pipe there would block an
+    // ordinary open until a writer came, so Unix opens without waiting.
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NONBLOCK);
+    let Ok(file) = options.open(entry.join("record.json")) else {
+        return false;
+    };
+    if !file.metadata().is_ok_and(|meta| meta.is_file()) {
+        return false;
+    }
+    // A record is a few hundred bytes, so a file this size is not crabx's.
+    let mut text = String::new();
+    if file.take(64 << 10).read_to_string(&mut text).is_err() {
+        return false;
+    }
+    serde_json::from_str::<Record>(&text)
+        .is_ok_and(|record| record.bins.iter().any(|bin| bin == name))
+}
+
+/// Whether `dir` is a crabx cache format's directory, `crabx/v<n>`.
+fn crabx_cache_format(dir: &Path) -> bool {
+    let version = dir.file_name().and_then(|name| name.to_str());
+    let version = version.and_then(|name| name.strip_prefix('v'));
+    version.is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        && dir.parent().and_then(Path::file_name) == Some("crabx".as_ref())
 }
 
 /// Check that this user can create a file beside `exe`, as staging a release there does, or
@@ -427,25 +487,83 @@ mod tests {
         };
         assert!(matches!(
             paths("/nix/store/abc-token-max/bin/token-max", None).install(),
-            Install::Manager(command) if command.starts_with("nix run ")
+            Install::Manager(advice) if advice.starts_with("Upgrade with nix run ")
         ));
         // Paths that don't exist stay as given, so these compare without a filesystem.
         assert!(matches!(
             paths("/home/u/.cargo/bin/token-max", Some("/home/u/.cargo")).install(),
-            Install::Manager(command) if command.contains("cargo install --locked token-max")
+            Install::Manager(advice) if advice.contains("cargo install --locked token-max")
         ));
         // The run scripts' cache keeps each release under its tag's name.
         assert!(matches!(
             paths("/home/u/.cache/token-max/run/token-max-v0.0.1-x86_64-unknown-linux-musl", None).install(),
             // slash ok: a URL
-            Install::Manager(command) if command.contains("max.kixel.me/run.")
+            Install::Manager(advice) if advice.contains("max.kixel.me/run.")
         ));
+        // crabx's cache keeps each version it verified, pinned or not, in any cache format.
+        for exe in [
+            "/home/u/.cache/crabx/v1/x86_64-unknown-linux-musl/author/token-max/0.1.0/bin/token-max",
+            "/srv/cache/crabx/v12/x86_64-unknown-linux-musl/author/token-max/0.1.0/bin/token-max",
+        ] {
+            assert!(
+                matches!(
+                    paths(exe, None).install(),
+                    Install::Manager(advice) if advice.starts_with("crabx manages this binary")
+                ),
+                "{exe}"
+            );
+        }
+        for dir in ["crabx/v", "crabx/v1a", "crabx/1", "crabx-v1/v1", "v1"] {
+            assert!(!crabx_cache_format(Path::new(dir)), "{dir}");
+        }
         let Some(target) = TARGET else {
             let elsewhere = paths("/home/u/.local/bin/token-max", None).install();
             assert!(matches!(elsewhere, Install::Reinstall(_)));
             return;
         };
         let w = crate::test_support::Workspace::new();
+        // A crabx entry a symlink moved anywhere still has its record beside `bin`.
+        let entry = w.home.join("moved/0.1.0");
+        fs::create_dir_all(entry.join("bin")).unwrap();
+        let moved = entry.join("bin/token-max");
+        let path = moved.to_str().unwrap();
+        assert!(matches!(
+            paths(path, None).install(),
+            Install::Replace { .. }
+        ));
+        // A record that doesn't name the binary, such as another tool's file beside a Cargo
+        // `bin`, leaves it replaceable.
+        for other in ["{}", r#"{"bins":["other"]}"#, "not json"] {
+            fs::write(entry.join("record.json"), other).unwrap();
+            assert!(
+                matches!(paths(path, None).install(), Install::Replace { .. }),
+                "{other}"
+            );
+        }
+        // A named pipe there, which an ordinary open would wait on for a writer, is skipped.
+        #[cfg(unix)]
+        {
+            fs::remove_file(entry.join("record.json")).unwrap();
+            let fifo = Command::new("mkfifo")
+                .arg(entry.join("record.json"))
+                .status()
+                .unwrap();
+            assert!(fifo.success());
+            assert!(matches!(
+                paths(path, None).install(),
+                Install::Replace { .. }
+            ));
+            fs::remove_file(entry.join("record.json")).unwrap();
+        }
+        fs::write(
+            entry.join("record.json"),
+            r#"{"version":"0.1.0","bins":["token-max"],"source":"crates.io"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            paths(path, None).install(),
+            Install::Manager(advice) if advice.starts_with("crabx manages this binary")
+        ));
         let exe = w.home.join("token-max");
         let cargo = w.home.join(".cargo");
         let mine = paths(exe.to_str().unwrap(), cargo.to_str()).install();

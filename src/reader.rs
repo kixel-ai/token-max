@@ -77,6 +77,8 @@ pub struct Reading {
     /// Count after every record, so a test sees each change the tally must catch.
     #[cfg(test)]
     every_record: bool,
+    /// A step the scan takes after reading, and when it began, while it runs.
+    pub step: Mutex<Option<(&'static str, Instant)>>,
 }
 
 impl Reading {
@@ -86,6 +88,12 @@ impl Reading {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .is_some_and(|counts| counts.spend.is_some())
+    }
+
+    /// Show `step` on the progress line from now, or clear it.
+    fn step(&self, step: Option<&'static str>) {
+        *self.step.lock().unwrap_or_else(PoisonError::into_inner) =
+            step.map(|step| (step, Instant::now()));
     }
 }
 
@@ -852,6 +860,7 @@ fn event(
         settings: Settings::default(),
         idle_attribution: IdleAttribution::Unknown,
         shell: None,
+        file: None,
         meta: EventMeta {
             harness: snapshot.harness,
             session: context.session.clone(),
@@ -1454,8 +1463,11 @@ impl Reader {
                         e.tool = text(member(b, "name"));
                         e.tool_id = opaque(b, "id")?.map(Id::from);
                         e.request = Some(request_id.clone());
+                        let input = nested(b, "input");
+                        // Only the language is kept, never the path.
+                        e.file =
+                            crate::lsp::File::call(string(b, "name"), string(input, "file_path"));
                         if is(b, "name", "Bash") {
-                            let input = nested(b, "input");
                             e.shell = Some(ShellCall {
                                 background: is_true(input, "run_in_background"),
                                 polls: string(input, "command").is_some_and(polling_loop),
@@ -1542,6 +1554,7 @@ impl Reader {
                             string(b, "tool_use_id"),
                         );
                         e.tool_id = opaque(b, "tool_use_id")?.map(Id::from);
+                        e.file = (!is_true(b, "is_error")).then_some(crate::lsp::File::Done);
                         if timed_out {
                             e.shell = Some(ShellCall {
                                 timed_out,
@@ -2355,6 +2368,12 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     discover_claude_controls(&options.discovery, &mut profiles, &requests)?;
     discover_codex_controls(&options.discovery, &mut profiles, &requests)?;
     crate::subagents::discover(&options.discovery, &mut profiles, &requests, &earlier)?;
+    // T3's database is read by the sessions the transcripts name, so only after them.
+    if let Some(reading) = &options.reading
+        && crate::t3::reads_database(&t3)
+    {
+        reading.step(Some("Reading T3 Code's database"));
+    }
     crate::t3::enrich(
         &mut t3,
         &mut profiles,
@@ -2364,11 +2383,12 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         &snapshot_finished_at,
         since,
     );
-    // Linking request records can move a request's time or profiles, and T3 can move a shared
-    // request to another profile, which changes the group its spend is extrapolated in, so
-    // count the window once more as the header will, with prices that may have loaded since
-    // the last count.
     if let Some(reading) = &options.reading {
+        reading.step(None);
+        // Linking request records can move a request's time or profiles, and T3 can move a
+        // shared request to another profile, which changes the group its spend is extrapolated
+        // in, so count the window once more as the header will, with prices that may have
+        // loaded since the last count.
         let split = requests.partition_point(|r| since.is_some_and(|since| r.time < since));
         crate::tally::recount(reading, &mut requests[split..], &subagents);
     }

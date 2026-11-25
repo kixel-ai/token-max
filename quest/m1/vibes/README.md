@@ -52,8 +52,8 @@ codex-cli 0.167.1 settings worth turning on):
   the `Main-session default` card's picks, and fast
   mode, unused skills and MCP servers and the Artifact tool are measured
   `doctor` lines.
-- Settings worth turning on: ✅
-  [code intelligence plugins](/quest/m1/vibes/language-servers.md), ✅
+- Settings worth turning on: ✅ code intelligence plugins, which shipped as
+  the Code intelligence card, ✅
   [an advisor model](/quest/m1/vibes/advisor.md) (rejected:
   `includeGitInstructions: false`, spend caps, and Codex code mode, which the
   model catalog already turns on). The one measurable find,
@@ -72,3 +72,8 @@ Give it `how` and the walk offers its edit, over SSH too, with nothing else
 to wire; leave `how` empty for a cited card with no question. `quiet` marks
 a card that advises nothing, which `doctor` does not offer `vibes` for.
 `docs/reference.md#vibes` lists every card.
+
+Expanded 2026-11-25 (maintainer, /quest-plan over five cost tips from
+@TekonBurns's posts): ✅ [a subagent default card](/quest/m1/vibes/subagent-default.md)
+that offers `high` past `high` (rejected: guidance with no edit; a model and
+effort pick like the main-session card).

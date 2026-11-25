@@ -1621,7 +1621,7 @@ are not read. The advice is always for the official copy:
 
 | State for a new session | Change |
 | --- | --- |
-| Not installed for every project | By hand: `claude plugin install <plugin>@claude-plugins-official`, since `enabledPlugins` turns a plugin on but doesn't download it. A bare install goes to whichever directories the shell selects, so the step sets `CLAUDE_CONFIG_DIR` to the profile, unsetting it only for the default `~/.claude` that the shell doesn't name, and sets or unsets `CLAUDE_CODE_PLUGIN_CACHE_DIR` as the profile has it. |
+| Not installed for every project | By hand: `claude plugin install <plugin>@claude-plugins-official`, since `enabledPlugins` turns a plugin on but doesn't download it. A bare install goes to whichever directories the shell selects, so the step sets `CLAUDE_CONFIG_DIR` to the profile, unsetting it only for the default `~/.claude` that the shell doesn't name, and sets or unsets `CLAUDE_CODE_PLUGIN_CACHE_DIR` as the profile has it. For a T3 instance whose launch arguments, secret environment values or machine policy can replace its settings, the card names the plugins directory it read, which the instance may not use, and the step names no directory. |
 | Installed, and turned off in the user settings | `enabledPlugins` set to `true` there, offered as an edit. For a T3 instance whose launch arguments, secret environment values or machine policy can replace the settings it reads, the card says the user settings turn it off only if the instance reads them, and the step, by hand, names no file. |
 | Turned off by managed settings | None. |
 | Installed and on | None. |
@@ -1636,10 +1636,11 @@ checks it from the real one, and `/plugin`'s **Errors** tab shows
 
 When `permissions.deny` in managed or user settings turns off the `LSP` tool,
 which Claude looks symbols up with, the card says the plugin would give only
-diagnostics after edits.
+diagnostics after edits. So does a card whose settings file a `doctor` change
+denying the `LSP` tool writes, once the walk has written it.
 
 Profiles share a card only when they share a settings file and a plugins
-directory; cards that share only the settings file name their plugins
+directory, by its real path; cards that share only the settings file name their plugins
 directory. A session whose recorded profiles span more than one card, such as
 T3 history two homes could hold, is left out and counted apart; a language
 only such sessions touched gets a quiet card saying so, when anything is
@@ -1649,7 +1650,8 @@ disabled T3 instance gets no card. When `installed_plugins.json` or an
 `enabledPlugins` entry holds what Claude Code would not write, or the registry
 isn't a file, the card says so in place of its advice, and nothing else fails;
 a T3 value for the plugins directory that token-max can't read, such as a
-secret, leaves a quiet card saying so. The `sessions` export never reads
+secret, or a relative `CLAUDE_CODE_PLUGIN_CACHE_DIR`, which claude reads from
+wherever it starts, leaves a quiet card saying so. The `sessions` export never reads
 plugins. Claude Code's own recommendation dialog settings are not read.
 
 ## Main-session effort

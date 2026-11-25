@@ -6678,11 +6678,42 @@ fn summary(
             home: out.home.as_deref(),
             arrow: out.arrow,
         };
-        let cards = crate::lsp::items(u, &view);
-        vibes.extend(cards.into_iter().map(|i| Item {
+        let named = |i: Item| Item {
             name: tagged(i.name.clone(), &profile),
             ..i
-        }));
+        };
+        // A `doctor` line denying the LSP tool in this card's settings leaves the plugin only
+        // its diagnostics, so the card reads as denied once the walk writes it.
+        let denies: Vec<Origin> = fixes
+            .iter()
+            .filter(|f| {
+                matches!(&f.how, How::Edit(p) if p.file == u.settings_file
+                    && p.edits.iter().any(|e| e.op == crate::doctor::Op::Append
+                        && e.path == ["permissions", "deny"]
+                        && e.value == "LSP"))
+            })
+            .flat_map(|f| f.origins.iter().copied())
+            .collect();
+        let denied = (u.denied.is_none() && !denies.is_empty()).then(|| {
+            crate::lsp::items(
+                &crate::lsp::LspUse {
+                    denied: Some(u.settings_file.clone()),
+                    ..u.clone()
+                },
+                &view,
+            )
+        });
+        let cards = crate::lsp::items(u, &view);
+        for (i, card) in cards.into_iter().enumerate() {
+            let mut card = named(card);
+            if let Some(after) = denied.as_ref().and_then(|d| d.get(i)) {
+                card.after.push(crate::vibes::After {
+                    origins: denies.clone(),
+                    item: Box::new(named(after.clone())),
+                });
+            }
+            vibes.push(card);
+        }
     }
     for u in &report.inbound {
         let mut row = inbound_row(u, out);
@@ -10277,6 +10308,53 @@ mod tests {
         assert!(
             both[1].ends_with("(plugins in /synthetic/cache)"),
             "{both:?}"
+        );
+
+        // A `doctor` line denying the LSP tool in the card's settings gives it an after-state
+        // that says the plugin would give only diagnostics; one for another file doesn't.
+        report.lsp.truncate(1);
+        let deny = |file: String| crate::doctor::Fix {
+            name: "LSP".into(),
+            value: "on -> off".into(),
+            suggested: false,
+            saving: None,
+            margin: None,
+            verb: "saves",
+            share: None,
+            what: String::new(),
+            evidence: String::new(),
+            origins: vec![super::Origin::Check(7)],
+            group: None,
+            removal: vec![],
+            how: How::Edit(crate::doctor::Patch {
+                file,
+                harness: Harness::Claude,
+                edits: vec![crate::doctor::Edit {
+                    path: vec!["permissions".into(), "deny".into()],
+                    value: serde_json::Value::String("LSP".into()),
+                    op: crate::doctor::Op::Append,
+                }],
+            }),
+        };
+        let card = |fixes: &[crate::doctor::Fix]| {
+            format_report(&report, fixes, ReportOptions::default())
+                .vibes
+                .into_iter()
+                .find(|i| i.name.contains("code intelligence"))
+                .unwrap()
+        };
+        let after = card(&[deny(format!("{ROOT}/settings.json"))]).after;
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].origins, [super::Origin::Check(7)]);
+        assert!(
+            after[0].item.text.contains(" turns off the LSP tool,"),
+            "{}",
+            after[0].item.text
+        );
+        assert!(
+            card(&[deny("/synthetic/other.json".into())])
+                .after
+                .is_empty()
         );
     }
 

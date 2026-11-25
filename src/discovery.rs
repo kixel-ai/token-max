@@ -946,6 +946,14 @@ pub(crate) fn git_dir(root: &str) -> Result<Option<GitDir>, ScanError> {
         .ok_or_else(|| error("invalid git directory pointer", &dotgit, 0))?;
     let gitdir = std::path::Path::new(root).join(gitdir);
     let common_file = gitdir.join("commondir");
+    // Never opened unless it is a file, so a named pipe can't block the scan.
+    if fs::metadata(&common_file).is_ok_and(|m| !m.is_file()) {
+        return Err(error(
+            "unsupported git common directory pointer",
+            &common_file.to_string_lossy(),
+            0,
+        ));
+    }
     let common = match fs::read_to_string(&common_file) {
         Ok(text) => text,
         // A submodule's own directory, not a linked worktree.
@@ -2603,10 +2611,17 @@ pub(crate) fn profile(
             .and_then(Value::as_str)
             .filter(|d| !d.is_empty())
             .map(|d| crate::lsp::expand(&options.home, d));
+        let dir = match &cache_dir {
+            Some(dir) => dir.clone(),
+            None => join(&[&canonical, "plugins"]),
+        };
         crate::lsp::Plugins {
-            dir: Some(match &cache_dir {
-                Some(dir) => dir.clone(),
-                None => join(&[&canonical, "plugins"]),
+            // By its real path, so profiles reaching one directory through a link share a
+            // card. A relative one is read from wherever claude starts, so it stays as given.
+            dir: Some(if std::path::Path::new(&dir).is_absolute() {
+                realpath(&dir).unwrap_or(dir)
+            } else {
+                dir
             }),
             cache_dir,
             // Without the variable, a shell reaches only the default home.

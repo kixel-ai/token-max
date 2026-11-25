@@ -216,6 +216,9 @@ pub enum Unread {
     Secret,
     /// A file Claude Code reads holds what it would not write, or can't be read.
     Invalid { file: String, problem: String },
+    /// `CLAUDE_CODE_PLUGIN_CACHE_DIR` is this relative path, which claude reads from
+    /// wherever it starts.
+    Relative(String),
 }
 
 /// The `enabledPlugins` entries of `settings`, read from `file`, for the official language
@@ -599,6 +602,9 @@ pub fn lsp_use(scan: &Scan, since: Option<Millis>, now: Millis) -> Vec<LspUse> {
 /// are known to be ones Claude Code would write.
 fn read(plugins: &Plugins) -> Result<IndexMap<String, Install>, Unread> {
     let dir = plugins.dir.as_ref().ok_or(Unread::Secret)?;
+    if !Path::new(dir).is_absolute() {
+        return Err(Unread::Relative(dir.clone()));
+    }
     plugins.user.as_ref().map_err(Clone::clone)?;
     plugins.managed.as_ref().map_err(Clone::clone)?;
     installs(&join(&[dir, "installed_plugins.json"]))
@@ -664,6 +670,12 @@ pub fn items(u: &LspUse, view: &View<'_>) -> Vec<Item> {
             Unread::Secret => (
                 format!(
                     "A T3 environment value token-max can't read, such as a secret, sets {CACHE_DIR}, so it can't tell which code intelligence plugins this instance has, and advises none."
+                ),
+                true,
+            ),
+            Unread::Relative(dir) => (
+                format!(
+                    "{CACHE_DIR} is the relative path {dir}, which claude reads from wherever it starts, so token-max can't tell which code intelligence plugins this profile has, and advises none."
                 ),
                 true,
             ),
@@ -769,6 +781,14 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
             home(&u.settings_file)
         )
     };
+    if install && u.unresolved {
+        text += &format!(
+            " token-max read {}, which the T3 instance may not use: {UNRESOLVED}.",
+            u.plugins_dir
+                .as_deref()
+                .map_or_else(|| "its plugins directory".into(), home)
+        );
+    }
     if let Some(file) = u.denied.as_deref().filter(|_| !blocked) {
         text += &format!(
             " permissions.deny in {} turns off the LSP tool, which Claude looks symbols up with, so the plugin would give only diagnostics after edits.",
@@ -802,6 +822,13 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
             harness: Harness::Claude,
             edits: vec![on],
         }))
+    } else if install && u.unresolved {
+        Some(How::Manual {
+            step: format!(
+                "{server}, then run `claude plugin install {id}` with the Claude home and plugins directory the T3 instance uses, then start a new session"
+            ),
+            reason: UNRESOLVED.into(),
+        })
     } else if install {
         Some(How::Manual {
             step: format!(
@@ -1520,6 +1547,29 @@ mod tests {
             "if the T3 instance reads that file: {UNRESOLVED}."
         )));
         assert_eq!(unresolved.value, "");
+        // Nor may such an instance use the plugins directory token-max read, so its install
+        // step names none.
+        let unresolved = items(
+            &LspUse {
+                unresolved: true,
+                ..u(usage(false, None))
+            },
+            &view,
+        )
+        .remove(0);
+        assert!(unresolved.text.contains(&format!(
+            " token-max read {}, which the T3 instance may not use: {UNRESOLVED}.",
+            native_path("/synthetic/claude-work/plugins")
+        )));
+        assert_eq!(
+            unresolved.how,
+            Some(How::Manual {
+                step: format!(
+                    "{server}, then run `claude plugin install {id}` with the Claude home and plugins directory the T3 instance uses, then start a new session"
+                ),
+                reason: UNRESOLVED.into(),
+            })
+        );
         // A denied LSP tool is named beside an install.
         let denied = items(
             &LspUse {
@@ -1588,6 +1638,8 @@ mod tests {
             .remove(0)
         };
         assert!(unread(Unread::Secret).quiet);
+        let relative = unread(Unread::Relative(".plugin-cache".into()));
+        assert!(relative.quiet && relative.text.contains("the relative path .plugin-cache,"));
         let invalid = unread(Unread::Invalid {
             file: settings.clone(),
             problem: "enabledPlugins.x@y is neither true, false nor a list".into(),

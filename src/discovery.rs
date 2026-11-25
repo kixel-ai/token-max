@@ -946,6 +946,14 @@ pub(crate) fn git_dir(root: &str) -> Result<Option<GitDir>, ScanError> {
         .ok_or_else(|| error("invalid git directory pointer", &dotgit, 0))?;
     let gitdir = std::path::Path::new(root).join(gitdir);
     let common_file = gitdir.join("commondir");
+    // Never opened unless it is a file, so a named pipe can't block the scan.
+    if fs::metadata(&common_file).is_ok_and(|m| !m.is_file()) {
+        return Err(error(
+            "unsupported git common directory pointer",
+            &common_file.to_string_lossy(),
+            0,
+        ));
+    }
     let common = match fs::read_to_string(&common_file) {
         Ok(text) => text,
         // A submodule's own directory, not a linked worktree.
@@ -980,8 +988,7 @@ pub(crate) fn git_dir(root: &str) -> Result<Option<GitDir>, ScanError> {
 }
 
 /// The main checkout of a linked worktree, reading only Git's path metadata.
-#[cfg(unix)]
-fn main_checkout(root: &str) -> Result<String, ScanError> {
+pub(crate) fn main_checkout(root: &str) -> Result<String, ScanError> {
     let Some(GitDir {
         common,
         linked: true,
@@ -2684,6 +2691,29 @@ pub(crate) fn profile(
     // A shell's CLAUDE_CONFIG_DIR keeps Claude Code's state inside it, even when it names
     // the default directory.
     let explicit = options.env.contains_key(variable) && active == canonical;
+    // `--defaults`, whose report has no cards, reads no plugins.
+    let plugins = (claude && !options.defaults).then(|| {
+        let cache_dir = environment
+            .values
+            .get(crate::lsp::CACHE_DIR)
+            .and_then(Value::as_str)
+            .filter(|d| !d.is_empty())
+            .map(|d| crate::lsp::expand(&options.home, d));
+        crate::lsp::Plugins {
+            dir: Some(match &cache_dir {
+                Some(dir) => dir.clone(),
+                None => join(&[&canonical, "plugins"]),
+            }),
+            cache_dir,
+            // Without the variable, a shell reaches only the default home.
+            named: explicit
+                || !realpath(&join(&[&options.home, ".claude"])).is_ok_and(|d| d == canonical),
+            denied: crate::lsp::denies_lsp(&[(&managed, managed_file), (&user, &settings_file)]),
+            home: options.home.clone(),
+            user: crate::lsp::enabled_entries(&user, &settings_file),
+            managed: crate::lsp::enabled_entries(&managed, managed_file),
+        }
+    });
     let claude_config = claude.then(|| claude_config(&options.home, &canonical, explicit));
     let mut profile = Profile {
         id: identity(key),
@@ -2713,6 +2743,7 @@ pub(crate) fn profile(
         memory: Some(memory),
         inbound: None,
         t3: None,
+        plugins,
         agents: crate::model::AgentControls::default(),
         instruction_budget_file,
         instruction_budget_unresolved: None,

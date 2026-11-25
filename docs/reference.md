@@ -823,7 +823,9 @@ phase in turn and clears itself before the report. While this host's
 transcripts are read it is a bar of the bytes read out of the total discovery
 found, with the time left to read them at the rate so far; the analysis after
 reading has no measured fraction, so its phases show only a spinner and how
-long each has run.
+long each has run. Reading T3 Code's database, which follows the transcripts,
+holds the line as the bar does, so under `--ssh` it shows over a later phase
+until it ends.
 
 On a terminal, `doctor` opens with its name, says it is about to scan this
 host's transcripts, and lists each profile root it found with its transcript
@@ -1398,6 +1400,7 @@ an exit code.
 | Fable weekly use | Any Fable request in the window: what they cost, and Anthropic's [plan rule](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan). |
 | [Advisor model](#advisor-model) | Every Claude settings file: with no `advisorModel`, the advisor one rank above the main-session default, citing Claude Code's [advisor page](https://code.claude.com/docs/en/advisor). |
 | [Auto memory](#auto-memory-in-vibes) | Every auto memory or Codex memories line: off is advised when most main sessions ran in a repository with a CLAUDE.md or AGENTS.md. |
+| [Code intelligence](#code-intelligence) | Claude sessions read or edited files of a typed language whose official language server plugin a new session wouldn't load: Anthropic's [costs page](https://code.claude.com/docs/en/costs#install-code-intelligence-plugins-for-typed-languages). |
 
 The effort, instruction-file, subagent and Fable lines stay in `doctor`, where
 their costs are measured; only the advice about them is here.
@@ -1597,6 +1600,86 @@ nothing; the walk doesn't ask about an edit saving under $1/mo, so then the
 card offers it. Otherwise the card offers the same edit `doctor` would make,
 including its steps by hand for a named Codex profile or an untrusted project
 that may set memories too.
+
+### Code intelligence
+
+A [code intelligence plugin](https://code.claude.com/docs/en/plugins/code-intelligence)
+runs a language server for Claude Code, so Claude looks up symbols instead of
+searching text and sees the errors its edits introduce. Anthropic's
+[costs page](https://code.claude.com/docs/en/costs#install-code-intelligence-plugins-for-typed-languages)
+recommends one for typed languages; what it saves is not measured. Only the
+page's statically typed languages get a card: its Lua, PHP, Python, Ruby and
+Liquid plugins are left out, since that advice doesn't name them.
+
+Each Claude settings file gets one card per such language whose files its
+sessions read or edited (`Read`, `Edit`, `MultiEdit` or `Write`), by the
+extensions each plugin's marketplace entry maps: the share of the window's
+sessions that touched one, a subagent's counted as its parent's, and the
+projects they ran in. A call whose result was an error, such as a read of a
+file that doesn't exist, or that has no result, such as one interrupted,
+counts for nothing. Only the language is kept, never the path. A project is
+the main checkout of the Git repository holding the session's directory, past
+any symbolic link, or for a directory removed since, such as a worktree, the
+nearest one that remains. A repository at or above home, such as one of
+dotfiles, holds no project. Marker files such as `Cargo.toml` are not read:
+most recorded directories are gone by the time the report runs.
+
+The card judges only what a new session gets now, from the profile's plugins
+directory and its user and managed settings, read when the report is built:
+
+- **Installed** when `installed_plugins.json` in the profile's plugins
+  directory (`CLAUDE_CODE_PLUGIN_CACHE_DIR`, `~` read as home, else `plugins`
+  in the profile) holds a user or managed record of
+  `<plugin>@claude-plugins-official`. A project or local record installs it
+  only for the project it names, which the card names too; one for every
+  project the sessions ran in, when each session recorded its directory,
+  serves them as well as a user install.
+- **On**, for a user or managed install, by the `enabledPlugins` entry that
+  wins: managed settings, then the user's. A project or local install is
+  turned on in that project's settings, which the card doesn't read. An entry may be `true`, `false` or a list of version constraints,
+  which keeps it on. With no entry, a plugin is on: its
+  [`defaultEnabled`](https://code.claude.com/docs/en/plugins-reference#defaultenabled)
+  defaults to `true`, and no official language server plugin sets it.
+
+It doesn't replay which plugin each past session loaded, so a project's local
+or project settings, another marketplace's copy of a plugin, plugins synced
+from claude.ai or loaded with `--plugin-dir`, and managed marketplace policy
+are not read. The advice is always for the official copy:
+
+| State for a new session | Change |
+| --- | --- |
+| Not installed for every project | By hand: `claude plugin install <plugin>@claude-plugins-official`, since `enabledPlugins` turns a plugin on but doesn't download it. A bare install goes to whichever directories the shell selects, so the step sets `CLAUDE_CONFIG_DIR` to the profile, unsetting it only for the default `~/.claude` that the shell doesn't name, and sets or unsets `CLAUDE_CODE_PLUGIN_CACHE_DIR` as the profile has it. For a T3 instance whose launch arguments, secret environment values or machine policy can replace its settings, the card names the plugins directory it read, which the instance may not use, and the step names no directory. |
+| Installed, and turned off in the user settings | `enabledPlugins` set to `true` there, offered as an edit. For a T3 instance whose launch arguments, secret environment values or machine policy can replace the settings it reads, the card says the user settings turn it off only if the instance reads them, and the step, by hand, names no file. |
+| Turned off by managed settings | None. |
+| Installed and on | None. |
+
+The plugin doesn't include its language server, such as `rust-analyzer`, so
+each card names it and each step starts by installing it on the `PATH` claude
+starts with, as the plugin's README says. token-max doesn't check that `PATH`:
+it can't know the one claude starts with, which settings' `env`, a T3
+instance's environment, a login shell or rustup's proxies change. Claude Code
+checks it from the real one, and `/plugin`'s **Errors** tab shows
+`Executable not found in $PATH` for a server it can't find.
+
+When `permissions.deny` in managed or user settings turns off the `LSP` tool,
+which Claude looks symbols up with, the card says the plugin would give only
+diagnostics after edits. So does a card whose settings file a `doctor` change
+denying the `LSP` tool writes, once the walk has written it.
+
+Profiles share a card only when they share a settings file and a plugins
+directory, by its real path; cards that share only the settings file name their plugins
+directory. A session whose recorded profiles span more than one card, such as
+T3 history two homes could hold, is left out and counted apart; a language
+only such sessions touched gets a quiet card saying so, when anything is
+missing. History T3 left unsettled counts for the card holding all its
+recorded profiles, as on every other line. A
+disabled T3 instance gets no card. When `installed_plugins.json` or an
+`enabledPlugins` entry holds what Claude Code would not write, or the registry
+isn't a file, the card says so in place of its advice, and nothing else fails;
+a T3 value for the plugins directory that token-max can't read, such as a
+secret, or a relative `CLAUDE_CODE_PLUGIN_CACHE_DIR`, which claude reads from
+wherever it starts, leaves a quiet card saying so. The `sessions` export never reads
+plugins. Claude Code's own recommendation dialog settings are not read.
 
 ## Main-session effort
 

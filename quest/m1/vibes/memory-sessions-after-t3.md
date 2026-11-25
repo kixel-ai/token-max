@@ -11,6 +11,8 @@ ones did.
 
 ## Plan
 
+Decided 2026-11-25 (maintainer, /quest-run): ✅ keep it (rejected: drop it).
+
 Today `memory::check` counts every request naming one of the line's profiles,
 before T3's ownership is considered, while the setting itself is read at the
 profile's own settled latest directory (`discovery::owned_by`, from

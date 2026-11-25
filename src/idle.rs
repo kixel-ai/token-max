@@ -3467,6 +3467,7 @@ mod tests {
             settings: Default::default(),
             idle_attribution: IdleAttribution::Unknown,
             shell: None,
+            file: None,
             meta: crate::model::EventMeta {
                 harness: Harness::Claude,
                 session: "sample".into(),
@@ -3592,6 +3593,7 @@ mod tests {
             background_requests: IndexMap::default(),
             memory: None,
             inbound: None,
+            plugins: None,
             t3: None,
         }
     }

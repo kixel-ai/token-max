@@ -41,6 +41,8 @@ Recommendations:
 - A list from a managed source token-max can't read (the admin console)
   leaves both cards advisory; say so in the text.
 
-0.1.0 need not wait for it: an allowlist is uncommon (mostly an
-organization's managed setup, though user, project and local settings can set
-one too), and an `advisorModel` it blocks adds no billable calls.
+Decided 2026-11-25 (maintainer, /quest-run): ✅ keep it (rejected: drop
+it); ✅ 0.1.0 does not wait for it (rejected: add it to `release-0.1.md`'s
+Required), since an allowlist is uncommon (mostly an organization's managed
+setup, though user, project and local settings can set one too), and an
+`advisorModel` it blocks adds no billable calls.

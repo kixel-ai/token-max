@@ -317,11 +317,16 @@ impl Meter {
                         };
                         bar(&progress, shared.look, progress_room())
                     } else {
-                        // A phase that began under the bar is timed from when reading ended.
-                        let since = match total {
-                            0 => since,
-                            _ => since.max(*read_end.get_or_insert_with(Instant::now)),
-                        };
+                        // Reading has ended only once the scan knows what it reads.
+                        if total != 0 {
+                            read_end.get_or_insert_with(Instant::now);
+                        }
+                        let step = *shared
+                            .reading
+                            .step
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner);
+                        let (name, since) = after_reading((name, since), step, read_end);
                         let line = busy(name, since.elapsed(), tick, shared.look.unicode);
                         (line.clone(), line)
                     };
@@ -336,7 +341,7 @@ impl Meter {
         }
     }
 
-    /// Show `phase` now, unless the reading bar holds the line.
+    /// Show `phase` now, unless the reading bar or the scan's step holds the line.
     fn phase(&self, phase: &'static str) {
         let mut current = self
             .shared
@@ -344,9 +349,16 @@ impl Meter {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         *current = (phase, Instant::now());
-        // While this host still reads, the bar stays; the ticker shows the phase after it.
+        // While this host still reads, the bar or its step stays; the ticker shows the phase
+        // after them.
         let reading = &self.shared.reading;
-        if reading.read.load(Ordering::Relaxed) < reading.total.load(Ordering::Relaxed) {
+        if reading.read.load(Ordering::Relaxed) < reading.total.load(Ordering::Relaxed)
+            || reading
+                .step
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_some()
+        {
             return;
         }
         let line = busy(phase, Duration::ZERO, 0, self.shared.look.unicode);
@@ -362,6 +374,20 @@ impl Drop for Meter {
         }
         drop(clear_progress());
     }
+}
+
+/// What the line shows once this host's reading is done, and since when: the scan's own
+/// step while it runs, as the bar holds the line before it, else `phase`, timed from when
+/// reading ended if it began under the bar.
+fn after_reading(
+    phase: (&'static str, Instant),
+    step: Option<(&'static str, Instant)>,
+    read_end: Option<Instant>,
+) -> (&'static str, Instant) {
+    step.unwrap_or(match read_end {
+        Some(end) => (phase.0, phase.1.max(end)),
+        None => phase,
+    })
 }
 
 /// A phase's progress line: after its first second, a spinner on `tick` and how long it has
@@ -2420,6 +2446,24 @@ mod tests {
         assert_eq!(duration(59.0), "59s");
         assert_eq!(duration(59.5), "1m 00s");
         assert_eq!(duration(125.0), "2m 05s");
+    }
+
+    #[test]
+    fn the_scans_step_holds_the_line_and_a_phase_begun_under_the_bar_counts_from_its_end() {
+        let start = Instant::now();
+        let at = |seconds| start + Duration::from_secs(seconds);
+        let phase = ("Scanning local histories", at(0));
+        let step = ("Reading T3 Code's database", at(40));
+        // Before reading ends, or with nothing to read, a phase counts from its own start.
+        assert_eq!(after_reading(phase, None, None), phase);
+        assert_eq!(
+            after_reading(phase, None, Some(at(36))),
+            ("Scanning local histories", at(36))
+        );
+        // A phase begun after reading ended keeps its own start.
+        let checking = ("Checking settings", at(50));
+        assert_eq!(after_reading(checking, None, Some(at(36))), checking);
+        assert_eq!(after_reading(checking, Some(step), Some(at(36))), step);
     }
 
     #[test]

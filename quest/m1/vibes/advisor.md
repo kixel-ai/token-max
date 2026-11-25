@@ -16,8 +16,7 @@ Decided 2026-11-23 (maintainer, /quest-plan after a survey of Claude Code
 2.1.322 settings worth turning on):
 
 - Card: ✅ an advisor (rejected: see
-  [the code intelligence card](/quest/m1/vibes/language-servers.md) for the
-  candidates left out).
+  [the epic](/quest/m1/vibes/README.md) for the candidates left out).
 - Pairing: ✅ one rank above the main default (rejected: always Opus, which
   gives an Opus main only an Opus second opinion).
 

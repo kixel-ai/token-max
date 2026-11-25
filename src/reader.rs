@@ -792,6 +792,7 @@ fn event(
         settings: Settings::default(),
         idle_attribution: IdleAttribution::Unknown,
         shell: None,
+        file: None,
         meta: EventMeta {
             harness: snapshot.harness,
             session: context.session.clone(),
@@ -1369,8 +1370,11 @@ impl Reader {
                         e.tool = text(member(b, "name"));
                         e.tool_id = opaque(b, "id")?.map(Id::from);
                         e.request = Some(request_id.clone());
+                        let input = nested(b, "input");
+                        // Only the language is kept, never the path.
+                        e.file =
+                            crate::lsp::File::call(string(b, "name"), string(input, "file_path"));
                         if is(b, "name", "Bash") {
-                            let input = nested(b, "input");
                             e.shell = Some(ShellCall {
                                 background: is_true(input, "run_in_background"),
                                 polls: string(input, "command").is_some_and(polling_loop),
@@ -1457,6 +1461,7 @@ impl Reader {
                             string(b, "tool_use_id"),
                         );
                         e.tool_id = opaque(b, "tool_use_id")?.map(Id::from);
+                        e.file = (!is_true(b, "is_error")).then_some(crate::lsp::File::Done);
                         if timed_out {
                             e.shell = Some(ShellCall {
                                 timed_out,

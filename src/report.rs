@@ -220,7 +220,7 @@ fn days(since: Option<Millis>, until: Option<Millis>) -> String {
 }
 
 /// Share to one decimal, rounded down so a partial share never reads as 100%.
-fn percent(part: u64, whole: u64) -> String {
+pub(crate) fn percent(part: u64, whole: u64) -> String {
     js_number(((part as f64 / whole as f64) * 1000.0).floor() / 10.0)
 }
 
@@ -6751,6 +6751,68 @@ fn summary(
             .to_string();
         rows.push(row);
     }
+    for u in &report.lsp {
+        let mut profile = tag(&u.profiles, &switch, out);
+        // This card's settings file, also when named another way, such as through a link.
+        let settings = crate::discovery::realpath(&u.settings_file).ok();
+        let same = |file: &str| {
+            file == u.settings_file
+                || settings.is_some() && crate::discovery::realpath(file).ok() == settings
+        };
+        // Profiles that share a settings file but not a plugins directory get a card each.
+        if report
+            .lsp
+            .iter()
+            .any(|o| same(&o.settings_file) && o.plugins_dir != u.plugins_dir)
+        {
+            let dir = u
+                .plugins_dir
+                .as_deref()
+                .map_or_else(|| "a secret directory".into(), |d| out.home_in(d));
+            profile = tagged(profile, &format!("(plugins in {dir})"));
+        }
+        let view = crate::lsp::View {
+            home: out.home.as_deref(),
+            arrow: out.arrow,
+        };
+        let named = |i: Item| Item {
+            name: tagged(i.name.clone(), &profile),
+            ..i
+        };
+        // A `doctor` line denying the LSP tool in this card's settings leaves the plugin only
+        // its diagnostics, so the card reads as denied once the walk writes it. The file may
+        // be written through another name for it, such as a link.
+        let denies: Vec<Origin> = fixes
+            .iter()
+            .filter(|f| {
+                matches!(&f.how, How::Edit(p) if same(&p.file)
+                    && p.edits.iter().any(|e| e.op == crate::doctor::Op::Append
+                        && e.path == ["permissions", "deny"]
+                        && e.value == "LSP"))
+            })
+            .flat_map(|f| f.origins.iter().copied())
+            .collect();
+        let denied = (u.denied.is_none() && !denies.is_empty()).then(|| {
+            crate::lsp::items(
+                &crate::lsp::LspUse {
+                    denied: Some(u.settings_file.clone()),
+                    ..u.clone()
+                },
+                &view,
+            )
+        });
+        let cards = crate::lsp::items(u, &view);
+        for (i, card) in cards.into_iter().enumerate() {
+            let mut card = named(card);
+            if let Some(after) = denied.as_ref().and_then(|d| d.get(i)) {
+                card.after.push(crate::vibes::After {
+                    origins: denies.clone(),
+                    item: Box::new(named(after.clone())),
+                });
+            }
+            vibes.push(card);
+        }
+    }
     for u in &report.inbound {
         let mut row = inbound_row(u, out);
         let owner = |p: &Profile| {
@@ -7747,6 +7809,7 @@ mod tests {
             fable: vec![],
             bash: vec![],
             inbound: vec![],
+            lsp: vec![],
             generated_at: "2026-12-01T00:00:00.000Z".into(),
             scan: Scan {
                 subagents: vec![],
@@ -10297,6 +10360,119 @@ mod tests {
             !cards.iter().any(|i| i.name.starts_with("Fable")),
             "{cards:?}"
         );
+    }
+
+    #[test]
+    fn code_intelligence_cards_sharing_a_settings_file_name_their_plugins_directory() {
+        use crate::lsp::{LanguageUse, Lsp, LspUse};
+        let mut report = synthetic();
+        let card = |plugins_dir: &str| LspUse {
+            profiles: vec!["profile".into()],
+            sessions: 1,
+            languages: vec![LanguageUse {
+                lsp: Lsp::of("main.rs").unwrap(),
+                sessions: 1,
+                shared: 0,
+                projects: vec![],
+                installed: false,
+                installed_for: vec![],
+                off: None,
+            }],
+            settings_file: format!("{ROOT}/settings.json"),
+            root: ROOT.into(),
+            plugins_dir: Some(plugins_dir.into()),
+            cache_dir: None,
+            named: false,
+            unresolved: false,
+            denied: None,
+            unread: None,
+        };
+        report.lsp = vec![card(&format!("{ROOT}/plugins"))];
+        let names = |report: &Report| -> Vec<String> {
+            advice(report, ReportOptions::default())
+                .into_iter()
+                .map(|i| i.name)
+                .filter(|n| n.contains("code intelligence"))
+                .collect()
+        };
+        let plain = names(&report);
+        assert_eq!(plain.len(), 1);
+        assert!(!plain[0].contains("plugins in"), "{plain:?}");
+        // A T3 instance split off for its unresolved settings shares the directory: no tag.
+        report.lsp.push(card(&format!("{ROOT}/plugins")));
+        assert!(names(&report).iter().all(|n| !n.contains("plugins in")));
+        report.lsp[1] = card("/synthetic/cache");
+        let both = names(&report);
+        assert_eq!(both.len(), 2);
+        assert_ne!(both[0], both[1]);
+        assert!(
+            both[1].ends_with("(plugins in /synthetic/cache)"),
+            "{both:?}"
+        );
+
+        // A `doctor` line denying the LSP tool in the card's settings gives it an after-state
+        // that says the plugin would give only diagnostics; one for another file doesn't.
+        report.lsp.truncate(1);
+        let deny = |file: String| crate::doctor::Fix {
+            name: "LSP".into(),
+            value: "on -> off".into(),
+            suggested: false,
+            saving: None,
+            margin: None,
+            verb: "saves",
+            share: None,
+            what: String::new(),
+            evidence: String::new(),
+            origins: vec![super::Origin::Check(7)],
+            group: None,
+            removal: vec![],
+            how: How::Edit(crate::doctor::Patch {
+                file,
+                harness: Harness::Claude,
+                edits: vec![crate::doctor::Edit {
+                    path: vec!["permissions".into(), "deny".into()],
+                    value: serde_json::Value::String("LSP".into()),
+                    op: crate::doctor::Op::Append,
+                }],
+            }),
+        };
+        let card = |fixes: &[crate::doctor::Fix]| {
+            format_report(&report, fixes, ReportOptions::default())
+                .vibes
+                .into_iter()
+                .find(|i| i.name.contains("code intelligence"))
+                .unwrap()
+        };
+        let after = card(&[deny(format!("{ROOT}/settings.json"))]).after;
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].origins, [super::Origin::Check(7)]);
+        assert!(
+            after[0].item.text.contains(" turns off the LSP tool,"),
+            "{}",
+            after[0].item.text
+        );
+        assert!(
+            card(&[deny("/synthetic/other.json".into())])
+                .after
+                .is_empty()
+        );
+        // A deny written through a link to the card's settings file is the same file.
+        #[cfg(unix)]
+        {
+            let w = crate::test_support::Workspace::new();
+            let settings = w.home.join("settings.json");
+            std::fs::write(&settings, "{}").unwrap();
+            let link = w.home.join("linked.json");
+            std::os::unix::fs::symlink(&settings, &link).unwrap();
+            let fixes = [deny(link.to_string_lossy().into_owned())];
+            report.lsp[0].settings_file = settings.to_string_lossy().into_owned();
+            let linked = format_report(&report, &fixes, ReportOptions::default())
+                .vibes
+                .into_iter()
+                .find(|i| i.name.contains("code intelligence"))
+                .unwrap();
+            assert_eq!(linked.after.len(), 1);
+        }
     }
 
     #[test]

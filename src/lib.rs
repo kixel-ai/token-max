@@ -21,6 +21,7 @@ mod fast;
 mod idle;
 mod inbound;
 mod keepalive;
+mod lsp;
 mod mcp;
 mod memory;
 mod model;

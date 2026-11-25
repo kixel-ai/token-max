@@ -3166,14 +3166,14 @@ fn which(fixes: &[&Fix], style: &Style) -> String {
         .map(|f| {
             let s = &f.section;
             // A name two members share, such as a duplicate skill's, is followed by its
-            // location, and a setting's by its profile.
-            let shared = fixes
-                .iter()
-                .filter(|o| o.section.member == s.member)
-                .count()
-                > 1;
+            // location, unless they share that too, as two profiles' copies of one skill do,
+            // and a setting's by its profile.
+            let peers = |same: &dyn Fn(&Fix) -> bool| fixes.iter().filter(|o| same(o)).count() > 1;
+            let shared = peers(&|o| o.section.member == s.member);
+            let placed =
+                !peers(&|o| o.section.member == s.member && o.section.location == s.location);
             match (&s.location, s.kind, f.profile.as_str()) {
-                (Some(at), Kind::Feature(..), _) if shared => {
+                (Some(at), Kind::Feature(..), _) if shared && placed => {
                     format!("{} ({})", s.member, style.path(at))
                 }
                 (_, _, "") => s.member.clone(),
@@ -5238,6 +5238,20 @@ mod tests {
         assert!(
             // slash ok: the locations are formatted with / and abbreviated as given
             printed.contains("  Which  review (~/a/SKILL.md), review (~/b/SKILL.md), lint.\n"),
+            "{printed}"
+        );
+        // Two profiles' copies of one skill at one path name their profiles instead.
+        let profiled = |line: &str, profile: &str| Fix {
+            profile: profile.into(),
+            ..copy(line, "review", Some("a"))
+        };
+        let (_, printed) = walk(
+            vec![profiled("A", "work"), profiled("B", "home")],
+            &w,
+            "n\n",
+        );
+        assert!(
+            printed.contains("  Which  review (work), review (home).\n"),
             "{printed}"
         );
     }

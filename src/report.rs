@@ -4320,6 +4320,9 @@ struct Row {
     origin: Option<Origin>,
     /// What it saves every 30 days, when measured.
     saving: Option<f64>,
+    /// What it cost over the window, when shown instead of a saving, and whether only as a
+    /// lower bound.
+    cost: Option<(Estimate, bool)>,
     /// How far `saving` may be off when extrapolated over unpriced requests.
     margin: Option<Margin>,
     /// How much was measured, such as the requests a replay covered, ahead of the evidence.
@@ -4363,6 +4366,7 @@ impl Row {
             scopes: vec![],
             origin: None,
             saving: None,
+            cost: None,
             margin: None,
             stats: String::new(),
             baseline: None,
@@ -4380,6 +4384,7 @@ impl Row {
     /// margin, and a lower bound when `at_least`, such as beside pieces nothing priced.
     fn costs(&mut self, estimate: Option<Estimate>, at_least: bool, spend: &Spend) {
         self.margin = estimate.and_then(|e| e.margin);
+        self.cost = estimate.map(|e| (e, at_least));
         self.amount = Some((
             "costs",
             match estimate {
@@ -4401,6 +4406,7 @@ impl Row {
         spend: &Spend,
     ) {
         self.saving = usd;
+        self.cost = None;
         self.margin = margin.filter(|_| usd.is_some());
         match usd {
             Some(usd) => {
@@ -4798,6 +4804,25 @@ fn section_row(members: &[Row], out: &Out<'_>) -> Row {
     }
     let verb = if partial { AT_LEAST } else { "saves" };
     match (measured, up_to) {
+        // Members shown by what they cost, such as duplicate skill copies, keep that figure
+        // summed, rather than a saving no one measured.
+        (None, None) if changes.iter().all(|r| r.cost.is_some()) => {
+            let (cost, at_least) = changes.iter().filter_map(|r| r.cost).fold(
+                (
+                    Estimate {
+                        usd: 0.0,
+                        margin: None,
+                    },
+                    false,
+                ),
+                |(sum, at_least), (e, lower)| {
+                    let usd = sum.usd + e.usd;
+                    let margin = Margin::plus(sum.margin, e.margin);
+                    (Estimate { usd, margin }, at_least || lower)
+                },
+            );
+            row.costs(Some(cost), at_least, &out.spend);
+        }
         (None, None) => row.saves("saves", None, None, &out.spend),
         (Some((usd, margin)), None) => row.saves(verb, Some(usd), margin, &out.spend),
         (None, Some((usd, margin))) => row.saves(UP_TO, Some(usd), margin, &out.spend),
@@ -13066,6 +13091,46 @@ mod tests {
                 "{label}: {groups:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_section_of_members_shown_by_cost_sums_what_they_cost() {
+        let report = synthetic();
+        let out = Out::new(&report, ReportOptions::default());
+        let member = |fix: usize, usd: f64| {
+            let mut row = Row::new(Mark::Change, format!("copy {fix}"), String::new());
+            row.costs(
+                Some(Estimate {
+                    usd,
+                    margin: Some(Margin::Usd(0.5)),
+                }),
+                false,
+                &out.spend,
+            );
+            row.section = Some(Membership {
+                id: 0,
+                fix,
+                section: crate::doctor::Section {
+                    kind: crate::doctor::Kind::Feature(
+                        ContextKind::Skill,
+                        crate::doctor::Reason::Duplicate,
+                    ),
+                    label: "Duplicate copies of skills".into(),
+                    member: "review".into(),
+                    location: None,
+                },
+                what: String::new(),
+            });
+            row
+        };
+        let row = section_row(&[member(0, 2.0), member(1, 3.0)], &out);
+        assert_eq!(row.saving, None);
+        assert_eq!(row.amount, Some(("costs", "~$5 ± $1".into())));
+        // A member with a measured saving makes the row a saving again.
+        let mut saved = member(1, 3.0);
+        saved.saves("saves", Some(4.0), None, &out.spend);
+        let row = section_row(&[member(0, 2.0), saved], &out);
+        assert_eq!(row.amount, Some(("saves", "$4/mo".into())));
     }
 
     /// Moves each profile's settings file into a fresh workspace, with the TTL lines that

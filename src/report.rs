@@ -4754,12 +4754,21 @@ fn advisor_item(u: &AdvisorUse, p: &Profile, profile: &str, out: &Out<'_>) -> It
                 if pick == "fable" {
                     text += " A Fable advisor needs Fable access, and on plans that bill Fable to usage credits, the one-time consent /model fable asks for; until then Claude Code sends requests without it.";
                 }
-                (
-                    format!("none {} {pick}", out.arrow),
-                    text,
-                    Some(crate::doctor::advisor_how(&control.owner, pick, owner, p)),
-                    false,
-                )
+                // A project's settings file that picks the main model picks it for that
+                // project only, and an advisor in the profile's own file would pair with
+                // every project's model, so the card names no file to edit.
+                let how = match project_file(owner, &p.settings_file) {
+                    Some(file) => {
+                        let _ = write!(
+                            text,
+                            " {file} sets that main model for its project only, and an advisor set in {} would pair with every project's model, so no edit is offered; set advisorModel by hand where that project reads it.",
+                            p.settings_file
+                        );
+                        None
+                    }
+                    None => Some(crate::doctor::advisor_how(&control.owner, pick, p)),
+                };
+                (format!("none {} {pick}", out.arrow), text, how, false)
             }
         },
     };
@@ -4774,6 +4783,21 @@ fn advisor_item(u: &AdvisorUse, p: &Profile, profile: &str, out: &Out<'_>) -> It
         // No `doctor` line writes the main model, `advisorModel` or what blocks the advisor.
         after: vec![],
     }
+}
+
+/// The project settings file in `owner`, a setting's owner such as `<file>:model` or
+/// `<file>:env.ANTHROPIC_MODEL`: one in a `.claude` directory other than `user_file`'s.
+/// None for the user's file, managed settings, the environment or a recorded model.
+fn project_file<'a>(owner: &'a str, user_file: &str) -> Option<&'a str> {
+    let file = owner
+        .strip_suffix(":model")
+        .or_else(|| owner.strip_suffix(":env.ANTHROPIC_MODEL"))?;
+    let project = file != user_file
+        && std::path::Path::new(file)
+            .parent()
+            .and_then(|dir| dir.file_name())
+            .is_some_and(|dir| dir == ".claude");
+    project.then_some(file)
 }
 
 /// Whose advice the Bash cap's margin is, before the pages on how the cap and cache work.
@@ -10449,17 +10473,25 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        // A main model a project sets gets its advisor beside it, as a step by hand: the
-        // user's file would pair it with every project's model.
+        // A main model a project sets, in `model` or its env, gets no edit: the user's file
+        // would pair the advisor with every project's model. The user's own env does.
         let project = "/synthetic/repo/.claude/settings.json";
-        report.scan.profiles[0].effort.as_mut().unwrap().model_owner = format!("{project}:model");
-        match card(&report).how {
-            Some(How::Manual { step, reason }) => {
-                assert_eq!(step, format!("set \"advisorModel\": \"opus\" in {project}"));
-                assert!(reason.contains("for that project only"), "{reason}");
-            }
-            other => panic!("{other:?}"),
+        for key in ["model", "env.ANTHROPIC_MODEL"] {
+            report.scan.profiles[0].effort.as_mut().unwrap().model_owner =
+                format!("{project}:{key}");
+            let c = card(&report);
+            assert_eq!((c.how, c.quiet), (None, false));
+            assert!(
+                c.text.contains(&format!(
+                    "{project} sets that main model for its project only"
+                )),
+                "{}",
+                c.text
+            );
         }
+        report.scan.profiles[0].effort.as_mut().unwrap().model_owner =
+            format!("{file}:env.ANTHROPIC_MODEL");
+        assert!(matches!(card(&report).how, Some(How::Edit(_))));
         // An Opus main gets Fable, with what Fable needs.
         set(&mut report, None, None, Some("claude-opus-5-5"));
         let opus = card(&report);

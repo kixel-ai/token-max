@@ -1961,6 +1961,13 @@ fn add(requests: &mut Requests, strings: &mut Interner, r: Request) -> Option<Te
         if incoming.server_tools.is_some() {
             meta.server_tools = incoming.server_tools.clone();
         }
+    } else {
+        // An older snapshot read after a newer one still names a model the newer omitted.
+        for (old, new) in previous.parts.iter_mut().zip(&parts) {
+            if old.kind == new.kind && old.model.is_none() {
+                old.model = new.model.clone();
+            }
+        }
     }
     let mut answered = None;
     if previous.reference.is_none() {
@@ -2563,17 +2570,23 @@ mod tests {
             ]);
             record
         };
-        write(
-            w.claude.join("projects/project/main.jsonl"),
-            jsonl(&[snapshot(Some("claude-fable-5-2"), 1), snapshot(None, 3)]),
-        );
-        let data = scan(&options(&w)).unwrap();
-        assert_eq!(data.requests.len(), 1);
-        let advisor = &data.requests[0].parts[1];
-        assert_eq!(
-            (advisor.model.as_deref(), advisor.usage.output),
-            (Some("claude-fable-5-2"), Some(3))
-        );
+        // In either order, as copies of a transcript may be read.
+        for records in [
+            [snapshot(Some("claude-fable-5-2"), 1), snapshot(None, 3)],
+            [snapshot(None, 3), snapshot(Some("claude-fable-5-2"), 1)],
+        ] {
+            write(
+                w.claude.join("projects/project/main.jsonl"),
+                jsonl(&records),
+            );
+            let data = scan(&options(&w)).unwrap();
+            assert_eq!(data.requests.len(), 1);
+            let advisor = &data.requests[0].parts[1];
+            assert_eq!(
+                (advisor.model.as_deref(), advisor.usage.output),
+                (Some("claude-fable-5-2"), Some(3))
+            );
+        }
     }
 
     #[test]

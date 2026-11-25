@@ -1507,7 +1507,8 @@ standard when every executor iteration of its request is, since Priority
 Tier is committed per model; otherwise it is unknown. Unpriced requests are
 extrapolated from the priced ones, never below what each is known to cost.
 A T3 instance's requests count on the first line of the settings file it
-shares, since its threads read that file's `advisorModel`. The suggested
+shares, since its threads read that file's `advisorModel`; an instance that
+shares no line's file is left out. The suggested
 advisor is `advisor::pick`: Opus above Haiku 4.5 or later and Sonnet 4.6 or
 later, Fable above Opus 4.6 or later, none above Fable, by the main model's
 canonical ID.

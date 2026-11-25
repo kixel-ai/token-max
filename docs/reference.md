@@ -1686,9 +1686,9 @@ main, and none for a Fable main, which Claude Code pairs only with a Fable
 advisor. It cites the page's claim that a faster main model with a stronger
 advisor "typically costs less than running the stronger model throughout",
 and offers to write `advisorModel` to the profile's settings file. When a
-project's settings file sets the main model, the card names that file as a step
-by hand instead, since the profile's file would set the advisor for every
-project. What the
+project's settings file sets the main model, in `model` or
+`env.ANTHROPIC_MODEL`, the card offers no edit, since an advisor in the
+profile's file would pair with every project's model. What the
 pairing saves or costs is not measured. A main model Claude Code attaches no
 advisor to (Sonnet or Opus before 4.6, Haiku before 4.5), or one token-max
 can't resolve, gets a card that advises nothing.
@@ -1716,7 +1716,8 @@ was assumed. Like the subagent lines it is evidence with no verdict, since the
 advisor's alternative is a stronger main model, which a replay can't price
 the work of. T3 Code picks each thread's main model, so T3 instances get no
 card or line of their own; their threads' advisor calls count on the line of
-the settings file they share.
+the settings file they share. Calls of an instance that shares no native
+line's settings file, as in a scan of only `--t3-dir`, are not counted yet.
 
 ## Messages from other sessions
 

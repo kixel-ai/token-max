@@ -878,12 +878,14 @@ pub(crate) fn subagent_effort_how(owner: &str, profile: &Profile, level: &str) -
             Edit::set("agents.default_subagent_reasoning_effort", level),
         ),
     };
-    owned(
-        owner,
-        profile,
-        vec![(key.into(), vec![edit])],
-        format!("set {owner} to {level}"),
-    )
+    // T3 keeps an instance's variables as entries named in a list.
+    let step = match owner.rsplit_once(".environment.") {
+        Some((list, key)) if list.contains(":providerInstances.") => {
+            format!("set the {key} entry in {list}.environment to {level}")
+        }
+        _ => format!("set {owner} to {level}"),
+    };
+    owned(owner, profile, vec![(key.into(), vec![edit])], step)
 }
 
 /// The edit that sets a main-session default level at `key` in the profile's own file, or

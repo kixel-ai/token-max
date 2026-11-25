@@ -538,6 +538,8 @@ struct SubagentLine<'a> {
     profile: String,
     /// The Claude Code the line's profiles last ran, for those with a recorded request.
     versions: Vec<Option<&'a str>>,
+    /// Whether the line covers more than one profile.
+    shared: bool,
 }
 
 /// The default subagent effort as `vibes` shows it: the level and the model it pairs with,
@@ -569,9 +571,14 @@ fn subagent_item(line: &SubagentLine<'_>, out: &Out<'_>) -> Option<Item> {
         Harness::Codex => None,
     };
     if let Some(version) = ignored {
+        let ran = if line.shared {
+            "One of these profiles' latest sessions ran"
+        } else {
+            "The latest session ran"
+        };
         let _ = write!(
             text,
-            " The latest session ran Claude Code {version}, which ignores CLAUDE_CODE_SUBAGENT_EFFORT: it arrived in 2.{minor}.{patch}, so subagents run at the main session's effort until Claude Code is upgraded."
+            " {ran} Claude Code {version}, which ignores CLAUDE_CODE_SUBAGENT_EFFORT: it arrived in 2.{minor}.{patch}, so its subagents run at the main session's effort. Upgrade Claude Code to 2.{minor}.{patch} or later for the setting to apply."
         );
     }
     let guidance = past_high(level, p.harness);
@@ -581,26 +588,10 @@ fn subagent_item(line: &SubagentLine<'_>, out: &Out<'_>) -> Option<Item> {
             " {guidance} The maintainer's pick for subagents is {SUBAGENT_PICK}. A different effort changes the output tokens, so what {SUBAGENT_PICK} would cost is not measured."
         );
     }
-    let set = guidance
+    // The edit stays on offer beside an upgrade, which token-max does not make itself.
+    let how = guidance
         .is_some()
         .then(|| crate::doctor::subagent_effort_how(&effort.owner, p, SUBAGENT_PICK));
-    let how = match (ignored, set) {
-        (Some(_), set) => {
-            let mut step = format!("upgrade Claude Code to 2.{minor}.{patch} or later");
-            if let Some(set) = set {
-                let set = match set {
-                    How::Manual { step, .. } => step,
-                    How::Edit(_) => format!("set {} to {SUBAGENT_PICK}", effort.owner),
-                };
-                let _ = write!(step, ", and {set}");
-            }
-            Some(How::Manual {
-                step,
-                reason: "token-max does not upgrade Claude Code".into(),
-            })
-        }
-        (None, set) => set,
-    };
     let mut sources: Vec<String> = match p.harness {
         Harness::Claude => vec![
             "The maintainer's pick of a subagent default. Anthropic's guidance:".into(),
@@ -615,7 +606,7 @@ fn subagent_item(line: &SubagentLine<'_>, out: &Out<'_>) -> Option<Item> {
     if ignored.is_some() {
         sources.push(CLAUDE_CHANGELOG.into());
     }
-    let quiet = how.is_none();
+    let quiet = how.is_none() && ignored.is_none();
     Some(Item {
         name: tagged("Subagent default".into(), &line.profile),
         value: if guidance.is_some() {
@@ -6440,13 +6431,30 @@ fn summary(
         .iter()
         .filter(|p| p.agents.effort.is_some());
     for group in crate::rows::groups(set, subagent_owner) {
-        let ids: Vec<&str> = group.ids.iter().map(String::as_str).collect();
-        let line = SubagentLine {
-            lead: group.lead,
-            profile: tag(&group.ids, &subagent_owner, out),
-            versions: crate::doctor::claude_versions(report, &ids),
-        };
-        vibes.extend(subagent_item(&line, out));
+        // Profiles sharing the effort setting can pair it with different subagent models.
+        let mut by_model: IndexMap<Option<&str>, Vec<&Profile>> = IndexMap::default();
+        for p in &group.members {
+            let model = p.agents.model.as_ref().map(|m| m.value.as_str());
+            by_model.entry(model).or_default().push(p);
+        }
+        // Lines split by model share a file, so they name their profiles instead.
+        let split = by_model.len() > 1;
+        for members in by_model.into_values() {
+            let ids: Vec<String> = members.iter().map(|p| p.id.clone()).collect();
+            let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+            let profile = if split {
+                tag(&ids, &|_| String::new(), out)
+            } else {
+                tag(&ids, &subagent_owner, out)
+            };
+            let line = SubagentLine {
+                lead: members[0],
+                profile,
+                versions: crate::doctor::claude_versions(report, &refs),
+                shared: members.len() > 1,
+            };
+            vibes.extend(subagent_item(&line, out));
+        }
     }
     // Lines of one setting that split only because the controls they replay differ name the
     // same file; name their profiles as well, so no two read alike.
@@ -9286,24 +9294,33 @@ mod tests {
 
         // Before 2.1.316, Claude Code ignores it, so the card recommends upgrading.
         let c = card(Harness::Claude, Some("medium"), &variable, "2.1.315").expect("a card");
-        assert!(!c.quiet);
+        assert!(!c.quiet && c.how.is_none(), "{:?}", c.how);
         assert!(
-            c.text.contains("ran Claude Code 2.1.315, which ignores"),
+            c.text
+                .contains("The latest session ran Claude Code 2.1.315, which ignores")
+                && c.text.contains("Upgrade Claude Code to 2.1.316 or later"),
             "{}",
             c.text
         );
         assert!(c.sources.iter().any(|s| s == CLAUDE_CHANGELOG));
-        let Some(How::Manual { step, .. }) = &c.how else {
-            panic!("expected a step: {:?}", c.how)
-        };
-        assert_eq!(step, "upgrade Claude Code to 2.1.316 or later");
+        // Past high, the edit stays on offer beside the upgrade.
         let c = card(Harness::Claude, Some("max"), &variable, "2.1.300").expect("a card");
+        assert!(c.text.contains("ignores") && c.text.contains("prone to overthinking"));
+        assert!(matches!(c.how, Some(How::Edit(_))), "{:?}", c.how);
+
+        // A T3 instance's own environment entry is a step by hand naming its list.
+        let entry = format!(
+            "{ROOT}/t3/settings.json:providerInstances.claudeAgent.environment.CLAUDE_CODE_SUBAGENT_EFFORT"
+        );
+        let c = card(Harness::Claude, Some("max"), &entry, "2.1.316").expect("a card");
         let Some(How::Manual { step, .. }) = &c.how else {
             panic!("expected a step: {:?}", c.how)
         };
         assert_eq!(
             step,
-            &format!("upgrade Claude Code to 2.1.316 or later, and set {variable} to high")
+            &format!(
+                "set the CLAUDE_CODE_SUBAGENT_EFFORT entry in {ROOT}/t3/settings.json:providerInstances.claudeAgent.environment to high"
+            )
         );
 
         // Codex: its own guidance, the edit in config.toml, and no version gate.
@@ -9318,6 +9335,40 @@ mod tests {
         assert_eq!(
             patch.edits[0].path,
             ["agents", "default_subagent_reasoning_effort"]
+        );
+
+        // Profiles sharing the setting but not the subagent model get a card each, named by
+        // profile, so neither's model is shown for the other.
+        let mut report = synthetic();
+        report.checks.clear();
+        report.context.clear();
+        let mut other = crate::test_support::make_profile("other", ROOT);
+        other.root = format!("{ROOT}/other");
+        report.scan.profiles.push(other);
+        for (p, model) in report
+            .scan
+            .profiles
+            .iter_mut()
+            .zip(["claude-haiku-5-5", "claude-sonnet-5-5"])
+        {
+            p.agents.effort = Some(Owned {
+                value: "max".into(),
+                owner: variable.clone(),
+            });
+            p.agents.model = Some(Owned {
+                value: model.into(),
+                owner: "CLAUDE_CODE_SUBAGENT_MODEL".into(),
+            });
+        }
+        let cards: Vec<Item> = advice(&report, ReportOptions::default())
+            .into_iter()
+            .filter(|i| i.name.starts_with("Subagent default"))
+            .collect();
+        assert_eq!(cards.len(), 2, "{cards:?}");
+        assert_ne!(cards[0].name, cards[1].name);
+        assert!(
+            cards[0].text.contains("on claude-haiku-5-5")
+                && cards[1].text.contains("on claude-sonnet-5-5")
         );
     }
 

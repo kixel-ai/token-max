@@ -1582,7 +1582,8 @@ Past `high`, the card quotes the same provider guidance as the main-session
 card and offers the maintainer's pick, `high`, which every model that takes
 effort accepts. The edit sets the variable where it is set now: `env` in the
 profile's Claude `settings.json` or the key in its Codex `config.toml`. A
-shell variable or another file that sets it makes the change a step by hand.
+shell variable, a T3 instance's own `environment` entry, or another file that
+sets it makes the change a step by hand naming that setting.
 An agent file's `effort:` or an Agent call's effort overrides the default and
 is left alone; the [subagent lines](#subagent-models) show it. At or below
 `high` the card advises nothing.
@@ -1590,9 +1591,11 @@ is left alone; the [subagent lines](#subagent-models) show it. At or below
 Claude Code reads `CLAUDE_CODE_SUBAGENT_EFFORT` from 2.1.316
 ([changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md)).
 When a profile's latest request ran an older Claude Code, the card says the
-variable is ignored and gives upgrading as a step by hand, joined with the
-change to `high` when it is past `high`. Only the profile's own settings and
-environment are read; a project's settings that set the variable are not.
+variable is ignored and advises upgrading; past `high` it still offers the
+change to `high`, which applies once Claude Code is upgraded. Profiles that
+share the setting but pair it with different subagent models get a card each.
+Only the profile's own settings and environment, or a T3 instance's, are
+read; a project's settings that set the variable are not.
 
 ### Auto memory in vibes
 

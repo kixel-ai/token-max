@@ -408,6 +408,23 @@ fn claude_controls(
     }
 }
 
+/// Name the T3 settings entry that sets a subagent variable from the instance's own
+/// environment, which otherwise reads as an exported variable.
+fn t3_owned(controls: &mut AgentControls, t3: &crate::model::T3Instance) {
+    let file = join(&[&t3.state, "settings.json"]);
+    for owned in [&mut controls.model, &mut controls.effort]
+        .into_iter()
+        .flatten()
+    {
+        if t3.environment.contains(&owned.owner) {
+            owned.owner = format!(
+                "{file}:providerInstances.{}.environment.{}",
+                t3.instance, owned.owner
+            );
+        }
+    }
+}
+
 /// Resolve every profile's current subagent model and effort controls, and how the project
 /// settings and agent files at each recorded subagent directory change them. A directory
 /// that no longer exists keeps the profile's controls; the recorded model still has to
@@ -446,10 +463,11 @@ pub fn discover(
                 let user = options.settings(&profile.settings_file, Harness::Claude)?;
                 let managed_file = options.managed_settings_file.as_str();
                 let managed = settings(managed_file, Harness::Claude)?;
-                let local_env = if profile.t3.is_none() && active == profile.root {
-                    env
-                } else {
-                    &empty
+                // A T3 instance launches Claude Code under its own environment.
+                let local_env = match &profile.t3 {
+                    Some(t3) => t3.env.as_ref().unwrap_or(&empty),
+                    None if active == profile.root => env,
+                    None => &empty,
                 };
                 let user_scope = SettingsScope {
                     config: &user,
@@ -494,10 +512,17 @@ pub fn discover(
                         }
                         definitions.extend(project_agents[&dir].iter().cloned());
                     }
-                    let scoped = claude_controls(&scopes, local_env, definitions);
+                    let mut scoped = claude_controls(&scopes, local_env, definitions);
+                    if let Some(t3) = &profile.t3 {
+                        t3_owned(&mut scoped, t3);
+                    }
                     if scoped != agents {
                         scoped_dirs.insert(cwd, scoped);
                     }
+                }
+                let mut agents = agents;
+                if let Some(t3) = &profile.t3 {
+                    t3_owned(&mut agents, t3);
                 }
                 agents
             }
@@ -1310,6 +1335,31 @@ mod tests {
     use super::*;
     use crate::model::{CacheContext, ExposureScan, ScanCoverage};
     use crate::test_support::{Workspace, make_profile, make_request, prices};
+
+    #[test]
+    fn a_t3_instances_own_variable_names_its_settings_entry() {
+        let profile = crate::test_support::make_t3_profile("agent", "/root");
+        let mut t3 = profile.t3.expect("a T3 instance");
+        t3.environment = vec!["CLAUDE_CODE_SUBAGENT_EFFORT".into()];
+        let owned = |owner: &str| {
+            Some(Owned {
+                value: "max".into(),
+                owner: owner.into(),
+            })
+        };
+        let mut controls = AgentControls {
+            effort: owned("CLAUDE_CODE_SUBAGENT_EFFORT"),
+            // Inherited from the shell T3 started from, which its settings don't own.
+            model: owned("CLAUDE_CODE_SUBAGENT_MODEL"),
+            ..AgentControls::default()
+        };
+        t3_owned(&mut controls, &t3);
+        assert_eq!(
+            controls.effort.unwrap().owner,
+            "/state/settings.json:providerInstances.agent.environment.CLAUDE_CODE_SUBAGENT_EFFORT"
+        );
+        assert_eq!(controls.model.unwrap().owner, "CLAUDE_CODE_SUBAGENT_MODEL");
+    }
 
     fn spawn(kind: &str) -> Subagent {
         Subagent {

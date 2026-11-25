@@ -34,8 +34,3 @@ Decided 2026-11-25 (maintainer, /quest-run): ✅ 0.1.0 waits for
 `Main-session default` card landed, accepting it (Sonnet to Opus) and the
 advisor card (`opus`) in one walk would write an Opus advisor under an Opus
 main.
-
-## Required
-
-- [Advisor after default](/quest/m1/vibes/advisor-after-default.md) - ranks the advisor card against a default accepted in the same walk, so 0.1.0 can't write an Opus advisor under an Opus main
-- [Short doctor output](/quest/m1/short/README.md) - the short report and walk the page and first release show

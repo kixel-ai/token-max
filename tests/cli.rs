@@ -1947,6 +1947,42 @@ mod unix {
         (status, out.join().unwrap(), err.join().unwrap())
     }
 
+    #[test]
+    fn vibes_ranks_the_advisor_against_a_default_accepted_in_the_same_walk() {
+        let w = Workspace::new();
+        w.fixture();
+        w.settings(r#"{"model":"claude-sonnet-5-5","cleanupPeriodDays":365}"#);
+        let mut base = vec!["vibes".to_string()];
+        base.extend(prices_args(&w));
+        let base: Vec<&str> = base.iter().map(String::as_str).collect();
+        // Off a terminal, the advisor card ranks against Sonnet and names what the default's
+        // change would do.
+        let (_, stdout, _) = run(&mut command(&w, &base));
+        let note = "Accepting the Main-session default card's change to claude-opus-5-5 suggests a Fable advisor instead.";
+        assert!(
+            stdout.contains("none -> opus") && stdout.contains(note),
+            "{stdout}"
+        );
+        // A plan pays, no to the Bash cap and the window, yes to the Opus default, then the advisor card is rebuilt on it.
+        let mut c = command(&w, &[&base[..], &["--plain"]].concat());
+        let (status, stdout, stderr) = typed(&mut c, b"p\nn\nn\ny\ny\ny\n");
+        assert_eq!(status, 0, "{stderr}");
+        let advisor = &stdout[stdout
+            .find("Advisor model")
+            .unwrap_or_else(|| panic!("{stdout}"))..];
+        assert!(
+            advisor.contains("none -> fable") && !advisor.contains(note),
+            "{stdout}"
+        );
+        let settings: Value =
+            serde_json::from_str(&std::fs::read_to_string(w.claude.join("settings.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            settings,
+            json!({"model": "claude-opus-5-5", "cleanupPeriodDays": 365, "advisorModel": "fable"})
+        );
+    }
+
     /// Every name in `dir`.
     fn names(dir: &Path) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(dir)

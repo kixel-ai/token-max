@@ -281,9 +281,12 @@ fn section<'a>(text: &'a str, host: &str) -> &'a str {
 /// every host's spend; and its evidence. `host` is None for a report of that host alone.
 fn view(text: &str, host: Option<&str>) -> String {
     let rows_end = text.find("\n  EVIDENCE\n").unwrap_or(text.len());
-    let mut rows: Vec<String> = vec![];
+    // Each row, and whether lines it sums follow it, which `--details` lists in its place.
+    let mut rows: Vec<(String, bool)> = vec![];
     let mut heading = "";
     let mut keep = false;
+    // The last top-level row kept, which a member line under it replaces.
+    let mut parent: Option<usize> = None;
     for line in text[..rows_end].lines() {
         if line.starts_with("token-max") {
             continue;
@@ -291,11 +294,11 @@ fn view(text: &str, host: Option<&str>) -> String {
         let Some(body) = line.strip_prefix("  ") else {
             continue;
         };
-        // A section's members sit under its row, two columns in.
-        let body = body
+        // A row's members sit under it, two columns in.
+        let member = body
             .strip_prefix("  ")
-            .filter(|b| b.starts_with(|c: char| c.is_ascii_lowercase()))
-            .unwrap_or(body);
+            .filter(|b| b.starts_with(|c: char| c.is_ascii_lowercase()));
+        let body = member.unwrap_or(body);
         if body.starts_with(|c: char| c.is_ascii_uppercase())
             && body
                 .split("  ")
@@ -313,6 +316,7 @@ fn view(text: &str, host: Option<&str>) -> String {
                 let words: Vec<&str> = body.split_whitespace().collect();
                 rows.last_mut()
                     .unwrap()
+                    .0
                     .push_str(&format!("\n  {}", words.join(" ")));
             }
             continue;
@@ -320,6 +324,9 @@ fn view(text: &str, host: Option<&str>) -> String {
         if !body.starts_with(|c: char| c.is_ascii_lowercase()) || body.starts_with("token-max") {
             keep = false;
             continue;
+        }
+        if let (Some(_), Some(at)) = (member, parent) {
+            rows[at].1 = true;
         }
         let mut words: Vec<String> = vec![];
         keep = host.is_none();
@@ -340,10 +347,18 @@ fn view(text: &str, host: Option<&str>) -> String {
                 _ => words.push(word.to_string()),
             }
         }
+        if member.is_none() {
+            parent = keep.then_some(rows.len());
+        }
         if keep {
-            rows.push(format!("{heading}: {}", words.join(" ")));
+            rows.push((format!("{heading}: {}", words.join(" ")), false));
         }
     }
+    let mut rows: Vec<String> = rows
+        .into_iter()
+        .filter(|(_, summed)| !summed)
+        .map(|(row, _)| row)
+        .collect();
     rows.sort();
     let block = match host {
         Some(host) => section(text, host),
@@ -1087,7 +1102,10 @@ fn the_coordinator_copies_itself_once_and_replaces_older_copies() {
     for _ in 0..2 {
         let (status, stdout, stderr) = hosts.run(&["--ssh", "devbox"]);
         assert_eq!(status, 0, "{stderr}");
-        assert!(stdout.contains(" [devbox] "), "{stdout}");
+        assert!(
+            stdout.starts_with("token-max: total over 2 hosts  "),
+            "{stdout}"
+        );
         assert_eq!(copies(), 1);
     }
     let cached: Vec<_> = std::fs::read_dir(&cache)
@@ -1115,7 +1133,10 @@ fn another_platform_runs_its_installed_build() {
     script(&cargo.join("token-max"), "exit 2");
     let (status, stdout, stderr) = hosts.run(&["--ssh", "installed"]);
     assert_eq!(status, 0, "{stderr}");
-    assert!(stdout.contains(" [installed] "), "{stdout}");
+    assert!(
+        stdout.starts_with("token-max: total over 2 hosts  "),
+        "{stdout}"
+    );
     assert!(!hosts.cache("installed").exists());
 }
 
@@ -1790,10 +1811,10 @@ fn doctor_hands_every_host_to_vibes_from_the_same_scan() {
         "{output}"
     );
     assert_eq!(flat.matches(credit).count(), 2, "{output}");
-    for host in ["this host", "devbox", "laptop"] {
-        let row = format!("keep Main-agent prompt cache TTL 1h saves <$0.01/mo 4% [{host}]");
-        assert!(flat.contains(&row), "{host}: {output}");
-    }
+    // One line sums a setting kept on every host, each host's history its own.
+    let row =
+        "keep Main-agent prompt cache TTL 3 kept saves <$0.01/mo 13% [this host, devbox, laptop]";
+    assert!(flat.contains(row), "{output}");
 }
 
 #[test]

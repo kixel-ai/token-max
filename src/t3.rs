@@ -688,6 +688,10 @@ pub(crate) fn discover(
             instances: instances.keys().cloned().collect(),
             text_generation: Some(text_generation(&settings, &instances, &file)),
         };
+        // Recorded before any home is probed: policy may have moved a missing home elsewhere.
+        if managed_policy_unresolved() {
+            state.exclusions.push(POLICY_GAP.into());
+        }
         for (id, instance) in instances {
             let enabled = instance.resolved_enabled();
             let harness = match instance.driver.as_str() {
@@ -852,9 +856,6 @@ pub(crate) fn discover(
             }
             if policy_unresolved {
                 limitations.push(POLICY_GAP.into());
-                if !state.exclusions.iter().any(|s| s == POLICY_GAP) {
-                    state.exclusions.push(POLICY_GAP.into());
-                }
                 profile.ttl.main.value = None;
                 profile.ttl.subagent.value = None;
             }

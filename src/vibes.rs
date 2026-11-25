@@ -114,16 +114,29 @@ pub fn window_cap(harness: Harness) -> i64 {
 }
 
 /// `items` as they read once `doctor`'s walk has written the changes of the lines `written`.
+/// The cards that wait on `vibes`' own walk are kept for it.
 pub fn settled(items: Vec<Item>, written: &[Origin]) -> Vec<Item> {
     items
         .into_iter()
         .map(|mut item| {
-            let after = std::mem::take(&mut item.after)
+            let (walked, after): (Vec<After>, Vec<After>) = std::mem::take(&mut item.after)
+                .into_iter()
+                .partition(After::walked);
+            item.after = walked;
+            let after = after
                 .into_iter()
                 .find(|a| a.origins.iter().any(|o| written.contains(o)));
             after.map_or(item, |a| *a.item)
         })
         .collect()
+}
+
+impl After {
+    /// Whether the card replaces its item in `vibes`' walk, once an earlier card's change
+    /// is accepted, rather than after `doctor`'s walk writes a line's change.
+    fn walked(&self) -> bool {
+        self.origins.iter().all(|o| matches!(o, Origin::Vibe(_)))
+    }
 }
 
 /// How many of `items` are worth `doctor` offering `vibes` for.
@@ -133,8 +146,10 @@ pub fn pending(items: &[Item]) -> usize {
 
 /// The changes `items` name as the walk's fixes, each tied to its item. Two items that make
 /// one edit share a fix, and the second of two values for one setting is left by hand.
+/// A card that the walk rebuilds offers its own change, never weighed against the one of the
+/// card it replaces.
 pub fn fixes(items: &[Item]) -> Vec<Fix> {
-    let fixes = items.iter().enumerate().filter_map(|(index, item)| {
+    let fix = |item: &Item, origin: Origin| {
         Some(Fix {
             name: item.name.clone(),
             value: item.value.clone(),
@@ -146,7 +161,7 @@ pub fn fixes(items: &[Item]) -> Vec<Fix> {
             what: String::new(),
             evidence: String::new(),
             how: item.how.clone()?,
-            origins: vec![Origin::Vibe(index)],
+            origins: vec![origin],
             // Each item names its own setting and profile, so none shares a question.
             section: Section {
                 kind: Kind::Setting,
@@ -157,8 +172,65 @@ pub fn fixes(items: &[Item]) -> Vec<Fix> {
             profile: String::new(),
             removal: vec![],
         })
-    });
-    crate::doctor::fixes_from(fixes.collect())
+    };
+    let base: Vec<Fix> = items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| fix(item, Origin::Vibe(index)))
+        .collect();
+    let mut fixes = crate::doctor::fixes_from(base.clone());
+    // Cards rebuilt on the same accepted changes show together, so each group's changes are
+    // weighed in place of the cards they replace, after every other card's: an identical edit
+    // shares its question, and a clash leaves one by hand.
+    let walked = || {
+        items.iter().enumerate().flat_map(|(index, item)| {
+            item.after
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| a.walked())
+                .map(move |(n, a)| (index, n, a))
+        })
+    };
+    let mut groups: Vec<&[Origin]> = vec![];
+    for (_, _, after) in walked() {
+        if !groups.contains(&after.origins.as_slice()) {
+            groups.push(&after.origins);
+        }
+    }
+    for group in groups {
+        let mut replaced = vec![];
+        let mut rebuilt = vec![];
+        for (index, n, after) in walked().filter(|(_, _, a)| a.origins == group) {
+            replaced.push(Origin::Vibe(index));
+            rebuilt.extend(fix(&after.item, Origin::Walked(index, n)));
+        }
+        let others = base
+            .iter()
+            .filter(|f| !f.origins.iter().any(|o| replaced.contains(o)))
+            .cloned();
+        for weighed in crate::doctor::fixes_from(others.chain(rebuilt).collect()) {
+            let (walked, kept): (Vec<Origin>, Vec<Origin>) = weighed
+                .origins
+                .iter()
+                .partition(|o| matches!(o, Origin::Walked(..)));
+            if walked.is_empty() {
+                continue;
+            }
+            // A card it shares an edit with here may clash with a card it replaces, and is
+            // then by hand on its own.
+            match fixes
+                .iter_mut()
+                .find(|f| !kept.is_empty() && f.how == weighed.how)
+            {
+                Some(same) => same.origins.extend(walked),
+                None => fixes.push(Fix {
+                    origins: walked,
+                    ..weighed
+                }),
+            }
+        }
+    }
+    fixes
 }
 
 /// The host that owns `items`' changes, each checked against its file as it is now. `home`
@@ -301,14 +373,26 @@ pub fn ask(
         let Some(offers) = host.offers else { continue };
         // Each offer answered so far: two items can name one edit.
         let mut answered = vec![];
+        // The items whose change was accepted, which a later card may be rebuilt on.
+        let mut accepted: Vec<Origin> = vec![];
         for (index, item) in host.items.iter().enumerate() {
             n += 1;
+            let rebuilt = item
+                .after
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| a.walked())
+                .find(|(_, a)| a.origins.iter().any(|o| accepted.contains(o)));
+            let (item, origin) = match rebuilt {
+                Some((k, after)) => (&*after.item, Origin::Walked(index, k)),
+                None => (item, Origin::Vibe(index)),
+            };
             // A card with nothing to act on, such as one leaving its change to `doctor`'s walk
             // of several hosts, asks nothing.
-            let change = offers.change(Origin::Vibe(index)).filter(|_| !item.quiet);
-            let offer = match change {
-                Some(Change::Offer(offer, _)) => Some(offer),
-                _ => None,
+            let change = offers.change(origin).filter(|_| !item.quiet);
+            let (offer, origins) = match change {
+                Some(Change::Offer(offer, fix)) => (Some(offer), fix.origins.as_slice()),
+                _ => (None, &[][..]),
             };
             if !going {
                 continue;
@@ -336,6 +420,9 @@ pub fn ask(
             let answer =
                 crate::doctor::answer(&host.style.prompt("Accept?", false), input, output)?;
             let yes = answer == Answer::Yes;
+            if yes {
+                accepted.extend(origins);
+            }
             selection
                 .apply(offers, Event::Choose { offer, yes })
                 .expect("the walk answers only what it offers");
@@ -526,6 +613,97 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(w.claude.join("settings.json")).unwrap())
                 .unwrap();
         assert_eq!(settings, json!({"env": {MAX: "240000", DEFAULT: "240000"}}));
+    }
+
+    #[test]
+    fn a_card_rebuilt_on_an_accepted_change_replaces_its_card_in_the_walk() {
+        let w = Workspace::new();
+        std::fs::write(w.claude.join("settings.json"), "{}\n").unwrap();
+        let set = |name: &str, key: &str, value: &str| Item {
+            value: format!("none -> {value}"),
+            how: Some(How::Edit(Patch {
+                file: w
+                    .claude
+                    .join("settings.json")
+                    .to_string_lossy()
+                    .into_owned(),
+                harness: Harness::Claude,
+                edits: vec![Edit {
+                    path: vec![key.into()],
+                    value: json!(value),
+                    op: Op::Set,
+                }],
+            })),
+            ..card(name)
+        };
+        let mut advisor = set("Advisor model", "advisorModel", "opus");
+        // Unwritten by doctor, the rebuilt card waits for the walk.
+        advisor.after.push(After {
+            origins: vec![Origin::Vibe(0)],
+            item: Box::new(set("Advisor model", "advisorModel", "fable")),
+        });
+        let items = settled(
+            vec![
+                set("Main-session default", "model", "claude-opus-5-5"),
+                advisor,
+            ],
+            &[Origin::Check(0)],
+        );
+        assert_eq!(items[1].after.len(), 1);
+        // Both changes are offered: the rebuilt one is not a clash with the one it replaces.
+        for (answers, shown, written) in [
+            (
+                "y\ny\n",
+                "fable",
+                json!({"model": "claude-opus-5-5", "advisorModel": "fable"}),
+            ),
+            ("n\ny\n", "opus", json!({"advisorModel": "opus"})),
+        ] {
+            std::fs::write(w.claude.join("settings.json"), "{}\n").unwrap();
+            let (text, events, owner) = walk(&w, &items, answers);
+            assert_eq!(text.matches("Accept?").count(), 2, "{text}");
+            assert!(text.contains(&format!("none -> {shown}\n")), "{text}");
+            assert!(!text.contains("by hand"), "{text}");
+            crate::doctor::write(&owner.plan(&events).unwrap()).unwrap();
+            let settings: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(w.claude.join("settings.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(settings, written, "{answers:?}");
+        }
+        // Off a terminal, nothing is accepted, so the card stays as built.
+        let style = style(&w);
+        let hosts = [Host {
+            label: None,
+            items: &resolved(items.clone()),
+            offers: None,
+            style: &style,
+        }];
+        let text = text(&hosts, &style);
+        assert!(
+            text.contains("none -> opus") && !text.contains("fable"),
+            "{text}"
+        );
+        // Another card keeping its own value for the setting makes the rebuilt one by hand;
+        // one with the rebuilt card's value is by hand already, against the card replaced.
+        for (value, by_hand) in [("opus", true), ("fable", false)] {
+            let mut items = items.clone();
+            items.push(set("Advisor model (other)", "advisorModel", value));
+            std::fs::write(w.claude.join("settings.json"), "{}\n").unwrap();
+            let (text, _, _) = walk(&w, &items, "y\nn\nn\n");
+            let rebuilt = &text[text.find("[2/3]").unwrap()..text.find("[3/3]").unwrap()];
+            assert_eq!(rebuilt.contains("by hand"), by_hand, "{text}");
+            assert_eq!(text.matches("Accept?").count(), 2, "{text}");
+        }
+        // Two cards rebuilt on the same change are weighed together, not against the cards
+        // they replace: they agree, so the second shares the first's question.
+        let mut items = items.clone();
+        items.push(items[1].clone());
+        let (text, events, _) = walk(&w, &items, "y\ny\n");
+        assert!(!text.contains("by hand"), "{text}");
+        assert!(text.contains("The same edit as a card above."), "{text}");
+        assert_eq!(text.matches("none -> fable").count(), 2, "{text}");
+        assert_eq!(events.len(), 2);
     }
 
     #[test]

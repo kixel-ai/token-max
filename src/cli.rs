@@ -80,8 +80,9 @@ skills or the cache TTLs (y, n, s to split a section, or q to stop), shows the a
 edits as a diff of each file, and writes the profile's own settings.json or config.toml
 only after a final yes. A change another owner would override, such as a shell variable,
 a project or managed settings file or T3, is listed to make by hand. Without a terminal it
-prints the report, each change or section naming its settings, and edits nothing;
---details lists each section's changes with their edits.
+prints the report, each change or section naming its settings and the rest one line
+per kind of feature or setting, and edits nothing; --details lists every line under its
+row, and each edit's exact JSON or TOML.
 
 With --defaults it reads every user, project and local settings file, T3 Code's settings
 and the shell's setting variables as unset, so each setting is at its Claude Code or Codex

@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::defaults::Credit;
-use crate::doctor::{Fix, How, Saved, Total};
+use crate::doctor::{Fix, How, Placed, Saved, Total, place};
 use crate::model::{CheckResult, Estimate, HistoricalCost, Margin, Report, Request, Scan};
 use crate::report::{Spend, spend_text};
 
@@ -156,21 +156,26 @@ impl Checked {
     }
 
     /// What the changes found so far save together, their shares unknown until the spend is
-    /// summed. As the walk lists them, biggest saving first, an edit two lines make keeps the
-    /// first line's saving only.
+    /// summed, counted as the walk lists them: biggest saving first, an edit two lines make
+    /// once, with the first line's saving, and an edit that wants a setting another line
+    /// sets at another value as a step by hand.
     pub fn savings(&self) -> Total {
         let mut found: Vec<&Finding> = self.found.iter().collect();
         found.sort_by(|a, b| crate::report::by_saving(a.saved.saving, b.saved.saving));
-        let mut edits: Vec<&How> = vec![];
+        let manual = How::Manual {
+            step: String::new(),
+            reason: String::new(),
+        };
+        let mut listed: Vec<&How> = vec![];
         let mut total = Total::default();
-        for offered in found {
-            if let Some(edit) = &offered.edit {
-                if edits.contains(&edit) {
-                    continue;
-                }
-                edits.push(edit);
+        for finding in found {
+            let how = finding.edit.as_ref().unwrap_or(&manual);
+            match place(&listed, how) {
+                Placed::Same(_) => continue,
+                Placed::Conflicts(_) => listed.push(&manual),
+                Placed::New => listed.push(how),
             }
-            total.count(&offered.saved);
+            total.count(&finding.saved);
         }
         total
     }
@@ -322,6 +327,7 @@ mod tests {
 
     /// Two lines that make one edit, such as a compaction window for two profiles sharing a
     /// settings file, count once as the walk lists them: the bigger saving's line keeps it.
+    /// Each line that wants another value for the setting is left by hand and counts.
     #[test]
     fn an_edit_two_checks_find_counts_once() {
         use crate::doctor::{Edit, Op, Patch};
@@ -359,6 +365,15 @@ mod tests {
         ];
         let tallied = checked.savings().tally(true);
         assert_eq!(tallied.measured.as_deref(), Some("found $63/mo more"));
+        // Two lines that want the window the bigger saving's line doesn't are each left by
+        // hand, so both count, as the walk lists them.
+        checked.found = vec![
+            finding(50.0, edit(400_000)),
+            finding(20.0, edit(300_000)),
+            finding(10.0, edit(300_000)),
+        ];
+        let tallied = checked.savings().tally(true);
+        assert_eq!(tallied.measured.as_deref(), Some("found $80/mo more"));
     }
 
     fn host(requests: u64, spend: f64, margin: Option<Margin>, monthly: f64) -> Totals {

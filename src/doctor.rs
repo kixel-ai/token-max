@@ -216,29 +216,52 @@ pub fn fixes(report: &Report, unicode: bool) -> Vec<Fix> {
 pub(crate) fn fixes_from(all: Vec<Fix>) -> Vec<Fix> {
     let mut fixes: Vec<Fix> = vec![];
     for mut fix in all {
-        if let Some(same) = fixes
-            .iter_mut()
-            .find(|f| matches!(f.how, How::Edit(_)) && f.how == fix.how)
-        {
-            same.origins.extend(fix.origins);
+        let listed: Vec<&How> = fixes.iter().map(|f| &f.how).collect();
+        let placed = place(&listed, &fix.how);
+        if let Placed::Same(at) = placed {
+            let origins = std::mem::take(&mut fix.origins);
+            fixes[at].origins.extend(origins);
             continue;
         }
-        // Two lines that want one setting at different values, such as checks for two
-        // projects that share the user file, leave the choice to the person.
-        if let How::Edit(patch) = &fix.how
-            && let Some(other) = fixes.iter().find(|f| conflicts(&f.how, patch))
-        {
+        if let (Placed::Conflicts(at), How::Edit(patch)) = (placed, &fix.how) {
             fix.how = How::Manual {
                 step: steps(patch),
                 reason: format!(
                     "{} wants a different value for the same setting",
-                    other.name
+                    fixes[at].name
                 ),
             };
         }
         fixes.push(fix);
     }
     fixes
+}
+
+/// Where a change carried out as `how` goes among the changes `listed` before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Placed {
+    /// The change at this index makes the same edit, so the two are listed once.
+    Same(usize),
+    /// The change at this index sets the same setting to another value, so this one is left
+    /// to do by hand, still listed.
+    Conflicts(usize),
+    New,
+}
+
+/// Where the walk lists a change carried out as `how`, after those `listed` already: an edit
+/// one of them makes is listed once, and one that wants a setting at another value, such as
+/// checks for two projects that share the user file, leaves the choice to the person.
+pub(crate) fn place(listed: &[&How], how: &How) -> Placed {
+    let How::Edit(patch) = how else {
+        return Placed::New;
+    };
+    if let Some(at) = listed.iter().position(|l| *l == how) {
+        return Placed::Same(at);
+    }
+    match listed.iter().position(|l| conflicts(l, patch)) {
+        Some(at) => Placed::Conflicts(at),
+        None => Placed::New,
+    }
 }
 
 /// Whether `how` sets a setting `patch` also sets, to another value, in the same file or

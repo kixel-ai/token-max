@@ -151,9 +151,9 @@ fn setting_start(text: &str) -> Option<usize> {
     }
 }
 
-/// A plain report's line whose heading starts with `head`: its verdict word, heading
-/// (name, value, figure and percent) with padding collapsed, and the evidence under it,
-/// which only details show. The evidence cards after the lines are not searched.
+/// A plain report's line whose heading starts with `head`, a section's member included: its
+/// verdict word, heading (name, value, figure and percent) with padding collapsed, and the
+/// evidence under it, which only details show. The evidence cards after the lines are not searched.
 fn report_line(text: &str, head: &str) -> (String, String, String) {
     // Every line but the header sits inside the report's two-cell margin.
     let lines: Vec<&str> = text
@@ -165,6 +165,11 @@ fn report_line(text: &str, head: &str) -> (String, String, String) {
         .iter()
         .enumerate()
         .find_map(|(i, line)| {
+            // A section's members sit two cells in under its row.
+            let (line, margin) = match line.strip_prefix("  ") {
+                Some(member) => (member, "           "),
+                None => (*line, "         "),
+            };
             let (word, _) = line.split_once(' ')?;
             if !["change", "consider", "keep", "unknown", "info"].contains(&word) {
                 return None;
@@ -176,7 +181,7 @@ fn report_line(text: &str, head: &str) -> (String, String, String) {
             let under = |n: usize| {
                 lines
                     .get(i + n)
-                    .and_then(|l| l.strip_prefix("         "))
+                    .and_then(|l| l.strip_prefix(margin))
                     .unwrap_or_default()
             };
             // Details open each line with what it does, then its evidence.
@@ -260,6 +265,7 @@ fn analysis(
         since: None,
         now: NOW,
         max_cost_per_use_usd,
+        reading: None,
     })
     .unwrap()
 }
@@ -405,19 +411,36 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     assert!(!report.contains("WARNINGS"), "{report}");
     assert!(
         report.ends_with(
-            "\n\n  token-max vibes has 2 pieces of advice the transcripts can't price. Run token-max vibes with the same profile, host, --since and price options to see them.\n"
+            "\n\n  token-max vibes has 3 pieces of advice the transcripts can't price. Run token-max vibes with the same profile, host, --since and price options to see them.\n"
         ),
         "{report}"
     );
-    // The same scan's advice: one cited card, its change named and not made, exit 0.
+    // The same scan's advice: cited cards, each change named and not made, exit 0.
     let (status, stdout, stderr) = invoke("vibes", &[]);
     assert_eq!((status, stderr.as_str()), (0, ""), "{stdout}");
+    let (cards, advisor) = stdout.split_at(
+        stdout
+            .find("\n  [5/5] Advisor model  not measured\n")
+            .unwrap_or_else(|| panic!("{stdout}")),
+    );
     assert_eq!(
-        stdout,
+        cards,
         format!(
-            "token-max vibes: 2 pieces of advice the transcripts can't price.\n  None of it is measured, so none of it is a verdict. Each card names whose advice it is.\n\n  [1/4] Bash timeout cap  not measured\n        2h -> 4m\n        What    The longest Claude waits on a foreground Bash command before Claude Code moves it to the background.\n        Advice  A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess. A command past the cap is not killed: it keeps running in the background, where Claude checks on it in later turns. Some commands need longer in the foreground; keep the cap if yours do. Project and local settings, which override it, are not read.\n        Source  The maintainer's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching\n        Change  \"env\": {{\"BASH_MAX_TIMEOUT_MS\": \"240000\"}} in ~{0}.claude{0}settings.json\n\n  [2/4] Auto memory  not measured\n        What    Auto memory lets Claude write notes for itself and loads them into every session.\n        Advice  0 of 1 main session (0%) in the window ran in a repository with a CLAUDE.md or AGENTS.md, counting as without 1 session whose transcript recorded loading none and whose directory is gone or unrecorded. Outside a repository, memory may be the only place a fact is kept, so turning it off is not advised. doctor's line could not price it over the window (never read back or written).\n        Source  The maintainer's pick: a lasting fact about a project belongs in its repository. How memory works: https://code.claude.com/docs/en/memory#auto-memory (2026-11-11)\n\n  [3/4] Auto-compact window (claude-opus-5-5)  not measured\n        967k -> 400k\n        What    How large a conversation grows before it is automatically summarized and continued from the summary.\n        Advice  No setting names it, so Claude Code compacts this model near 967k, its window for the model. The maintainer would cap it at 400k for better output, not a smaller bill: a smaller window compacts sooner, so the model works from a shorter context. Anthropic's docs say accuracy and recall degrade as a context grows. doctor's auto-compact window line keeps it on cost. Against the 967k window, its replay of a 400k window changes no recorded request, so it costs the same at API prices. The cap is advice beside that line, not its verdict.\n        Source  The maintainer's pick, for output quality rather than cost. Anthropic's docs on context rot: https://platform.claude.com/docs/en/build-with-claude/context-windows\n        Change  \"modelSettings\": {{\"claude-opus-5-5\": {{\"autoCompactWindow\": 400000}}}} in ~{0}.claude{0}settings.json\n\n  [4/4] Main-session default  not measured\n        What    The model and reasoning effort a main session starts with.\n        Advice  Defaults to claude-opus-5-5 at medium, the maintainer's pick. Ran claude-opus-5-5 at an unrecorded effort 2 times, $0.01.\n        Source  The maintainer's pick of a default. Anthropic's guidance: https://claude.dev/blog/which-claude-model-should-you-build-with/ https://code.claude.com/docs/en/model-config#choose-an-effort-level\n",
+            "token-max vibes: 3 pieces of advice the transcripts can't price.\n  None of it is measured, so none of it is a verdict. Each card names whose advice it is.\n\n  [1/5] Bash timeout cap  not measured\n        2h -> 4m\n        What    The longest Claude waits on a foreground Bash command before Claude Code moves it to the background.\n        Advice  A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess. A command past the cap is not killed: it keeps running in the background, where Claude checks on it in later turns. Some commands need longer in the foreground; keep the cap if yours do. Project and local settings, which override it, are not read.\n        Source  The maintainer's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching\n        Change  \"env\": {{\"BASH_MAX_TIMEOUT_MS\": \"240000\"}} in ~{0}.claude{0}settings.json\n\n  [2/5] Auto memory  not measured\n        What    Auto memory lets Claude write notes for itself and loads them into every session.\n        Advice  0 of 1 main session (0%) in the window ran in a repository with a CLAUDE.md or AGENTS.md, counting as without 1 session whose transcript recorded loading none and whose directory is gone or unrecorded. Outside a repository, memory may be the only place a fact is kept, so turning it off is not advised. doctor's line could not price it over the window (never read back or written).\n        Source  The maintainer's pick: a lasting fact about a project belongs in its repository. How memory works: https://code.claude.com/docs/en/memory#auto-memory (2026-11-11)\n\n  [3/5] Auto-compact window (claude-opus-5-5)  not measured\n        967k -> 400k\n        What    How large a conversation grows before it is automatically summarized and continued from the summary.\n        Advice  No setting names it, so Claude Code compacts this model near 967k, its window for the model. The maintainer would cap it at 400k for better output, not a smaller bill: a smaller window compacts sooner, so the model works from a shorter context. Anthropic's docs say accuracy and recall degrade as a context grows. doctor's auto-compact window line keeps it on cost. Against the 967k window, its replay of a 400k window changes no recorded request, so it costs the same at API prices. The cap is advice beside that line, not its verdict.\n        Source  The maintainer's pick, for output quality rather than cost. Anthropic's docs on context rot: https://platform.claude.com/docs/en/build-with-claude/context-windows\n        Change  \"modelSettings\": {{\"claude-opus-5-5\": {{\"autoCompactWindow\": 400000}}}} in ~{0}.claude{0}settings.json\n\n  [4/5] Main-session default  not measured\n        What    The model and reasoning effort a main session starts with.\n        Advice  Defaults to claude-opus-5-5 at medium, the maintainer's pick. Ran claude-opus-5-5 at an unrecorded effort 2 times, $0.01.\n        Source  The maintainer's pick of a default. Anthropic's guidance: https://claude.dev/blog/which-claude-model-should-you-build-with/ https://code.claude.com/docs/en/model-config#choose-an-effort-level\n",
             std::path::MAIN_SEPARATOR
         )
+    );
+    // The fixture's Opus main gets a Fable advisor, one rank up. No setting names that main
+    // model, which a session ran on, so the card says another session may run another.
+    assert!(
+        advisor.starts_with("\n  [5/5] Advisor model  not measured\n        none -> fable\n")
+            && advisor.contains("Fable ranks one above claude-opus-5-5, the main-session default (the latest recorded main-session model).")
+            && advisor.contains("No setting names the main model")
+            && advisor.ends_with(&format!(
+                "        Change  \"advisorModel\": \"fable\" in ~{0}.claude{0}settings.json\n",
+                std::path::MAIN_SEPARATOR
+            )),
+        "{advisor}"
     );
     assert_eq!(
         std::fs::read_to_string(w.claude.join("settings.json")).unwrap(),
@@ -426,10 +449,10 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     // Settings pretended away are not the ones vibes reads, so --defaults names no count.
     let (_, report, _) = invoke("doctor", &["--defaults"]);
     assert!(!report.contains("token-max vibes"), "{report}");
-    // A cap already at the margin and a window at the maintainer's keep their cards, and
-    // doctor has nothing to name.
+    // A cap already at the margin, a window at the maintainer's and an advisor already set
+    // keep their cards, and doctor has nothing to name.
     w.settings(
-        r#"{"promptCacheTtl":"1h","autoCompactWindow":400000,"cleanupPeriodDays":365,"env":{"BASH_MAX_TIMEOUT_MS":"3300000"}}"#,
+        r#"{"promptCacheTtl":"1h","autoCompactWindow":400000,"advisorModel":"fable","cleanupPeriodDays":365,"env":{"BASH_MAX_TIMEOUT_MS":"3300000"}}"#,
     );
     let (status, report, _) = invoke("doctor", &[]);
     assert_eq!(status, 0, "{report}");
@@ -438,12 +461,13 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     assert_eq!(status, 0);
     // The heading counts advice as doctor does, so the card that advises nothing is not in it.
     assert!(
-        stdout.starts_with("token-max vibes: no advice for these settings.\n\n  [1/4] "),
+        stdout.starts_with("token-max vibes: no advice for these settings.\n\n  [1/5] "),
         "{stdout}"
     );
     assert!(
-        stdout.contains("\n  [1/4] Bash timeout cap  not measured\n        What    ")
-            && stdout.contains("\n  [3/4] Auto-compact window (claude-opus-5-5)  not measured\n        What    ")
+        stdout.contains("\n  [1/5] Bash timeout cap  not measured\n        What    ")
+            && stdout.contains("\n  [3/5] Auto-compact window (claude-opus-5-5)  not measured\n        What    ")
+            && stdout.contains("\n  [5/5] Advisor model  not measured\n        What    ")
             && stdout.contains("Set to 400k. That is at or under the 400k window the maintainer caps it at, so there is nothing to change.")
             && stdout.contains("Capped at 55m, the margin suggested under the 1h cache, the current main-agent cache TTL setting.")
             && !stdout.contains("Change"),
@@ -519,10 +543,10 @@ fn vibes_advises_memory_off_when_most_sessions_ran_in_a_repository() {
         std::fs::write(w.transcript(), text).unwrap();
     };
     session(&repo.join("src"), &[]);
-    // Memory is on by default; a 55m cap under a 1h cache, a window at the maintainer's cap
-    // and a year of transcripts leave the other cards quiet.
+    // Memory is on by default; a 55m cap under a 1h cache, a window at the maintainer's cap,
+    // a year of transcripts and an advisor already set leave the other cards quiet.
     w.settings(
-        r#"{"promptCacheTtl":"1h","autoCompactWindow":400000,"cleanupPeriodDays":365,"env":{"BASH_MAX_TIMEOUT_MS":"3300000"}}"#,
+        r#"{"promptCacheTtl":"1h","autoCompactWindow":400000,"advisorModel":"fable","cleanupPeriodDays":365,"env":{"BASH_MAX_TIMEOUT_MS":"3300000"}}"#,
     );
     let base = prices_args(&w);
     let invoke = |name: &str| {
@@ -604,7 +628,7 @@ fn vibes_suggests_a_year_of_transcripts_unless_claude_already_keeps_one() {
     // Unset is Claude Code's 30 days; the card counts the disk the transcripts read take.
     let unset = cards("{}");
     assert!(
-        unset.contains("  [2/5] Transcript retention  not measured\n        30 days -> 365 days\n        What    How long Claude Code keeps session transcripts before its startup sweep deletes them.\n        Advice  Claude Code deletes eligible transcripts after 30 days, so token-max has less history to replay. The transcripts token-max read take "),
+        unset.contains("  [2/6] Transcript retention  not measured\n        30 days -> 365 days\n        What    How long Claude Code keeps session transcripts before its startup sweep deletes them.\n        Advice  Claude Code deletes eligible transcripts after 30 days, so token-max has less history to replay. The transcripts token-max read take "),
         "{unset}"
     );
     assert!(
@@ -1140,6 +1164,7 @@ fn explicit_windows_match_the_library_replay() {
             since: Some(since),
             now: 21 * MIN,
             max_cost_per_use_usd: 1.0,
+            reading: None,
         })
         .unwrap();
         assert!(
@@ -1717,8 +1742,9 @@ mod unix {
         // open until the child exits, as a person's would.
         let mut keyboard = std::fs::File::from(master);
         // A plan pays, then yes to the TTL and to writing it; then yes to seeing `vibes`'
-        // advice, yes to its Bash cap, no to its window and yes to writing the cap.
-        keyboard.write_all(b"p\ny\ny\ny\ny\nn\ny\n").unwrap();
+        // advice, yes to its Bash cap, no to its window and its advisor, and yes to writing
+        // the cap.
+        keyboard.write_all(b"p\ny\ny\ny\ny\nn\nn\ny\n").unwrap();
         let status = child.wait().unwrap().code().unwrap();
         let (stdout, stderr) = (out.join().unwrap(), err.join().unwrap());
         assert_eq!(status, 0, "{stderr}");
@@ -1789,14 +1815,14 @@ mod unix {
         // Once the walk ends, doctor offers the advice it can't measure, from the same scan:
         // nothing is asked or scanned again.
         let offer = at(
-            "\n  token-max vibes has 2 pieces of advice the transcripts can't price. Show them?\n  [y]es, [n]o: ",
+            "\n  token-max vibes has 3 pieces of advice the transcripts can't price. Show them?\n  [y]es, [n]o: ",
         );
-        let advice = at("\ntoken-max vibes: 2 pieces of advice the transcripts can't price.\n");
-        let card = at("\n  [1/4] Bash timeout cap ");
-        let window = at("\n  [3/4] Auto-compact window (claude-opus-5-5) ");
+        let advice = at("\ntoken-max vibes: 3 pieces of advice the transcripts can't price.\n");
+        let card = at("\n  [1/5] Bash timeout cap ");
+        let window = at("\n  [3/5] Auto-compact window (claude-opus-5-5) ");
         assert_eq!(
             words(&stdout[advice..card]),
-            "token-max vibes: 2 pieces of advice the transcripts can't price. None of it is measured, so none of it is a verdict. Each card names whose advice it is. Nothing is written until you confirm the list at the end."
+            "token-max vibes: 3 pieces of advice the transcripts can't price. None of it is measured, so none of it is a verdict. Each card names whose advice it is. Nothing is written until you confirm the list at the end."
         );
         assert!(
             confirm < wrote && wrote < offer && offer < advice && advice < card && card < window
@@ -1809,11 +1835,11 @@ mod unix {
             .map(|at| card + at)
             .unwrap_or_else(|| panic!("{stdout}"));
         // The memory card that follows advises nothing here, so it asks nothing.
-        let memory = at("\n  [2/4] Auto memory ");
+        let memory = at("\n  [2/5] Auto memory ");
         assert!(card < memory && memory < window, "{stdout}");
         let entry = words(&stdout[card..memory]);
         assert!(
-            entry.starts_with("[1/4] Bash timeout cap not measured 2h -> 4m What The longest Claude waits on a foreground Bash command before Claude Code moves it to the background. Advice A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess."),
+            entry.starts_with("[1/5] Bash timeout cap not measured 2h -> 4m What The longest Claude waits on a foreground Bash command before Claude Code moves it to the background. Advice A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess."),
             "{entry}"
         );
         assert!(
@@ -1823,12 +1849,16 @@ mod unix {
         assert!(!entry.contains("Recommended") && !entry.contains("Worth considering"));
         // The window card names doctor's verdict beside its own cap, which is declined.
         // The card on the default advises nothing, so it asks nothing before the diff.
-        let next = at("\n  [4/4] Main-session default ");
-        assert!(window < next && next < again, "{stdout}");
+        let next = at("\n  [4/5] Main-session default ");
+        let advisor = at("\n  [5/5] Advisor model ");
+        assert!(
+            window < next && next < advisor && advisor < again,
+            "{stdout}"
+        );
         let entry = words(&stdout[window..next]);
         assert!(
             entry.starts_with(
-                "[3/4] Auto-compact window (claude-opus-5-5) not measured 967k -> 400k What "
+                "[3/5] Auto-compact window (claude-opus-5-5) not measured 967k -> 400k What "
             ),
             "{entry}"
         );
@@ -1836,6 +1866,11 @@ mod unix {
             entry.contains("doctor's auto-compact window line keeps it on cost.")
                 && entry.ends_with(r#"Change "modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 400000}} in ~/.claude/settings.json Accept? [y]es, [n]o, [q]uit:"#),
             "{entry}"
+        );
+        // The advisor card asks too, and its no writes nothing.
+        assert!(
+            words(&stdout[advisor..again]).ends_with(r#"Change "advisorModel": "fable" in ~/.claude/settings.json Accept? [y]es, [n]o, [q]uit:"#),
+            "{stdout}"
         );
         // The card is from the scan before doctor wrote 1h, so its cap is for the 5m cache
         // set then; the next run moves it to 55m.

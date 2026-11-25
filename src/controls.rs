@@ -160,7 +160,7 @@ pub fn idle_controls(scopes: &[SettingsScope], env: &Env) -> Result<IdleControl,
 }
 
 /// A boolean environment value in the forms Claude Code accepts; None for anything else.
-fn env_flag(value: &Value) -> Option<bool> {
+pub(crate) fn env_flag(value: &Value) -> Option<bool> {
     match js_string(Some(value)).trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
         "0" | "false" | "no" | "off" => Some(false),

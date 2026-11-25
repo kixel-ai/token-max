@@ -164,6 +164,7 @@ fn report(data: &Scan, max_cost_per_use_usd: f64) -> Report {
         since: None,
         now: NOW,
         max_cost_per_use_usd,
+        reading: None,
     })
     .unwrap()
 }
@@ -897,6 +898,7 @@ fn recorded_request_shapes_price_each_piece_at_its_cache_position_and_count_its_
         since: None,
         now: NOW,
         max_cost_per_use_usd: artifact.cost_usd.to_f64() / 2.0,
+        reading: None,
     })
     .unwrap();
     let verdict = |name: &str| row(&strict, name).verdict;

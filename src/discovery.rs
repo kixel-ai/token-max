@@ -1079,7 +1079,8 @@ pub(crate) fn claude_project_files(
 
 /// Resolve each Claude profile's `crossSessionInbound` at its latest main-session request's
 /// directory, as auto memory's is; without an existing one, user and managed settings decide.
-/// It runs once T3 has attributed requests, so an instance reads its own sessions' directory.
+/// It runs once T3 has attributed requests, so an instance reads its own sessions' directory,
+/// and a request whose owner T3 can't settle decides for no profile.
 pub fn discover_inbound(
     options: &DiscoveryOptions,
     profiles: &mut [Profile],
@@ -1091,11 +1092,12 @@ pub fn discover_inbound(
     }
     let managed_file = options.managed_settings_file.as_str();
     let managed = settings(managed_file, Harness::Claude)?;
+    let t3 = t3_instances(profiles);
     for profile in profiles.iter_mut().filter(|p| p.harness == Harness::Claude) {
         let user = options.settings(&profile.settings_file, Harness::Claude)?;
         let mine: Vec<&Request> = requests
             .iter()
-            .filter(|r| r.profiles.contains(&profile.id))
+            .filter(|r| owned_by(r, profile, &t3))
             .collect();
         let latest = crate::memory::deciding_request(&mine).and_then(|r| r.cwd.as_deref());
         let directory = match latest {
@@ -1130,6 +1132,123 @@ pub fn discover_inbound(
                 &scopes,
             )?
         });
+    }
+    Ok(())
+}
+
+/// Every T3 instance's profile ID.
+fn t3_instances(profiles: &[Profile]) -> HashSet<String> {
+    profiles
+        .iter()
+        .filter(|p| p.t3.is_some())
+        .map(|p| p.id.to_string())
+        .collect()
+}
+
+/// Whether T3 settled that `profile` owns `r`. A request whose owner T3 can't settle keeps
+/// every candidate, so a native profile counts only requests that name no T3 instance, and
+/// an instance only those that name it alone. One T3 marked unsettled decides for no one,
+/// even when it names a single candidate.
+fn owned_by(r: &Request, profile: &Profile, t3: &HashSet<String>) -> bool {
+    if !r.profiles.iter().any(|p| **p == *profile.id)
+        || r.issues.iter().any(|i| i.starts_with(crate::t3::UNSETTLED))
+    {
+        return false;
+    }
+    if profile.t3.is_some() {
+        r.profiles.iter().all(|p| **p == *profile.id)
+    } else {
+        !r.profiles.iter().any(|p| t3.contains(p))
+    }
+}
+
+/// Resolve each native Claude profile's auto memory, main-session effort and advisor at its
+/// latest main-session request's directory; without an existing one, the user and managed
+/// files decide. It runs once T3 has attributed requests, so a T3 thread that shares the
+/// profile's history never decides them, nor does a request whose owner T3 can't settle.
+pub fn discover_latest_claude_controls(
+    options: &DiscoveryOptions,
+    profiles: &mut [Profile],
+    requests: &[Request],
+) -> Result<(), ScanError> {
+    let env = &options.env;
+    let empty = Env::default();
+    let default_root = join(&[&options.home, ".claude"]);
+    let configured = env.get("CLAUDE_CONFIG_DIR").unwrap_or(&default_root);
+    let active = realpath(&resolve(configured)).unwrap_or_default();
+    let managed_file = options.managed_settings_file.as_str();
+    let t3 = t3_instances(profiles);
+    let mut native = profiles
+        .iter_mut()
+        .filter(|p| p.harness == Harness::Claude && p.t3.is_none())
+        .peekable();
+    // Read only for a native Claude profile: a Codex-only scan never reads Claude's policy.
+    if native.peek().is_none() {
+        return Ok(());
+    }
+    let managed = settings(managed_file, Harness::Claude)?;
+    // T3 resolves its instances' controls itself, and they get no advisor: T3 picks each
+    // thread's main model, which an advisor ranks against.
+    for profile in native {
+        let user = options.settings(&profile.settings_file, Harness::Claude)?;
+        let local_env = if active == profile.root { env } else { &empty };
+        let mine: Vec<&Request> = requests
+            .iter()
+            .filter(|r| r.agent == Agent::Main && owned_by(r, profile, &t3))
+            .collect();
+        let recorded = latest_model(&mine);
+        let latest = crate::memory::deciding_request(&mine).and_then(|r| r.cwd.as_deref());
+        let directory = match latest {
+            Some(cwd) if !cwd.is_empty() && existing_directory(cwd)? => Some(cwd),
+            _ => None,
+        };
+        let mut project = vec![];
+        if let Some(cwd) = directory {
+            // A session in the home directory reads the user's own file as its project's.
+            for file in claude_project_files(cwd, options)? {
+                if !same_file(&file, &profile.settings_file) {
+                    let config = options.settings(&file, Harness::Claude)?;
+                    project.push((file, config));
+                }
+            }
+        }
+        let scopes: Vec<SettingsScope> = std::iter::once(SettingsScope {
+            config: &user,
+            file: &profile.settings_file,
+        })
+        .chain(
+            project
+                .iter()
+                .map(|(file, config)| SettingsScope { config, file }),
+        )
+        .chain(std::iter::once(SettingsScope {
+            config: &managed,
+            file: managed_file,
+        }))
+        .collect();
+        profile.memory = Some(MemoryControl {
+            directory: directory.map(Into::into),
+            ..claude_memory(&scopes, local_env)?
+        });
+        let mut effort = claude_effort(&scopes, &profile.settings_file, local_env, recorded)?;
+        // A model only requests T3 left unsettled recorded is no evidence for this profile,
+        // but saying none was recorded would be wrong.
+        if effort.unresolved.as_deref() == Some(crate::effort::NO_MODEL)
+            && requests.iter().any(|r| {
+                r.agent == Agent::Main
+                    && r.model.is_some()
+                    && r.profiles.iter().any(|p| **p == *profile.id)
+            })
+        {
+            effort.unresolved = Some(crate::effort::UNSETTLED_MODEL.into());
+        }
+        profile.effort = Some(effort);
+        // Read where effort is: the advisor card ranks against that main-session default.
+        profile.advisor = Some(crate::advisor::control(
+            &scopes,
+            local_env,
+            &profile.settings_file,
+        ));
     }
     Ok(())
 }
@@ -1226,25 +1345,6 @@ pub fn discover_claude_controls(
             .iter()
             .filter(|r| r.agent == Agent::Main && r.profiles.contains(&profile.id))
             .collect();
-        // Auto memory's and effort's settings are read at the latest main-agent request's
-        // directory; without one, the user and managed files decide.
-        let latest = crate::memory::deciding_request(&relevant).and_then(|r| r.cwd.clone());
-        let recorded = latest_model(&relevant);
-        profile.effort = Some(claude_effort(
-            &[
-                SettingsScope {
-                    config: &user,
-                    file: &profile.settings_file,
-                },
-                SettingsScope {
-                    config: &managed,
-                    file: managed_file,
-                },
-            ],
-            &profile.settings_file,
-            local_env,
-            recorded,
-        )?);
         if relevant
             .iter()
             .any(|r| r.cwd.as_deref().is_none_or(str::is_empty))
@@ -1336,18 +1436,6 @@ pub fn discover_claude_controls(
             let speed = speed_controls(Harness::Claude, &scopes, local_env)?;
             let mut idle = idle_controls(&scopes, local_env)?;
             let background = claude_background(&scopes, local_env)?;
-            if latest.as_deref() == Some(cwd) {
-                profile.memory = Some(MemoryControl {
-                    directory: Some(cwd.into()),
-                    ..claude_memory(&scopes, local_env)?
-                });
-                profile.effort = Some(claude_effort(
-                    &scopes,
-                    &profile.settings_file,
-                    local_env,
-                    recorded,
-                )?);
-            }
             let settings_env = scoped_environment(&scopes, &empty);
             let launch_conflict = CLAUDE_BACKGROUND_ENV.iter().any(|key| {
                 settings_env
@@ -2067,7 +2155,7 @@ fn ancestors_setting_codex_memory(
 }
 
 /// Whether two paths name one file, as recorded or once resolved.
-fn same_file(a: &str, b: &str) -> bool {
+pub(crate) fn same_file(a: &str, b: &str) -> bool {
     a == b || realpath(a).is_ok_and(|a| realpath(b).is_ok_and(|b| a == b))
 }
 
@@ -2627,6 +2715,12 @@ pub(crate) fn profile(
         }
     });
     let claude_config = claude.then(|| claude_config(&options.home, &canonical, explicit));
+    // Claude Code rewrites its state file while it runs, so one that doesn't parse now
+    // leaves the install unknown, as a missing one does, rather than failing the scan.
+    let updater = claude_config
+        .as_ref()
+        .and_then(|state| self::settings(state, Harness::Claude).ok())
+        .and_then(|state| updater(&state));
     let mut profile = Profile {
         id: identity(key),
         harness,
@@ -2646,6 +2740,7 @@ pub(crate) fn profile(
         retention,
         turn_end,
         effort: None,
+        advisor: None,
         speed_directories: None,
         idle_directories: None,
         background,
@@ -2661,6 +2756,7 @@ pub(crate) fn profile(
         outranking_files: vec![],
         ttl_directories: IndexMap::default(),
         claude_config,
+        updater,
         codex_system_config: (!claude).then(|| system_file.to_string()),
         switched_off: switched_off(harness, &user),
         pretended_on: vec![],
@@ -2673,6 +2769,13 @@ pub(crate) fn profile(
     let file = profile.settings_file.clone();
     options.pretend_on(harness, &mut profile.pretended_on, &file)?;
     Ok(profile)
+}
+
+/// The command that upgrades Claude Code, as its state file's `installMethod` names it:
+/// only a native install's is known, since a package manager's, such as npm's, Nix's or
+/// Homebrew's, may not be the one that installed it.
+fn updater(state: &Map<String, Value>) -> Option<&'static str> {
+    (state.get("installMethod")?.as_str()? == "native").then_some("claude update")
 }
 
 /// Claude Code's state file for a canonical root: `.claude.json` inside a root the shell's
@@ -3249,6 +3352,26 @@ mod tests {
             state(env(&[("CLAUDE_CONFIG_DIR", &native_path(&w.claude))])),
             join(&[&root, ".claude.json"])
         );
+    }
+
+    #[test]
+    fn only_a_native_install_names_its_update_command() {
+        let w = Workspace::new();
+        let updater = || claude(&discover(&options(&w)).unwrap()).updater;
+        assert_eq!(updater(), None);
+        for (method, expected) in [
+            ("native", Some("claude update")),
+            ("global", None),
+            ("unknown", None),
+        ] {
+            write(
+                w.home.join(".claude.json"),
+                &format!(r#"{{"installMethod": "{method}"}}"#),
+            );
+            assert_eq!(updater(), expected, "{method}");
+        }
+        write(w.home.join(".claude.json"), "{");
+        assert_eq!(updater(), None);
     }
 
     // Current environment overrides are scoped to the active config root.
@@ -4767,5 +4890,123 @@ mod tests {
         let profile = claude(&data);
         assert!(!profile.idle.as_ref().unwrap().resolved);
         assert!(profile.idle_directories.as_ref().unwrap().is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_session_in_a_link_to_the_home_reads_the_user_file_once() {
+        let w = Workspace::new();
+        write(
+            w.claude.join("settings.json"),
+            r#"{"advisorModel":null,"model":"claude-sonnet-5-5"}"#,
+        );
+        let link = w.home.join("link");
+        std::os::unix::fs::symlink(&w.home, &link).unwrap();
+        let mut data = discover(&options(&w)).unwrap();
+        let profile = claude(&data).clone();
+        let requests = [request(&profile, Some(&link))];
+        discover_latest_claude_controls(&options(&w), &mut data.profiles, &requests).unwrap();
+        let profile = claude(&data);
+        // The user's own file owns both, not the same file under the link's path.
+        assert_eq!(
+            profile.advisor.as_ref().unwrap().owner,
+            format!("{}:advisorModel", profile.settings_file)
+        );
+        assert_eq!(
+            profile.effort.as_ref().unwrap().model_owner,
+            format!("{}:model", profile.settings_file)
+        );
+    }
+
+    #[test]
+    fn only_the_profiles_own_settled_latest_request_decides_its_controls() {
+        let w = Workspace::new();
+        let (mine, theirs) = (w.home.join("mine"), w.home.join("theirs"));
+        for (dir, settings) in [
+            (
+                &mine,
+                r#"{"advisorModel":"opus","autoMemoryEnabled":false}"#,
+            ),
+            (
+                &theirs,
+                r#"{"advisorModel":"fable","model":"claude-sonnet-5-5"}"#,
+            ),
+        ] {
+            fs::create_dir_all(dir.join(".git")).unwrap();
+            write(dir.join(".claude/settings.json"), settings);
+        }
+        let mut data = discover(&options(&w)).unwrap();
+        let profile = claude(&data).clone();
+        data.profiles.push(crate::test_support::make_t3_profile(
+            "t3",
+            &native_path(w.home.join("t3")),
+        ));
+        let mut earlier = request(&profile, Some(&mine));
+        earlier.time = 1;
+        // Newer, but T3 attributed it to an instance of its own.
+        let mut later = request(&profile, Some(&theirs));
+        later.time = 2;
+        later.profiles = vec!["t3".into()].into();
+        // Newest, but T3 couldn't settle its owner, so it names both: it decides for neither.
+        let mut unsettled = request(&profile, Some(&theirs));
+        unsettled.time = 3;
+        unsettled.profiles = vec![profile.id.clone(), "t3".into()].into();
+        let requests = [earlier, later, unsettled.clone()];
+        discover_latest_claude_controls(&options(&w), &mut data.profiles, &requests).unwrap();
+        discover_inbound(&options(&w), &mut data.profiles, &requests).unwrap();
+        let directory = |data: &Discovery, id: &str| {
+            let p = data.profiles.iter().find(|p| p.id == id).unwrap();
+            p.inbound.as_ref().unwrap().directory.clone()
+        };
+        assert_eq!(directory(&data, &profile.id), Some(native_path(&mine)));
+        assert_eq!(directory(&data, "t3"), Some(native_path(&theirs)));
+        let profile = claude(&data);
+        let advisor = profile.advisor.as_ref().unwrap();
+        assert_eq!(advisor.model.as_deref(), Some("opus"));
+        assert_eq!(
+            advisor.owner,
+            format!(
+                "{}:advisorModel",
+                join(&[&native_path(&mine), ".claude", "settings.json"])
+            )
+        );
+        let memory = profile.memory.as_ref().unwrap();
+        assert_eq!(
+            memory.directory.as_deref(),
+            Some(native_path(&mine).as_str())
+        );
+        // The recorded model, not the other project's setting.
+        let effort = profile.effort.as_ref().unwrap();
+        assert_eq!(effort.model.as_deref(), Some("claude-opus-5-5"));
+
+        // With only an unsettled request, the user and managed files decide.
+        let requests = [unsettled];
+        discover_latest_claude_controls(&options(&w), &mut data.profiles, &requests).unwrap();
+        discover_inbound(&options(&w), &mut data.profiles, &requests).unwrap();
+        assert_eq!(directory(&data, &claude(&data).id.clone()), None);
+        assert_eq!(directory(&data, "t3"), None);
+        let profile = claude(&data);
+        assert_eq!(profile.memory.as_ref().unwrap().directory, None);
+        let advisor = profile.advisor.as_ref().unwrap();
+        assert_eq!(advisor.model, None);
+        assert_eq!(
+            advisor.owner,
+            format!("{}:advisorModel", profile.settings_file)
+        );
+        // Its recorded model is no evidence, and the reason says why rather than that none
+        // was recorded.
+        let effort = profile.effort.as_ref().unwrap();
+        assert_eq!(effort.model, None);
+        assert_eq!(
+            effort.unresolved.as_deref(),
+            Some(crate::effort::UNSETTLED_MODEL)
+        );
+
+        // One T3 marked unsettled decides for no one, even when it names a single candidate.
+        let mut single = request(&profile.clone(), Some(&theirs));
+        single.profiles = vec!["t3".into()].into();
+        single.issues = vec![format!("{}: synthetic", crate::t3::UNSETTLED).into()];
+        discover_inbound(&options(&w), &mut data.profiles, &[single]).unwrap();
+        assert_eq!(directory(&data, "t3"), None);
     }
 }

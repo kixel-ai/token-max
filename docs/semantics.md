@@ -957,9 +957,12 @@ after it; `MEMORY.md` is placed like any other attachment. Both form the
 as subagents do, leaves any memory instructions elsewhere in its prompt
 unmeasured, and the check says how many did. Today's setting decides whether
 memory is on, as every other check reads today's settings. It is resolved at the
-working directory of the latest main-agent request, where the user worked most
-recently, including the project's `.claude/settings.json` and
-`.claude/settings.local.json`, so `off_file` names the file that owns it. Claude
+working directory of the profile's latest main-agent request, where the user
+worked most recently, once T3 has attributed requests, so a T3 thread sharing
+the history never decides it, nor does a request whose owner T3 can't settle;
+without one, the user and managed files decide. The project's
+`.claude/settings.json` and `.claude/settings.local.json` count, so `off_file`
+names the file that owns it. Claude
 Code reads the setting when a session starts, so a session begun before a change
 keeps the old value until it restarts. When main-agent sessions in that
 directory disagree with the setting at their latest request with a recorded
@@ -984,8 +987,9 @@ tagged `memories.instructions` holding `memory_summary.md`, split into several
 parts when long, its first part starting `## Memory`. A full world
 state leaves it in context. Compaction rebuilds it: the summary in the
 `compacted` record's `replacement_history` takes its place, and without one it
-is gone. The settings decide whether memory is on, resolved like Claude Code's
-at the latest main-agent request's directory, including the `.codex/config.toml` layers of
+is gone. The settings decide whether memory is on, resolved at the latest
+main-agent request's directory before T3 attributes requests, so unlike Claude
+Code's, a newer T3 thread sharing `~/.codex` can pick that directory, including the `.codex/config.toml` layers of
 a trusted project. When something the scan cannot record could change that, the
 state is unknown and the line is a yellow advisory that memories may be on,
 naming why: a project layer that sets memories in a project whose trust is not
@@ -1314,7 +1318,8 @@ from today's settings, read where auto memory's are: at the latest main-session
 request's working directory, or from the user and managed files when none is
 recorded. The model is `ANTHROPIC_MODEL` or the highest settings file's
 `model` for Claude, or the highest config layer's `model` for Codex, else the
-model the latest main session ran most. A Claude alias such as `opus` resolves
+model the latest main session ran most, which a null Claude `model` also falls
+back to, its owner marked as such. A Claude alias such as `opus` resolves
 to that session's model when it is in the alias's family, else the line is
 unknown.
 
@@ -1483,6 +1488,28 @@ Fable request, as
 `--details` gives each line's spans with their unknown costs, the caveats
 and the sources.
 
+## Advisor model
+
+`Profile.advisor` is resolved where `Profile.effort` is: the user and managed
+settings, plus the project and local files of the profile's latest
+main-session request's directory once T3 has attributed requests, with the active profile's shell environment, settings
+`env` overriding it. `advisorModel` comes from the highest scope that sets it;
+a null there sets no advisor, as a settings merge does, a non-string or a
+string that is neither an alias nor a Claude model ID of a family that can
+advise is set but blocked, kept as its kind alone (only the card reads it,
+so it fails no scan),
+and an empty name sets no advisor. What stops an advisor loading is checked in Claude Code's order: the
+tool turned off, then an unsupported provider, then a variable that turns off
+feature-flag fetching, which Claude Platform on AWS and Claude Models on
+Google Cloud (Anthropic managed) don't need. T3 instances have none.
+
+`vibes` gives one card to each group of profiles that share the
+`advisorModel` owner, the resolved main-session default and the setting that
+names it, and what stops the advisor. `doctor` has no advisor line. The
+suggested advisor is `advisor::pick`: Opus above Haiku 4.5 or later and
+Sonnet 4.6 or later, Fable above Opus 4.6 or later, none above Fable, by the
+main model's canonical ID.
+
 ## Messages from other sessions
 
 The reader marks three kinds of record, keeping no text. A Claude `user`
@@ -1522,7 +1549,8 @@ Code does; one as strict as managed settings' leaves them named. A value
 Claude Code does not recognize fails the scan in the file that sets it.
 Project and local files are read at the latest main-session request's working
 directory, as auto memory's are, once T3 has attributed requests, so a T3
-instance reads its own sessions' directory; without an existing one, user and
-managed settings decide. A `--settings` flag outranks the user's file and is not recorded, and
+instance reads its own sessions' directory and a request whose owner T3 can't
+settle decides for no profile; without an existing one, user and managed
+settings decide. A `--settings` flag outranks the user's file and is not recorded, and
 a T3 instance whose launch settings are unresolved gets the line unknown.
 

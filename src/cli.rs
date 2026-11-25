@@ -317,11 +317,18 @@ impl Meter {
                         };
                         bar(&progress, shared.look, progress_room())
                     } else {
-                        // A phase that began under the bar is timed from when reading ended.
-                        let since = match total {
-                            0 => since,
-                            _ => since.max(*read_end.get_or_insert_with(Instant::now)),
-                        };
+                        let read_end = *read_end.get_or_insert_with(Instant::now);
+                        let step = *shared
+                            .reading
+                            .step
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner);
+                        // The local scan's own step holds the line as the bar does. A phase
+                        // that began under the bar is timed from when reading ended.
+                        let (name, since) = step.unwrap_or(match total {
+                            0 => (name, since),
+                            _ => (name, since.max(read_end)),
+                        });
                         let line = busy(name, since.elapsed(), tick, shared.look.unicode);
                         (line.clone(), line)
                     };
@@ -344,9 +351,16 @@ impl Meter {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         *current = (phase, Instant::now());
-        // While this host still reads, the bar stays; the ticker shows the phase after it.
+        // While this host still reads, the bar or its step stays; the ticker shows the phase
+        // after them.
         let reading = &self.shared.reading;
-        if reading.read.load(Ordering::Relaxed) < reading.total.load(Ordering::Relaxed) {
+        if reading.read.load(Ordering::Relaxed) < reading.total.load(Ordering::Relaxed)
+            || reading
+                .step
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_some()
+        {
             return;
         }
         let line = busy(phase, Duration::ZERO, 0, self.shared.look.unicode);

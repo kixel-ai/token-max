@@ -1482,8 +1482,8 @@ from it. Where the window is above the cap, the line's replay prices the cap
 beside its own candidates but never recommends it: the verdict stays the best
 of the windows the evidence names, and `--details` lists the cap's replay
 apart from them. The card gives what the cap saves or costs every 30 days
-against the current window; when the replay could not price it, or its service
-tier is unsettled, it says what the cap costs is not measured.
+against the current window, or says what the cap costs is not measured, and
+why: the replay could not price it, or priced it at an assumed service tier.
 
 The cap goes through the same edit the line's own change makes: where the
 owner holds it, as a model's `modelSettings` row, or, under

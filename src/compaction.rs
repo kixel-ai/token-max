@@ -5649,6 +5649,20 @@ mod tests {
             let text = card(&report).text;
             assert!(
                 text.contains(
+                    " Its replay of a 400k window rests on an assumed service tier, so what the cap costs is not measured. "
+                ),
+                "{text}"
+            );
+            // An unpriced cap is unmeasured too.
+            let CheckResult::Compaction(c) = &mut report.checks[index] else {
+                unreachable!()
+            };
+            let cap = c.cap.as_mut().unwrap();
+            cap.comparison_cost.assumptions.clear();
+            cap.savings_usd = None;
+            let text = card(&report).text;
+            assert!(
+                text.contains(
                     " Its replay did not price a 400k window, so what the cap costs is not measured. "
                 ),
                 "{text}"

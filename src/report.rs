@@ -4820,19 +4820,15 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
     // The line's own replay of the cap, against the window it compared every candidate with.
     // A cap priced at an assumed service tier is unmeasured even when the line's winner is
     // settled, since no tier reversing the winner says nothing of the cap.
-    let priced = c
-        .scenarios
-        .iter()
-        .chain(&c.cap)
-        .find(|s| s.window == cap)
-        .filter(|s| {
-            !crate::prices::tier_sensitive(&s.comparison_cost)
-                && !crate::prices::tier_sensitive(&s.baseline_comparison_cost)
-        })
-        .and_then(|s| {
-            let changes = s.affected_requests > 0 || !s.added.is_empty();
-            Some((s.savings_usd?, s.margin, changes))
-        });
+    let replayed = c.scenarios.iter().chain(&c.cap).find(|s| s.window == cap);
+    let assumed = replayed.is_some_and(|s| {
+        crate::prices::tier_sensitive(&s.comparison_cost)
+            || crate::prices::tier_sensitive(&s.baseline_comparison_cost)
+    });
+    let priced = replayed.filter(|_| !assumed).and_then(|s| {
+        let changes = s.affected_requests > 0 || !s.added.is_empty();
+        Some((s.savings_usd?, s.margin, changes))
+    });
     let against = match (doctor, c.base.current) {
         (Doctor::Wrote(_), Some(w)) => format!("the {} window before that change", tokens(w)),
         (_, Some(w)) => format!("the {} window", tokens(w)),
@@ -4858,6 +4854,10 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
                 tokens(cap)
             )
         }
+        None if assumed => format!(
+            "Its replay of a {} window rests on an assumed service tier, so what the cap costs is not measured.",
+            tokens(cap)
+        ),
         None => format!(
             "Its replay did not price a {} window, so what the cap costs is not measured.",
             tokens(cap)

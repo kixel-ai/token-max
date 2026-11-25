@@ -324,6 +324,7 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
                 });
                 if let (true, How::Edit(patch)) = (unused, &how) {
                     let versions = crate::version::latest(&members, &report.scan.requests);
+                    let installed = crate::version::installed(&members, &report.scan.requests);
                     let whole = ends_at(&c.name, c.details.iter().map(|d| d.name.as_str()));
                     let own = holds_its_tools(&c.name);
                     removal = crate::mcp::definitions(&c.name, control, &members)
@@ -337,7 +338,7 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
                             Definition::Deny(deny) if !whole => {
                                 deny.by_hand("its tools' names do not show where its name ends")
                             }
-                            d => gate(d, &versions, &patch.file),
+                            d => gate(d, &versions, &installed, &patch.file),
                         })
                         .collect();
                 }
@@ -391,7 +392,12 @@ fn holds_its_tools(server: &str) -> bool {
 
 /// A `deniedMcpServers` entry where every profile's latest Claude Code matches it by name,
 /// else its step by hand, or an upgrade and the entry to add to `file` after it.
-fn gate(definition: Definition, versions: &[(&Profile, Option<&str>)], file: &str) -> Definition {
+fn gate(
+    definition: Definition,
+    versions: &[(&Profile, Option<&str>)],
+    installed: &[(&Profile, Option<&str>)],
+    file: &str,
+) -> Definition {
     let Definition::Deny(deny) = definition else {
         return definition;
     };
@@ -410,6 +416,16 @@ fn gate(definition: Definition, versions: &[(&Profile, Option<&str>)], file: &st
     let Some(upgrade) = upgrade else {
         return Definition::Deny(deny);
     };
+    // Only an old interactive install is worth upgrading; an SDK app pins its own.
+    let advice = match versions.first() {
+        Some(_) => needs.upgrade(installed.iter().copied()),
+        None => Some(upgrade.clone()),
+    };
+    let what = "blocking just this server by name with a deniedMcpServers entry";
+    let Some(upgrade) = advice else {
+        return deny.by_hand(&upgrade.why(what));
+    };
+    let why = upgrade.why(what);
     // A rerun would not offer the entry, since the walk's switch already turned it off.
     let step = format!(
         "{}, or {} and add {} to deniedMcpServers in {file}",
@@ -417,7 +433,6 @@ fn gate(definition: Definition, versions: &[(&Profile, Option<&str>)], file: &st
         upgrade.step(),
         serde_json::json!({ "serverName": deny.name })
     );
-    let why = upgrade.why("blocking just this server by name with a deniedMcpServers entry");
     crate::mcp::Deny { step, ..deny }.by_hand(&why)
 }
 
@@ -5637,9 +5652,14 @@ mod tests {
         let other = crate::test_support::make_profile("other", "/o");
         // Every profile's latest Claude Code must match it by name.
         let new = [(&native, Some("2.1.182")), (&other, Some("2.1.331"))];
-        assert_eq!(gate(blocked("p"), &new, "s.json"), blocked("p"));
+        assert_eq!(gate(blocked("p"), &new, &new, "s.json"), blocked("p"));
         let Definition::Manual { step, reason } = gate(
             blocked("p"),
+            &[
+                (&other, Some("2.1.331")),
+                (&native, Some("2.1.90")),
+                (&other, None),
+            ],
             &[
                 (&other, Some("2.1.331")),
                 (&native, Some("2.1.90")),
@@ -5661,6 +5681,7 @@ mod tests {
         let Definition::Manual { step, .. } = gate(
             blocked("p"),
             &[(&other, Some("2.1.331")), (&native, Some("2.1.90"))],
+            &[(&other, Some("2.1.331")), (&native, Some("2.1.90"))],
             "s.json",
         ) else {
             panic!("an older Claude Code is a step by hand")
@@ -5674,6 +5695,7 @@ mod tests {
         let Definition::Manual { step, reason } = gate(
             blocked("p"),
             &[(&native, Some("2.1.331")), (&other, None)],
+            &[(&native, Some("2.1.331")), (&other, None)],
             "s.json",
         ) else {
             panic!("an unrecorded Claude Code is a step by hand")
@@ -5684,9 +5706,24 @@ mod tests {
             "{reason}"
         );
         assert!(matches!(
-            gate(blocked("p"), &[], "s.json"),
+            gate(blocked("p"), &[], &[], "s.json"),
             Definition::Manual { .. }
         ));
+        // An Agent SDK app pinned to an old Claude Code on the same file holds the entry back,
+        // but names no upgrade, since the interactive install already matches it.
+        let Definition::Manual { step, reason } = gate(
+            blocked("p"),
+            &[(&native, Some("2.1.90"))],
+            &[(&native, Some("2.1.331"))],
+            "s.json",
+        ) else {
+            panic!("an older SDK's Claude Code is a step by hand")
+        };
+        assert_eq!(step, "uninstall the plugin");
+        assert!(
+            reason.ends_with("but its latest session ran 2.1.90"),
+            "{reason}"
+        );
 
         // A tool family whose tools may belong to a longer name is not denied by its own.
         assert!(ends_at(

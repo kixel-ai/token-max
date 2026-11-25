@@ -26,10 +26,37 @@ pub(crate) fn latest<'a>(
     members: &[&'a Profile],
     requests: impl IntoIterator<Item = &'a Request>,
 ) -> Vec<(&'a Profile, Option<&'a str>)> {
+    latest_where(members, requests, |_, _| true)
+}
+
+/// What [`latest`] returns, counting only each member's own interactive install: the one an
+/// upgrade reaches. An Agent SDK app, remote session or MCP client on the same settings file
+/// pins its own Claude Code, so it never names an upgrade.
+pub(crate) fn installed<'a>(
+    members: &[&'a Profile],
+    requests: impl IntoIterator<Item = &'a Request>,
+) -> Vec<(&'a Profile, Option<&'a str>)> {
+    // T3 runs its own binary under each instance's profile, and Codex profiles count every request.
+    latest_where(members, requests, |p, r| {
+        p.harness != Harness::Claude
+            || p.t3.is_some()
+            || matches!(
+                r.client.as_deref(),
+                Some("cli" | "claude-vscode" | "ssh-remote")
+            )
+    })
+}
+
+fn latest_where<'a>(
+    members: &[&'a Profile],
+    requests: impl IntoIterator<Item = &'a Request>,
+    keep: impl Fn(&Profile, &Request) -> bool,
+) -> Vec<(&'a Profile, Option<&'a str>)> {
     let mut last: Vec<Option<&Request>> = vec![None; members.len()];
     for r in requests {
         for (i, p) in members.iter().enumerate() {
-            if r.profiles.contains(&p.id) && last[i].is_none_or(|l| r.time >= l.time) {
+            if r.profiles.contains(&p.id) && keep(p, r) && last[i].is_none_or(|l| r.time >= l.time)
+            {
                 last[i] = Some(r);
             }
         }
@@ -231,6 +258,41 @@ mod tests {
         let versions: Vec<(&str, Option<&str>)> =
             versions.iter().map(|(p, v)| (p.id.as_str(), *v)).collect();
         assert_eq!(versions, [("a", Some("2.1.300")), ("b", Some("2.1.200"))]);
+    }
+
+    #[test]
+    fn only_a_native_claude_profiles_interactive_requests_name_its_install() {
+        use crate::model::Harness;
+        use crate::test_support::{make_profile, make_request, make_t3_profile};
+        let native = make_profile("native", "/n");
+        let t3 = make_t3_profile("t3", "/t");
+        let mut codex = make_profile("codex", "/c");
+        codex.harness = Harness::Codex;
+        let request = |profile: &str, time, client: &str, version: &str| {
+            let mut r = make_request();
+            r.time = time;
+            r.profiles = vec![profile.into()].into();
+            r.client = Some(client.into());
+            r.version = Some(version.into());
+            r
+        };
+        let requests = [
+            request("native", 10, "ssh-remote", "2.1.300"),
+            request("native", 20, "sdk-ts", "2.1.100"),
+            request("t3", 20, "sdk-ts", "2.1.200"),
+            request("codex", 20, "codex_exec", "0.150.0"),
+        ];
+        let versions = super::installed(&[&native, &t3, &codex], &requests);
+        let versions: Vec<(&str, Option<&str>)> =
+            versions.iter().map(|(p, v)| (p.id.as_str(), *v)).collect();
+        assert_eq!(
+            versions,
+            [
+                ("native", Some("2.1.300")),
+                ("t3", Some("2.1.200")),
+                ("codex", Some("0.150.0"))
+            ]
+        );
     }
 
     #[test]

@@ -1869,6 +1869,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             .collect();
         // What each profile's next session runs, whichever model it last used.
         let versions = crate::version::latest(&group.members, requests.iter().copied());
+        let installed = crate::version::installed(&group.members, requests.iter().copied());
         let selected: Vec<&Request> = requests
             .iter()
             .copied()
@@ -2245,7 +2246,10 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             } else {
                 None
             };
-            let upgrade = upgrade.filter(|_| unlocked);
+            // Advice names only the install an upgrade reaches, never an SDK app's pinned one.
+            let upgrade = upgrade
+                .filter(|_| unlocked)
+                .and_then(|_| needs.upgrade(installed.iter().copied()));
             let profiles: IndexSet<&String> =
                 selected.iter().flat_map(|r| r.profiles.iter()).collect();
             let savings = winning
@@ -5788,6 +5792,7 @@ mod tests {
             let mut old = scan.clone();
             for r in &mut old.requests {
                 r.version = Some("2.1.287".into());
+                r.client = Some("cli".into());
             }
             let Some(How::Manual { step, reason }) = card(&self::report(&old)).how else {
                 panic!("an old Claude Code's cap goes by hand")
@@ -6054,6 +6059,13 @@ mod tests {
             old.profiles[0].updater = Some("claude update");
             for r in &mut old.requests {
                 r.version = Some("2.1.287".into());
+            }
+            // An Agent SDK app pins its own Claude Code, so its old version names no upgrade.
+            let sdk = check(&old);
+            assert_eq!(sdk.base.action, Action::Advisory);
+            assert_eq!(sdk.base.upgrade, None);
+            for r in &mut old.requests {
+                r.client = Some("claude-vscode".into());
             }
             let c = check(&old);
             assert_eq!(c.base.action, Action::Advisory);

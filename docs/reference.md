@@ -602,6 +602,15 @@ session ran ("an unrecorded version" when none was), and to upgrade. `vibes`' wi
 step by hand to block an MCP server say so too. token-max never upgrades a
 harness itself.
 
+Every request on a settings file counts toward whether its setting applies,
+but only Claude Code's interactive clients (`cli`, `claude-vscode` and
+`ssh-remote`, main agent or subagent) say which version to upgrade: an Agent
+SDK app, remote session or MCP client on the same file pins its own Claude
+Code, which `claude update` doesn't reach. Such a client holds the line back
+without advising an upgrade. The idle compaction toggle, which only an
+interactive client runs, is judged by interactive requests alone. A T3
+instance's own requests and every Codex request count.
+
 It names an upgrade command only when it knows how the harness was installed:
 `claude update` when Claude Code's state file records a native install
 (`"installMethod": "native"`). An npm, Nix or Homebrew install, Codex, and a

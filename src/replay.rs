@@ -689,7 +689,13 @@ fn ttl_check(
     let pinnable = current.value.is_none() && current.reason == TTL_BILLING_UNKNOWN;
     let settable = current.value.is_some() || pinnable;
     let applies = supported && settable;
-    let upgrade = upgrade.filter(|_| settable);
+    // Advice names only the install an upgrade reaches, never an SDK app's pinned one.
+    let upgrade = upgrade.filter(|_| settable).and_then(|_| {
+        TTL_CONTROLS.upgrade(crate::version::installed(
+            &group.members,
+            requests.iter().copied(),
+        ))
+    });
     let action = match recommended {
         Some(recommended) if applies => {
             if Some(recommended) != current.value {
@@ -1543,6 +1549,11 @@ mod tests {
         // An upgrade alone would not let it apply.
         assert_eq!(disabled.base.upgrade, None);
         s.profiles[0].ttl.main.value = Some(H1);
+        // An Agent SDK app pins its own Claude Code, so its old version names no upgrade.
+        let sdk = check(&s, None, 100);
+        assert_eq!(sdk.base.action, Action::Advisory);
+        assert_eq!(sdk.base.upgrade, None);
+        s.requests[0].client = Some("cli".into());
         let old = check(&s, None, 100);
         assert_eq!(old.base.action, Action::Advisory);
         let upgrade = old.base.upgrade.expect("only the version holds it back");

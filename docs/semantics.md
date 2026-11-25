@@ -988,8 +988,9 @@ parts when long, its first part starting `## Memory`. A full world
 state leaves it in context. Compaction rebuilds it: the summary in the
 `compacted` record's `replacement_history` takes its place, and without one it
 is gone. The settings decide whether memory is on, resolved at the latest
-main-agent request's directory before T3 attributes requests, so unlike Claude
-Code's, a newer T3 thread sharing `~/.codex` can pick that directory, including the `.codex/config.toml` layers of
+main-agent request's directory among those T3 settled to the profile, so a newer
+T3 thread sharing `~/.codex` never picks that directory; with no such request, the
+user and system files decide. That includes the `.codex/config.toml` layers of
 a trusted project. When something the scan cannot record could change that, the
 state is unknown and the line is a yellow advisory that memories may be on,
 naming why: a project layer that sets memories in a project whose trust is not

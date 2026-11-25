@@ -412,22 +412,33 @@ fn claude_controls(
 /// environment, which otherwise reads as an exported variable.
 fn t3_owned(controls: &mut AgentControls, t3: &crate::model::T3Instance) {
     let file = join(&[&t3.state, "settings.json"]);
-    // An entry the instance sets with no readable value, such as a secret.
+    // An entry the instance sets with no readable value, such as a secret or one under
+    // settings that don't resolve, unless a settings file's `env`, which wins, sets it too.
     let (effort, secret): (Vec<&str>, Vec<&str>) = t3
         .environment
         .iter()
         .map(String::as_str)
         .filter(|key| {
             crate::t3::SUBAGENT_ENVIRONMENT.contains(key)
-                && t3.env.as_ref().is_some_and(|env| !env.contains_key(*key))
+                && t3.env.as_ref().is_none_or(|env| !env.contains_key(*key))
+                && !match *key {
+                    "CLAUDE_CODE_SUBAGENT_EFFORT" => controls.effort.is_some(),
+                    "CLAUDE_CODE_SUBAGENT_MODEL" => controls.model.is_some(),
+                    _ => false,
+                }
         })
         .partition(|key| *key == "CLAUDE_CODE_SUBAGENT_EFFORT");
-    let unreadable = |keys: &[&str]| {
-        format!(
+    let unreadable = |keys: &[&str]| match t3.env {
+        Some(_) => format!(
             "T3 instance {} sets {} with a value token-max cannot read",
             t3.instance,
             keys.join(", ")
-        )
+        ),
+        None => format!(
+            "T3 instance {} sets {}, but its settings do not resolve",
+            t3.instance,
+            keys.join(", ")
+        ),
     };
     // A secret effort leaves only the effort unknown; the others decide the model.
     if !effort.is_empty() && controls.effort_unresolved.is_none() {
@@ -1397,7 +1408,10 @@ mod tests {
         t3_owned(&mut controls, &t3);
         assert_eq!(
             controls.effort.unwrap().owner,
-            "/state/settings.json:providerInstances.agent.environment.CLAUDE_CODE_SUBAGENT_EFFORT"
+            format!(
+                "{}:providerInstances.agent.environment.CLAUDE_CODE_SUBAGENT_EFFORT",
+                join(&[&t3.state, "settings.json"])
+            )
         );
         assert_eq!(controls.model.unwrap().owner, "CLAUDE_CODE_SUBAGENT_MODEL");
         // When the model and effort are both secret, the effort text names both entries.
@@ -1422,6 +1436,23 @@ mod tests {
         for key in ["CLAUDE_CODE_SUBAGENT_MODEL", "CLAUDE_CODE_SUBAGENT_EFFORT"] {
             assert!(effort.contains(&format!("sets {key} with")), "{effort}");
         }
+        // A settings file's `env` overrides the secret, so the effort it sets is known.
+        let mut overridden = AgentControls {
+            effort: owned("/root/settings.json:env.CLAUDE_CODE_SUBAGENT_EFFORT"),
+            ..AgentControls::default()
+        };
+        t3_owned(&mut overridden, &t3);
+        assert_eq!(overridden.effort_unresolved, None);
+        assert!(overridden.unresolved.is_some());
+        // Settings that don't resolve leave the instance's own entries unread.
+        t3.env = None;
+        let mut unread = AgentControls::default();
+        t3_owned(&mut unread, &t3);
+        assert!(
+            unread
+                .effort_unresolved
+                .is_some_and(|why| why.contains("do not resolve"))
+        );
     }
 
     fn spawn(kind: &str) -> Subagent {

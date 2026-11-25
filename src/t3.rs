@@ -3320,6 +3320,18 @@ mod tests {
             p.t3.as_ref().unwrap().settings_unresolved,
             managed_policy_unresolved()
         );
+        if managed_policy_unresolved() {
+            // Unread machine policy, as on Windows, leaves every entry the instance sets unread.
+            assert!(p.agents.effort.is_none() && p.agents.model.is_none());
+            for (why, key) in [
+                (&p.agents.effort_unresolved, "CLAUDE_CODE_SUBAGENT_EFFORT"),
+                (&p.agents.unresolved, "CLAUDE_CODE_SUBAGENT_MODEL"),
+            ] {
+                assert!(why.as_deref().is_some_and(|w| w.contains(key)), "{why:?}");
+            }
+            assert!(!format!("{scan:?}").contains("PRIVATE_MODEL"));
+            return;
+        }
         let effort = p.agents.effort.as_ref().expect("the instance's effort");
         assert_eq!(effort.value, "max");
         assert!(

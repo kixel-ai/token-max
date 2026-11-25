@@ -30,7 +30,7 @@ apart, as the post-walk report already lists them, so its accepted total
 counts only what was accepted; validation and writing stay on each host.
 
 Percents are of every host's spend together, as the total line already
-computes (`Totals::monthly`). The left-out line from the
-[preamble quest](/quest/m1/short/preamble.md) sums across hosts.
+computes (`Totals::monthly`). The report's left-out line
+(`left_out` in `src/report.rs`) sums its counts across hosts.
 
 Rerun `assets/demo/walk.tape`.

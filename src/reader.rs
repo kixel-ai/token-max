@@ -287,20 +287,67 @@ fn usage_of(u: &Map<String, Value>, harness: Harness) -> Result<Usage, ScanError
 
 /// Keep known counters from an earlier snapshot of the same streamed part.
 fn fill(usage: &mut Usage, old: &Usage) {
-    let fields = [
-        (&mut usage.input, old.input),
-        (&mut usage.output, old.output),
-        (&mut usage.read, old.read),
-        (&mut usage.write, old.write),
-        (&mut usage.write5m, old.write5m),
-        (&mut usage.write1h, old.write1h),
-        (&mut usage.write30m, old.write30m),
-        (&mut usage.write12h, old.write12h),
-        (&mut usage.reasoning, old.reasoning),
-    ];
-    for (value, old) in fields {
-        if value.is_none() {
+    let keep = |value: &mut Option<i64>, old: Option<i64>| {
+        let filled = value.is_none() && old.is_some();
+        if filled {
             *value = old;
+        }
+        filled
+    };
+    keep(&mut usage.input, old.input);
+    keep(&mut usage.output, old.output);
+    let read = keep(&mut usage.read, old.read);
+    let write = keep(&mut usage.write, old.write);
+    let reasoning = keep(&mut usage.reasoning, old.reasoning);
+    // A subset filled beside another snapshot's total may exceed it; it stays unknown then,
+    // as `usage_of` would refuse the merged counters.
+    if usage
+        .input
+        .is_some_and(|input| usage.read.unwrap_or(0) + usage.write.unwrap_or(0) > input)
+    {
+        if read {
+            usage.read = None;
+        }
+        if write {
+            usage.write = None;
+        }
+    }
+    if reasoning
+        && usage
+            .output
+            .is_some_and(|output| usage.reasoning.unwrap_or(0) > output)
+    {
+        usage.reasoning = None;
+    }
+    // A lifetime split belongs to its write total: one copied beside a different total
+    // would price only part of the writes, so it stays unknown instead.
+    // Even then, a pair completed from both snapshots must still sum to that total.
+    if usage.write == old.write {
+        for (a, b, old_a, old_b) in [
+            (
+                &mut usage.write5m,
+                &mut usage.write1h,
+                old.write5m,
+                old.write1h,
+            ),
+            (
+                &mut usage.write30m,
+                &mut usage.write12h,
+                old.write30m,
+                old.write12h,
+            ),
+        ] {
+            let filled = (keep(a, old_a), keep(b, old_b));
+            if let (Some(x), Some(y), Some(write)) = (*a, *b, usage.write)
+                && x + y != write
+            {
+                if filled.0 {
+                    *a = None;
+                }
+                if filled.1 {
+                    *b = None;
+                }
+            }
         }
     }
 }
@@ -397,8 +444,11 @@ fn claude_parts(raw: &Value, model: Option<Text>) -> Result<Vec<BillingPart>, Sc
                 Some("message") => PartKind::Message,
                 _ => PartKind::Unknown,
             };
-            let mut p = part(iteration, model.clone(), kind)?;
             let advisor = kind == PartKind::Advisor;
+            // An advisor runs on its own model, never the executor's, so one it doesn't
+            // record stays unknown.
+            let fallback = if advisor { None } else { model.clone() };
+            let mut p = part(iteration, fallback, kind)?;
             if p.tier.is_none() && !advisor {
                 p.tier = text(member(u, "service_tier"));
             }
@@ -1965,6 +2015,12 @@ impl Reader {
 
 /// Merge a request into its earlier copy; `r` shares the interner's strings. Returns the
 /// reference the stored request newly answers.
+/// Whether two snapshots' parts at one position are the same part: one kind, and one model
+/// unless either snapshot omits it.
+fn same_part(a: &BillingPart, b: &BillingPart) -> bool {
+    a.kind == b.kind && (a.model == b.model || a.model.is_none() || b.model.is_none())
+}
+
 fn add(requests: &mut Requests, strings: &mut Interner, r: Request) -> Option<Text> {
     let Some(&index) = requests.ids.get(&r.id) else {
         let answered = r.reference.clone();
@@ -2050,9 +2106,11 @@ fn add(requests: &mut Requests, strings: &mut Interner, r: Request) -> Option<Te
     {
         for (index, p) in parts.iter_mut().enumerate() {
             if let Some(old) = previous.parts.get(index)
-                && old.kind == p.kind
-                && old.model == p.model
+                && same_part(old, p)
             {
+                if p.model.is_none() {
+                    p.model = old.model.clone();
+                }
                 fill(&mut p.usage, &old.usage);
                 if p.tier.is_none() {
                     p.tier = old.tier.clone();
@@ -2063,6 +2121,20 @@ fn add(requests: &mut Requests, strings: &mut Interner, r: Request) -> Option<Te
         previous.evidence = evidence;
         if incoming.server_tools.is_some() {
             meta.server_tools = incoming.server_tools.clone();
+        }
+    } else {
+        // An older snapshot read after a newer one still fills what the newer omitted: a
+        // model, a counter or a tier.
+        for (old, new) in previous.parts.iter_mut().zip(&parts) {
+            if same_part(old, new) {
+                if old.model.is_none() {
+                    old.model = new.model.clone();
+                }
+                fill(&mut old.usage, &new.usage);
+                if old.tier.is_none() {
+                    old.tier = new.tier.clone();
+                }
+            }
         }
     }
     let mut answered = None;
@@ -2292,8 +2364,10 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         if r.source.as_deref().is_some_and(|s| s.starts_with("agent:")) {
             r.agent = Agent::Subagent;
         }
+        // A compact request's own iterations are summary work; an advisor call it made is
+        // still the advisor's, billed at the advisor's model.
         if matches!(r.source.as_deref(), Some("compact" | "compaction")) {
-            for p in &mut r.parts {
+            for p in r.parts.iter_mut().filter(|p| p.kind != PartKind::Advisor) {
                 p.kind = PartKind::Compaction;
             }
         }
@@ -2376,7 +2450,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     {
         reading.step(Some("Reading T3 Code's database"));
     }
-    crate::t3::enrich(
+    let unplaced = crate::t3::enrich(
         &mut t3,
         &mut profiles,
         &mut requests,
@@ -2438,6 +2512,8 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         );
     }
     let coverage = ScanCoverage {
+        t3_unattributed: unplaced.unattributed,
+        t3_removed: unplaced.removed,
         requests: requests.len() as u64,
         source_known: requests
             .iter()
@@ -2850,6 +2926,146 @@ mod tests {
         let data = scan(&options(&w)).unwrap();
         assert_eq!(data.requests.len(), 1);
         assert_eq!(data.requests[0].effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn a_lifetime_split_fills_in_only_beside_its_own_write_total() {
+        let old = Usage {
+            write: Some(100),
+            write5m: Some(100),
+            ..Usage::default()
+        };
+        let mut same = Usage {
+            write: Some(100),
+            ..Usage::default()
+        };
+        fill(&mut same, &old);
+        assert_eq!(same.write5m, Some(100));
+        let mut other = Usage {
+            write: Some(200),
+            ..Usage::default()
+        };
+        fill(&mut other, &old);
+        assert_eq!((other.write, other.write5m), (Some(200), None));
+        let mut unset = Usage::default();
+        fill(&mut unset, &old);
+        assert_eq!((unset.write, unset.write5m), (Some(100), Some(100)));
+        // A pair completed from two snapshots that no longer sums to the total gives way.
+        let mut half = Usage {
+            write: Some(100),
+            write5m: Some(100),
+            ..Usage::default()
+        };
+        let other_split = Usage {
+            write: Some(100),
+            write5m: Some(0),
+            write1h: Some(100),
+            ..Usage::default()
+        };
+        fill(&mut half, &other_split);
+        assert_eq!((half.write5m, half.write1h), (Some(100), None));
+        let mut empty = Usage {
+            write: Some(100),
+            ..Usage::default()
+        };
+        fill(&mut empty, &other_split);
+        assert_eq!((empty.write5m, empty.write1h), (Some(0), Some(100)));
+    }
+
+    #[test]
+    fn a_filled_subset_never_exceeds_its_total() {
+        let old = Usage {
+            input: Some(300),
+            read: Some(200),
+            write: Some(0),
+            output: Some(9),
+            reasoning: Some(5),
+            ..Usage::default()
+        };
+        let mut new = Usage {
+            input: Some(100),
+            output: Some(2),
+            ..Usage::default()
+        };
+        fill(&mut new, &old);
+        assert_eq!((new.read, new.write, new.reasoning), (None, None, None));
+        let mut fits = Usage {
+            input: Some(250),
+            write: Some(50),
+            output: Some(5),
+            ..Usage::default()
+        };
+        fill(&mut fits, &old);
+        assert_eq!(
+            (fits.read, fits.write, fits.reasoning),
+            (Some(200), Some(50), Some(5))
+        );
+    }
+
+    #[test]
+    fn snapshots_of_one_request_keep_what_either_recorded_in_either_order() {
+        let w = Workspace::new();
+        // The earlier snapshot alone records a cache counter and the tier, the later one the
+        // final output, and either one the advisor's model.
+        let snapshot = |early: bool, model_early: bool| {
+            let mut advisor = json!({"type": "advisor_message", "input_tokens": 9, "output_tokens": if early { 1 } else { 3 }, "cache_creation_input_tokens": 0});
+            let mut record = assistant("session", "message");
+            if early {
+                advisor["cache_read_input_tokens"] = 4.into();
+                record["message"]["usage"]["service_tier"] = "standard".into();
+            }
+            if early == model_early {
+                advisor["model"] = "claude-fable-5-2".into();
+            }
+            record["message"]["usage"]["iterations"] = json!([
+                {"type": "message", "input_tokens": 1, "output_tokens": 2, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                advisor,
+            ]);
+            record
+        };
+        // In either order, as copies of a transcript may be read.
+        for records in [true, false].into_iter().flat_map(|m| {
+            [
+                [snapshot(true, m), snapshot(false, m)],
+                [snapshot(false, m), snapshot(true, m)],
+            ]
+        }) {
+            write(
+                w.claude.join("projects/project/main.jsonl"),
+                jsonl(&records),
+            );
+            let data = scan(&options(&w)).unwrap();
+            assert_eq!(data.requests.len(), 1);
+            let parts = &data.requests[0].parts;
+            assert_eq!(parts[0].tier.as_deref(), Some("standard"));
+            let advisor = &parts[1];
+            assert_eq!(
+                (
+                    advisor.model.as_deref(),
+                    advisor.usage.output,
+                    advisor.usage.read
+                ),
+                (Some("claude-fable-5-2"), Some(3), Some(4))
+            );
+        }
+    }
+
+    #[test]
+    fn a_compact_request_keeps_its_advisor_call() {
+        let w = Workspace::new();
+        let mut record = assistant("session", "message");
+        record["querySource"] = "compact".into();
+        record["message"]["usage"]["iterations"] = json!([
+            {"type": "message", "input_tokens": 1, "output_tokens": 2},
+            {"type": "advisor_message", "model": "claude-fable-5-2", "input_tokens": 9, "output_tokens": 1},
+        ]);
+        write(
+            w.claude.join("projects/project/main.jsonl"),
+            jsonl(&[record]),
+        );
+        let data = scan(&options(&w)).unwrap();
+        let kinds: Vec<_> = data.requests[0].parts.iter().map(|p| p.kind).collect();
+        assert_eq!(kinds, [PartKind::Compaction, PartKind::Advisor]);
     }
 
     #[test]
@@ -3463,6 +3679,30 @@ mod tests {
         let result = scan(&options(&w)).unwrap();
         assert_eq!(result.requests.len(), 1);
         assert_eq!(result.requests[0].locations.len(), 2);
+    }
+
+    #[test]
+    fn an_advisor_iteration_keeps_only_its_own_model() {
+        let usage = |model: Option<&str>| {
+            let mut advisor = serde_json::json!({"type": "advisor_message", "input_tokens": 9, "output_tokens": 1});
+            if let Some(m) = model {
+                advisor["model"] = m.into();
+            }
+            serde_json::json!({
+                "input_tokens": 5,
+                "output_tokens": 1,
+                "service_tier": "standard",
+                "iterations": [{"type": "message", "input_tokens": 5, "output_tokens": 1}, advisor],
+            })
+        };
+        let executor = Some(Text::from("claude-sonnet-5-5"));
+        let parts = claude_parts(&usage(Some("claude-opus-5-5")), executor.clone()).unwrap();
+        assert_eq!(parts[0].model.as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(parts[1].model.as_deref(), Some("claude-opus-5-5"));
+        // Nor the executor's tier: Priority Tier is committed per model.
+        assert_eq!(parts[1].tier, None);
+        let parts = claude_parts(&usage(None), executor).unwrap();
+        assert_eq!(parts[1].model, None);
     }
 
     #[test]

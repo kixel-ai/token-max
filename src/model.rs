@@ -956,6 +956,45 @@ pub enum Allowlist {
     Unknown(String),
 }
 
+/// What a line of Claude profiles' advisor calls cost over the window.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdvisorUse {
+    pub profiles: Vec<String>,
+    /// Whose calls the line counts.
+    pub line: AdvisorLine,
+    /// Requests that called the advisor.
+    pub requests: u64,
+    /// Advisor calls, one per advisor iteration a request recorded.
+    pub calls: u64,
+    /// The advisor models the calls ran on, most calls first.
+    pub models: Vec<Share>,
+    /// What the calls are known to cost, with what could not be priced and what was assumed.
+    pub cost: Cost,
+    /// What the calls cost, extrapolated from the priced requests to every one; None when
+    /// none was priced.
+    pub estimate: Option<Estimate>,
+    /// Requests that called the advisor and also name a profile on another line, counted once
+    /// on a shared line instead of here.
+    pub shared: u64,
+}
+
+/// Whose advisor calls an [`AdvisorUse`] counts.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AdvisorLine {
+    /// Native profiles sharing an advisor card, with the T3 instances that read their
+    /// settings file.
+    Settings,
+    /// T3 instances that read no native line's settings file; `owner` is that file's
+    /// `advisorModel`, None when unresolved launch settings may replace the file.
+    T3 { owner: Option<String> },
+    /// A T3 instance since removed from T3's settings, whose retained history still names it.
+    Removed,
+    /// Requests naming profiles on several lines, as when two config roots read one
+    /// `projects/` directory, or on one T3 line that T3 could not settle, so whose they
+    /// were is unknown; `owners` are those lines' `advisorModel` settings.
+    Shared { owners: Vec<String> },
+}
+
 /// A profile's main-session default reasoning effort, the setting that decides it and the
 /// level its session runs at.
 #[derive(Clone, Debug, PartialEq)]
@@ -1226,6 +1265,12 @@ pub struct T3State {
     pub unresolved: IndexMap<String, u64>,
     /// Requests every T3 owner of which was removed from settings, counted by instance; billed but in no current profile's checks.
     pub removed: IndexMap<String, u64>,
+    /// Provider instances whose driver token-max can't read, whose spend is excluded.
+    pub unsupported: u64,
+    /// Provider instances T3's settings name whose history home doesn't exist, such as one
+    /// on an unmounted volume, so none of their history was read. An unnamed built-in
+    /// instance's absent default home isn't counted.
+    pub missing: u64,
     /// Every instance the settings name, which tells a removed owner from one not selected.
     pub(crate) instances: HashSet<String>,
     /// The model T3 resolves for generated text; absent for a state that was not read.
@@ -3274,6 +3319,10 @@ pub struct ScanCoverage {
     /// Unreadable complete lines skipped; their usage counts as missing.
     pub skipped_lines: u64,
     pub skipped_files: u64,
+    /// Selected requests T3 could not attribute to one owner, each counted once.
+    pub t3_unattributed: u64,
+    /// Selected requests whose every T3 owner was removed from its settings, each counted once.
+    pub t3_removed: u64,
     pub issues: Vec<String>,
 }
 
@@ -3348,7 +3397,8 @@ pub struct FableUse {
     pub profiles: Vec<String>,
     /// Fable requests in the window.
     pub requests: u64,
-    /// Requests whose model was not recorded, which may have run on Fable.
+    /// Requests with no Fable part whose model, or an advisor call's, was not recorded, which
+    /// may have run on Fable.
     pub unrecorded: u64,
     /// Fable requests also attributed to another eligible profile, so whose they were is unknown.
     pub shared: u64,
@@ -3419,6 +3469,8 @@ pub struct Report {
     pub checks: Vec<CheckResult>,
     /// Each foreground Bash timeout cap and its long waits, which `vibes` shows as advice.
     pub bash: Vec<BashCap>,
+    /// Each Claude `advisorModel` line's advisor calls, as evidence beside `vibes`' card.
+    pub advisor: Vec<AdvisorUse>,
     /// What the report assumes beyond the measurements.
     pub assumptions: Vec<String>,
 }

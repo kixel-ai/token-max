@@ -542,6 +542,23 @@ fn gate(
     crate::mcp::Deny { step, ..deny }.by_hand(&why)
 }
 
+/// The plural a section of features of `kind` names them by, such as "MCP servers"; None
+/// for a kind that is a setting of its own, such as auto memory.
+pub(crate) fn feature_noun(kind: ContextKind) -> Option<&'static str> {
+    match kind {
+        ContextKind::Tool => Some("tools"),
+        ContextKind::McpServer => Some("MCP servers"),
+        ContextKind::McpTool => Some("MCP tools"),
+        ContextKind::McpDiscovery => Some("MCP discovery listings"),
+        ContextKind::Skill => Some("skills"),
+        ContextKind::ToolOutput => Some("tool outputs"),
+        ContextKind::Instructions
+        | ContextKind::System
+        | ContextKind::Memory
+        | ContextKind::Other => None,
+    }
+}
+
 /// The section a line's change joins: a feature's kind and why it is offered, as its verdict
 /// says; both cache TTLs; or, for any other setting, that setting across profiles.
 fn section(report: &Report, line: &Recommendation<'_>) -> Section {
@@ -562,17 +579,8 @@ fn section(report: &Report, line: &Recommendation<'_>) -> Section {
         Source::Check(_) => return own(Kind::Setting, &line.name, &line.name),
         Source::Piece(c) => c,
     };
-    let kind = match c.kind {
-        ContextKind::Tool => "tools",
-        ContextKind::McpServer => "MCP servers",
-        ContextKind::McpTool => "MCP tools",
-        ContextKind::McpDiscovery => "MCP discovery listings",
-        ContextKind::Skill => "skills",
-        ContextKind::ToolOutput => "tool outputs",
-        ContextKind::Instructions
-        | ContextKind::System
-        | ContextKind::Memory
-        | ContextKind::Other => return own(Kind::Setting, &line.name, &line.name),
+    let Some(kind) = feature_noun(c.kind) else {
+        return own(Kind::Setting, &line.name, &line.name);
     };
     let duplicate = c
         .skill

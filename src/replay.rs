@@ -256,8 +256,9 @@ pub fn compaction_charges(scan: &mut Scan, catalog: &Catalog) -> Vec<CompactionC
         ];
         if let Some(i) = linked {
             let r = all.get_mut(i);
+            // A summary request's advisor call is still the advisor's, at its own model.
             if !has_compaction(r) {
-                for p in &mut r.parts {
+                for p in r.parts.iter_mut().filter(|p| p.kind != PartKind::Advisor) {
                     p.kind = PartKind::Compaction;
                 }
             }
@@ -271,17 +272,28 @@ pub fn compaction_charges(scan: &mut Scan, catalog: &Catalog) -> Vec<CompactionC
                     .filter(|p| p.kind == PartKind::Compaction)
                     .map(|p| price_part(catalog, r, p))
                     .collect();
-                add_costs(&costs)
+                if costs.is_empty() {
+                    unknown_cost("the linked request recorded no summary iteration")
+                } else {
+                    add_costs(&costs)
+                }
             };
             claimed[i] = true;
+            // The request replay prices the linked request's own parts, so the TTL totals
+            // add only a summary it never recorded.
+            let unpriced = if cost.total_usd.is_none() && !has_compaction(r) {
+                cost.clone()
+            } else {
+                zero_cost()
+            };
             result.push(CompactionCharge {
                 event: e.id.clone(),
                 request: Some(r.id.clone()),
                 evidence: Evidence::Measured,
                 cost,
                 ttl_cost: PerTtl {
-                    five_minutes: zero_cost(),
-                    one_hour: zero_cost(),
+                    five_minutes: unpriced.clone(),
+                    one_hour: unpriced,
                 },
                 assumptions: assumptions
                     .into_iter()
@@ -596,13 +608,14 @@ fn ttl_check(
         .filter(|e| e.time >= since)
         .map(|e| &e.id)
         .collect();
-    let unmatched: Vec<&CompactionCharge> = summaries
+    // A linked charge's TTL cost is zero unless its summary went unrecorded.
+    let charged: Vec<&CompactionCharge> = summaries
         .iter()
-        .filter(|s| summary_ids.contains(&s.event) && s.request.is_none())
+        .filter(|s| summary_ids.contains(&s.event))
         .collect();
     let summary_cost = PerTtl {
-        five_minutes: add_costs(unmatched.iter().map(|s| &s.ttl_cost.five_minutes)),
-        one_hour: add_costs(unmatched.iter().map(|s| &s.ttl_cost.one_hour)),
+        five_minutes: add_costs(charged.iter().map(|s| &s.ttl_cost.five_minutes)),
+        one_hour: add_costs(charged.iter().map(|s| &s.ttl_cost.one_hour)),
     };
     let replayer = Replayer {
         input,
@@ -805,7 +818,7 @@ fn ttl_check(
                 "latest recorded client version is assumed to remain applicable to current profile controls",
                 "1h writes use documented 2x input; first visible request keeps observed reads from prefixes warmed before the window",
                 "reuse conversions are limited to the previously cached prefix; new input stays a write",
-                "ordinary input, output, server fees and unmatched summary proxies are held identical under fixed behavior and cancel; comparisonCost contains cache charges only, even when fixedCost is unknown",
+                "ordinary input, output, server fees and unmatched summary proxies and unrecorded linked summaries are held identical under fixed behavior and cancel; comparisonCost contains cache charges only, even when fixedCost is unknown",
                 "unlinked-attempt estimates are comparison-only; original usage/coverage and historical spend remain unknown, never excluded or assigned zero billing",
                 "cache evidence retains known, estimated and unknown predecessor witnesses, including pre-window attempts and possible cohorts with missing metadata; request counts and charges cover only the selected window",
                 "per-check savings share baselines and must not be summed",
@@ -1218,6 +1231,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         inbound: crate::inbound::inbound_use(&scan, catalog, since, now),
         lsp: crate::lsp::lsp_use(&scan, since, now),
         checks,
+        advisor: crate::advisor::advisor_use(&scan, catalog, since),
         bash,
         assumptions: [
             "host-local read-only analysis; network access is only for public prices and doctor's check for a newer token-max release",
@@ -1912,6 +1926,41 @@ mod tests {
         assert_eq!(total(&result.fixed_cost), None);
         assert_eq!(total(&result.cost.one_hour), None);
         assert!(result.base.savings_usd.unwrap() > 0.0);
+    }
+
+    #[test]
+    fn a_linked_summary_request_keeps_its_advisor_call() {
+        let mut summary = make_request();
+        summary.id = "summary".into();
+        summary.parts[0].tier = Some("standard".into());
+        let mut advisor = summary.parts[0].clone();
+        advisor.kind = PartKind::Advisor;
+        advisor.tier = None;
+        summary.parts.push(advisor);
+        let mut event = boundary("boundary", &summary.session, summary.time + 1);
+        event.request = Some(summary.id.clone());
+        let mut scan = data(vec![summary], vec![event]);
+        compaction_charges(&mut scan, &prices());
+        let r = &scan.requests[0];
+        let kinds: Vec<_> = r.parts.iter().map(|p| p.kind).collect();
+        assert_eq!(kinds, [PartKind::Compaction, PartKind::Advisor]);
+        // Still priced at its executor's standard tier, which is now the summary's.
+        assert!(price_part(&prices(), r, &r.parts[1]).total_usd.is_some());
+    }
+
+    #[test]
+    fn a_linked_request_of_only_advisor_calls_leaves_the_summary_cost_unknown() {
+        let mut summary = make_request();
+        summary.id = "summary".into();
+        summary.parts[0].kind = PartKind::Advisor;
+        let mut event = boundary("boundary", &summary.session, summary.time + 1);
+        event.request = Some(summary.id.clone());
+        let mut scan = data(vec![summary], vec![event]);
+        let charges = compaction_charges(&mut scan, &prices());
+        assert_eq!(scan.requests[0].parts[0].kind, PartKind::Advisor);
+        assert_eq!(charges[0].cost.total_usd, None);
+        assert_eq!(charges[0].ttl_cost.five_minutes.total_usd, None);
+        assert_eq!(charges[0].ttl_cost.one_hour.total_usd, None);
     }
 
     #[test]

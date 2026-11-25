@@ -551,8 +551,11 @@ fn image_inputs_and_unlinked_requests_never_calibrate_from_partial_text() {
     assert!(report.context.iter().all(|c| c.estimated_usd.is_none()));
     let text = text(&report);
     let artifact = report_line(&text, "Artifact tool");
-    // No figure at all rather than $0.
-    assert_eq!(artifact.head, "Artifact tool on", "{artifact:?}");
+    // An unknown cost rather than $0.
+    assert_eq!(
+        artifact.head, "Artifact tool on costs unknown",
+        "{artifact:?}"
+    );
     assert!(
         artifact
             .evidence

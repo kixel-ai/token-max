@@ -1962,16 +1962,24 @@ fn writable(path: &Path) -> bool {
 pub(crate) const ASKED_USD: f64 = 1.0;
 
 /// Whether the walk takes up `fix`, one of `fixes`: it names a step by hand whatever it
-/// saves, and asks about an edit only when its section, the edits in `fixes` it joins, saves
-/// enough to ask, as `ask` asks any question.
+/// saves, and asks about an edit only when its section saves enough to ask: `fix` and the
+/// other edits in `fixes` it joins whose files take them, as `Owner::new` checks each offer.
 pub(crate) fn takes_up(fix: &Fix, fixes: &[Fix]) -> bool {
-    let edit = |f: &Fix| matches!(f.how, How::Edit(_));
-    if !edit(fix) {
+    if !matches!(fix.how, How::Edit(_)) {
         return true;
     }
-    let section: Vec<Fix> = fixes
-        .iter()
-        .filter(|f| edit(f) && f.joins(fix))
+    // Another member whose file refuses its edit becomes a step by hand, outside the question.
+    let offered = |f: &Fix| match &f.how {
+        How::Edit(patch) => Target::open(&patch.file, patch.harness)
+            .is_ok_and(|target| apply(&target, &patch.edits, &[]).is_ok()),
+        How::Manual { .. } => false,
+    };
+    let section: Vec<Fix> = std::iter::once(fix)
+        .chain(
+            fixes
+                .iter()
+                .filter(|f| *f != fix && f.joins(fix) && offered(f)),
+        )
         .cloned()
         .collect();
     Total::of(&section).asked()
@@ -5251,8 +5259,11 @@ mod tests {
 
     #[test]
     fn a_change_is_taken_up_when_its_section_saves_enough_to_ask() {
-        let settings = Path::new("/synthetic/settings.json");
-        let memory = |line: &str| Fix {
+        let w = Workspace::new();
+        let settings = w.claude.join("settings.json");
+        let elsewhere = w.home.join("other").join("settings.json");
+        std::fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
+        let memory = |line: &str, settings: &Path| Fix {
             saving: Some(0.6),
             section: Section {
                 kind: Kind::Setting,
@@ -5262,9 +5273,13 @@ mod tests {
             },
             ..change(line, settings, Harness::Claude, vec![edit(line, 1, false)])
         };
-        let (a, b) = (memory("A"), memory("B"));
+        let (a, b) = (memory("A", &settings), memory("B", &elsewhere));
         assert!(!takes_up(&a, std::slice::from_ref(&a)));
         assert!(takes_up(&a, &[a.clone(), b.clone()]));
+        // Another member whose file refuses its edit becomes a step by hand, so it adds
+        // nothing to the section's question.
+        let refused = memory("R", Path::new("/nonexistent/token-max/settings.json"));
+        assert!(!takes_up(&a, &[a.clone(), refused]));
         // One only worth considering, such as memory used at a high cost, is its own section.
         let considered = Fix {
             suggested: true,

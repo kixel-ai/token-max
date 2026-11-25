@@ -130,7 +130,8 @@ A section saving under $1/mo in total, including a lone small change such as
 a check, is not asked: one dim line says how many changes were left out, and
 the list after the walk shows them among those not accepted. `vibes`' card
 that says the walk skips a change too small to ask, such as auto memory's,
-judges its section's total, not the one change's.
+judges its section's total, not the one change's, leaving out a member whose
+file refuses its edit, which the walk lists as a step by hand.
 
 Each question takes `y`, `n` or `q`, and a section also `s`; anything else asks
 again. An answer only selects: after each yes, a running total sums the

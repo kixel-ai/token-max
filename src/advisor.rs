@@ -248,10 +248,13 @@ pub fn advisor_use(scan: &Scan, catalog: &Catalog, since: Option<Millis>) -> Vec
             .strip_suffix(&format!(":{KEY}"))
             .map(|f| crate::rows::canonical(&format!("{f}:")));
         let mut ids = line.ids.clone();
-        // Launch settings token-max can't resolve may replace the file.
+        // Launch settings token-max can't resolve may replace the file, and a disabled
+        // instance keeps a line naming it, as `rows::owner_file` does.
         t3.retain(|p| {
-            let unresolved = p.t3.as_ref().is_some_and(|t| t.settings_unresolved);
-            let mine = !unresolved && owned.as_ref() == Some(&file(p));
+            let apart =
+                p.t3.as_ref()
+                    .is_some_and(|t| t.settings_unresolved || !t.enabled);
+            let mine = !apart && owned.as_ref() == Some(&file(p));
             if mine {
                 ids.push(p.id.clone());
             }
@@ -291,9 +294,15 @@ pub fn advisor_use(scan: &Scan, catalog: &Catalog, since: Option<Millis>) -> Vec
             .filter(|(_, (_, ids, _))| r.profiles.iter().any(|p| ids.contains(p)))
             .map(|(i, _)| i)
             .collect();
+        // A T3 line says its threads made its calls, so a request T3 could not settle, such
+        // as a native session in a scan of only `--t3-dir`, counts as unknown instead.
+        let unsettled = |i: usize| {
+            matches!(lines[i].2, AdvisorLine::T3 { .. })
+                && r.issues.iter().any(|i| i.starts_with(crate::t3::UNSETTLED))
+        };
         match on.as_slice() {
             [] => {}
-            [i] => tallies[*i].add(catalog, r),
+            [i] if !unsettled(*i) => tallies[*i].add(catalog, r),
             _ => {
                 for &i in &on {
                     shared[i] += 1;
@@ -779,6 +788,18 @@ mod tests {
         let lines = advisor_use(&scan, &catalog, None);
         assert_eq!(lines[0].line, AdvisorLine::T3 { owner: None });
         scan.profiles[0].t3.as_mut().unwrap().settings_unresolved = false;
+        // A request T3 could not settle, such as a native session, is not the line's threads'.
+        let mut unsettled = request("t3", 2);
+        unsettled
+            .issues
+            .push(format!("{}: synthetic", crate::t3::UNSETTLED).into());
+        scan.requests.push(unsettled);
+        let lines = advisor_use(&scan, &catalog, None);
+        assert_eq!(lines.len(), 2);
+        assert_eq!((lines[0].requests, lines[0].shared), (1, 1));
+        assert!(matches!(lines[1].line, AdvisorLine::Shared { .. }));
+        assert_eq!((lines[1].requests, lines[1].calls), (1, 2));
+        scan.requests.pop();
         // A removed instance's retained requests keep its old key, and a line of their own.
         let gone = crate::t3::profile_key("/state", "gone");
         scan.t3.push(crate::model::T3State {

@@ -1532,7 +1532,9 @@ lines make too) or, for unresolved launch settings, no setting, and a T3 instanc
 settings a line of its own for the requests its history still names. A
 request naming profiles on several lines counts on none of them but once on a
 shared entry for that set of lines, whose profiles are theirs together, and
-each of those lines counts it as shared. A compact request's `advisor_message`
+each of those lines counts it as shared. A request on a T3 line whose owner T3
+could not settle, such as a native session in a scan of only `--t3-dir`,
+moves to a shared entry for that line alone the same way. A compact request's `advisor_message`
 iterations, and those of a request a compaction boundary links to, stay
 advisor calls rather than summary work. The suggested
 advisor is `advisor::pick`: Opus above Haiku 4.5 or later and Sonnet 4.6 or

@@ -2052,7 +2052,9 @@ gets a line of its own with no card, as does one
 removed from T3's settings whose history the window still holds. A request that names
 profiles on two lines, as when two config roots read one `projects/`
 directory, counts once, on a shared line that says whose it was is unknown,
-and each line it touches says how many of its requests moved there.
+and each line it touches says how many of its requests moved there. So does a
+request on a T3 instance's own line whose owner T3 could not settle, such as a
+native session in a scan of only `--t3-dir`.
 
 ## Messages from other sessions
 

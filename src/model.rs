@@ -976,8 +976,8 @@ pub enum AdvisorLine {
     /// A T3 instance since removed from T3's settings, whose retained history still names it.
     Removed,
     /// Requests naming profiles on several lines, as when two config roots read one
-    /// `projects/` directory, so whose they were is unknown; `owners` are those lines'
-    /// `advisorModel` settings.
+    /// `projects/` directory, or on one T3 line that T3 could not settle, so whose they
+    /// were is unknown; `owners` are those lines' `advisorModel` settings.
     Shared { owners: Vec<String> },
 }
 

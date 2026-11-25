@@ -5422,10 +5422,11 @@ fn advisor_calls(u: &AdvisorUse) -> String {
     if u.shared > 0 {
         let _ = write!(
             text,
-            "{}{} that called the advisor also {} a profile on another advisor line, so whose {} is unknown; {} counted once on a shared line instead.",
+            "{}{} that called the advisor also {} a profile on another advisor line, or T3 could not settle {} owner, so whose {} is unknown; {} counted once on a shared line instead.",
             if text.is_empty() { "" } else { " " },
             plural(u.shared, "request"),
             if u.shared == 1 { "names" } else { "name" },
+            if u.shared == 1 { "its" } else { "their" },
             if u.shared == 1 { "it was" } else { "they were" },
             if u.shared == 1 { "it is" } else { "they are" },
         );
@@ -5470,7 +5471,7 @@ fn advisor_row(u: &AdvisorUse, control: Option<&AdvisorControl>, out: &Out<'_>) 
             "no setting".into(),
         ),
         AdvisorLine::Shared { owners } => (
-            "Each of these requests names profiles on more than one advisor line, as when two config roots read one projects directory, so whose they were is unknown; they count here once rather than on each line.".into(),
+            "Each of these requests names profiles on more than one advisor line, as when two config roots read one projects directory, or T3 could not settle which instance or native session made it, so whose they were is unknown; they count here once rather than on each line.".into(),
             owners
                 .iter()
                 .map(|o| out.home(o))

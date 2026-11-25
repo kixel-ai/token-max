@@ -3471,12 +3471,28 @@ struct Question<'a> {
 }
 
 impl Question<'_> {
-    /// The members' savings summed as the running total sums them.
+    /// The members' savings summed as the running total sums them: each host's apart, then
+    /// the hosts' together, whose margins combine as separate samples'.
     fn together(&self) -> Total {
-        let mut total = Total::default();
+        let mut hosts: Vec<(usize, Total)> = vec![];
         for member in &self.members {
-            total.add(&member.offer.fix);
+            match hosts.iter_mut().find(|(h, _)| *h == member.host) {
+                Some((_, total)) => total.add(&member.offer.fix),
+                None => {
+                    let mut total = Total::default();
+                    total.add(&member.offer.fix);
+                    hosts.push((member.host, total));
+                }
+            }
         }
+        // One host's keeps its own shares, which a merge leaves to `set_share`.
+        let mut total = match hosts.len() {
+            1 => hosts.remove(0).1,
+            _ => hosts.iter().fold(Total::default(), |mut total, (_, host)| {
+                total.merge(host);
+                total
+            }),
+        };
         if let Some(monthly) = self.monthly {
             total.set_share(monthly);
         }

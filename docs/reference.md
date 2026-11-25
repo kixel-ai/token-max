@@ -90,7 +90,8 @@ across every settings file, recommended and worth considering alike, biggest
 monthly saving first. Each change is a card. Its first line is a counter, such
 as `[1/4]`, and the setting's name, with its saving per 30 days in dollars and
 as a percent of this host's spend over the window (the base the report's
-percents use) at the right. Next comes the current value and the offered one,
+percents use; with `--ssh`, every host's spend together, as
+[On SSH hosts](#on-ssh-hosts) says) at the right. Next comes the current value and the offered one,
 such as `5m -> 1h`, with whether it is recommended or worth considering.
 Then `What` gives one plain sentence on what the setting or
 feature does (see [What each line does](#what-each-line-does)), and `Why`
@@ -519,7 +520,7 @@ recommend off.
 Then the report gives every setting and feature one line. Each line names its verdict, the
 setting or feature, its current value (and the value to change to, for a
 change), what it saves per 30 days or costs over the window, that figure's
-share of this host's spend, the profile when several were read, and the
+share of this host's spend (every host's under `--ssh`), the profile when several were read, and the
 setting that changes it. A section's row names the settings its members
 change, such as `skillOverrides.*`, and `--details` lists each member under it.
 
@@ -577,8 +578,9 @@ dot for no verdict, either for lack of evidence or because nothing can be set.
 Without color a word replaces the dot: `change`, `consider`, `keep`,
 `unknown` or `info`.
 
-Every percent is of this host's spend over the window at API prices: every
-request it recorded, shared histories counted once. A cost's percent divides
+Every percent is of this host's spend over the window at API prices (with
+`--ssh`, of every host's spend together): every request it recorded, shared
+histories counted once. A cost's percent divides
 its total by the host's, since a profile's history lies within the host's
 window; a saving's compares its monthly rate with the host's. When some
 requests could not be priced, each profile's spend is extrapolated from the ones

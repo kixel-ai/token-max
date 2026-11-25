@@ -329,10 +329,10 @@ def offered(transcript: str) -> tuple[re.Match, dict[str, tuple[float, bool, int
     if not total:
         sys.exit("the results need the hosts' total that --ssh prints")
     offer = {"measured": (0.0, False, 0, False), "up to": (0.0, False, 0, False)}
-    sentence = re.search(
-        r"(?:From the defaults|Together), these changes save (.*?)\.(?: |$)", plain[total.end():]
-    )
-    unmeasured = False
+    rest = plain[total.end():]
+    sentence = re.search(r"(?:From the defaults|Together), these changes save (.*?)\.(?: |$)", rest)
+    # Changes none of whose savings were measured get a sentence of their own.
+    unmeasured = bool(re.search(r"(?:From the defaults, no|No) change's saving was measured\.", rest))
     for part in sentence[1].split(", plus ") if sentence else []:
         if re.search(r"not measured(; overlapping changes may save less)?$", part):
             unmeasured = True

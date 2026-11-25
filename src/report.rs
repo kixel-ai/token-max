@@ -5209,6 +5209,26 @@ fn entries(rows: Vec<&Row>, join: Join, out: &Out<'_>) -> Vec<Entry> {
     entries
 }
 
+/// Margins summed within each host, whose lines can price the same requests, then combined
+/// across hosts in quadrature, since each host's history is a separate sample.
+#[derive(Default)]
+struct Margins<'a>(Vec<(Option<&'a str>, Option<Margin>)>);
+
+impl<'a> Margins<'a> {
+    fn add(&mut self, host: Option<&'a str>, margin: Option<Margin>) {
+        match self.0.iter_mut().find(|(h, _)| *h == host) {
+            Some((_, sum)) => *sum = Margin::plus(*sum, margin),
+            None => self.0.push((host, margin)),
+        }
+    }
+
+    fn total(&self) -> Option<Margin> {
+        self.0
+            .iter()
+            .fold(None, |sum, (_, m)| Margin::independent(sum, *m))
+    }
+}
+
 /// A section's row: its heading, the member count and offered value, the members' savings
 /// together, with an "up to" saving apart from the measured, their verdict the strongest
 /// member's, and the files and settings they change.
@@ -5241,8 +5261,8 @@ fn section_row(members: &[Row], out: &Out<'_>) -> Row {
     );
     // The measured savings, then those that hold only when an unset default would otherwise
     // be the other value.
-    let mut measured: Option<(f64, Option<Margin>)> = None;
-    let mut up_to: Option<(f64, Option<Margin>)> = None;
+    let mut measured: Option<(f64, Margins<'_>)> = None;
+    let mut up_to: Option<(f64, Margins<'_>)> = None;
     let mut partial = false;
     for r in &changes {
         let Some(usd) = r.saving else { continue };
@@ -5253,29 +5273,28 @@ fn section_row(members: &[Row], out: &Out<'_>) -> Row {
         } else {
             &mut measured
         };
-        let (total, margin) = sum.get_or_insert((0.0, None));
+        let (total, margins) = sum.get_or_insert_with(Default::default);
         *total += usd;
-        *margin = Margin::plus(*margin, r.margin);
+        margins.add(r.host.as_deref(), r.margin);
     }
+    let measured = measured.map(|(usd, m)| (usd, m.total()));
+    let up_to = up_to.map(|(usd, m)| (usd, m.total()));
     let verb = if partial { AT_LEAST } else { "saves" };
     match (measured, up_to) {
         // Members shown by what they cost, such as duplicate skill copies, keep that figure
         // summed, rather than a saving no one measured.
         (None, None) if changes.iter().all(|r| r.cost.is_some()) => {
-            let (cost, at_least) = changes.iter().filter_map(|r| r.cost).fold(
-                (
-                    Estimate {
-                        usd: 0.0,
-                        margin: None,
-                    },
-                    false,
-                ),
-                |(sum, at_least), (e, lower)| {
-                    let usd = sum.usd + e.usd;
-                    let margin = Margin::plus(sum.margin, e.margin);
-                    (Estimate { usd, margin }, at_least || lower)
-                },
-            );
+            let (mut usd, mut margins, mut at_least) = (0.0, Margins::default(), false);
+            for r in &changes {
+                let (e, lower) = r.cost.expect("filtered on a cost");
+                usd += e.usd;
+                margins.add(r.host.as_deref(), e.margin);
+                at_least |= lower;
+            }
+            let cost = Estimate {
+                usd,
+                margin: margins.total(),
+            };
             row.costs(Some(cost), at_least, &out.spend);
         }
         (None, None) => row.saves("saves", None, None, &out.spend),
@@ -5399,12 +5418,12 @@ fn kind_row(members: &[Row], out: &Out<'_>) -> Row {
         named.entry(name).or_default().push(figure);
         *apart.entry(name).or_insert(true) &= r.apart;
     }
-    let (mut usd, mut margin, mut at_least) = (0.0, None, unknown);
+    let (mut usd, mut margins, mut at_least) = (0.0, Margins::default(), unknown);
     for (name, figures) in &named {
         if apart[name] {
             for (e, lower) in figures {
                 usd += e.usd;
-                margin = Margin::plus(margin, e.margin);
+                margins.add(name.0, e.margin);
                 at_least |= lower;
             }
             continue;
@@ -5415,9 +5434,10 @@ fn kind_row(members: &[Row], out: &Out<'_>) -> Row {
             .max_by(|a, b| a.0.usd.total_cmp(&b.0.usd))
             .expect("a name has a figure");
         usd += most.usd;
-        margin = Margin::plus(margin, most.margin);
+        margins.add(name.0, most.margin);
         at_least |= lower || figures.len() > 1;
     }
+    let margin = margins.total();
     let costs = members.iter().any(|r| r.cost.is_some());
     let verbs: IndexSet<&str> = members
         .iter()
@@ -9674,6 +9694,21 @@ pub(crate) mod tests {
             "Policy in /etc/managed-settings.json keeps it off, which a user can't change."
         );
         assert_eq!(report_line(&text, "MCP server docs off").mark, "info");
+    }
+
+    /// A section's lines on one host can price the same requests, so their margins add; hosts'
+    /// histories are separate samples, so theirs combine in quadrature.
+    #[test]
+    fn margins_add_within_a_host_and_combine_across_hosts() {
+        let mut margins = Margins::default();
+        margins.add(None, Some(Margin::Usd(1.0)));
+        margins.add(None, Some(Margin::Usd(2.0)));
+        margins.add(Some("devbox"), Some(Margin::Usd(4.0)));
+        match margins.total() {
+            Some(Margin::Usd(usd)) => assert!((usd - 5.0).abs() < 1e-9, "{usd}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(Margins::default().total(), None);
     }
 
     /// Hosts' reports join into one: every row once per host, tagged with it, its percent of

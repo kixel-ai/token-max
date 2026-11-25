@@ -463,6 +463,15 @@ fn default_pair(model: Option<&str>, level: Option<&str>) -> String {
     }
 }
 
+/// The settings file and key a `model` owner names, null or not; None when no settings
+/// file names the model.
+fn model_setting(owner: &str) -> Option<(&str, &str)> {
+    owner
+        .strip_suffix(crate::effort::NULL_MODEL)
+        .unwrap_or(owner)
+        .rsplit_once(':')
+}
+
 /// The main-session default as `vibes` shows it: the maintainer's pick beside the default
 /// the settings give, the provider's guidance past `high`, and what each recorded model and
 /// effort pair cost. None when the default is unresolved.
@@ -480,13 +489,18 @@ fn default_item(e: &EffortCheck, profile: &str, how: Option<How>, out: &Out<'_>)
         .collect();
     let current = default_pair(c.model.as_deref(), c.effective.as_deref());
     // The pick reaches every profile the card covers, and every other whose model the same
-    // setting names, such as a project's, so an allowlist among them that blocks it keeps it
-    // from being offered, unless it is the default already.
+    // setting names, such as a project's, even through a symlink or as a null the edit
+    // replaces, so an allowlist among them that blocks it keeps it from being offered,
+    // unless it is the default already.
+    let setting = model_setting(&c.model_owner);
     let shared = |p: &Profile| {
-        !crate::effort::recorded(&c.model_owner)
-            && p.effort
-                .as_ref()
-                .is_some_and(|o| o.model_owner == c.model_owner)
+        p.effort.as_ref().is_some_and(|o| {
+            match (setting, model_setting(&o.model_owner)) {
+                (Some((f, k)), Some((g, l))) => k == l && crate::discovery::same_file(f, g),
+                // The process environment's ANTHROPIC_MODEL names every profile's model.
+                _ => c.model_owner != crate::effort::RECORDED && o.model_owner == c.model_owner,
+            }
+        })
     };
     let members: Vec<&Profile> = out
         .profiles
@@ -12001,11 +12015,13 @@ mod tests {
         let file = format!("{ROOT}/settings.json");
         let owner = format!("{file}:availableModels");
         // A Sonnet main with `advisor` set, under `allowlist`, and another profile with the
-        // same model setting under `other`'s, its effort set where `other` names: the first
-        // default card and the advisor card.
+        // same model setting under `other`'s, its effort set where `other` names, and the two
+        // profiles' model owners `owners` names if not the file's `model`: the first default
+        // card and the advisor card.
         let line = |allowlist: Option<Allowlist>,
                     advisor: Option<&str>,
-                    other: Option<(Option<Allowlist>, &str)>| {
+                    other: Option<(Option<Allowlist>, &str)>,
+                    owners: Option<(&str, &str)>| {
             let mut report = synthetic();
             report.checks.clear();
             report.context.clear();
@@ -12038,6 +12054,11 @@ mod tests {
                 other.effort.as_mut().unwrap().owner = effort.into();
                 report.scan.profiles.push(other);
             }
+            if let Some((first, second)) = owners {
+                for (p, owner) in report.scan.profiles.iter_mut().zip([first, second]) {
+                    p.effort.as_mut().unwrap().model_owner = owner.into();
+                }
+            }
             let checks = effort_checks(&EffortInput {
                 scan: &report.scan,
                 catalog: &prices(),
@@ -12062,7 +12083,7 @@ mod tests {
                     .clone(),
             )
         };
-        let cards = |allowlist: Option<Allowlist>| line(allowlist, None, None);
+        let cards = |allowlist: Option<Allowlist>| line(allowlist, None, None, None);
         let read = |entries: &[&str]| {
             Some(Allowlist::Read {
                 entries: entries.iter().map(|e| e.to_string()).collect(),
@@ -12130,7 +12151,12 @@ mod tests {
             rebuilt.text
         );
         // A set Opus advisor narrowed to a version Sonnet 5.5 doesn't pair with attaches none.
-        let (_, advisor) = line(read(&["sonnet", "claude-opus-4-6"]), Some("opus"), None);
+        let (_, advisor) = line(
+            read(&["sonnet", "claude-opus-4-6"]),
+            Some("opus"),
+            None,
+            None,
+        );
         assert_eq!((&advisor.how, advisor.quiet), (&None, false));
         assert!(
             advisor.text.contains(&format!("Set to opus in {file}, but availableModels permits only claude-opus-4-6 of the Opus family, and Claude Code's pairing table takes none of those as an advisor for claude-sonnet-5-5 ({file}:model), so none is attached.")),
@@ -12141,8 +12167,35 @@ mod tests {
         // does one on another line whose model the same setting names.
         let level = format!("{file}:env.CLAUDE_CODE_EFFORT_LEVEL");
         for effort in [level.as_str(), "/elsewhere/settings.json:effortLevel"] {
-            let (default, _) = line(None, None, Some((read(&["sonnet"]), effort)));
+            let (default, _) = line(None, None, Some((read(&["sonnet"]), effort)), None);
             assert_eq!((&default.how, default.quiet), (&None, true), "{effort}");
+        }
+        // So does one whose model the same setting names as a null the edit replaces, or
+        // through a symlink; one on another setting, or a recorded model, does not.
+        let w = crate::test_support::Workspace::new();
+        let real = w.home.join("settings.json");
+        std::fs::write(&real, "{}").unwrap();
+        let real = real.display().to_string();
+        let null = format!("{real}:model{}", crate::effort::NULL_MODEL);
+        let mut cases = vec![
+            ((null.as_str(), null.as_str()), true),
+            ((crate::effort::RECORDED, crate::effort::RECORDED), false),
+        ];
+        let set = format!("{real}:model");
+        let env = format!("{real}:env.ANTHROPIC_MODEL");
+        cases.push(((set.as_str(), env.as_str()), false));
+        #[cfg(unix)]
+        let link = {
+            let link = w.home.join("link.json");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            format!("{}:model", link.display())
+        };
+        #[cfg(unix)]
+        cases.push(((set.as_str(), link.as_str()), true));
+        for (owners, blocked) in cases {
+            let other = Some((read(&["sonnet"]), "/elsewhere/settings.json:effortLevel"));
+            let (default, _) = line(None, None, other, Some(owners));
+            assert_eq!(default.how.is_none(), blocked, "{owners:?}");
         }
         // A list token-max can't read keeps both offers, saying so.
         let why = "the admin console's settings, cached in /r.json, set availableModels, which token-max doesn't resolve";

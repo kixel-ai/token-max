@@ -48,7 +48,7 @@ Each run:
 The recurrence ends when the maintainer drops this quest.
 
 Baseline, from the 2026-11-23 survey that planned the
-[vibes cards](/docs/reference.md#vibes): Claude Code 2.1.322, codex-cli
+[vibes cards](/quest/m1/vibes/README.md): Claude Code 2.1.322, codex-cli
 0.167.1. Rejected then, so not to propose again unless changed: Codex
 `features.code_mode` (the model catalog already forces code mode on for every
 OpenAI model, T3's included), `includeGitInstructions: false` (right only

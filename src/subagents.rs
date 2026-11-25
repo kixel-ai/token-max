@@ -413,7 +413,7 @@ fn claude_controls(
 fn t3_owned(controls: &mut AgentControls, t3: &crate::model::T3Instance) {
     let file = join(&[&t3.state, "settings.json"]);
     // An entry the instance sets with no readable value, such as a secret.
-    let secret: Vec<&str> = t3
+    let (effort, secret): (Vec<&str>, Vec<&str>) = t3
         .environment
         .iter()
         .map(String::as_str)
@@ -421,13 +421,20 @@ fn t3_owned(controls: &mut AgentControls, t3: &crate::model::T3Instance) {
             crate::t3::SUBAGENT_ENVIRONMENT.contains(key)
                 && t3.env.as_ref().is_some_and(|env| !env.contains_key(*key))
         })
-        .collect();
-    if !secret.is_empty() && controls.unresolved.is_none() {
-        controls.unresolved = Some(format!(
+        .partition(|key| *key == "CLAUDE_CODE_SUBAGENT_EFFORT");
+    let unreadable = |keys: &[&str]| {
+        format!(
             "T3 instance {} sets {} with a value token-max cannot read",
             t3.instance,
-            secret.join(", ")
-        ));
+            keys.join(", ")
+        )
+    };
+    // A secret effort leaves only the effort unknown; the others decide the model.
+    if !effort.is_empty() && controls.effort_unresolved.is_none() {
+        controls.effort_unresolved = Some(unreadable(&effort));
+    }
+    if !secret.is_empty() && controls.unresolved.is_none() {
+        controls.unresolved = Some(unreadable(&secret));
     }
     for owned in [&mut controls.model, &mut controls.effort]
         .into_iter()
@@ -495,7 +502,11 @@ pub fn discover(
                     file: managed_file,
                 };
                 let own = claude_definitions(&join(&[&profile.root, "agents"]), None)?;
-                let agents = claude_controls(&[user_scope, managed_scope], local_env, own.clone());
+                let mut agents =
+                    claude_controls(&[user_scope, managed_scope], local_env, own.clone());
+                if let Some(t3) = &profile.t3 {
+                    t3_owned(&mut agents, t3);
+                }
                 for cwd in existing {
                     let [project_file, legacy_file, local_file] =
                         crate::discovery::claude_project_files(&cwd, options)?;
@@ -536,10 +547,6 @@ pub fn discover(
                     if scoped != agents {
                         scoped_dirs.insert(cwd, scoped);
                     }
-                }
-                let mut agents = agents;
-                if let Some(t3) = &profile.t3 {
-                    t3_owned(&mut agents, t3);
                 }
                 agents
             }
@@ -1069,6 +1076,8 @@ fn settings_text(
         for text in [&mut texts.0, &mut texts.1] {
             *text += &format!("; unresolved: {reason}");
         }
+    } else if let Some(reason) = &controls.effort_unresolved {
+        texts.1 += &format!("; unresolved: {reason}");
     }
     texts
 }

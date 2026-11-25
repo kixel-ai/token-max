@@ -1600,6 +1600,13 @@ share the setting but pair it with different subagent models get a card each.
 Only the profile's own settings and environment, or a T3 instance's, are
 read; a project's settings that set the variable are not.
 
+A T3 instance can set these variables as secret or sensitive entries, which
+token-max never reads. A secret subagent model, `_MODEL_FORCE` or Explore cap
+gets its own card that names the model as one token-max cannot resolve and
+says which entry it couldn't read. A secret effort gives no card, and the
+[subagent lines](#subagent-models) mark only the effort unresolved, keeping
+their model attribution.
+
 ### Auto memory in vibes
 
 The maintainer's pick: a lasting fact about a project belongs in its

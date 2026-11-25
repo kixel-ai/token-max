@@ -549,11 +549,12 @@ fn subagent_item(line: &SubagentLine<'_>, out: &Out<'_>) -> Option<Item> {
     let p = line.lead;
     let effort = p.agents.effort.as_ref()?;
     let level = effort.value.as_str();
-    let model = p
-        .agents
-        .model
-        .as_ref()
-        .map_or("the main session's model", |m| m.value.as_str());
+    // Unresolved settings, such as a secret model, may name a model other than the main one.
+    let model = match (&p.agents.model, &p.agents.unresolved) {
+        (Some(m), _) => m.value.as_str(),
+        (None, None) => "the main session's model",
+        (None, Some(_)) => "a model token-max cannot resolve",
+    };
     let mut text = format!(
         "Subagents default to {level} on {model} when neither the call nor the agent's definition names an effort. Set in {}.",
         out.home(&effort.owner)
@@ -6441,11 +6442,14 @@ fn summary(
         .iter()
         .filter(|p| p.agents.effort.is_some());
     for group in crate::rows::groups(set, subagent_owner) {
-        // Profiles sharing the effort setting can pair it with different subagent models.
-        let mut by_model: IndexMap<Option<&str>, Vec<&Profile>> = IndexMap::default();
+        // Profiles sharing the effort setting can pair it with different subagent models, or
+        // with settings token-max can't read, which each card has to say.
+        let mut by_model: IndexMap<(Option<&str>, Option<&str>), Vec<&Profile>> =
+            IndexMap::default();
         for p in &group.members {
             let model = p.agents.model.as_ref().map(|m| m.value.as_str());
-            by_model.entry(model).or_default().push(p);
+            let unresolved = p.agents.unresolved.as_deref();
+            by_model.entry((model, unresolved)).or_default().push(p);
         }
         // Lines split by model share a file, so they name their profiles instead.
         let split = by_model.len() > 1;
@@ -9491,6 +9495,43 @@ mod tests {
         assert!(
             cards[0].text.contains("on claude-haiku-5-5")
                 && cards[1].text.contains("on claude-sonnet-5-5")
+        );
+
+        // A profile whose subagent model can't be read gets its own card, keeping the note
+        // and never claiming the main session's model.
+        let mut report = synthetic();
+        report.checks.clear();
+        report.context.clear();
+        let mut other = crate::test_support::make_profile("other", ROOT);
+        other.root = format!("{ROOT}/other");
+        report.scan.profiles.push(other);
+        for p in &mut report.scan.profiles {
+            p.agents.effort = Some(Owned {
+                value: "max".into(),
+                owner: variable.clone(),
+            });
+        }
+        let why = "T3 instance claudeAgent sets CLAUDE_CODE_SUBAGENT_MODEL with a value token-max cannot read";
+        report.scan.profiles[1].agents.unresolved = Some(why.into());
+        let cards: Vec<Item> = advice(&report, ReportOptions::default())
+            .into_iter()
+            .filter(|i| i.name.starts_with("Subagent default"))
+            .collect();
+        assert_eq!(cards.len(), 2, "{cards:?}");
+        assert_ne!(cards[0].name, cards[1].name);
+        assert!(
+            cards[0].text.contains("on the main session's model")
+                && !cards[0].text.contains("cannot read"),
+            "{}",
+            cards[0].text
+        );
+        assert!(
+            cards[1]
+                .text
+                .contains("on a model token-max cannot resolve")
+                && cards[1].text.contains(&capitalize(why)),
+            "{}",
+            cards[1].text
         );
     }
 

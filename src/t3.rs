@@ -3339,6 +3339,37 @@ mod tests {
             p.agents.unresolved
         );
         assert!(!format!("{scan:?}").contains("PRIVATE_MODEL"));
+        assert_eq!(p.agents.effort_unresolved, None);
+
+        // A secret effort leaves only the effort unknown; the model still attributes runs.
+        state(
+            &w,
+            json!({"providerInstances":{"claudeAgent":{"driver":"claudeAgent","environment":[
+                {"name":"CLAUDE_CODE_SUBAGENT_EFFORT","value":"PRIVATE_EFFORT","sensitive":true},
+                {"name":"CLAUDE_CODE_SUBAGENT_MODEL","value":"claude-haiku-5-5"}
+            ]}}}),
+        );
+        let secret = crate::reader::scan(&w.scan_options()).unwrap();
+        let p = secret
+            .profiles
+            .iter()
+            .find(|p| p.t3.as_ref().is_some_and(|t| t.instance == "claudeAgent"))
+            .expect("the instance's profile");
+        assert!(p.agents.effort.is_none());
+        assert_eq!(p.agents.unresolved, None);
+        assert_eq!(
+            p.agents.model.as_ref().map(|m| m.value.as_str()),
+            Some("claude-haiku-5-5")
+        );
+        assert!(
+            p.agents
+                .effort_unresolved
+                .as_deref()
+                .is_some_and(|why| why.contains("CLAUDE_CODE_SUBAGENT_EFFORT")),
+            "{:?}",
+            p.agents.effort_unresolved
+        );
+        assert!(!format!("{secret:?}").contains("PRIVATE_EFFORT"));
     }
     #[test]
     fn a_secret_plugins_directory_leaves_only_the_plugins_unread() {

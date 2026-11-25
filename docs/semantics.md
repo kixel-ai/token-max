@@ -1491,8 +1491,9 @@ and the sources.
 settings, plus the project and local files of the profile's latest
 main-session request's directory once T3 has attributed requests, with the active profile's shell environment, settings
 `env` overriding it. `advisorModel` comes from the highest scope that sets it;
-a null there sets no advisor, as a settings merge does, a non-string is an
-error, and an empty name sets no advisor. What stops an advisor loading is checked in Claude Code's order: the
+a null there sets no advisor, as a settings merge does, a non-string is set
+but blocked as no model name (only the card reads it, so it fails no scan),
+and an empty name sets no advisor. What stops an advisor loading is checked in Claude Code's order: the
 tool turned off, then an unsupported provider, then a variable that turns off
 feature-flag fetching, which Claude Platform on AWS and Claude Models on
 Google Cloud (Anthropic managed) don't need. T3 instances have none.

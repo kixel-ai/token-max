@@ -5,7 +5,6 @@ use serde_json::Value;
 
 use crate::controls::{Env, SettingsScope, env_flag, js_string, scoped_environment};
 use crate::model::{AdvisorControl, Profile};
-use crate::safe::ScanError;
 
 /// Claude Code's page on the advisor tool.
 pub(crate) const DOCS: &str = "https://code.claude.com/docs/en/advisor";
@@ -38,29 +37,19 @@ const FLAG_OFF: [(&str, bool); 5] = [
 ];
 
 /// Resolve the advisor from `scopes`, lowest precedence first, and the terminal `env`.
-/// `user_file` is where an advisor would be set when no scope sets one.
-pub fn control(
-    scopes: &[SettingsScope],
-    env: &Env,
-    user_file: &str,
-) -> Result<AdvisorControl, ScanError> {
+/// `user_file` is where an advisor would be set when no scope sets one. A value that is no
+/// model name is shown as set and blocked, since only the advisor card reads it.
+pub fn control(scopes: &[SettingsScope], env: &Env, user_file: &str) -> AdvisorControl {
     // A null outranks the files below it, as settings merge.
-    let (model, owner) = match crate::effort::highest(scopes, KEY) {
-        Some((Value::Null, file)) => (None, format!("{file}:{KEY}")),
+    let (model, owner, invalid) = match crate::effort::highest(scopes, KEY) {
+        Some((Value::Null, file)) => (None, format!("{file}:{KEY}"), false),
         Some((Value::String(m), file)) => (
             Some(m.trim().to_string()).filter(|m| !m.is_empty()),
             format!("{file}:{KEY}"),
+            false,
         ),
-        Some((_, file)) => {
-            return Err(ScanError::at(
-                format!("invalid {KEY}"),
-                crate::model::Location {
-                    file: file.into(),
-                    line: 1,
-                },
-            ));
-        }
-        None => (None, format!("{user_file}:{KEY}")),
+        Some((value, file)) => (Some(value.to_string()), format!("{file}:{KEY}"), true),
+        None => (None, format!("{user_file}:{KEY}"), false),
     };
     let environment = scoped_environment(scopes, env);
     let value = |key: &str| {
@@ -77,7 +66,9 @@ pub fn control(
         }
     };
     let flagless = FLAGLESS.iter().any(|key| on(key));
-    let blocked = if on("CLAUDE_CODE_DISABLE_ADVISOR_TOOL") {
+    let blocked = if invalid {
+        Some(format!("{KEY} is not a model name"))
+    } else if on("CLAUDE_CODE_DISABLE_ADVISOR_TOOL") {
         Some(format!(
             "{} turns the advisor tool off",
             named("CLAUDE_CODE_DISABLE_ADVISOR_TOOL")
@@ -102,12 +93,12 @@ pub fn control(
     };
     let gateway =
         (!flagless && value("ANTHROPIC_BASE_URL").is_some()).then(|| named("ANTHROPIC_BASE_URL"));
-    Ok(AdvisorControl {
+    AdvisorControl {
         model,
         owner,
         blocked,
         gateway,
-    })
+    }
 }
 
 /// What puts profiles on one advisor card: the `advisorModel` owner, and the main-session
@@ -124,13 +115,26 @@ pub(crate) fn owner(p: &Profile) -> Option<String> {
     ))
 }
 
-/// Where a Claude model or alias, such as `opus` or `claude-sonnet-5-5`, ranks among the
-/// families an advisor pairs across: Haiku, Sonnet, Opus, then Fable. None for any other name.
-pub(crate) fn rank(model: &str) -> Option<usize> {
-    let model = model.to_ascii_lowercase();
-    ["haiku", "sonnet", "opus", "fable"]
-        .iter()
-        .position(|family| model.contains(family))
+/// A canonical Claude model ID's family and version, such as `("opus", (5, 5))` for
+/// `claude-opus-5-5`; None for an alias or another name.
+fn parse(id: &str) -> Option<(&str, (u32, u32))> {
+    let mut parts = id.strip_prefix("claude-")?.split('-');
+    let family = parts.next()?;
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    Some((family, (major, minor)))
+}
+
+/// Whether Claude Code pairs `main`, a Fable model, with `advisor`: only a Fable advisor of
+/// its version or later. The `fable` alias resolves to Claude Code's own default, so passes.
+pub(crate) fn fable_accepts(main: &str, advisor: &str) -> bool {
+    if advisor.eq_ignore_ascii_case("fable") {
+        return true;
+    }
+    match (parse(main), parse(advisor)) {
+        (Some((_, main)), Some(("fable", advisor))) => advisor >= main,
+        _ => false,
+    }
 }
 
 /// What `vibes` suggests as the advisor for a main model, by Claude Code's ranking.
@@ -147,15 +151,11 @@ pub(crate) enum Pick {
 /// The advisor one rank above `main`, a canonical Claude model ID such as `claude-opus-5-5`:
 /// Opus above Haiku and Sonnet, and Fable above Opus.
 pub(crate) fn pick(main: &str) -> Pick {
-    let mut parts = main.strip_prefix("claude-").unwrap_or_default().split('-');
-    let family = parts.next().unwrap_or_default();
-    let mut number = || parts.next().and_then(|n| n.parse::<u32>().ok());
-    let version = (number(), number().unwrap_or(0));
-    let (Some(major), minor) = version else {
+    let Some((family, version)) = parse(main) else {
         return Pick::Unsupported;
     };
     // Claude Code takes an advisor on Opus and Sonnet 4.6 or later and Haiku 4.5 or later.
-    let at_least = |m: u32, n: u32| (major, minor) >= (m, n);
+    let at_least = |m: u32, n: u32| version >= (m, n);
     match family {
         "fable" => Pick::Top,
         "opus" if at_least(4, 6) => Pick::Advisor("fable"),
@@ -190,7 +190,7 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-        control(&scopes, &env, "/u/settings.json").unwrap()
+        control(&scopes, &env, "/u/settings.json")
     }
 
     #[test]
@@ -223,12 +223,12 @@ mod tests {
         let a = resolve(json!({}), json!({"advisorModel": " "}), &[]);
         assert_eq!(a.model, None);
         assert_eq!(a.owner, "/p/.claude/settings.json:advisorModel");
-        let user = config(json!({"advisorModel": 1}));
-        let scopes = [SettingsScope {
-            config: &user,
-            file: "/u/settings.json",
-        }];
-        assert!(control(&scopes, &Env::default(), "/u/settings.json").is_err());
+        // A value that is no model name stops the advisor rather than the scan.
+        let a = resolve(json!({"advisorModel": false}), json!({}), &[]);
+        assert_eq!(
+            (a.model.as_deref(), a.blocked.as_deref()),
+            (Some("false"), Some("advisorModel is not a model name"))
+        );
     }
 
     #[test]
@@ -299,6 +299,21 @@ mod tests {
             a.gateway.as_deref(),
             Some("ANTHROPIC_BASE_URL, set in the environment,")
         );
+    }
+
+    #[test]
+    fn a_fable_main_takes_only_a_fable_advisor_of_its_version_or_later() {
+        for (main, advisor, accepted) in [
+            ("claude-fable-5-2", "fable", true),
+            ("claude-fable-5-2", "claude-fable-5-2", true),
+            ("claude-fable-5-2", "claude-fable-5-1", false),
+            ("claude-fable-5-1", "claude-fable-5-2", true),
+            ("claude-fable-5", "claude-fable-5-1", true),
+            ("claude-fable-5-2", "opus", false),
+            ("claude-fable-5-2", "claude-opus-5-5", false),
+        ] {
+            assert_eq!(fable_accepts(main, advisor), accepted, "{main} {advisor}");
+        }
     }
 
     #[test]

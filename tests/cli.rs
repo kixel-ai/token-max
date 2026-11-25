@@ -424,14 +424,13 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
             std::path::MAIN_SEPARATOR
         )
     );
-    // The fixture's Opus main gets a Fable advisor, one rank up.
+    // The fixture's Opus main gets a Fable advisor, one rank up, with no edit: no setting
+    // names that main model, which a session only ran on.
     assert!(
         advisor.starts_with("\n  [5/5] Advisor model  not measured\n        none -> fable\n")
             && advisor.contains("Fable ranks one above claude-opus-5-5, the main-session default (the latest recorded main-session model).")
-            && advisor.ends_with(&format!(
-                "        Change  \"advisorModel\": \"fable\" in ~{0}.claude{0}settings.json\n",
-                std::path::MAIN_SEPARATOR
-            )),
+            && advisor.contains("No setting names the main model")
+            && !advisor.contains("Change"),
         "{advisor}"
     );
     assert_eq!(
@@ -1714,9 +1713,8 @@ mod unix {
         // open until the child exits, as a person's would.
         let mut keyboard = std::fs::File::from(master);
         // A plan pays, then yes to the TTL and to writing it; then yes to seeing `vibes`'
-        // advice, yes to its Bash cap, no to its window and its advisor, and yes to writing
-        // the cap.
-        keyboard.write_all(b"p\ny\ny\ny\ny\nn\nn\ny\n").unwrap();
+        // advice, yes to its Bash cap, no to its window, and yes to writing the cap.
+        keyboard.write_all(b"p\ny\ny\ny\ny\nn\ny\n").unwrap();
         let status = child.wait().unwrap().code().unwrap();
         let (stdout, stderr) = (out.join().unwrap(), err.join().unwrap());
         assert_eq!(status, 0, "{stderr}");
@@ -1839,9 +1837,9 @@ mod unix {
                 && entry.ends_with(r#"Change "modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 400000}} in ~/.claude/settings.json Accept? [y]es, [n]o, [q]uit:"#),
             "{entry}"
         );
-        // The advisor card asks too, and its no writes nothing.
+        // The advisor card offers no edit on a recorded main model, so it asks nothing.
         assert!(
-            words(&stdout[advisor..again]).ends_with(r#"Change "advisorModel": "fable" in ~/.claude/settings.json Accept? [y]es, [n]o, [q]uit:"#),
+            !words(&stdout[advisor..again]).contains("Accept?"),
             "{stdout}"
         );
         // The card is from the scan before doctor wrote 1h, so its cap is for the 5m cache

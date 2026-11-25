@@ -1567,7 +1567,9 @@ is on and more than half of a line's main sessions in the window ran in a
 repository with a `CLAUDE.md`, `.claude/CLAUDE.md` or `AGENTS.md`, the card
 advises turning it off, and says what share of sessions qualified.
 
-A session counts at the directory of its latest main-agent request. It ran in
+A session counts at the directory of its latest main-agent request; for
+Claude Code, only a session T3 settled to the line counts, as for the
+directory the setting is read at ([T3 Code](t3.md)). It ran in
 such a repository when its transcript recorded Claude Code loading one of those
 files as the project's, from that directory or one above it, compared once
 symlinks resolve while both directories exist; or when one sits
@@ -1700,10 +1702,13 @@ the maintainer's pick: `opus` for a Haiku or Sonnet main, `fable` for an Opus
 main, and none for a Fable main, which Claude Code pairs only with a Fable
 advisor. It cites the page's claim that a faster main model with a stronger
 advisor "typically costs less than running the stronger model throughout",
-and offers to write `advisorModel` to the profile's settings file. When a
-project's settings file sets the main model, in `model` or
-`env.ANTHROPIC_MODEL`, the card offers no edit, since an advisor in the
-profile's file would pair with every project's model. What the
+and offers to write `advisorModel` to the profile's settings file, saying
+that a project whose own settings pick another main model takes it too. The
+edit is offered only when a profile-wide setting names the main model: when a
+project's settings file sets it, in `model` or `env.ANTHROPIC_MODEL`, an
+advisor in the profile's file would pair with every project's model, and when
+no setting names it, the latest recorded model may be a session's `/model` or
+`--model` choice rather than the default, so the card offers no edit. What the
 pairing saves or costs is not measured. A main model Claude Code attaches no
 advisor to (Sonnet or Opus before 4.6, Haiku before 4.5), or one token-max
 can't resolve, gets a card that advises nothing.
@@ -1719,15 +1724,19 @@ Cloud (Anthropic managed) need no flag. An `ANTHROPIC_BASE_URL` gateway must
 pass the advisor tool on intact, and a Fable advisor needs Fable access and,
 on plans that bill Fable to usage credits, the consent `/model fable` asks
 for; the card says both. An `advisorModel` already set gets a card that
-advises nothing, unless one of those stops it loading, the main model takes
-no advisor or only a Fable one, or the advisor ranks no higher than the main
-model; then it says so and offers no edit.
+advises nothing, unless one of those stops it loading, its value is no model
+name, the main model takes no advisor, or a Fable main model has an advisor
+other than Fable of its version or later; then it says so and offers no edit.
+Which other advisors a main model takes depends on both versions (Claude
+Code's [pairing table](https://code.claude.com/docs/en/advisor#choose-an-advisor-model)),
+so the card checks only those rules, which hold for every version.
 
 T3 Code picks each thread's main model, so T3 instances get no card; when one
-reads the same settings file, the card says its threads would take the
-advisor too. `doctor` has no advisor line: a recorded advisor call counts in
-its request's cost, priced where the transcript records what pricing needs,
-but no line says how many ran or what they cost.
+reads the same settings file, the card says each of its threads whose model
+takes the advisor would use it. `doctor` has no advisor line. An advisor call
+records no service tier, so a request that made one has no price of its own
+and is extrapolated from the priced requests like any other unpriced one, and
+no line says how many calls ran or what they cost.
 
 ## Messages from other sessions
 

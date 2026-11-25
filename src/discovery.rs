@@ -1130,7 +1130,7 @@ pub fn discover_inbound(
 }
 
 /// Every T3 instance's profile ID.
-fn t3_instances(profiles: &[Profile]) -> HashSet<String> {
+pub(crate) fn t3_instances(profiles: &[Profile]) -> HashSet<String> {
     profiles
         .iter()
         .filter(|p| p.t3.is_some())
@@ -1142,7 +1142,7 @@ fn t3_instances(profiles: &[Profile]) -> HashSet<String> {
 /// every candidate, so a native profile counts only requests that name no T3 instance, and
 /// an instance only those that name it alone. One T3 marked unsettled decides for no one,
 /// even when it names a single candidate.
-fn owned_by(r: &Request, profile: &Profile, t3: &HashSet<String>) -> bool {
+pub(crate) fn owned_by(r: &Request, profile: &Profile, t3: &HashSet<String>) -> bool {
     if !r.profiles.iter().any(|p| **p == *profile.id)
         || r.issues.iter().any(|i| i.starts_with(crate::t3::UNSETTLED))
     {
@@ -1197,9 +1197,12 @@ pub fn discover_latest_claude_controls(
         };
         let mut project = vec![];
         if let Some(cwd) = directory {
+            // A session in the home directory reads the user's own file as its project's.
             for file in claude_project_files(cwd, options)? {
-                let config = options.settings(&file, Harness::Claude)?;
-                project.push((file, config));
+                if !same_file(&file, &profile.settings_file) {
+                    let config = options.settings(&file, Harness::Claude)?;
+                    project.push((file, config));
+                }
             }
         }
         let scopes: Vec<SettingsScope> = std::iter::once(SettingsScope {
@@ -1238,7 +1241,7 @@ pub fn discover_latest_claude_controls(
             &scopes,
             local_env,
             &profile.settings_file,
-        )?);
+        ));
     }
     Ok(())
 }
@@ -2145,7 +2148,7 @@ fn ancestors_setting_codex_memory(
 }
 
 /// Whether two paths name one file, as recorded or once resolved.
-fn same_file(a: &str, b: &str) -> bool {
+pub(crate) fn same_file(a: &str, b: &str) -> bool {
     a == b || realpath(a).is_ok_and(|a| realpath(b).is_ok_and(|b| a == b))
 }
 
@@ -4822,6 +4825,32 @@ mod tests {
         let profile = claude(&data);
         assert!(!profile.idle.as_ref().unwrap().resolved);
         assert!(profile.idle_directories.as_ref().unwrap().is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_session_in_a_link_to_the_home_reads_the_user_file_once() {
+        let w = Workspace::new();
+        write(
+            w.claude.join("settings.json"),
+            r#"{"advisorModel":null,"model":"claude-sonnet-5-5"}"#,
+        );
+        let link = w.home.join("link");
+        std::os::unix::fs::symlink(&w.home, &link).unwrap();
+        let mut data = discover(&options(&w)).unwrap();
+        let profile = claude(&data).clone();
+        let requests = [request(&profile, Some(&link))];
+        discover_latest_claude_controls(&options(&w), &mut data.profiles, &requests).unwrap();
+        let profile = claude(&data);
+        // The user's own file owns both, not the same file under the link's path.
+        assert_eq!(
+            profile.advisor.as_ref().unwrap().owner,
+            format!("{}:advisorModel", profile.settings_file)
+        );
+        assert_eq!(
+            profile.effort.as_ref().unwrap().model_owner,
+            format!("{}:model", profile.settings_file)
+        );
     }
 
     #[test]

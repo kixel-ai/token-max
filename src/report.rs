@@ -1401,9 +1401,17 @@ pub(crate) fn closing(
         }
     }
     if !remaining.steps().is_empty() {
-        out.section("STEPS BY HAND");
-        for (name, step) in remaining.steps() {
-            out.wrap(&format!("{name}: {step}"), 2, Some(4), PLAIN);
+        match remaining.host() {
+            Some(host) => out.section(&format!("STEPS BY HAND  {host}")),
+            None => out.section("STEPS BY HAND"),
+        }
+        for (name, step, reason) in remaining.steps() {
+            out.wrap(
+                &format!("{name}: {step} (since {reason})"),
+                2,
+                Some(4),
+                PLAIN,
+            );
         }
     }
     out.text

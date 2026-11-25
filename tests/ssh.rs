@@ -911,13 +911,14 @@ fn background_controls_and_estimates_keep_their_remote_history() {
     assert_eq!(status, 1, "{stderr}");
     assert_eq!(stderr, "");
     // The same report, but for its closing edits naming their files after the host, as `scp`
-    // would.
+    // would, and its steps by hand naming the host.
     let devbox = section(&stdout, "devbox");
     assert!(devbox.contains("\n  EDITS  devbox:~"), "{devbox}");
-    assert_eq!(
-        timeless(&devbox.replace("\n  EDITS  devbox:~", "\n  EDITS  ~")),
-        timeless(&there)
-    );
+    assert!(devbox.contains("\n  STEPS BY HAND  devbox\n"), "{devbox}");
+    let devbox = devbox
+        .replace("\n  EDITS  devbox:~", "\n  EDITS  ~")
+        .replace("\n  STEPS BY HAND  devbox\n", "\n  STEPS BY HAND\n");
+    assert_eq!(timeless(&devbox), timeless(&there));
     // Why a cost is unknown is evidence, which only details show.
     let (_, text, stderr) = hosts.run(&["--ssh", "devbox", "--details"]);
     assert_eq!(stderr, "");

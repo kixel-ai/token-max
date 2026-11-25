@@ -147,8 +147,9 @@ changes, naming each file; nothing is written before that yes, end of input is a
 and a no says nothing was written. Each file is then written once, with every
 edit accepted for it. After the confirm, a **Not written** section per file
 lists every edit left unwritten, whether declined at its question or at the
-confirm, one line per key as the report's closing sections show them, then the
-steps by hand, so each can still be made by hand, which also suits a file
+confirm, one line per key as the report's closing sections show them, including
+the MCP server removals and `deniedMcpServers` entries offered after a yes and
+the cleanup of servers off already, then the steps by hand, so each can still be made by hand, which also suits a file
 another tool rewrites, such as a dotfiles manager. Either answer exits 0.
 
 Only a profile's own `settings.json` or Codex `config.toml` is edited,
@@ -489,7 +490,8 @@ and settings under one parent set to one value share one too, such as
 `skillOverrides.{a, b} = "off" (2)` for two skills turned off. `--details`
 shows each edit's exact JSON or TOML instead. Steps to take by hand, such as
 one a shell variable would override, follow in a **Steps by hand** section,
-each naming its line.
+named after its host under `--ssh`, each naming its line and why token-max
+can't take it.
 
 Every line is measured: replayed or priced from your own transcripts at public
 API prices, or marked unknown where they can't price it. No verdict rests on

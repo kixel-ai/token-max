@@ -1300,58 +1300,99 @@ pub fn describe(fix: &Fix, home: Option<&str>) -> Described {
 /// at its end: each file's edits, then the steps.
 #[derive(Debug, Default)]
 pub struct Remaining {
-    /// Each file as shown, such as `devbox:~/.claude/settings.json`, with its format and
-    /// edits, each once.
-    files: Vec<(String, Harness, Vec<Edit>)>,
-    /// Each change made by hand: its name and the step.
-    steps: Vec<(String, String)>,
+    /// The SSH destination whose these are, which names the steps; none for this host's.
+    host: Option<String>,
+    files: Vec<Unmade>,
+    /// Each change made by hand: its name, the step, and why the doctor cannot take it.
+    steps: Vec<(String, String, String)>,
+}
+
+/// One file's edits left to make.
+#[derive(Debug)]
+struct Unmade {
+    /// As shown, such as `devbox:~/.claude/settings.json`.
+    file: String,
+    harness: Harness,
+    /// Each edit once.
+    edits: Vec<Edit>,
+    /// Each MCP server entry to remove, as a person finds it in the file.
+    removals: Vec<String>,
 }
 
 impl Remaining {
     /// The edits and steps of `fixes`, their files named as `style` names them.
     pub fn of<'a>(fixes: impl IntoIterator<Item = &'a Fix>, style: &Style) -> Self {
-        let mut remaining = Remaining::default();
+        let mut remaining = Remaining {
+            host: style.host.clone(),
+            ..Remaining::default()
+        };
         for fix in fixes {
             match &fix.how {
                 How::Edit(patch) => {
-                    let file = style.file(&patch.file);
-                    let at = match remaining.files.iter().position(|(f, _, _)| *f == file) {
-                        Some(at) => at,
-                        None => {
-                            remaining.files.push((file, patch.harness, vec![]));
-                            remaining.files.len() - 1
-                        }
-                    };
-                    let edits = &mut remaining.files[at].2;
+                    let unmade = remaining.file(&style.file(&patch.file), patch.harness);
                     for edit in &patch.edits {
-                        if !edits.contains(edit) {
-                            edits.push(edit.clone());
+                        if !unmade.edits.contains(edit) {
+                            unmade.edits.push(edit.clone());
                         }
                     }
                 }
-                How::Manual { step, .. } => remaining
-                    .steps
-                    .push((fix.name.clone(), home_in(step, style.home.as_deref()))),
+                How::Manual { step, reason } => remaining.steps.push((
+                    fix.name.clone(),
+                    home_in(step, style.home.as_deref()),
+                    home_in(reason, style.home.as_deref()),
+                )),
             }
         }
         remaining
     }
 
+    /// The edits left in `file`, empty until one is added.
+    fn file(&mut self, file: &str, harness: Harness) -> &mut Unmade {
+        let at = match self.files.iter().position(|u| u.file == file) {
+            Some(at) => at,
+            None => {
+                self.files.push(Unmade {
+                    file: file.into(),
+                    harness,
+                    edits: vec![],
+                    removals: vec![],
+                });
+                self.files.len() - 1
+            }
+        };
+        &mut self.files[at]
+    }
+
+    /// Add removing an MCP server's `entry`, its file named as `style` names it.
+    fn remove(&mut self, entry: &Entry, style: &Style) {
+        let text = format!("remove {}", entry.text());
+        let unmade = self.file(&style.file(&entry.file), entry.harness);
+        if !unmade.removals.contains(&text) {
+            unmade.removals.push(text);
+        }
+    }
+
     /// Each file with its lines: one per key, or each edit's exact JSON or TOML under
-    /// `details`.
+    /// `details`, then its removals.
     pub(crate) fn files(&self, details: bool) -> impl Iterator<Item = (&str, Vec<String>)> {
-        self.files.iter().map(move |(file, harness, edits)| {
-            let lines = match details {
-                true => edits.iter().map(|e| e.text(*harness)).collect(),
-                false => keys(*harness, edits),
+        self.files.iter().map(move |u| {
+            let mut lines = match details {
+                true => u.edits.iter().map(|e| e.text(u.harness)).collect(),
+                false => keys(u.harness, &u.edits),
             };
-            (file.as_str(), lines)
+            lines.extend(u.removals.iter().cloned());
+            (u.file.as_str(), lines)
         })
     }
 
-    /// Each change made by hand: its name and the step.
-    pub(crate) fn steps(&self) -> &[(String, String)] {
+    /// Each change made by hand: its name, the step, and why the doctor cannot take it.
+    pub(crate) fn steps(&self) -> &[(String, String, String)] {
         &self.steps
+    }
+
+    /// The SSH destination whose steps these are; none for this host's.
+    pub(crate) fn host(&self) -> Option<&str> {
+        self.host.as_deref()
     }
 }
 
@@ -1394,15 +1435,12 @@ fn keys(harness: Harness, edits: &[Edit]) -> Vec<String> {
             Op::Remove => keys.push(Key::Remove(&edit.path)),
         }
     }
+    // A key that is not bare, such as a model name with a dot, is quoted so it reads as one.
     let path = |path: &[String]| -> String {
-        match harness {
-            Harness::Claude => path.join("."),
-            Harness::Codex => path
-                .iter()
-                .map(|k| crate::context::toml_key(k))
-                .collect::<Vec<_>>()
-                .join("."),
-        }
+        path.iter()
+            .map(|k| crate::context::toml_key(k))
+            .collect::<Vec<_>>()
+            .join(".")
     };
     let value = |value: &Value| -> String {
         match harness {
@@ -2696,7 +2734,44 @@ impl Selection {
             .enumerate()
             .filter(|(index, _)| !(wrote && self.yes.contains(index)))
             .map(|(_, offer)| &offer.fix);
-        Remaining::of(declined.chain(&offers.by_hand), style)
+        let mut remaining = Remaining::of(declined.chain(&offers.by_hand), style);
+        // What the walk wrote to a target, if anything.
+        let written = |target: usize| {
+            self.accepted
+                .iter()
+                .find(|(t, _, _)| wrote && *t == target)
+                .map(|(_, edits, removals)| (edits, removals))
+        };
+        // An accepted change's own removals and blocks, and the cleanup of servers off
+        // already; a declined change's are moot.
+        for (index, offer) in offers.offers.iter().enumerate() {
+            if !self.yes.contains(&index) {
+                continue;
+            }
+            let How::Edit(patch) = &offer.fix.how else {
+                unreachable!("offers are edits")
+            };
+            for name in &offer.denials {
+                let edit = deny(name);
+                if !written(offer.target).is_some_and(|(edits, _)| edits.contains(&edit)) {
+                    let unmade = remaining.file(&style.file(&patch.file), patch.harness);
+                    if !unmade.edits.contains(&edit) {
+                        unmade.edits.push(edit);
+                    }
+                }
+            }
+            for (target, entry) in &offer.entries {
+                if !written(*target).is_some_and(|(_, removals)| removals.contains(entry)) {
+                    remaining.remove(entry, style);
+                }
+            }
+        }
+        for (target, entry) in &offers.cleanup {
+            if !written(*target).is_some_and(|(_, removals)| removals.contains(entry)) {
+                remaining.remove(entry, style);
+            }
+        }
+        remaining
     }
 
     /// What the walk came to on the host whose changes are `offers`.
@@ -4117,7 +4192,7 @@ pub fn finish(hosts: &[(&Summary, &[Written], &Style)], style: &Style) -> String
             "Nothing to change on this host."
         }
     } else if summaries().all(|s| s.offered == 0) {
-        "token-max cannot make these changes; the steps by hand are listed below."
+        "token-max cannot make these changes; take the steps by hand it names."
     } else if summaries().all(|s| s.files.is_empty()) {
         "Nothing was accepted, so nothing was written."
     } else {
@@ -4641,7 +4716,8 @@ mod tests {
             [(
                 "Plugin".to_string(),
                 // slash ok: the step's text passes through, its home shortened
-                "uninstall the plugin in ~/.claude".to_string()
+                "uninstall the plugin in ~/.claude".to_string(),
+                "token-max does not uninstall plugins".to_string()
             )]
         );
         // Each file is its own section, its lines wrapping under it, then the steps.
@@ -4660,7 +4736,7 @@ mod tests {
             "{text}"
         );
         // slash ok: the step's text passes through, its home shortened
-        let steps = "\n  STEPS BY HAND\n    Plugin: uninstall the plugin in\n      ~/.claude\n";
+        let steps = "\n  STEPS BY HAND  devbox\n    Plugin: uninstall the plugin in\n      ~/.claude (since token-max does\n      not uninstall plugins)\n";
         assert!(text.ends_with(steps), "{text}");
         assert_eq!(
             crate::report::closing(&Remaining::default(), "EDITS", Default::default()),
@@ -4706,7 +4782,11 @@ mod tests {
         let left = |wrote| {
             let remaining = selection.unwritten(owner.offers(), wrote, &style);
             let lines: Vec<String> = remaining.files(false).flat_map(|(_, l)| l).collect();
-            let steps: Vec<String> = remaining.steps().iter().map(|(n, _)| n.clone()).collect();
+            let steps: Vec<String> = remaining
+                .steps()
+                .iter()
+                .map(|(n, _, _)| n.clone())
+                .collect();
             (lines, steps)
         };
         // Once A is written, B and the step are left; a no at the confirm leaves A too.
@@ -4717,6 +4797,78 @@ mod tests {
                 vec!["a = false".into(), "b = false".into()],
                 vec!["C".into()]
             )
+        );
+    }
+
+    #[test]
+    fn the_walk_leaves_listed_the_mcp_removals_and_blocks_it_did_not_write() {
+        let w = Workspace::new();
+        let settings = w.claude.join("settings.json");
+        let state = w.home.join(".claude.json");
+        let config = w.codex.join("config.toml");
+        std::fs::write(&settings, "{}\n").unwrap();
+        std::fs::write(&state, "{\n  \"mcpServers\": {\"A\": {}, \"B\": {}}\n}\n").unwrap();
+        std::fs::write(&config, "[mcp_servers.off]\nenabled = false\n").unwrap();
+        let a = entry(&state, Harness::Claude, &["mcpServers", "A"]);
+        let b = entry(&state, Harness::Claude, &["mcpServers", "B"]);
+        let gmail = Definition::Deny(crate::mcp::Deny {
+            name: "Gmail".into(),
+            since: (1, 330),
+            step: "disconnect it at claude.ai".into(),
+            reason: "it is a claude.ai connector".into(),
+        });
+        let fixes = vec![
+            server("A", 6.0, &settings, vec![Definition::Entry(a), gmail]),
+            server("B", 2.0, &settings, vec![Definition::Entry(b)]),
+        ];
+        let off = entry(&config, Harness::Codex, &["mcp_servers", "off"]);
+        let owner = Owner::new(fixes, vec![Definition::Entry(off)], None, 0.0);
+        let mut selection = Selection::default();
+        // A and the removal of its entry are accepted, not its block; B is declined, and so
+        // is the cleanup of the server off already.
+        for event in [
+            Event::Choose {
+                offer: 0,
+                yes: true,
+            },
+            Event::Remove { offer: 0, entry: 0 },
+            Event::Choose {
+                offer: 1,
+                yes: false,
+            },
+        ] {
+            selection.apply(owner.offers(), event).unwrap();
+        }
+        let style = style(&w);
+        let left = |wrote| -> Vec<Vec<String>> {
+            selection
+                .unwritten(owner.offers(), wrote, &style)
+                .files(false)
+                .map(|(_, lines)| lines)
+                .collect()
+        };
+        // Once written, A's block is left, and B's removal is moot since B stays on.
+        assert_eq!(
+            left(true),
+            [
+                vec![
+                    "permissions.deny += mcp__B".to_string(),
+                    "deniedMcpServers += Gmail".into()
+                ],
+                vec!["remove [mcp_servers.off]".into()],
+            ]
+        );
+        // A no at the confirm leaves A's removal too.
+        assert_eq!(
+            left(false),
+            [
+                vec![
+                    "permissions.deny += mcp__A, mcp__B (2)".to_string(),
+                    "deniedMcpServers += Gmail".into()
+                ],
+                vec!["remove mcpServers.A".into()],
+                vec!["remove [mcp_servers.off]".into()],
+            ]
         );
     }
 
@@ -5626,7 +5778,7 @@ mod tests {
         );
         assert_eq!(
             finish(&plan, &[], &style(&w)),
-            "\n  token-max cannot make these changes; the steps by hand are listed below.\n"
+            "\n  token-max cannot make these changes; take the steps by hand it names.\n"
         );
         std::fs::write(&settings, "{}").unwrap();
         let (plan, _) = walk(vec![deny], &w, "y\n");

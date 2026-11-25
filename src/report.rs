@@ -1983,7 +1983,7 @@ fn details(report: &Report, out: &mut Out<'_>) {
                 out.field(
                     "Shared",
                     &format!(
-                        "{} also on another line, counted once on a shared line",
+                        "{} whose owner is unknown, counted once on a shared line",
                         plural(u.shared, "request")
                     ),
                 );
@@ -5459,7 +5459,10 @@ fn advisor_row(u: &AdvisorUse, control: Option<&AdvisorControl>, out: &Out<'_>) 
             (set, out.home(&control.owner))
         }
         AdvisorLine::T3 { owner } => (
-            "T3 Code threads made these calls, and no native advisor line is confirmed to name the advisorModel they read, which is not read here: T3 picks each thread's main model, so its instances get no advisor card.".into(),
+            format!(
+                "{}o native advisor line is confirmed to name the advisorModel these T3 Code threads read, which is not read here: T3 picks each thread's main model, so its instances get no advisor card.",
+                if u.calls > 0 { "T3 Code threads made the calls counted here, and n" } else { "N" }
+            ),
             owner.as_ref().map_or_else(
                 || "unresolved: T3 launch settings may replace its settings file".into(),
                 // Project or local settings may set their own, which no T3 line resolves.
@@ -12385,7 +12388,7 @@ mod tests {
         assert!(
             lines[0]
                 .evidence
-                .contains("T3 Code threads made these calls"),
+                .contains("T3 Code threads made the calls counted here"),
             "{}",
             lines[0].evidence
         );

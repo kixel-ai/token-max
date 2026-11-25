@@ -4858,10 +4858,21 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
                 format!("saves {}", approx(usd, margin, "/mo"))
             };
             // Both windows replay the TTL doctor's TTL line recommends, which may not be today's.
-            let ttl = c.ttls.main.map_or_else(
-                || ",".into(),
-                |t| format!(", both at a {} main-session cache TTL,", t.as_str()),
-            );
+            let ttl = match (c.ttls.main, c.ttls.subagent) {
+                (Some(main), Some(sub)) if sub == main => {
+                    format!(", both at a {} cache TTL,", main.as_str())
+                }
+                (Some(main), Some(sub)) => format!(
+                    ", both at a {} main-session and {} subagent cache TTL,",
+                    main.as_str(),
+                    sub.as_str()
+                ),
+                (Some(main), None) => {
+                    format!(", both at a {} main-session cache TTL,", main.as_str())
+                }
+                (None, Some(sub)) => format!(", both at a {} subagent cache TTL,", sub.as_str()),
+                (None, None) => ",".into(),
+            };
             format!(
                 "Against {against}{ttl} its replay of a {} window {amount} at API prices.",
                 tokens(cap)
@@ -6833,7 +6844,13 @@ fn summary(
         )
     };
     // Said once, for every figure extrapolated over requests that could not be priced.
-    let tilde = if spend.margin.is_some() || rows.iter().any(|r| r.margin.is_some()) {
+    // The details also print every compaction window's estimate, the cap's included.
+    let windows = out.options.details
+        && report.checks.iter().any(|c| {
+            matches!(c, CheckResult::Compaction(c)
+                if c.scenarios.iter().chain(&c.cap).any(|s| s.margin.is_some()))
+        });
+    let tilde = if spend.margin.is_some() || rows.iter().any(|r| r.margin.is_some()) || windows {
         " A ~ marks a figure extrapolated from the requests that could be priced to those that could not, assuming they resemble each other, followed by its 95% margin of error."
     } else {
         ""

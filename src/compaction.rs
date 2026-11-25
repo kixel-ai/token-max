@@ -5629,13 +5629,23 @@ mod tests {
             };
             let priced = c.cap.as_mut().unwrap();
             priced.savings_usd = Some(-0.5);
-            priced.margin = None;
+            priced.margin = Some(crate::model::Margin::Unmeasured);
             priced.affected_requests = 1;
+            // The details print the cap's extrapolated estimate, so they explain the `~`.
+            assert!(text(&report, None, true).contains("A ~ marks a figure extrapolated"));
+            let CheckResult::Compaction(c) = &mut report.checks[index] else {
+                unreachable!()
+            };
+            c.cap.as_mut().unwrap().margin = None;
+            assert!(!text(&report, None, true).contains("A ~ marks a figure extrapolated"));
+            let CheckResult::Compaction(c) = &mut report.checks[index] else {
+                unreachable!()
+            };
             let scale = crate::report::monthly(1.0, c.base.since, c.base.until);
             let text = card(&report).text;
             assert!(
                 text.contains(&format!(
-                    " Against the 600k window, both at a 5m main-session cache TTL, its replay of a 400k window costs {} more at API prices. ",
+                    " Against the 600k window, both at a 5m cache TTL, its replay of a 400k window costs {} more at API prices. ",
                     crate::report::approx(0.5 * scale, None, "/mo")
                 )),
                 "{text}"

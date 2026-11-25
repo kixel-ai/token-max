@@ -1431,7 +1431,7 @@ pub fn totals_section(
 }
 
 /// What a figure marked `~` assumes, said once.
-pub(crate) const TILDE: &str = "A ~ marks a figure extrapolated from the requests that could be priced to those that could not, assuming they resemble each other, followed by its 95% margin of error.";
+pub(crate) const TILDE: &str = "A ~ figure extrapolates from the priced requests to the unpriced ones, assuming they resemble each other; ± is its 95% margin of error.";
 
 /// The note under the credit that opens the walk, saying what each host's footer says only
 /// after it: what a `~` in `credit` assumes, and that its percents leave out the profiles that
@@ -6449,49 +6449,11 @@ pub(crate) fn sessions(scan: &crate::model::Scan) -> u64 {
     roots.len() as u64
 }
 
-/// The report: what was read, then every setting and feature on one line, the changes
-/// first, with each line's evidence under `--details`.
-/// Returns the text before the list, the list's rows, its advice and what the settings save
-/// against the defaults; what follows them stays in `out`.
-fn summary(
-    report: &Report,
-    fixes: &[crate::doctor::Fix],
-    out: &mut Out<'_>,
-) -> (
-    String,
-    String,
-    Vec<Row>,
-    Vec<Item>,
-    Option<crate::defaults::Credit>,
-) {
-    let arrow = out.arrow;
+/// What `--details` says before the headline: the `--defaults` pretence, the profiles read,
+/// T3 coverage, what the prices mean, and each request or line left out or assumed.
+/// `conditional` counts the requests priced at an assumed service tier.
+fn preamble(report: &Report, conditional: u64, out: &mut Out<'_>) {
     let coverage = &report.scan.coverage;
-    let spend = out.spend;
-    let many = report.scan.profiles.len() > 1;
-    let spent = spend.text();
-    let title = out.title(&match spend.since {
-        Some(since) if coverage.requests > 0 => format!(
-            "{} requests in {} from {} to {} ({}), {spent} at API prices",
-            count(coverage.requests),
-            plural(sessions(&report.scan), "session"),
-            date(&iso(since)),
-            date(&report.generated_at),
-            days(Some(since), Some(spend.until))
-        ),
-        _ => format!(
-            "No requests found{}",
-            report
-                .scan
-                .since
-                .map_or_else(String::new, |s| format!(" since {}", date(&iso(s))))
-        ),
-    });
-    let profiles: Vec<String> = report
-        .scan
-        .profiles
-        .iter()
-        .map(|p| out.short_profile(&p.id))
-        .collect();
     if report.scan.defaults {
         out.line(
             "As a user with no settings files would see it (--defaults): every user, project and local settings file, T3 Code's settings and the shell's setting variables are pretended away, so each setting is at its Claude Code or Codex default and every tool, skill and MCP server is on. Managed and system policy still apply.",
@@ -6499,21 +6461,21 @@ fn summary(
             PLAIN,
         );
     }
+    let profiles: Vec<String> = report
+        .scan
+        .profiles
+        .iter()
+        .map(|p| out.short_profile(&p.id))
+        .collect();
     if !profiles.is_empty() {
         out.line(&format!("Profiles: {}.", profiles.join(", ")), 0, DIM);
     }
     t3_coverage(report, out);
     out.line(&format!("{PRICES_MEAN} Nothing was changed."), 0, DIM);
-    let conditional: u64 = report
-        .historical
-        .iter()
-        .filter(|g| !g.tier_sensitivity.is_empty())
-        .map(|g| g.conditional_requests)
-        .sum();
     if conditional > 0 {
         out.line(
             &format!(
-                "{} Codex requests are priced at an assumed service tier, which their records leave unclear; --details shows each tier's cost.",
+                "{} Codex requests are priced at an assumed service tier, which their records leave unclear; Recorded usage and coverage below shows each tier's cost.",
                 count(conditional)
             ),
             0,
@@ -6540,6 +6502,96 @@ fn summary(
             0,
             DIM,
         );
+    }
+}
+
+/// The short report's one line counting what was left out or assumed, pointing to
+/// `--details` for why; empty when nothing was. `conditional` counts the requests priced at
+/// an assumed service tier.
+fn left_out(report: &Report, conditional: u64) -> String {
+    let coverage = &report.scan.coverage;
+    let t3 = report.scan.t3.iter().filter(|s| s.status == "selected");
+    let unsupported: u64 = t3.clone().map(|s| s.unsupported).sum();
+    let missing: u64 = t3.clone().map(|s| s.missing).sum();
+    let policy = t3
+        .filter(|s| s.exclusions.iter().any(|e| e == crate::t3::POLICY_GAP))
+        .count() as u64;
+    let counts = [
+        (policy, "T3 state", " with unread machine policy"),
+        (unsupported, "unsupported T3 instance", ""),
+        (missing, "T3 instance", " with a missing history home"),
+        (coverage.t3_unattributed, "unattributed T3 request", ""),
+        (coverage.t3_removed, "removed T3 request", ""),
+        (coverage.missing_usage, "request", " with no usage"),
+        (coverage.skipped_lines, "unreadable line", ""),
+        (conditional, "request", " at an assumed service tier"),
+    ];
+    let parts: Vec<String> = counts
+        .iter()
+        .filter(|(n, ..)| *n > 0)
+        .map(|(n, noun, rest)| format!("{}{rest}", plural(*n, noun)))
+        .collect();
+    if parts.is_empty() {
+        return String::new();
+    }
+    format!(
+        "Left out or assumed: {}. --details says why.",
+        parts.join(", ")
+    )
+}
+
+/// The report: what was read, then every setting and feature on one line, the changes
+/// first, with each line's evidence under `--details`.
+/// Returns the text before the list, the list's rows, its advice and what the settings save
+/// against the defaults; what follows them stays in `out`.
+fn summary(
+    report: &Report,
+    fixes: &[crate::doctor::Fix],
+    out: &mut Out<'_>,
+) -> (
+    String,
+    String,
+    Vec<Row>,
+    Vec<Item>,
+    Option<crate::defaults::Credit>,
+) {
+    let arrow = out.arrow;
+    let coverage = &report.scan.coverage;
+    let spend = out.spend;
+    let many = report.scan.profiles.len() > 1;
+    let spent = spend.text();
+    let read = match spend.since {
+        Some(since) if coverage.requests > 0 => format!(
+            "{} requests in {} from {} to {} ({}), {spent} at API prices",
+            count(coverage.requests),
+            plural(sessions(&report.scan), "session"),
+            date(&iso(since)),
+            date(&report.generated_at),
+            days(Some(since), Some(spend.until))
+        ),
+        _ => format!(
+            "No requests found{}",
+            report
+                .scan
+                .since
+                .map_or_else(String::new, |s| format!(" since {}", date(&iso(s))))
+        ),
+    };
+    let title = out.title(&if report.scan.defaults {
+        format!("{read}, as a default user (--defaults)")
+    } else {
+        read
+    });
+    let conditional: u64 = report
+        .historical
+        .iter()
+        .filter(|g| !g.tier_sensitivity.is_empty())
+        .map(|g| g.conditional_requests)
+        .sum();
+    // Only --details explains what was read and what was left out or assumed; the short
+    // report counts it on one line under the headline.
+    if out.options.details {
+        preamble(report, conditional, out);
     }
     if report.scan.snapshots.is_empty() {
         out.line("No transcript histories found. Select a profile with --claude-dir or --codex-dir after using that agent.", 0, PLAIN);
@@ -8028,7 +8080,10 @@ fn summary(
         rows.push(row);
     }
 
-    out.blank();
+    // The headline follows the title directly unless --details put notes between them.
+    if !out.text.is_empty() {
+        out.blank();
+    }
     let changes = rows.iter().filter(|r| r.mark == Mark::Change).count();
     let considered = rows.iter().filter(|r| r.mark == Mark::Consider).count();
     let headline = headline(changes, considered);
@@ -8050,45 +8105,67 @@ fn summary(
     if let Some(credit) = &credit {
         out.line(&credit.text(spend.monthly(), &host), 0, PLAIN);
     }
-    out.blank();
-    // With a profile that priced nothing, the base is only what could be priced, so a share can read high.
-    let base = if !spend.partial && spend.margin.is_some() {
-        format!(
-            "{host} spend over the window, {spent}, extrapolated from the requests that could be priced"
-        )
-    } else if !spend.partial {
-        format!("{host} spend over the window, {spent}")
-    } else {
-        format!(
-            "{host} spend over the window, {spent}, since a profile that priced none of its requests adds only what could be priced, so a line's true share may be smaller"
-        )
-    };
     // Said once, for every figure extrapolated over requests that could not be priced.
-    // The details also print every compaction window's estimate, the cap's included.
-    let windows = out.options.details
-        && report.checks.iter().any(|c| {
-            matches!(c, CheckResult::Compaction(c)
-                if c.scenarios.iter().chain(&c.cap).any(|s| s.margin.is_some()))
-        });
-    let tilde = if spend.margin.is_some() || rows.iter().any(|r| r.margin.is_some()) || windows {
-        format!(" {TILDE}")
-    } else {
-        String::new()
+    // The details print many more estimates, so check what they render rather than list them,
+    // unwrapped so no figure splits across lines.
+    let detailed = out.options.details && {
+        let mut scratch = Out::new(
+            report,
+            ReportOptions {
+                width: None,
+                ..out.options
+            },
+        );
+        details(report, &mut scratch);
+        sampled(&scratch.text)
     };
-    out.line(
-        &format!(
-            "Savings are per 30 days at the window's rate, and costs are totals over the window; each percent is of {base}.{tilde} A tool, skill, MCP server or auto memory that was never used is recommended off, and one that cost more than {} per use (--max-cost-per-use) is worth considering off.",
-            about(report.max_cost_per_use_usd)
-        ),
-        0,
-        DIM,
-    );
-    if report
-        .checks
-        .iter()
-        .any(|c| matches!(c, CheckResult::Background(_)))
-    {
-        out.line("Background estimates apply current files to history; historical settings and unrecorded launch overrides remain unknown.", 0, DIM);
+    // A switched-off feature's baseline can carry the only margin, in its line and the credit.
+    let tilde = spend.margin.is_some()
+        || rows
+            .iter()
+            .any(|r| r.margin.is_some() || r.baseline.as_ref().is_some_and(|b| b.margin.is_some()))
+        || detailed;
+    let left = left_out(report, conditional);
+    // A blank line sets the notes and legend apart, when any follow.
+    if out.options.details || out.options.color || tilde || !left.is_empty() {
+        out.blank();
+    }
+    if out.options.details {
+        // With a profile that priced nothing, the base is only what could be priced, so a share can read high.
+        let base = if !spend.partial && spend.margin.is_some() {
+            format!(
+                "{host} spend over the window, {spent}, extrapolated from the requests that could be priced"
+            )
+        } else if !spend.partial {
+            format!("{host} spend over the window, {spent}")
+        } else {
+            format!(
+                "{host} spend over the window, {spent}, since a profile that priced none of its requests adds only what could be priced, so a line's true share may be smaller"
+            )
+        };
+        out.line(
+            &format!(
+                "Savings are per 30 days at the window's rate, and costs are totals over the window; each percent is of {base}.{} A tool, skill, MCP server or auto memory that was never used is recommended off, and one that cost more than {} per use (--max-cost-per-use) is worth considering off.",
+                if tilde { format!(" {TILDE}") } else { String::new() },
+                about(report.max_cost_per_use_usd)
+            ),
+            0,
+            DIM,
+        );
+        if report
+            .checks
+            .iter()
+            .any(|c| matches!(c, CheckResult::Background(_)))
+        {
+            out.line("Background estimates apply current files to history; historical settings and unrecorded launch overrides remain unknown.", 0, DIM);
+        }
+    } else {
+        if !left.is_empty() {
+            out.line(&left, 0, DIM);
+        }
+        if tilde {
+            out.line(TILDE, 0, DIM);
+        }
     }
     if out.options.color {
         out.legend();
@@ -8978,6 +9055,7 @@ mod tests {
                     skipped_lines: 2,
                     skipped_files: 1,
                     issues: vec!["synthetic coverage limit".into()],
+                    ..ScanCoverage::default()
                 },
             },
             prices: PriceSource {
@@ -9433,6 +9511,8 @@ mod tests {
             ambiguous_requests: 0,
             unresolved: IndexMap::default(),
             removed: IndexMap::from_iter([("gone".into(), 3)]),
+            unsupported: 0,
+            missing: 0,
             instances: Default::default(),
             text_generation: None,
         });
@@ -9444,6 +9524,62 @@ mod tests {
             "T3 gone (removed from T3 settings); 2000 requests"
         )));
         assert!(rendered.contains(&compact("T3 removed: 3 requests of instance gone")));
+    }
+
+    #[test]
+    fn the_short_report_counts_what_was_left_out_and_details_explain_it() {
+        let mut report = synthetic();
+        let short = |report: &Report| text(report, Some(400), false);
+        report.scan.coverage.missing_usage = 0;
+        report.scan.coverage.skipped_lines = 0;
+        // Nothing left out or assumed: no line.
+        assert!(!short(&report).contains("Left out"), "{}", short(&report));
+        report.scan.t3.push(T3State {
+            path: "/state".into(),
+            status: "selected".into(),
+            exclusions: vec![
+                "T3 instance x (grok) is unsupported; its spend is excluded".into(),
+                "T3 instance y: native history home /gone is missing".into(),
+                crate::t3::POLICY_GAP.into(),
+            ],
+            metadata: String::new(),
+            snapshot_started_at: None,
+            snapshot_finished_at: None,
+            ambiguous_requests: 0,
+            unresolved: IndexMap::from_iter([("a".into(), 1), ("b".into(), 1)]),
+            removed: IndexMap::from_iter([("gone".into(), 3)]),
+            unsupported: 1,
+            missing: 1,
+            instances: Default::default(),
+            text_generation: None,
+        });
+        // One request unresolved in two states counts once.
+        report.scan.coverage.t3_unattributed = 1;
+        report.scan.coverage.t3_removed = 3;
+        report.scan.coverage.missing_usage = 4;
+        report.scan.coverage.skipped_lines = 1;
+        report.scan.coverage.skipped_files = 1;
+        let text = short(&report);
+        assert!(
+            text.contains("\n  Left out or assumed: 1 T3 state with unread machine policy, 1 unsupported T3 instance, 1 T3 instance with a missing history home, 1 unattributed T3 request, 3 removed T3 requests, 4 requests with no usage, 1 unreadable line. --details says why.\n"),
+            "{text}"
+        );
+        for note in ["T3 coverage:", "T3 removed:", "Profiles:", PRICES_MEAN] {
+            assert!(!text.contains(note), "{note}: {text}");
+        }
+        let details = super::tests::text(&report, Some(400), true);
+        assert!(!details.contains("Left out"), "{details}");
+        for note in [
+            "T3 coverage: T3 instance x (grok) is unsupported",
+            "T3 coverage: T3 instance y: native history home /gone is missing",
+            "T3 coverage: T3 machine managed policy is present",
+            "T3 unresolved: 1 request: a",
+            "T3 removed: 3 requests",
+            "4 requests have no recorded usage",
+            "1 unreadable transcript lines in 1 files were skipped",
+        ] {
+            assert!(details.contains(note), "{note}: {details}");
+        }
     }
 
     #[test]
@@ -9555,6 +9691,27 @@ mod tests {
         }
         server.description = Some("Searches the docs.".into());
         assert_eq!(piece_what(&server), "Searches the docs.");
+    }
+
+    #[test]
+    fn a_tilde_only_the_details_print_is_explained() {
+        let mut report = synthetic();
+        for group in &mut report.historical {
+            group.estimate.as_mut().unwrap().margin = None;
+        }
+        let base = check_base(Action::Keep, Some(true), Some(true));
+        report.checks = vec![idle_check(base, PeriodCounts::default(), Some(-30.0))];
+        if let CheckResult::Idle(c) = &mut report.checks[0] {
+            c.after_recommendations.sensitivity.closed_delta = Some(Estimate {
+                usd: -5.0,
+                margin: Some(Margin::Usd(2.0)),
+            });
+        }
+        let detailed = text(&report, None, true);
+        assert!(detailed.contains("closed ~-$5"), "{detailed}");
+        assert!(detailed.contains(TILDE), "{detailed}");
+        let short = text(&report, None, false);
+        assert!(!sampled(&short) && !short.contains(TILDE), "{short}");
     }
 
     #[test]
@@ -11432,8 +11589,9 @@ mod tests {
                 assert!(compact.contains("$12.34") && compact.contains("$24.68"));
             }
             assert!(!text.contains('\x1b') && !text.contains('…'));
+            // Only --details names the profile's root.
             assert!(
-                text.contains("e\u{301}"),
+                !details || text.contains("e\u{301}"),
                 "decomposed names are not normalized"
             );
         }
@@ -11601,7 +11759,7 @@ mod tests {
             "System prompt and core tools costs at least ~$213 ± $3 14%"
         );
         assert!(core.evidence.starts_with("1 piece could not be priced. "));
-        assert!(text.contains("A ~ marks a figure extrapolated"));
+        assert!(text.contains(TILDE));
         // `doctor` offers the change with the same margin.
         let offered = recommendations(&report, false);
         let artifact = offered
@@ -13003,10 +13161,7 @@ mod tests {
         let summary = text(&partial, None, true);
         let title = summary.lines().next().unwrap();
         assert!(title.contains(", ~$") && title.contains(" ± "), "{title}");
-        assert!(
-            summary.contains("A ~ marks a figure extrapolated"),
-            "{summary}"
-        );
+        assert!(summary.contains(TILDE), "{summary}");
         let row = report_line(&summary, "Main-agent prompt cache TTL");
         assert!(
             row.head.contains("~$") && row.head.contains(" ± "),
@@ -13073,8 +13228,9 @@ mod tests {
 
     #[test]
     fn percents_of_partly_priced_spend_say_their_base() {
+        // The details say what each percent is of.
         let mut report = synthetic_report();
-        let priced = text(&report, None, false);
+        let priced = text(&report, None, true);
         assert!(priced.contains("each percent is of this host's spend over the window, $"));
         for group in &mut report.historical {
             group.cost.total_usd = None;
@@ -13083,7 +13239,7 @@ mod tests {
                 margin: Some(Margin::Usd(0.5)),
             });
         }
-        let summary = text(&report, None, false);
+        let summary = text(&report, None, true);
         assert!(
             summary.contains(" this host's spend over the window, ~$2 ± $0.50, extrapolated from the requests that could be priced."),
             "{summary}"
@@ -13092,7 +13248,7 @@ mod tests {
         for group in &mut report.historical {
             group.estimate = None;
         }
-        let summary = text(&report, None, false);
+        let summary = text(&report, None, true);
         assert!(
             summary.contains(", since a profile that priced none of its requests adds only what could be priced, so a line's true share may be smaller."),
             "{summary}"

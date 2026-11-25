@@ -1245,6 +1245,12 @@ pub struct T3State {
     pub unresolved: IndexMap<String, u64>,
     /// Requests every T3 owner of which was removed from settings, counted by instance; billed but in no current profile's checks.
     pub removed: IndexMap<String, u64>,
+    /// Provider instances whose driver token-max can't read, whose spend is excluded.
+    pub unsupported: u64,
+    /// Provider instances T3's settings name whose history home doesn't exist, such as one
+    /// on an unmounted volume, so none of their history was read. An unnamed built-in
+    /// instance's absent default home isn't counted.
+    pub missing: u64,
     /// Every instance the settings name, which tells a removed owner from one not selected.
     pub(crate) instances: HashSet<String>,
     /// The model T3 resolves for generated text; absent for a state that was not read.
@@ -3293,6 +3299,10 @@ pub struct ScanCoverage {
     /// Unreadable complete lines skipped; their usage counts as missing.
     pub skipped_lines: u64,
     pub skipped_files: u64,
+    /// Selected requests T3 could not attribute to one owner, each counted once.
+    pub t3_unattributed: u64,
+    /// Selected requests whose every T3 owner was removed from its settings, each counted once.
+    pub t3_removed: u64,
     pub issues: Vec<String>,
 }
 

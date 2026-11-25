@@ -280,6 +280,9 @@ impl<'de> Deserialize<'de> for Instance {
     }
 }
 
+/// The exclusion a T3 state carries when unread machine policy may move its history homes.
+pub(crate) const POLICY_GAP: &str = "T3 machine managed policy is present, inaccessible or unsupported on this platform; it may override homes and settings, so discovery coverage and current control ownership are unresolved";
+
 /// Platform policy can replace homes and controls. Do not claim user-file ownership
 /// when that uninspected layer exists (or cannot be checked).
 fn managed_policy_unresolved() -> bool {
@@ -609,6 +612,8 @@ pub(crate) fn discover(
                     ambiguous_requests: 0,
                     unresolved: IndexMap::default(),
                     removed: IndexMap::default(),
+                    unsupported: 0,
+                    missing: 0,
                     instances: HashSet::default(),
                     text_generation: None,
                 });
@@ -658,6 +663,9 @@ pub(crate) fn discover(
                 Some(LegacyIdle::Bool(true)) => T3IdleMode::BeforeCacheExpires,
                 _ => T3IdleMode::OnReturn,
             });
+        // Only an instance the settings name counts as a missing history home: T3 adds the
+        // built-ins below even for a user who never set up that provider.
+        let named: HashSet<String> = instances.keys().cloned().collect();
         // T3 restores these built-in instances even before settings have been saved.
         for driver in ["claudeAgent", "codex"] {
             instances.entry(driver.into()).or_insert(Instance {
@@ -675,15 +683,22 @@ pub(crate) fn discover(
             ambiguous_requests: 0,
             unresolved: IndexMap::default(),
             removed: IndexMap::default(),
+            unsupported: 0,
+            missing: 0,
             instances: instances.keys().cloned().collect(),
             text_generation: Some(text_generation(&settings, &instances, &file)),
         };
+        // Recorded before any home is probed: policy may have moved a missing home elsewhere.
+        if managed_policy_unresolved() {
+            state.exclusions.push(POLICY_GAP.into());
+        }
         for (id, instance) in instances {
             let enabled = instance.resolved_enabled();
             let harness = match instance.driver.as_str() {
                 "claudeAgent" => Harness::Claude,
                 "codex" => Harness::Codex,
                 _ => {
+                    state.unsupported += 1;
                     state.exclusions.push(if slug(&id) && slug(&instance.driver) {format!("T3 instance {id} ({}) is unsupported; its spend is excluded",instance.driver)} else {"T3 provider instance has an unsupported identity/driver; its spend is excluded".into()});
                     continue;
                 }
@@ -780,6 +795,9 @@ pub(crate) fn discover(
             let root = match fs::canonicalize(&native_root) {
                 Ok(root) => root,
                 Err(e) if e.kind() == ErrorKind::NotFound => {
+                    if named.contains(&id) {
+                        state.missing += 1;
+                    }
                     state.exclusions.push(format!(
                         "T3 instance {id}: native history home {} is missing",
                         native_root.display()
@@ -837,11 +855,7 @@ pub(crate) fn discover(
                 limitations.push("a relevant T3 environment override uses a secret or redacted value; it was not read and effective ownership is unresolved".into());
             }
             if policy_unresolved {
-                let gap = "T3 machine managed policy is present, inaccessible or unsupported on this platform; it may override homes and settings, so discovery coverage and current control ownership are unresolved";
-                limitations.push(gap.into());
-                if !state.exclusions.iter().any(|s| s == gap) {
-                    state.exclusions.push(gap.into());
-                }
+                limitations.push(POLICY_GAP.into());
                 profile.ttl.main.value = None;
                 profile.ttl.subagent.value = None;
             }
@@ -2041,7 +2055,18 @@ pub(crate) fn reads_database(states: &[T3State]) -> bool {
         .any(|s| s.status == "selected" && Path::new(&s.path).join("statev2.sqlite").is_file())
 }
 
-/// Freeze optional projection metadata in one read-only WAL transaction, then close it before analysis.
+/// Selected requests T3 left out of every current profile's checks, each counted once however
+/// many states or owners it touches; each state's own counts break them down.
+#[derive(Default)]
+pub(crate) struct Unplaced {
+    /// Requests whose owner stays unresolved.
+    pub unattributed: u64,
+    /// Requests every T3 owner of which was removed from its settings.
+    pub removed: u64,
+}
+
+/// Freeze optional projection metadata in one read-only WAL transaction, then close it before
+/// analysis. Returns the selected requests it could not place in any current profile.
 pub(crate) fn enrich(
     states: &mut [T3State],
     profiles: &mut [Profile],
@@ -2050,7 +2075,8 @@ pub(crate) fn enrich(
     ids: &NativeIds,
     bound: &str,
     since: Option<Millis>,
-) {
+) -> Unplaced {
+    let mut unplaced = Unplaced::default();
     let mut projections: Vec<NativeRequest<'_>> = requests
         .iter()
         .filter_map(|r| native_request(r, ids))
@@ -2422,6 +2448,9 @@ pub(crate) fn enrich(
                     if selected {
                         let states: HashSet<String> =
                             r.profiles.iter().filter_map(state_of).collect();
+                        if !states.is_empty() {
+                            unplaced.unattributed += 1;
+                        }
                         for state in states {
                             *unresolved.entry((state, c)).or_default() += 1;
                         }
@@ -2434,6 +2463,9 @@ pub(crate) fn enrich(
             }
         }
         if selected && !removed.is_empty() {
+            if r.profiles.iter().any(|p| removed.contains_key(p)) {
+                unplaced.removed += 1;
+            }
             for p in r.profiles.iter() {
                 if let Some(owner) = removed.get(p) {
                     *removed_requests.entry(owner).or_default() += 1;
@@ -2560,6 +2592,7 @@ pub(crate) fn enrich(
             cap.unresolved = Some(REASON.into());
         }
     }
+    unplaced
 }
 
 /// A control whose current value T3's unsettled ownership can leave unknown. Idle
@@ -3090,6 +3123,51 @@ mod tests {
     }
 
     #[test]
+    fn unread_instances_are_counted() {
+        let w = Workspace::new();
+        native(&w);
+        fs::remove_dir_all(w.home.join(".claude")).unwrap();
+        state(
+            &w,
+            json!({"providerInstances":{"codex":{"driver":"codex","config":{"homePath":w.codex}},"away":{"driver":"codex","config":{"homePath":w.home.join("unmounted")}},"other":{"driver":"grok"}}}),
+        );
+        let scan = scan(&w.scan_options()).unwrap();
+        // The built-in claudeAgent's default home is absent too, but no setting names it.
+        assert!(
+            scan.t3[0]
+                .exclusions
+                .iter()
+                .any(|e| e.contains("instance claudeAgent"))
+        );
+        assert_eq!((scan.t3[0].missing, scan.t3[0].unsupported), (1, 1));
+    }
+
+    #[test]
+    fn a_request_unresolved_in_two_states_counts_once() {
+        let w = Workspace::new();
+        native(&w);
+        let settings =
+            json!({"providerInstances":{"codex":{"driver":"codex","config":{"homePath":w.codex}}}});
+        // Both states, sharing the home, claim the native session, so the request stays
+        // unresolved in each.
+        let first = state(&w, settings.clone());
+        seed(&db(&first), "codex", "codex");
+        let second = w.home.join("t3-dev");
+        write(second.join("settings.json"), settings.to_string());
+        seed(&db(&second), "codex", "codex");
+        let mut options = w.scan_options();
+        options.discovery.t3_dirs = vec![
+            first.to_string_lossy().into(),
+            second.to_string_lossy().into(),
+        ];
+        let scan = scan(&options).unwrap();
+        assert_eq!(scan.requests.len(), 1);
+        let per_state: u64 = scan.t3.iter().flat_map(|s| s.unresolved.values()).sum();
+        assert_eq!(per_state, 2, "{:?}", scan.t3);
+        assert_eq!(scan.coverage.t3_unattributed, 1);
+    }
+
+    #[test]
     fn removed_owners_stay_billed_outside_current_checks() {
         // `gone` is no longer in settings; `elsewhere` is, but under another home.
         for (owner, removed) in [("gone", true), ("elsewhere", false)] {
@@ -3144,9 +3222,17 @@ mod tests {
                 assert!(r.t3.is_some(), "joined evidence still applies");
                 assert_eq!(t3.removed, IndexMap::from_iter([("gone".into(), 1)]));
                 assert!(t3.unresolved.is_empty(), "{:?}", t3.unresolved);
+                assert_eq!(
+                    (scan.coverage.t3_removed, scan.coverage.t3_unattributed),
+                    (1, 0)
+                );
             } else {
                 assert!(r.profiles.contains(&current.id));
                 assert!(t3.removed.is_empty());
+                assert_eq!(
+                    (scan.coverage.t3_removed, scan.coverage.t3_unattributed),
+                    (0, 1)
+                );
                 // The request says T3 names an owner outside it, for checks that count it.
                 assert!(
                     r.issues.iter().any(|i| i.contains(OUTSIDE)),

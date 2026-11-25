@@ -6,12 +6,9 @@ Run the `cost` audit: `quest audit cost` prints what it checks, what each findin
 
 ## Plan
 
-Scope: the `Check` workflow (the merge gate), `Release`, and `Pullfrog`, the
-release archives and installers, and the crate. The repository is public, so
+Scope: the `Check` workflow (the merge gate), `Release`, the release archives and installers, and the crate. The repository is public, so
 GitHub-hosted minutes cost no money; what CI costs is gate latency and the
-org's runner concurrency, which macOS hits first. Pullfrog's workflow and
-settings follow the org standard in dotfiles' `repo-settings`, and its model
-cost is not visible from Actions, so report its minutes but change it there.
+org's runner concurrency, which macOS hits first.
 
 Baseline from the m1 run (2026-11-20, main at 309b526), before its fixes:
 
@@ -19,7 +16,7 @@ Baseline from the m1 run (2026-11-20, main at 309b526), before its fixes:
   (2026-11-16 to 2026-11-20): 1,993 runner minutes (ubuntu 794, windows-2025
   700, macos-15 500); 1,348 on pull requests, 336 in the merge queue, 309 on
   pushes to main. Source p50 139 s, Windows tests p50 155 s, macOS tests
-  p50 101 s. Pullfrog: 373 ubuntu minutes over 217 runs since 2026-11-12.
+  p50 101 s.
   A release is about 12 minutes of builds across five runners.
 - Slowest test: `tests/ssh.rs::any_failed_destination_fails_the_whole_report`,
   71 to 115 s on the Linux runner and about 20 s on macOS, because each

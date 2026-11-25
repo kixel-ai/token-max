@@ -70,6 +70,13 @@ pub struct Reading {
     pub counts: Mutex<Option<Counts>>,
     /// Public prices once they load, which the scan prices what it has read with.
     pub catalog: OnceLock<Catalog>,
+    /// The counts when reading ended, before the full recount after reconciliation replaces
+    /// them, so a test can check what was counted as the scan read.
+    #[cfg(test)]
+    read_end: Mutex<Option<Counts>>,
+    /// Count after every record, so a test sees each change the tally must catch.
+    #[cfg(test)]
+    every_record: bool,
 }
 
 impl Reading {
@@ -2159,7 +2166,11 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
                 reading.read.store(read, Ordering::Relaxed);
                 let now = Instant::now();
                 let catalog = reading.catalog.get();
-                if pace.due(now, catalog.is_some()) {
+                #[cfg(not(test))]
+                let every_record = false;
+                #[cfg(test)]
+                let every_record = reading.every_record;
+                if every_record || pace.due(now, catalog.is_some()) {
                     reader.count(reading, catalog, &profiles);
                     pace.counted(now, Instant::now(), catalog.is_some());
                 }
@@ -2229,6 +2240,10 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
                 catalog: reading.catalog.get(),
             },
         );
+        #[cfg(test)]
+        {
+            *reading.read_end.lock().unwrap() = Some(counts);
+        }
         *reading
             .counts
             .lock()
@@ -2732,7 +2747,10 @@ mod tests {
                 .unwrap();
         }
         let since = timestamp(&json!("2026-10-15T00:00:00Z"));
-        let reading = Arc::new(Reading::default());
+        let reading = Arc::new(Reading {
+            every_record: true,
+            ..Reading::default()
+        });
         let catalog = crate::test_support::prices();
         reading.catalog.set(catalog.clone()).unwrap();
         let data = scan(&ScanOptions {
@@ -2741,8 +2759,12 @@ mod tests {
             ..options(&w)
         })
         .unwrap();
+        // The counts the scan kept as it read, counting after every record, before the recount
+        // after reconciliation could rebuild them: nothing here moves in reconciliation, so
+        // they already end on the header's.
+        let read = reading.read_end.lock().unwrap().unwrap();
         let counts = || reading.counts.lock().unwrap().unwrap();
-        let read = counts();
+        assert_eq!(counts(), read);
         let report = analyze(AnalyzeOptions {
             scan: data,
             catalog: &catalog,

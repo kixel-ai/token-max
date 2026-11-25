@@ -246,6 +246,9 @@ def changes(transcript: str, api: set[str], api_rates: bool) -> dict[str, list]:
     a lower bound]. `api_rates` says
     every profile doctor asked about was answered as API."""
     rows: dict[str, list] = {}
+    # Each change row with the profiles its host answered as API. Under --details a section's
+    # members follow its row two cells in, so the members count and the section's row doesn't.
+    found: list[tuple[str, set[str]]] = []
     section, here = None, set()
     for plain in plain_lines(transcript):
         if TITLE.match(plain):
@@ -254,35 +257,43 @@ def changes(transcript: str, api: set[str], api_rates: bool) -> dict[str, list]:
             section, here = None, roots(api, name)
         elif HEADING.match(plain):
             section = plain.split()[0]
+        elif section == "CHANGES" and plain.startswith("    ● "):
+            if not found or found[-1][0].startswith("    "):
+                found.append((plain, here))
+            else:
+                found[-1] = (plain, here)
         elif section == "CHANGES" and plain.startswith("  ● "):
-            # A change whose saving was not measured, or one priced only as what it costs,
-            # such as a Codex catalog skill's listing, promises no saving.
-            if not re.search(r"\ssaves\s", plain):
-                if not re.search(r"\ssaving not measured(\s{2}|$)|\scosts\s", plain.rstrip()):
-                    sys.exit(f"unparsed change line {plain.strip()!r}")
-                continue
-            m = CHANGE.match(plain)
-            if not m:
+            found.append((plain, here))
+    for plain, here in found:
+        plain = plain.removeprefix("  ") if plain.startswith("    ") else plain
+        # A change whose saving was not measured, or one priced only as what it costs,
+        # such as a Codex catalog skill's listing, promises no saving.
+        if not re.search(r"\ssaves\s", plain):
+            if not re.search(r"\ssaving not measured(\s{2}|$)|\scosts\s", plain.rstrip()):
                 sys.exit(f"unparsed change line {plain.strip()!r}")
-            up_to = bool(m["verb"]) and m["verb"].startswith("up to")
-            # "Up to" prices an unset main TTL against the default it would replace, which the
-            # API's 5m is only for a change to 1h.
-            if api_rates and up_to and m["to"] != "1h":
-                sys.exit(f"cannot price {plain.strip()!r} at API rates without that profile's billing")
-            # After its saving, a change names the file it edits, such as
-            # [~/.claude/settings.json], unless its host has one profile.
-            path = re.match(r"[^\[]*?\s{2}\[([^\]]+)\]", plain[m.end():])
-            paid = any(path[1].startswith(root + "/") for root in here) if path else bool(here)
-            # "<$0.01" counts as nothing.
-            usd = 0.0 if m["lt"] else dollars(m["usd"])
-            row = rows.setdefault(m["name"], [0.0, 0.0, False, 0, 0.0, False])
-            row[1 if up_to else 0] += usd
-            row[2] |= bool(m["about"])
-            row[3] += 1
-            # "At least" leaves part of the saving unpriced, so the figure is a lower bound.
-            row[5] |= bool(m["verb"]) and m["verb"].startswith("at least")
-            if not up_to and not paid:
-                row[4] += usd
+            continue
+        m = CHANGE.match(plain)
+        if not m:
+            sys.exit(f"unparsed change line {plain.strip()!r}")
+        up_to = bool(m["verb"]) and m["verb"].startswith("up to")
+        # "Up to" prices an unset main TTL against the default it would replace, which the
+        # API's 5m is only for a change to 1h.
+        if api_rates and up_to and m["to"] != "1h":
+            sys.exit(f"cannot price {plain.strip()!r} at API rates without that profile's billing")
+        # After its saving, a change names the file it edits, such as
+        # [~/.claude/settings.json], unless its host has one profile.
+        path = re.match(r"[^\[]*?\s{2}\[([^\]]+)\]", plain[m.end():])
+        paid = any(path[1].startswith(root + "/") for root in here) if path else bool(here)
+        # "<$0.01" counts as nothing.
+        usd = 0.0 if m["lt"] else dollars(m["usd"])
+        row = rows.setdefault(m["name"], [0.0, 0.0, False, 0, 0.0, False])
+        row[1 if up_to else 0] += usd
+        row[2] |= bool(m["about"])
+        row[3] += 1
+        # "At least" leaves part of the saving unpriced, so the figure is a lower bound.
+        row[5] |= bool(m["verb"]) and m["verb"].startswith("at least")
+        if not up_to and not paid:
+            row[4] += usd
     return rows
 
 
@@ -481,9 +492,10 @@ def main() -> None:
     now = datetime.now(timezone.utc)
     transcript = run(command, answers, COLUMNS)
     # The results parse each change's row from runs too wide to wrap one: the same run, and one
-    # with every profile answered as API for the API-rate column.
-    plan = run(command, answers, WIDE)
-    api = run(command, {profile: "a" for profile in answers}, WIDE)
+    # with every profile answered as API for the API-rate column. --details lists each section's
+    # changes, so the breakdown names settings rather than sections.
+    plan = run(command + ["--details"], answers, WIDE)
+    api = run(command + ["--details"], {profile: "a" for profile in answers}, WIDE)
     run_steps, questions = steps(transcript)
     figures, bars = results(transcript, plan, api, {p for p, a in answers.items() if a == "a"}, since, now)
     body = "".join(f'<span class="step">{chr(10).join(s)}\n</span>' for s in run_steps)

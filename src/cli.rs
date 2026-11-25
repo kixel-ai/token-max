@@ -74,13 +74,13 @@ gets that tool's command instead. Without a terminal, or if the check cannot run
 says so on stderr and goes on with this build.
 
 Prints which settings to change, with the evidence for each. When stdin and stdout are
-both a terminal, it then offers the changes it can make, grouping tools, skills and MCP
-servers by why they are offered (y, n, s to split a group, or q to stop), shows the
-accepted edits as a diff of each file, and writes the profile's own settings.json or
-config.toml only after a final yes. A change another owner would
-override, such as a shell variable, a project or managed settings file or T3, is listed
-to make by hand. Without a terminal it prints the report, each change naming its edit,
-and edits nothing.
+both a terminal, it then offers the changes it can make in sections, such as never-used
+skills or the cache TTLs (y, n, s to split a section, or q to stop), shows the accepted
+edits as a diff of each file, and writes the profile's own settings.json or config.toml
+only after a final yes. A change another owner would override, such as a shell variable,
+a project or managed settings file or T3, is listed to make by hand. Without a terminal it
+prints the report, each change or section naming its settings, and edits nothing;
+--details lists each section's changes with their edits.
 
 With --defaults it reads every user, project and local settings file, T3 Code's settings
 and the shell's setting variables as unset, so each setting is at its Claude Code or Codex

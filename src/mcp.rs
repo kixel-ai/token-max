@@ -167,16 +167,32 @@ pub fn definitions(server: &str, control: &Control, profiles: &[&Profile]) -> Ve
         // settings turn the server off.
         let places: IndexSet<String> = profiles
             .iter()
-            .map(|p| match &p.plugins {
-                Some(plugins) if plugins.dir.is_some() => format!(
-                    "in Claude Code started with {}",
-                    crate::lsp::variables(plugins.named, &p.root, plugins.cache_dir.as_deref())
-                ),
-                // A plugins directory token-max could not read, or a report that read none.
-                _ => format!(
-                    "in Claude Code for {}, started the way it usually is",
-                    p.root
-                ),
+            .map(|p| {
+                let app = match &p.t3 {
+                    Some(t3) => format!("the Claude Code T3 instance {} starts", t3.instance),
+                    None => "Claude Code".into(),
+                };
+                match &p.plugins {
+                    // A relative cache depends on where Claude Code starts, which no step knows.
+                    Some(plugins)
+                        if plugins.dir.is_some()
+                            && plugins
+                                .cache_dir
+                                .as_deref()
+                                .is_none_or(|d| Path::new(d).is_absolute()) =>
+                    {
+                        format!(
+                            "in {app} with {}",
+                            crate::lsp::variables(
+                                plugins.named,
+                                &p.root,
+                                plugins.cache_dir.as_deref()
+                            )
+                        )
+                    }
+                    // A plugins directory token-max could not read, or a report that read none.
+                    _ => format!("in {app} for {}, started the way it usually is", p.root),
+                }
             })
             .collect();
         let step = format!(
@@ -830,13 +846,30 @@ mod tests {
         let mut native = p.clone();
         native.plugins = Some(plugins(false, None));
         // A launcher sharing the root with a plugins directory of its own.
-        let mut t3 = p.clone();
-        t3.plugins = Some(plugins(true, Some("/synthetic/t3-plugins")));
+        let mut t3 = crate::test_support::make_t3_profile("claudeAgent", &p.root);
+        t3.claude_config = p.claude_config.clone();
+        // A report that read no plugins still tells the native and T3 launchers apart.
+        assert_eq!(
+            step(&[&p, &t3]),
+            format!(
+                "uninstall or disable the plugin that provides it with /plugin in Claude Code for {0}, started the way it usually is, and again in the Claude Code T3 instance claudeAgent starts for {0}, started the way it usually is",
+                p.root
+            )
+        );
+        // A relative cache depends on where Claude Code starts, so it is not named.
+        t3.plugins = Some(plugins(true, Some("./plugins")));
+        assert!(
+            step(&[&t3]).ends_with(&format!("for {}, started the way it usually is", p.root)),
+            "{}",
+            step(&[&t3])
+        );
+        let cache = w.home.join("t3-plugins").to_string_lossy().into_owned();
+        t3.plugins = Some(plugins(true, Some(&cache)));
         assert_eq!(
             step(&[&native, &t3, &native]),
             format!(
-                "uninstall or disable the plugin that provides it with /plugin in Claude Code started with CLAUDE_CONFIG_DIR and CLAUDE_CODE_PLUGIN_CACHE_DIR unset, and again in Claude Code started with CLAUDE_CONFIG_DIR set to {} and CLAUDE_CODE_PLUGIN_CACHE_DIR set to /synthetic/t3-plugins",
-                p.root
+                "uninstall or disable the plugin that provides it with /plugin in Claude Code with CLAUDE_CONFIG_DIR and CLAUDE_CODE_PLUGIN_CACHE_DIR unset, and again in the Claude Code T3 instance claudeAgent starts with CLAUDE_CONFIG_DIR set to {} and CLAUDE_CODE_PLUGIN_CACHE_DIR set to {}",
+                p.root, cache
             )
         );
         for server in ["plugin_a_b_c", "plugin_github", "plugin__x"] {

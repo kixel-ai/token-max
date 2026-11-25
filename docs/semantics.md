@@ -1257,6 +1257,15 @@ cancelled question, saying no further settings were changed: every write was
 reported before the offer, so what was written stands, and a destination
 stopped there is not asked to end its audit.
 
+## Transcript retention
+
+`Profile.retention`, a Claude-only control, is `cleanupPeriodDays` from the managed
+file, else the user file, else 30 days (the user file's key, marked default). A value
+that is not a whole number of at least 1 owns the setting with no days, and has no
+card, and a T3 instance with disabled or unresolved settings has none either. The disk figure is the sum of the sizes of the Claude transcripts the scan read
+for the profiles whose line shares that owner, counted once per file; transcripts
+the scan did not read, and the other files Claude Code sweeps, are not in it.
+
 ## Bash timeout cap
 
 The Bash cap, a `vibes` card and no check of `doctor`'s, uses `Profile.bash`, resolved from user and

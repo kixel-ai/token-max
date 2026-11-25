@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::model::{
-    Api, BillingPart, Cost, Estimate, Harness, Margin, PartKind, Request, TierScenario, Usd,
+    Api, BillingPart, Cost, Estimate, Harness, Margin, PartKind, Request, Text, TierScenario, Usd,
 };
 use crate::safe::{ScanError, iso, label, object, truthy};
 
@@ -32,6 +32,60 @@ pub const PRICE_SOURCES: [&str; 7] = [
 
 /// Why a conditional tier estimate cannot decide a cost comparison.
 pub const TIER_SENSITIVITY: &str = "effective service tier is absent or conflicting; project defaults and served tiers can differ from requests; tier sensitivity has no verified bounds, so affected cost-based recommendations are withheld";
+
+/// Why a cost comparison priced at an assumed tier still decides: every priced session moved
+/// the same way.
+pub const TIER_SIGNS: &str = "effective service tier is absent or conflicting, so dollars are priced at an assumed tier; each session's saving at an assumed tier, apart wherever one tier would scale its charges differently, such as on another model or assumed tier, and the saving at recorded tiers, went the same way, and a service tier multiplies all of a request's token rates by one positive factor, so no tier could reverse the verdict, assuming one tier bills every request of a session in both replays";
+
+/// What a part priced at an assumed tier scales with when another tier bills it: the
+/// documented default, fast and ultrafast rates relative to the assumed one's, or, where one
+/// is unknown, its model, its assumed tier and which side of the model's context threshold
+/// its input falls on.
+/// Parts that share one scale alike under any tier.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TierScale {
+    /// Each tier's rate per thousand of the assumed tier's.
+    ratios: Option<[u64; 3]>,
+    model: Option<Text>,
+    assumed: Option<Text>,
+    long: bool,
+}
+
+/// The scale of a part priced at an assumed tier; None for a recorded tier or an unpriced part.
+pub fn tier_scale(r: &Request, p: &BillingPart) -> Option<TierScale> {
+    if !conditional_tier(r, p) {
+        return None;
+    }
+    let assumed = service_tier(r, p).ok()?;
+    let model = p.model.as_deref().or(r.model.as_deref()).unwrap_or("");
+    let input = p.usage.input;
+    let rate = |tier: &str| match tier {
+        "default" | "standard" => Some(1.0),
+        tier => premium_multiplier(tier, model, input),
+    };
+    let ratios = rate(assumed).and_then(|base| {
+        let tiers = [rate("default")?, rate("fast")?, rate("ultrafast")?];
+        Some(tiers.map(|m| (m / base * 1000.0).round() as u64))
+    });
+    if ratios.is_some() {
+        return Some(TierScale {
+            ratios,
+            model: None,
+            assumed: None,
+            long: false,
+        });
+    }
+    let limit = r
+        .provider
+        .as_deref()
+        .and_then(|provider| threshold(provider, model));
+    Some(TierScale {
+        ratios,
+        model: Some(model.into()),
+        assumed: Some(tier_name(assumed).into()),
+        long: input.zip(limit).is_some_and(|(input, limit)| input > limit),
+    })
+}
 
 /// Whether this Codex part lacks consistent effective-tier evidence.
 pub fn conditional_tier(r: &Request, p: &BillingPart) -> bool {
@@ -838,6 +892,58 @@ impl PairedSavings {
     }
 }
 
+/// Which ways a comparison's priced savings went: each session's at an assumed tier, split by
+/// [`TierScale`], and all of those at recorded tiers together. One tier scales a session's
+/// charges of one scale by one positive factor, so when one tier bills each session and no
+/// saving went the other way, no tier could reverse the total's sign; one that did could be
+/// scaled past the rest.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Signs {
+    saves: bool,
+    loses: bool,
+}
+
+impl Signs {
+    /// Count one baseline-minus-alternative saving.
+    pub fn add(&mut self, savings: Usd) {
+        self.saves |= savings > Usd::ZERO;
+        self.loses |= savings < Usd::ZERO;
+    }
+
+    /// Whether no saving was negative, so the alternative costs no more under any tier.
+    pub fn never_loses(&self) -> bool {
+        !self.loses
+    }
+
+    /// Whether no saving was positive, so the alternative saves nothing under any tier.
+    pub fn never_saves(&self) -> bool {
+        !self.saves
+    }
+}
+
+/// A comparison's priced savings grouped as [`Signs`] counts them: by session and
+/// [`TierScale`] at an assumed tier, and all together at recorded tiers.
+#[derive(Clone, Debug, Default)]
+pub struct TierSavings(HashMap<Option<(Text, TierScale)>, Usd>);
+
+impl TierSavings {
+    /// Add a saving of `usd` on `session` at `scale`, None for a recorded tier: a baseline
+    /// charge as itself and an alternative's negated.
+    pub fn add(&mut self, session: &Text, scale: Option<&TierScale>, usd: Usd) {
+        let key = scale.map(|scale| (session.clone(), scale.clone()));
+        *self.0.entry(key).or_default() += usd;
+    }
+
+    /// Which ways the groups went.
+    pub fn signs(&self) -> Signs {
+        let mut signs = Signs::default();
+        for &usd in self.0.values() {
+            signs.add(usd);
+        }
+        signs
+    }
+}
+
 /// Compares two scenarios pair by pair as (baseline, alternative), so a few unpriced requests
 /// cannot hide a clear winner, without keeping a whole history's pairs.
 #[derive(Clone, Copy, Debug, Default)]
@@ -1590,6 +1696,59 @@ mod tests {
             built.api = Api::Responses;
             built
         }
+    }
+
+    #[test]
+    fn tier_scales_part_what_one_tier_scales_alike() {
+        let part = |model: &str, input: i64, requested: Option<&str>, tier: Option<&str>| {
+            let mut r = codex_request();
+            r.requested_speed = requested.map(|t| crate::model::RequestedSpeed {
+                tier: Some(t.into()),
+                speed: None,
+            });
+            r.parts[0].model = Some(model.into());
+            r.parts[0].tier = tier.map(Into::into);
+            r.parts[0].speed = None;
+            r.parts[0].geo = None;
+            r.parts[0].usage.input = Some(input);
+            tier_scale(&r, &r.parts[0])
+        };
+        let base = part("gpt-6.1-sol", 1000, None, None);
+        assert!(base.is_some());
+        assert_eq!(part("gpt-6.1-sol", 2000, Some("default"), None), base);
+        // A premium tier is 2x on GPT-6.1 and 2.5x on GPT-5.5, so the models scale apart.
+        assert_ne!(part("gpt-5.5", 1000, None, None), base);
+        assert_ne!(part("gpt-6.1-sol", 1000, Some("fast"), None), base);
+        // GPT-5.5 has no published ultrafast rate, so its assumed tier keys it instead.
+        assert_ne!(
+            part("gpt-5.5", 1000, Some("fast"), None),
+            part("gpt-5.5", 1000, None, None)
+        );
+        assert_eq!(
+            part("gpt-5.5", 1000, Some("default"), None),
+            part("gpt-5.5", 2000, None, None)
+        );
+        assert_ne!(
+            part("gpt-5.5", 300_000, None, None),
+            part("gpt-5.5", 1000, None, None)
+        );
+        assert_eq!(part("gpt-6.1-sol", 1000, None, Some("standard")), None);
+
+        // A saving at one scale and a loss at another leave the sign open.
+        let session: Text = "s".into();
+        let mut savings = TierSavings::default();
+        savings.add(&session, base.as_ref(), Usd::from_f64(1.1));
+        savings.add(
+            &session,
+            part("gpt-5.5", 1000, None, None).as_ref(),
+            -Usd::from_f64(1.0),
+        );
+        let signs = savings.signs();
+        assert!(!signs.never_loses() && !signs.never_saves());
+        let mut savings = TierSavings::default();
+        savings.add(&session, base.as_ref(), Usd::from_f64(1.1));
+        savings.add(&session, base.as_ref(), -Usd::from_f64(1.0));
+        assert!(savings.signs().never_loses());
     }
 
     #[test]

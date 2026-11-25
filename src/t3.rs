@@ -871,6 +871,8 @@ pub(crate) fn discover(
                     "T3 picks the model and effort for each thread, and its current selection is unavailable"
                         .into(),
                 ),
+                picked: None,
+                provider: None,
             });
             // T3 picks each thread's main model, which an advisor must rank against.
             profile.advisor = None;

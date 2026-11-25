@@ -418,6 +418,8 @@ mod tests {
                 caps: vec![],
                 default: None,
                 unresolved: None,
+                picked: None,
+                provider: None,
             });
             p
         };

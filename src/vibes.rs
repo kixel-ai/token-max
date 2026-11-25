@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::doctor::{
     Answer, Card, Change, Event, Fix, How, Offers, Owner, Selection, Standing, Style,
 };
+use crate::model::Harness;
 use crate::report::Origin;
 use crate::terminal::BOLD;
 
@@ -35,6 +36,40 @@ pub struct Item {
     /// Nothing to act on, such as a setting already as advised: `vibes` shows it, and
     /// `doctor` does not offer `vibes` for it.
     pub quiet: bool,
+    /// The cards to show instead once `doctor`'s walk writes changes that move the setting
+    /// this one advises on; the first whose lines were written applies.
+    pub after: Vec<After>,
+}
+
+/// What a card becomes once `doctor` writes the change for any of some lines.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct After {
+    /// The `doctor` lines whose changes move the setting.
+    pub origins: Vec<Origin>,
+    pub item: Box<Item>,
+}
+
+/// The window the maintainer caps compaction at for `harness`, for output quality rather than
+/// cost.
+pub fn window_cap(harness: Harness) -> i64 {
+    match harness {
+        Harness::Claude => 400_000,
+        Harness::Codex => 240_000,
+    }
+}
+
+/// `items` as they read once `doctor`'s walk has written the changes of the lines `written`.
+pub fn settled(items: Vec<Item>, written: &[Origin]) -> Vec<Item> {
+    items
+        .into_iter()
+        .map(|mut item| {
+            let after = std::mem::take(&mut item.after)
+                .into_iter()
+                .find(|a| a.origins.iter().any(|o| written.contains(o)));
+            after.map_or(item, |a| *a.item)
+        })
+        .collect()
 }
 
 /// How many of `items` are worth `doctor` offering `vibes` for.
@@ -277,7 +312,6 @@ fn pieces(count: usize) -> String {
 mod tests {
     use super::*;
     use crate::doctor::{Edit, Op, Patch};
-    use crate::model::Harness;
     use crate::test_support::Workspace;
     use serde_json::json;
 
@@ -301,6 +335,7 @@ mod tests {
             sources: vec!["https://example.com/guide".into()],
             how: None,
             quiet: false,
+            after: vec![],
         }
     }
 

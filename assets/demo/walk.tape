@@ -53,8 +53,18 @@ Type "y"
 Sleep 300ms
 Enter
 Sleep 5s
-# Its Bash cap, lowered under the 5m cache the scan saw, then a Fable advisor above the Opus
-# main model, then the write.
+# Its Bash cap, lowered under the 5m cache the scan saw.
+Type "y"
+Sleep 300ms
+Enter
+Sleep 4s
+# Auto memory off, since the sessions ran in a repository with an AGENTS.md.
+Type "y"
+Sleep 300ms
+Enter
+Sleep 4s
+# The maintainer's smaller compaction window, then a Fable advisor above the Opus main model,
+# then the write.
 Type "y"
 Sleep 300ms
 Enter

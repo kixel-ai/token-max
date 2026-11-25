@@ -3581,6 +3581,7 @@ mod tests {
             ),
             speed: None,
             bash: None,
+            retention: None,
             turn_end: None,
             effort: None,
             advisor: None,
@@ -4287,6 +4288,8 @@ mod tests {
             usage_estimates: vec![],
             cache_evidence: vec![],
             reowned: None,
+            capped: None,
+            unsettable: None,
         };
         for policies in [
             Policies {
@@ -5046,6 +5049,7 @@ mod tests {
             "full resumed-prefix savings should cover the summary"
         );
         assert_eq!(check.base.recommended, Some(BeforeCacheExpires));
+        // slash ok: the synthetic owner is passed through
         assert!(check.base.owner.contains("t3/settings.json"));
         let counts = &check.current_settings.periods;
         let gap = |k: &PeriodKind| {

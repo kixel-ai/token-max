@@ -22,7 +22,7 @@ use crate::model::{Billing, Location, Millis, Scan, Verdict};
 use crate::prices::{Catalog, PriceOptions, cancel_downloads, load_prices};
 use crate::reader::{Reading, ScanOptions, scan};
 use crate::replay::{AnalyzeOptions, analyze};
-use crate::report::{Listing, ReportOptions, format_report, totals_section};
+use crate::report::{Listing, Origin, ReportOptions, format_report, totals_section};
 use crate::safe::{ScanError, display};
 use crate::sessions::{Session, export};
 use crate::ssh::{self, Reply, Scope};
@@ -857,6 +857,8 @@ enum Side {
         listing: Option<Box<Listing>>,
         /// Its spend every 30 days.
         monthly: f64,
+        /// The report lines whose changes the walk wrote, which can move what `vibes` advises.
+        written: Vec<Origin>,
     },
     /// A destination's, through its open audit.
     There {
@@ -873,15 +875,17 @@ impl WalkHost {
         }
     }
 
-    /// Go on from `doctor`'s walk to `vibes`': the changes its advice names, checked against
-    /// the files as they are now, after whatever `doctor` wrote.
+    /// Go on from `doctor`'s walk to `vibes`': its advice as it reads after whatever `doctor`
+    /// wrote, and the changes it names, checked against the files as they are now.
     fn advise(&mut self) -> Result<(), ScanError> {
         match &mut self.side {
             Side::Here {
                 owner,
                 listing,
                 monthly,
+                written,
             } => {
+                self.items = vibes::settled(std::mem::take(&mut self.items), written);
                 *owner = vibes::owner(&self.items, self.style.home.clone(), *monthly);
                 *listing = None;
             }
@@ -1668,6 +1672,7 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
                         owner: Owner::new(fixes, turned_off, home.clone(), monthly),
                         listing,
                         monthly,
+                        written: vec![],
                     }
                 });
                 (Some(printed), side, items)
@@ -1994,11 +1999,11 @@ fn walk(walk: Walk) -> Result<(), ScanError> {
             let selections = ask(&walking, &style, &mut stdin, &mut stdout).map_err(failed)?;
             drop(walking);
             settle(&mut hosts, &selections, &style, &mut stdin, &mut stdout)?;
-            let pending: usize = hosts.iter().map(|h| h.pending).sum();
-            if pending == 0 {
+            let wrote = hosts.iter().any(|h| h.wrote);
+            // What a host wrote can change its advice, so its count is read again below.
+            if !wrote && hosts.iter().all(|h| h.pending == 0) {
                 return Ok(());
             }
-            let wrote = hosts.iter().any(|h| h.wrote);
             enter(if wrote {
                 Phase::AskingMore
             } else {
@@ -2009,12 +2014,26 @@ fn walk(walk: Walk) -> Result<(), ScanError> {
             if ssh::cancelled() {
                 return Ok(());
             }
+            // A host that wrote reads its advice again for the count; the rest only on a yes.
+            for host in hosts.iter_mut().filter(|h| h.wrote) {
+                host.advise()?;
+            }
+            let pending: usize = hosts
+                .iter()
+                .map(|h| match h.wrote {
+                    true => vibes::pending(&h.items),
+                    false => h.pending,
+                })
+                .sum();
+            if pending == 0 {
+                return Ok(());
+            }
             let failed = |_| unusable(wrote);
             if !vibes::offer(pending, &style, &mut stdin, &mut stdout).map_err(failed)? {
                 return Ok(());
             }
             writeln!(stdout).map_err(failed)?;
-            for host in &mut hosts {
+            for host in hosts.iter_mut().filter(|h| !h.wrote) {
                 host.advise()?;
             }
         }
@@ -2144,7 +2163,9 @@ fn settle(
             continue;
         }
         let result = match (&mut host.side, plan) {
-            (Side::Here { .. }, Some(plan)) => write(&plan),
+            (Side::Here { written, .. }, Some(plan)) => write(&plan).inspect(|_| {
+                written.extend(plan.accepted());
+            }),
             (Side::There { remote, .. }, None) => remote.write(),
             _ => unreachable!("a plan for each host here"),
         };

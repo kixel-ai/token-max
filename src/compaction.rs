@@ -18,8 +18,9 @@ use crate::model::{
     Usage, UsageEstimate, Usd, WindowBasisKind, WindowControl, WindowScenario, WindowSensitivity,
 };
 use crate::prices::{
-    Catalog, PRICE_SOURCES, Pairs, Sum, TIER_SENSITIVITY, add_costs, price_components, price_part,
-    server_cost, tier_sensitive, unknown_cost, write_billing, zero_cost,
+    Catalog, PRICE_SOURCES, Pairs, Signs, Sum, TIER_SENSITIVITY, TIER_SIGNS, TierSavings,
+    add_costs, price_components, price_part, server_cost, tier_scale, tier_sensitive, unknown_cost,
+    write_billing, zero_cost,
 };
 use crate::scenarios::{PartReplay, ReplayOptions, ReplayTtls, ReplayedPart, replay_parts};
 use crate::version::claude_at_least;
@@ -835,6 +836,7 @@ impl<'r, 'o> Simulator<'r, 'o> {
             matches.median.output
         };
         let (input, read) = summary;
+        let part = summary_part(template, input, read, output, cold);
         self.result.added.push(AddedCompaction {
             request: req.id.clone(),
             input_tokens: input,
@@ -850,14 +852,11 @@ impl<'r, 'o> Simulator<'r, 'o> {
                 .collect(),
             // No one sample's rate stands for samples that disagree.
             summary_cost: if matches.uniform {
-                price_part(
-                    self.options.catalog,
-                    template.summary_request,
-                    &summary_part(template, input, read, output, cold),
-                )
+                price_part(self.options.catalog, template.summary_request, &part)
             } else {
                 unknown_cost(DISAGREE)
             },
+            summary_scale: tier_scale(template.summary_request, &part),
             prefix_cost: zero_cost(),
         });
         self.result.added.len() - 1
@@ -1463,6 +1462,8 @@ struct Candidate<'r, 'o, 'b> {
     baseline: Sum,
     alternative: Sum,
     pairs: Pairs,
+    /// The priced pairs' savings, for the signs of the comparison.
+    savings: TierSavings,
     cache_evidence: Vec<CacheReplayEvidence>,
 }
 
@@ -1483,6 +1484,12 @@ impl Candidate<'_, '_, '_> {
             self.baseline.add(b);
             self.alternative.add(a);
             self.pairs.add(b, a);
+            if let (Some(b), Some(a)) = (b.total_usd, a.total_usd) {
+                let session = &item.request.session;
+                let scale = |r: &ReplayedPart| tier_scale(r.request, &r.p);
+                self.savings.add(session, scale(original).as_ref(), b);
+                self.savings.add(session, scale(item).as_ref(), -a);
+            }
         };
         if uncertain {
             let reason = "session replay is unknown after a request it cannot model";
@@ -1527,6 +1534,8 @@ pub(crate) struct Run {
     pub(crate) comparison_cost: Cost,
     pub(crate) savings_usd: Option<f64>,
     pub(crate) margin: Option<Margin>,
+    /// Which ways its priced sessions went.
+    pub(crate) signs: Signs,
     pub(crate) coverage: Coverage,
     pub(crate) added: Vec<AddedCompaction>,
     pub(crate) affected: usize,
@@ -1601,6 +1610,9 @@ impl<'r> Lockstep<'_, 'r> {
             skipped,
         } = *self;
         let mut baseline_cost = None;
+        // The session of each request a summary can be added to.
+        let sessions: HashMap<&str, &Text> =
+            requests.iter().map(|r| (&*r.id, &r.session)).collect();
         let mut runs: [Vec<Run>; 3] = Default::default();
         for (scenario, runs) in runs.iter_mut().enumerate() {
             let detail = scenario == 0;
@@ -1615,6 +1627,7 @@ impl<'r> Lockstep<'_, 'r> {
                     baseline: Sum::new(),
                     alternative: Sum::new(),
                     pairs: Pairs::default(),
+                    savings: TierSavings::default(),
                     cache_evidence: vec![],
                 })
                 .collect();
@@ -1701,34 +1714,42 @@ impl<'r> Lockstep<'_, 'r> {
             for c in candidates {
                 // One pair per request that gains or loses a summary, so the unpriced
                 // bound compares against single differences rather than their total.
-                let mut summaries: IndexMap<&str, (Vec<&Cost>, Vec<&Cost>)> = IndexMap::default();
+                let mut summaries: IndexMap<&str, (Vec<&AddedCompaction>, Vec<&AddedCompaction>)> =
+                    IndexMap::default();
                 for a in before.iter().flat_map(|(_, added)| added.iter()) {
-                    summaries
-                        .entry(&*a.request)
-                        .or_default()
-                        .0
-                        .push(&a.summary_cost);
+                    summaries.entry(&*a.request).or_default().0.push(a);
                 }
                 let own = c.stream.as_ref().or(current.as_ref());
                 let added = own.map_or(&[][..], |s| s.simulator.result.added.as_slice());
                 for a in added {
-                    summaries
-                        .entry(&*a.request)
-                        .or_default()
-                        .1
-                        .push(&a.summary_cost);
+                    summaries.entry(&*a.request).or_default().1.push(a);
                 }
                 // Summary pairs come first, then the parts, then each replay's errors,
                 // which keeps the first-seen order of every unknown reason.
                 let mut pairs = c.pairs;
+                let mut savings = c.savings;
                 let mut baseline_sum = Sum::new();
                 let mut alternative_sum = Sum::new();
-                for (b, a) in summaries.into_values() {
-                    let (b, a) = (add_costs(b), add_costs(a));
+                for (request, (before, after)) in summaries {
+                    let total = |added: &[&AddedCompaction]| {
+                        add_costs(added.iter().map(|a| &a.summary_cost))
+                    };
+                    let (b, a) = (total(&before), total(&after));
                     baseline_sum.add(&b);
                     alternative_sum.add(&a);
                     pairs.add(&b, &a);
+                    if b.total_usd.is_some() && a.total_usd.is_some() {
+                        let session = sessions[request];
+                        for (added, baseline) in [(&before, true), (&after, false)] {
+                            for s in added.iter() {
+                                let usd = s.summary_cost.total_usd.unwrap_or(Usd::ZERO);
+                                let usd = if baseline { usd } else { -usd };
+                                savings.add(session, s.summary_scale.as_ref(), usd);
+                            }
+                        }
+                    }
                 }
+                let signs = savings.signs();
                 baseline_sum.add(&c.baseline.cost());
                 alternative_sum.add(&c.alternative.cost());
                 let owned_total;
@@ -1760,6 +1781,7 @@ impl<'r> Lockstep<'_, 'r> {
                     comparison_cost,
                     savings_usd,
                     margin,
+                    signs,
                     coverage: Coverage {
                         priced: paired.priced,
                         total: paired.total,
@@ -1830,6 +1852,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             .filter(|r| selected_ids.contains(&*r.id))
             .collect();
         let Some(first_selected) = selected.iter().map(|r| r.time).min() else {
+            checks.extend(unmeasured(&group, options.since));
             continue;
         };
         let ttl_results: Vec<&TtlCheck> = options
@@ -2092,6 +2115,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 || PartReplay::new([&index.cache], &replayer.options(options.estimates)),
             );
             let baseline_cost = current_cost.unwrap_or_else(|| recorded_cost.clone());
+            let signs: Vec<Signs> = runs[0].iter().map(|r| r.signs).collect();
             let scenarios = scenarios(&windows, runs);
             let priced: Vec<&WindowScenario> = scenarios
                 .iter()
@@ -2115,6 +2139,15 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             let conditional = scenarios.iter().any(|s| {
                 tier_sensitive(&s.baseline_comparison_cost) || tier_sensitive(&s.comparison_cost)
             });
+            // Priced at an assumed tier, a verdict holds only when no tier could reverse it.
+            let settled = !conditional
+                || match winning {
+                    Some(w) => scenarios
+                        .iter()
+                        .zip(&signs)
+                        .any(|(s, signs)| s.window == w.window && signs.never_loses()),
+                    None => signs.iter().all(Signs::never_saves),
+                };
             let recommended = winning
                 .map(|w| w.window)
                 .or(if priced.len() == scenarios.len() {
@@ -2122,7 +2155,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 } else {
                     None
                 })
-                .filter(|_| !conditional);
+                .filter(|_| settled);
             let patch = control.minimum_claude_patch.unwrap_or(288);
             let per_model_supported =
                 !claude || claude_at_least(recent.version.as_deref(), 1, patch);
@@ -2139,28 +2172,29 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                     && (e.model.is_none()
                         || models.iter().any(|m| m.as_deref() == e.model.as_deref()))
             });
-            let reowned = profile
-                .compaction
-                .percent
-                .as_ref()
-                .filter(|_| claude)
-                .zip(recommended.filter(|r| Some(*r) != control.value))
-                .map(|(percent, target)| {
-                    let outside: Vec<&Profile> = scan
-                        .profiles
-                        .iter()
-                        .filter(|p| !group.ids.contains(&p.id))
-                        .collect();
-                    reowned(
-                        &group.members,
-                        &outside,
-                        &ran,
-                        percent,
-                        target,
-                        models,
-                        inventory.iter(),
-                    )
-                });
+            // What moving the window to `target` must also change, when the percentage
+            // override lowers it: for the recommendation, and for `vibes`' cap.
+            let plan = |target: Option<i64>| {
+                let percent = profile.compaction.percent.as_ref().filter(|_| claude)?;
+                let target = target.filter(|t| Some(*t) != control.value)?;
+                let outside: Vec<&Profile> = scan
+                    .profiles
+                    .iter()
+                    .filter(|p| !group.ids.contains(&p.id))
+                    .collect();
+                Some(reowned(
+                    &group.members,
+                    &outside,
+                    &ran,
+                    percent,
+                    target,
+                    models,
+                    inventory.iter(),
+                ))
+            };
+            let reowned = plan(recommended);
+            let cap = crate::vibes::window_cap(profile.harness);
+            let capped = plan(control.value.is_none_or(|v| v > cap).then_some(cap));
             let unpinned = reowned.as_ref().filter(|r| !r.unkept.is_empty()).map(|r| {
                 format!(
                     "changing this window removes {PERCENT_KEY}, and {}",
@@ -2171,13 +2205,24 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 && per_model_supported
                 && (!claude || !models.contains(&None))
                 && unpinned.is_none();
+            let unsettable = if !control.applicable {
+                Some(control.reason.clone())
+            } else if !per_model_supported {
+                Some(format!(
+                    "the recorded Claude Code is older than v2.1.{patch}, which this window control needs"
+                ))
+            } else if claude && models.contains(&None) {
+                Some("requests with no recorded model ran on this line, and no setting is known to hold their window".into())
+            } else {
+                None
+            };
             let profiles: IndexSet<&String> =
                 selected.iter().flat_map(|r| r.profiles.iter()).collect();
             let savings = winning
                 .and_then(|w| w.savings_usd)
                 .or(recommended.map(|_| 0.0))
-                .filter(|_| !conditional);
-            let margin = winning.and_then(|w| w.margin).filter(|_| !conditional);
+                .filter(|_| settled);
+            let margin = winning.and_then(|w| w.margin).filter(|_| settled);
             let mut uncertainty: IndexSet<String> = [
                 "compaction loses detail; re-reading files, repeated tool calls or changed reasoning may erase savings; that work is unmeasured, not priced at zero",
                 "observed boundary timestamps, precomputed flags and durations do not prove summary generation time or idle attribution; unlogged/discarded summaries remain unknown",
@@ -2186,7 +2231,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             .map(String::from)
             .into_iter()
             .collect();
-            if conditional {
+            if !settled {
                 uncertainty.insert(TIER_SENSITIVITY.into());
             }
             if !control.applicable {
@@ -2274,7 +2319,10 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                         "changed prefixes are fully reused only within the chosen Claude lifetime or the documented default 30m billed Codex lifetime, with stable prefix identity assumed; expiry makes the new prefix cold and cannot inherit external warming of the old transcript".into(),
                         "cold-summary sensitivity charges 1h Claude writes or 12h billed Codex writes; larger-summary sensitivity uses observed cohort maxima; neither sensitivity vetoes the aggregate estimate".into(),
                         "shared history is conditional for this current profile; model/check scenarios overlap and their savings must not be added".into(),
-                    ],
+                    ]
+                    .into_iter()
+                    .chain((conditional && recommended.is_some()).then(|| TIER_SIGNS.into()))
+                    .collect(),
                     uncertainty: uncertainty.into_iter().collect(),
                     sources: SOURCES.iter().chain(&PRICE_SOURCES).map(|s| s.to_string()).collect(),
                 },
@@ -2294,10 +2342,45 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                     .collect(),
                 cache_evidence: baseline_evidence.clone(),
                 reowned,
+                capped,
+                unsettable,
             });
         }
     }
     checks
+}
+
+/// A Codex limit that is set, with no selected request to replay it against.
+fn unmeasured(group: &crate::rows::Group<'_>, since: Option<Millis>) -> Option<CompactionCheck> {
+    let profile = group.lead;
+    if profile.harness != Harness::Codex {
+        return None;
+    }
+    let control = window_control(&profile.compaction, None);
+    let current = control.value.filter(|_| !control.unset)?;
+    let mut base = CheckBase::unmeasured(group, current, control.owner, since);
+    base.sources = SOURCES.iter().map(|s| s.to_string()).collect();
+    Some(CompactionCheck {
+        base,
+        bucket: "all",
+        model: None,
+        models: vec![],
+        unset: false,
+        setting: control.setting,
+        baseline_cost: Cost::default(),
+        observed_summary_cost: Cost::default(),
+        ttls: PerBucket {
+            main: None,
+            subagent: None,
+        },
+        scenarios: vec![],
+        usage_estimates: vec![],
+        cache_evidence: vec![],
+        reowned: None,
+        // Only Claude's percentage override needs a plan, and this line is Codex.
+        capped: None,
+        unsettable: (!control.applicable).then(|| control.reason.clone()),
+    })
 }
 
 /// What a window change under `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` must also change so one
@@ -2560,6 +2643,7 @@ mod tests {
                 baseline: Sum::new(),
                 alternative: Sum::new(),
                 pairs: Pairs::default(),
+                savings: TierSavings::default(),
                 cache_evidence: vec![],
             };
             candidate.compare(&catalog, original, item, false, false);
@@ -2705,6 +2789,7 @@ mod tests {
             idle: None,
             speed: None,
             bash: None,
+            retention: None,
             turn_end: None,
             effort: None,
             advisor: None,
@@ -3744,6 +3829,104 @@ mod tests {
     }
 
     #[test]
+    fn the_vibes_cap_under_the_percent_override_gets_its_own_plan() {
+        let key = crate::controls::PERCENT_KEY;
+        let mut scan = data(4);
+        scan.profiles[0].settings_file = "settings.json".into();
+        let mut haiku = at("haiku", "haiku", HOUR);
+        haiku.model = Some("claude-haiku-5-5".into());
+        haiku.parts[0].model = Some("claude-haiku-5-5".into());
+        scan.requests.push(haiku);
+        let percent = |opus: i64| {
+            json!({
+                "env": {key: "50"},
+                "modelSettings": {
+                    "claude-opus-5-5": {"autoCompactWindow": opus},
+                    "claude-haiku-5-5": {"autoCompactWindow": 300000},
+                },
+            })
+        };
+        scan.profiles[0].compaction = controls(
+            Harness::Claude,
+            percent(900_000),
+            &Env::default(),
+            "settings.json",
+        );
+        crate::controls::tune_windows(&mut scan);
+        let opus = |scan: &Scan| {
+            checks(scan)
+                .into_iter()
+                .find(|c| c.model.as_deref() == Some("claude-opus-5-5"))
+                .unwrap()
+        };
+        let check = opus(&scan);
+        assert_eq!(check.base.current, Some(450_000));
+        // The cap moves the override out as the recommendation would, keeping Haiku's trigger.
+        let capped = check.capped.as_ref().unwrap();
+        assert_eq!(
+            planned(capped),
+            [
+                (
+                    "settings.json:modelSettings.claude-opus-5-5.autoCompactWindow".into(),
+                    Some(400_000)
+                ),
+                (
+                    "settings.json:modelSettings.claude-haiku-5-5.autoCompactWindow".into(),
+                    Some(150_000)
+                ),
+                (format!("settings.json:env.{key}"), None),
+            ]
+        );
+        assert!(capped.unkept.is_empty(), "{:?}", capped.unkept);
+        // By hand, the step still takes the whole plan, or the override would halve the cap.
+        let how = crate::doctor::window_by_hand(
+            &check,
+            Some(capped),
+            400_000,
+            &scan.profiles[0],
+            "no edit is known to hold it",
+        );
+        assert_eq!(
+            how,
+            crate::doctor::How::Manual {
+                step: format!(
+                    r#"in settings.json, set "modelSettings": {{"claude-opus-5-5": {{"autoCompactWindow": 400000}}}} and "modelSettings": {{"claude-haiku-5-5": {{"autoCompactWindow": 150000}}}}, and remove env.{key}"#
+                ),
+                reason: "no edit is known to hold it".into(),
+            }
+        );
+        // A plan that can't pin a trigger, such as an unrecorded model's, says so beside it.
+        let mut unpinned = capped.clone();
+        let unrecorded =
+            "requests with no recorded model ran on this line, and their trigger cannot be pinned";
+        unpinned.unkept.push(unrecorded.into());
+        let crate::doctor::How::Manual { reason, .. } = crate::doctor::window_by_hand(
+            &check,
+            Some(&unpinned),
+            400_000,
+            &scan.profiles[0],
+            "no edit is known to hold it",
+        ) else {
+            panic!("an edit for a window no edit holds")
+        };
+        assert_eq!(
+            reason,
+            format!(
+                "no edit is known to hold it; changing this window removes {key}, and {unrecorded}"
+            )
+        );
+        // A trigger already at or under the cap needs no plan for it.
+        scan.profiles[0].compaction = controls(
+            Harness::Claude,
+            percent(800_000),
+            &Env::default(),
+            "settings.json",
+        );
+        crate::controls::tune_windows(&mut scan);
+        assert_eq!(opus(&scan).capped, None);
+    }
+
+    #[test]
     fn a_window_change_under_the_percent_override_pins_every_other_model() {
         let key = crate::controls::PERCENT_KEY;
         let mut scan = data(4);
@@ -4525,15 +4708,92 @@ mod tests {
     }
 
     #[test]
-    fn missing_codex_tiers_price_scenarios_without_selecting_a_winner() {
-        let mut scan = scenario("codex");
-        for r in &mut scan.requests {
-            for p in &mut r.parts {
+    fn an_assumed_tier_decides_only_when_every_session_goes_one_way() {
+        let untiered = |mut scan: Scan| {
+            for p in scan.requests.iter_mut().flat_map(|r| &mut r.parts) {
                 p.tier = None;
                 p.speed = None;
             }
+            scan
+        };
+        let tiered = scenario("codex");
+        let recorded = &checks(&tiered)[0];
+        assert!(recorded.base.recommended.is_some());
+        // Every changed request is in one session, which saves at any tier.
+        let result = &checks(&untiered(tiered.clone()))[0];
+        assert_eq!(result.base.recommended, recorded.base.recommended);
+        assert_eq!(result.base.savings_usd, recorded.base.savings_usd);
+        assert!(result.base.assumptions.iter().any(|s| s == TIER_SIGNS));
+        assert!(
+            !result
+                .base
+                .uncertainty
+                .iter()
+                .any(|s| s == TIER_SENSITIVITY)
+        );
+
+        // A session whose only request reads its 300k context from the cache pays for a
+        // summary under the smaller window and saves nothing.
+        let mut mixed = tiered;
+        let mut warm = mixed.requests.last().unwrap().clone();
+        warm.id = "warm".into();
+        warm.session = "warm".into();
+        warm.parts[0].usage = Usage {
+            read: Some(300000),
+            write: Some(0),
+            ..warm.parts[0].usage
+        };
+        mixed.requests.push(warm);
+        // The 20k window's saving with each session's requests billed at a recorded tier.
+        let at_tiers = |scan: &Scan, tiers: &[(&str, &str)]| {
+            let mut scan = scan.clone();
+            for r in &mut scan.requests {
+                let tier = tiers
+                    .iter()
+                    .find(|(session, _)| *session == &*r.session)
+                    .map_or("default", |(_, tier)| *tier);
+                for p in &mut r.parts {
+                    p.tier = Some(tier.into());
+                    p.speed = None;
+                }
+            }
+            let check = &checks(&scan)[0];
+            let window = check.scenarios.iter().find(|s| s.window == 20000);
+            window.and_then(|s| s.savings_usd).unwrap()
+        };
+        // Repriced through the real pipeline, no tier on the saving session reverses it.
+        for tier in ["default", "fast", "ultrafast"] {
+            let tiers = [("sample", tier), ("session", tier)];
+            assert!(at_tiers(&mixed, &tiers) > 0.0, "{tier}");
         }
-        let result = &checks(&scan)[0];
+        // It loses less than the other saves, so with recorded tiers the window still wins.
+        let recorded = &checks(&mixed)[0];
+        assert_eq!(recorded.base.recommended, Some(20000));
+        assert!(recorded.base.savings_usd < result.base.savings_usd);
+        // At an assumed tier, a dearer tier on the warm session could reverse it, and does.
+        // A summary takes its price from a sample on its session's tier, so give one an
+        // ultrafast sample to bill the warm session's summary with its requests.
+        let mut fast = mixed.clone();
+        for id in ["summary", "sample-resume"] {
+            let mut r = fast.requests.iter().find(|r| &*r.id == id).unwrap().clone();
+            r.id = format!("{id}-fast").into();
+            r.session = "sample-fast".into();
+            fast.requests.push(r);
+        }
+        let mut sample = fast.events[0].clone();
+        sample.id = "sample-boundary-fast".into();
+        sample.request = Some("summary-fast".into());
+        sample.origins = vec![Origin {
+            session: "sample-fast".into(),
+            location: sample.location.clone(),
+        }]
+        .into();
+        sample.session = "sample-fast".into();
+        fast.events.push(sample);
+        assert!(at_tiers(&fast, &[("sample-fast", "ultrafast")]) > 0.0);
+        let dear = [("sample-fast", "ultrafast"), ("warm", "ultrafast")];
+        assert!(at_tiers(&fast, &dear) < 0.0);
+        let result = &checks(&untiered(mixed))[0];
         assert_eq!(result.base.action, Action::Advisory);
         assert_eq!(result.base.recommended, None);
         assert_eq!(result.base.savings_usd, None);
@@ -4546,6 +4806,7 @@ mod tests {
                 .iter()
                 .any(|s| s == TIER_SENSITIVITY)
         );
+        assert!(!result.base.assumptions.iter().any(|s| s == TIER_SIGNS));
         assert!(
             result
                 .scenarios
@@ -5227,6 +5488,227 @@ mod tests {
             assert_eq!(check.ttls.main, Some(Ttl::FiveMinutes));
         }
 
+        #[test]
+        fn vibes_caps_a_window_past_the_maintainers_pick_apart_from_the_lines_verdict() {
+            use crate::doctor::{Edit, How, Op, Patch};
+            use crate::report::Origin;
+            let mut scan = data(4);
+            scan.profiles[0].compaction = controls(
+                Harness::Claude,
+                json!({"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 600000}}}),
+                &Env::default(),
+                "synthetic/settings.json",
+            );
+            let mut report = report(&scan);
+            let index = report
+                .checks
+                .iter()
+                .position(|c| matches!(c, CheckResult::Compaction(_)))
+                .unwrap();
+            let check = compaction(&report);
+            assert_eq!(
+                (
+                    check.base.current,
+                    check.base.recommended,
+                    check.base.action
+                ),
+                (Some(600_000), Some(100_000), Action::Change)
+            );
+            let card = |report: &Report| {
+                crate::report::advice(report, ReportOptions::default())
+                    .into_iter()
+                    .find(|i| i.name.starts_with("Auto-compact window"))
+                    .unwrap()
+            };
+            let item = card(&report);
+            assert_eq!(item.name, "Auto-compact window (claude-opus-5-5)");
+            assert_eq!(item.value, "600k -> 400k");
+            assert_eq!(
+                item.text,
+                "Set to 600k. The maintainer would cap it at 400k for better output, not a smaller bill: a smaller window compacts sooner, so the model works from a shorter context. Anthropic's docs say accuracy and recall degrade as a context grows. doctor's auto-compact window line recommends 100k on cost. Its replay did not price a 400k window, so what the cap costs is not measured. The cap is advice beside that line, not its verdict."
+            );
+            assert_eq!(
+                item.sources,
+                [
+                    "The maintainer's pick, for output quality rather than cost. Anthropic's docs on context rot:",
+                    "https://platform.claude.com/docs/en/build-with-claude/context-windows",
+                ]
+            );
+            assert!(!item.quiet);
+            // The edit `doctor`'s line would make, at the cap.
+            assert_eq!(
+                item.how,
+                Some(How::Edit(Patch {
+                    file: "synthetic/settings.json".into(),
+                    harness: Harness::Claude,
+                    edits: vec![Edit {
+                        path: vec![
+                            "modelSettings".into(),
+                            "claude-opus-5-5".into(),
+                            "autoCompactWindow".into()
+                        ],
+                        value: json!(400_000),
+                        op: Op::Set,
+                    }],
+                }))
+            );
+            // Once the walk writes the line's 100k, the window is under the cap.
+            // The only window line, so only its own change moves it.
+            let [after] = &item.after[..] else {
+                panic!("{:?}", item.after)
+            };
+            assert_eq!(after.origins, [Origin::Check(index)]);
+            assert_eq!(
+                after.item.text,
+                "doctor's auto-compact window line recommended 100k on cost, and the walk wrote it. That is at or under the 400k window the maintainer caps it at, so there is nothing to change."
+            );
+            assert!(after.item.quiet && after.item.how.is_none());
+            let wrote = crate::vibes::settled(vec![item.clone()], &after.origins);
+            assert_eq!(wrote, [*after.item.clone()]);
+            let declined = crate::vibes::settled(vec![item.clone()], &[Origin::Check(index + 1)]);
+            assert_eq!(declined[0].after, []);
+            assert_eq!(declined[0].text, item.text);
+            // A cap the replay priced says what it costs against the current window.
+            let CheckResult::Compaction(c) = &mut report.checks[index] else {
+                unreachable!()
+            };
+            let mut priced = c.scenarios[0].clone();
+            priced.window = 400_000;
+            priced.savings_usd = Some(-0.5);
+            priced.margin = None;
+            c.scenarios.push(priced);
+            let scale = crate::report::monthly(1.0, c.base.since, c.base.until);
+            let text = card(&report).text;
+            assert!(
+                text.contains(&format!(
+                    " Against the 600k window, its replay of a 400k window costs {} more at API prices. ",
+                    crate::report::approx(0.5 * scale, None, "/mo")
+                )),
+                "{text}"
+            );
+            // A cap priced at an assumed service tier stays unmeasured, whatever the line's
+            // winner settled.
+            let CheckResult::Compaction(c) = &mut report.checks[index] else {
+                unreachable!()
+            };
+            let cap = c.scenarios.last_mut().unwrap();
+            cap.comparison_cost
+                .assumptions
+                .push(crate::prices::TIER_SENSITIVITY.into());
+            assert!(
+                !c.base
+                    .uncertainty
+                    .iter()
+                    .any(|u| u == crate::prices::TIER_SENSITIVITY)
+            );
+            let text = card(&report).text;
+            assert!(
+                text.contains(
+                    " Its replay did not price a 400k window, so what the cap costs is not measured. "
+                ),
+                "{text}"
+            );
+            // A window already under the cap advises nothing, and `doctor` does not offer it.
+            scan.profiles[0].compaction = controls(
+                Harness::Claude,
+                json!({"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 300000}}}),
+                &Env::default(),
+                "synthetic/settings.json",
+            );
+            let item = card(&self::report(&scan));
+            assert!(item.quiet && item.how.is_none() && item.value.is_empty());
+            assert_eq!(
+                item.text,
+                "Set to 300k. That is at or under the 400k window the maintainer caps it at, so there is nothing to change."
+            );
+            // Unset on a native-1M model, Claude Code compacts near 967k, past the cap.
+            scan.profiles[0].compaction = controls(
+                Harness::Claude,
+                json!({}),
+                &Env::default(),
+                "synthetic/settings.json",
+            );
+            scan.events[0].trigger = Some("manual".into());
+            scan.profiles[0].compaction.tuned.clear();
+            crate::controls::tune_windows(&mut scan);
+            let item = card(&self::report(&scan));
+            assert_eq!(item.value, "967k -> 400k");
+            assert!(
+                item.text.starts_with("No setting names it, so Claude Code compacts this model near 967k, its window for the model. The maintainer would cap it at 400k"),
+                "{}",
+                item.text
+            );
+            assert!(matches!(item.how, Some(How::Edit(_))), "{:?}", item.how);
+        }
+
+        #[test]
+        fn a_written_window_change_that_pins_other_models_asks_for_a_fresh_vibes() {
+            use crate::doctor::How;
+            use crate::report::Origin;
+            let key = crate::controls::PERCENT_KEY;
+            let mut scan = data(4);
+            let mut haiku = at("haiku", "haiku", HOUR);
+            haiku.model = Some("claude-haiku-5-5".into());
+            haiku.parts[0].model = Some("claude-haiku-5-5".into());
+            scan.requests.push(haiku);
+            scan.profiles[0].compaction = controls(
+                Harness::Claude,
+                json!({
+                    "env": {key: "50"},
+                    "modelSettings": {
+                        "claude-opus-5-5": {"autoCompactWindow": 900000},
+                        "claude-haiku-5-5": {"autoCompactWindow": 300000},
+                    },
+                }),
+                &Env::default(),
+                "synthetic/settings.json",
+            );
+            crate::controls::tune_windows(&mut scan);
+            let report = report(&scan);
+            let line = |model: &str| {
+                report
+                    .checks
+                    .iter()
+                    .position(|c| matches!(c, CheckResult::Compaction(c) if c.model.as_deref() == Some(model)))
+                    .unwrap()
+            };
+            let (opus, haiku) = (line("claude-opus-5-5"), line("claude-haiku-5-5"));
+            let CheckResult::Compaction(c) = &report.checks[opus] else {
+                unreachable!()
+            };
+            assert_eq!(
+                (c.base.current, c.base.action, c.reowned.is_some()),
+                (Some(450_000), Action::Change, true)
+            );
+            let cards = crate::report::advice(&report, ReportOptions::default());
+            let card = |name: &str| cards.iter().find(|i| i.name.contains(name)).unwrap();
+            // Opus's cap goes through its own plan: the override out, Haiku's trigger pinned.
+            let first = card("claude-opus-5-5");
+            assert_eq!(first.value, "450k -> 400k");
+            let Some(How::Edit(patch)) = &first.how else {
+                panic!("{:?}", first.how)
+            };
+            assert_eq!(patch.edits.len(), 3, "{patch:?}");
+            assert!(card("claude-haiku-5-5").quiet);
+            // Once the walk writes Opus's planned change, neither card's edits fit the files.
+            let rescan = "doctor's walk just wrote a compaction window change that can move this window. Run token-max vibes again to compare the 400k cap with the settings as they are now.";
+            for item in crate::vibes::settled(cards.clone(), &[Origin::Check(opus)])
+                .iter()
+                .filter(|i| i.name.starts_with("Auto-compact window"))
+            {
+                assert_eq!(
+                    (item.text.as_str(), item.quiet, &item.how),
+                    (rescan, true, &None)
+                );
+            }
+            // A change to another line elsewhere moves neither.
+            let kept = crate::vibes::settled(cards.clone(), &[Origin::Check(haiku + opus + 1)]);
+            assert_eq!(
+                kept.iter().map(|i| &i.text).collect::<Vec<_>>(),
+                cards.iter().map(|i| &i.text).collect::<Vec<_>>()
+            );
+        }
+
         // Window presentation keeps conditional baselines, every scenario and geometry evidence reachable.
         #[test]
         fn window_presentation_keeps_conditional_baselines_every_scenario_and_geometry_evidence() {
@@ -5441,6 +5923,65 @@ mod tests {
             near(first.summary_cost.total_usd.map(Usd::to_f64), 1.23);
             near(first.prefix_cost.total_usd.map(Usd::to_f64), 0.05);
             near(window(&first_check, 20000).savings_usd, 4.5702);
+            // `vibes` caps Codex at 240k, with the maintainer's pick as its only source, and
+            // writes the key the line names.
+            let card = |s: &Scan| {
+                crate::report::advice(&report(s), ReportOptions::default())
+                    .into_iter()
+                    .find(|i| i.name.starts_with("Auto-compact window"))
+                    .unwrap()
+            };
+            let mut owned = s.clone();
+            owned.profiles[0].settings_file = "config.toml".into();
+            let item = card(&owned);
+            assert_eq!(item.value, "400k -> 240k");
+            assert_eq!(
+                item.sources,
+                ["The maintainer's pick, for output quality rather than cost."]
+            );
+            assert!(item.text.contains("No OpenAI page says how output changes with the window, so this rests on the maintainer's pick alone."), "{}", item.text);
+            assert_eq!(
+                item.how,
+                Some(crate::doctor::How::Edit(crate::doctor::Patch {
+                    file: "config.toml".into(),
+                    harness: Harness::Codex,
+                    edits: vec![crate::doctor::Edit {
+                        path: vec!["model_auto_compact_token_limit".into()],
+                        value: json!(240_000),
+                        op: crate::doctor::Op::Set,
+                    }],
+                }))
+            );
+            assert!(item.after[0].item.quiet);
+            // A limit under a named profile may not be the one its sessions read, so the cap is
+            // set by hand, as the line would leave it.
+            let mut named = owned.clone();
+            named.profiles[0].compaction = controls(
+                Harness::Codex,
+                json!({"model_auto_compact_token_limit": 400000, "profiles": {"work": {}}}),
+                &Env::default(),
+                "config.toml",
+            );
+            let item = card(&named);
+            assert_eq!(item.value, "400k -> 240k");
+            assert_eq!(
+                item.how,
+                Some(crate::doctor::How::Manual {
+                    step: "set config.toml:model_auto_compact_token_limit to 240000".into(),
+                    reason: "named Codex profiles exist; the active profile/CLI override is not established".into(),
+                })
+            );
+            // With no limit set, the default is unread: a smaller one would rise to the cap, so
+            // nothing is advised.
+            owned.profiles[0].settings.clear();
+            owned.profiles[0].compaction =
+                controls(Harness::Codex, json!({}), &Env::default(), "config.toml");
+            let item = card(&owned);
+            assert!(item.quiet && item.how.is_none() && item.value.is_empty());
+            assert_eq!(
+                item.text,
+                "token-max could not resolve this window, so it cannot tell whether it is above the 240k window the maintainer caps it at. Set by config.toml:model_auto_compact_token_limit."
+            );
             let mut unpriced = s.clone();
             let unsupported = &mut unpriced.profiles[0];
             unsupported.settings.insert(

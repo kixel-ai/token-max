@@ -11,6 +11,9 @@ use crate::model::*;
 use crate::prices::{Catalog, PriceOptions, load_prices};
 use crate::reader::ScanOptions;
 
+mod paths;
+pub use paths::native_path;
+
 /// Adjustable synthetic Claude usage; defaults to a 1000-token 5m write and 10 output tokens.
 #[derive(Clone, Copy, Debug)]
 pub struct ClaudeUsage {
@@ -325,6 +328,7 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
         idle: None,
         speed: None,
         bash: None,
+        retention: None,
         turn_end: None,
         effort: None,
         advisor: None,

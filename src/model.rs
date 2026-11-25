@@ -969,6 +969,13 @@ pub struct EffortControl {
     pub default: Option<String>,
     /// Why the default cannot be resolved, such as an unrecorded `--profile` selection.
     pub unresolved: Option<String>,
+    /// The default as these settings resolve it on the model the maintainer picks, whose
+    /// own level setting may differ, with its model as the settings would name it, such as
+    /// with a `[1m]`; None when the model is already that one or unknown.
+    pub picked: Option<Box<EffortControl>>,
+    /// The cloud provider the settings it was resolved from send requests to, which spells
+    /// models its own way; None for the harness's own API.
+    pub provider: Option<String>,
 }
 
 /// Codex's `model_post_turn_compact_threshold_percent`: the share of the usable context
@@ -1000,6 +1007,17 @@ pub struct BashCapControl {
     pub unresolved: Option<String>,
 }
 
+/// Claude's `cleanupPeriodDays`: how long it keeps transcripts before its startup sweep
+/// deletes them, and the file that decides it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RetentionControl {
+    /// The days in effect (30 when unset); None when the setting is not a whole number of
+    /// days of at least 1, which Claude Code rejects.
+    pub days: Option<u64>,
+    /// Where `cleanupPeriodDays` is set, or the user's settings file that would set it.
+    pub owner: String,
+}
+
 /// A selected profile's current settings and their owning controls.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Profile {
@@ -1020,6 +1038,8 @@ pub struct Profile {
     pub idle: Option<IdleControl>,
     pub speed: Option<SpeedControl>,
     pub bash: Option<BashCapControl>,
+    /// How long Claude keeps transcripts; None for Codex, which keeps them until deleted.
+    pub retention: Option<RetentionControl>,
     /// Codex's turn-end compaction threshold; None for Claude.
     pub turn_end: Option<TurnEndControl>,
     /// The main session's default reasoning effort.
@@ -1703,6 +1723,43 @@ pub struct CheckBase<V> {
     pub sources: Vec<String>,
 }
 
+impl<V> CheckBase<V> {
+    /// A line for a set value that no selected request measures: the value and its owner, no
+    /// verdict, no saving, and no edit to offer.
+    pub fn unmeasured(
+        group: &crate::rows::Group<'_>,
+        current: V,
+        owner: String,
+        since: Option<Millis>,
+    ) -> Self {
+        Self {
+            profile: group.lead.id.clone(),
+            profiles: group.ids.clone(),
+            history_profiles: vec![],
+            evidence: Evidence::Unknown,
+            action: Action::Advisory,
+            current: Some(current),
+            recommended: None,
+            owner,
+            since,
+            until: None,
+            window_basis: "no selected request".into(),
+            baseline: "no request in the scan to replay this value against".into(),
+            requests: 0,
+            coverage: None,
+            savings_usd: None,
+            margin: None,
+            monthly_savings_usd: None,
+            break_even: None,
+            assumptions: vec![],
+            uncertainty: vec![
+                "no request in the window uses this setting, so nothing measures it; select a window that holds requests to compare it".into(),
+            ],
+            sources: vec![],
+        }
+    }
+}
+
 /// What chose the TTL comparison's window: `--since`, the last TTL change, or all available history.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WindowBasisKind {
@@ -1764,6 +1821,8 @@ pub struct AddedCompaction {
     pub prefix_tokens: i64,
     pub basis: Vec<CompactionBasis>,
     pub summary_cost: Cost,
+    /// What `summary_cost` scales with when it was priced at an assumed tier.
+    pub summary_scale: Option<crate::prices::TierScale>,
     pub prefix_cost: Cost,
 }
 
@@ -1814,6 +1873,11 @@ pub struct CompactionCheck {
     /// The edits that make one setting own the trigger when `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`
     /// lowers it, so the recommended window is the trigger.
     pub reowned: Option<Reowned>,
+    /// The same edits for the window `vibes` caps compaction at, which its card offers.
+    pub capped: Option<Reowned>,
+    /// Why no edit is known to set this line's window where its sessions read it, such as a
+    /// Codex limit under a named profile; None when the owner's edit does.
+    pub unsettable: Option<String>,
 }
 
 /// A model's usable context window, as Codex last recorded it.

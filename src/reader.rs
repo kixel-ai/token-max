@@ -2380,19 +2380,9 @@ fn attribute_idle(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::Workspace;
+    use crate::test_support::{Workspace, native_path};
     use serde_json::json;
     use std::path::Path;
-
-    fn text(path: &Path) -> String {
-        // Windows paths joined from "a/b" keep the slash; the code under test normalizes it.
-        let path: std::path::PathBuf = if cfg!(windows) {
-            path.components().collect()
-        } else {
-            path.to_path_buf()
-        };
-        path.to_string_lossy().into_owned()
-    }
 
     fn options(w: &Workspace) -> ScanOptions {
         w.scan_options()
@@ -2591,14 +2581,14 @@ mod tests {
         let subagents = data.requests.iter().filter(|r| r.agent == Agent::Subagent);
         assert_eq!(subagents.count(), 1);
         let mut selected = options(&w);
-        selected.discovery.claude_dirs = vec![text(&alternate)];
+        selected.discovery.claude_dirs = vec![native_path(&alternate)];
         let selected = scan(&selected).unwrap();
         assert_eq!(selected.profiles.len(), 1);
         assert!(
             selected
                 .roots
                 .iter()
-                .any(|r| r.path == text(&w.claude) && r.status == RootState::Excluded)
+                .any(|r| r.path == native_path(&w.claude) && r.status == RootState::Excluded)
         );
         assert_eq!(selected.profiles[0].ttl.main.value, Some(Ttl::OneHour));
     }
@@ -3102,7 +3092,7 @@ mod tests {
             "transcript changed identity or shrank after snapshot"
         );
         let mut absent = options(&w).discovery;
-        absent.claude_dirs = vec![text(&w.home.join("absent"))];
+        absent.claude_dirs = vec![native_path(w.home.join("absent"))];
         assert!(discover(&absent).is_err());
     }
 

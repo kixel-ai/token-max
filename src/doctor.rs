@@ -185,7 +185,14 @@ impl Edit {
                 "{} (added to the list)",
                 setting_text(&self.path, self.value.clone(), true, harness)
             ),
-            Op::Remove => format!("remove {}", self.path.join(".")),
+            Op::Remove => format!(
+                "remove {}",
+                self.path
+                    .iter()
+                    .map(|k| crate::context::toml_key(k))
+                    .collect::<Vec<_>>()
+                    .join(".")
+            ),
         }
     }
 }
@@ -4638,8 +4645,16 @@ mod tests {
     fn edits_left_to_make_take_one_line_per_key_and_their_exact_text_under_details() {
         let settings = Path::new("/synthetic/home/.claude/settings.json");
         let config = Path::new("/synthetic/home/.codex/config.toml");
-        let mut old = edit("old", Value::Null, false);
-        old.op = Op::Remove;
+        // A removal's model name holds a dot, so its key is quoted to read as one.
+        let old = Edit {
+            path: vec![
+                "modelSettings".into(),
+                "claude-opus-4.6".into(),
+                "autoCompactWindow".into(),
+            ],
+            value: Value::Null,
+            op: Op::Remove,
+        };
         let fixes = [
             change(
                 "A",
@@ -4715,7 +4730,7 @@ mod tests {
                         "fastMode = false".into(),
                         r#"deniedMcpServers += {"serverName":"docs"}"#.into(),
                         "autoMemoryEnabled = false".into(),
-                        "remove old".into(),
+                        r#"remove modelSettings."claude-opus-4.6".autoCompactWindow"#.into(),
                     ]
                 ),
                 (
@@ -4733,6 +4748,10 @@ mod tests {
             ]
         );
         assert_eq!(exact[0].1.len(), 8);
+        assert_eq!(
+            exact[0].1[7],
+            r#"remove modelSettings."claude-opus-4.6".autoCompactWindow"#
+        );
         assert_eq!(
             remaining.steps(),
             [(

@@ -162,7 +162,18 @@ pub fn definitions(server: &str, control: &Control, profiles: &[&Profile]) -> Ve
     // A plugin's server and a claude.ai connector live in no file token-max reads, but a
     // declared key may spell the same prefix.
     let source = if let Some(rest) = server.strip_prefix("plugin_") {
-        let step = "uninstall or disable the plugin that provides it, with /plugin in Claude Code";
+        // Each profile installs its own plugins, and another may share this one, so the step
+        // names the profiles whose settings turn the server off.
+        let roots: Vec<&str> = profiles.iter().map(|p| p.root.as_str()).collect();
+        let step = format!(
+            "uninstall or disable the plugin that provides it, with /plugin in Claude Code's {} at {}",
+            if roots.len() > 1 {
+                "profiles"
+            } else {
+                "profile"
+            },
+            roots.join(" and "),
+        );
         let reason = "a plugin adds it";
         // Claude Code names it `plugin:<plugin>:<server>`, whose colons its tools carry as
         // `_`; with no other `_` in the prefix, neither name held one or a character read
@@ -174,12 +185,12 @@ pub fn definitions(server: &str, control: &Control, profiles: &[&Profile]) -> Ve
                 Definition::Deny(Deny {
                     name: format!("plugin:{plugin}:{name}"),
                     since: PLUGIN,
-                    step: step.into(),
+                    step: step.clone(),
                     reason: reason.into(),
                 })
             }
             _ => Definition::Manual {
-                step: step.into(),
+                step,
                 reason: format!("{reason}, and its tools' prefix does not spell its name"),
             },
         })
@@ -777,6 +788,36 @@ mod tests {
         assert_eq!(
             denied("plugin_my-tools_my-docs"),
             ("plugin:my-tools:my-docs".into(), PLUGIN)
+        );
+        // Each profile installs its own plugins, so the step names the ones the change covers.
+        let root = |p: &Profile| p.root.clone();
+        let step = |profiles: &[&Profile]| match definitions(
+            "plugin_github_github",
+            &deny("plugin_github_github"),
+            profiles,
+        )
+        .as_slice()
+        {
+            [Definition::Deny(d)] => d.step.clone(),
+            all => panic!("{all:?}"),
+        };
+        assert_eq!(
+            step(&[&p]),
+            format!(
+                "uninstall or disable the plugin that provides it, with /plugin in Claude Code's profile at {}",
+                root(&p)
+            )
+        );
+        let mut work = p.clone();
+        work.root = format!("{}-work", p.root);
+        assert!(
+            step(&[&p, &work]).ends_with(&format!(
+                "Claude Code's profiles at {} and {}",
+                root(&p),
+                root(&work)
+            )),
+            "{}",
+            step(&[&p, &work])
         );
         for server in ["plugin_a_b_c", "plugin_github", "plugin__x"] {
             assert!(

@@ -9,8 +9,7 @@ Run the `deps` audit: `quest audit deps` prints what it checks, what each findin
 Baseline: the m1 run covered releases through 2026-11-20.
 
 Scope: the crates in `Cargo.toml`, the GitHub Actions pinned in
-`.github/workflows` (Pullfrog's pin follows the org standard in dotfiles'
-`repo-settings`, so bump it there), cargo-dist's version in
+`.github/workflows`, cargo-dist's version in
 `dist-workspace.toml` and `.github/workflows/release.yml`, the Rust toolchain
 the Nix dev shell provides, and `site/wrangler.jsonc`'s compatibility date.
 The flake's nixpkgs, flake-utils and quest inputs are commit pins, so they are

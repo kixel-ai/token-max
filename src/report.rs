@@ -6991,9 +6991,16 @@ fn summary(
         out.line(&credit.text(spend.monthly(), &host), 0, PLAIN);
     }
     // Said once, for every figure extrapolated over requests that could not be priced.
-    // The details print many more estimates, so check what they render rather than list them.
+    // The details print many more estimates, so check what they render rather than list them,
+    // unwrapped so no figure splits across lines.
     let detailed = out.options.details && {
-        let mut scratch = Out::new(report, out.options);
+        let mut scratch = Out::new(
+            report,
+            ReportOptions {
+                width: None,
+                ..out.options
+            },
+        );
         details(report, &mut scratch);
         sampled(&scratch.text)
     };

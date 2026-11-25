@@ -5530,15 +5530,12 @@ fn preamble(report: &Report, conditional: u64, out: &mut Out<'_>) {
 /// an assumed service tier.
 fn left_out(report: &Report, conditional: u64) -> String {
     let coverage = &report.scan.coverage;
-    let unsupported: u64 = report
-        .scan
-        .t3
-        .iter()
-        .filter(|s| s.status == "selected")
-        .map(|s| s.unsupported)
-        .sum();
+    let t3 = report.scan.t3.iter().filter(|s| s.status == "selected");
+    let unsupported: u64 = t3.clone().map(|s| s.unsupported).sum();
+    let missing: u64 = t3.map(|s| s.missing).sum();
     let counts = [
         (unsupported, "unsupported T3 instance", ""),
+        (missing, "missing T3 history home", ""),
         (coverage.t3_unattributed, "unattributed T3 request", ""),
         (coverage.t3_removed, "removed T3 request", ""),
         (coverage.missing_usage, "request", " with no usage"),
@@ -8344,6 +8341,7 @@ mod tests {
             unresolved: IndexMap::default(),
             removed: IndexMap::from_iter([("gone".into(), 3)]),
             unsupported: 0,
+            missing: 0,
             instances: Default::default(),
             text_generation: None,
         });
@@ -8368,7 +8366,10 @@ mod tests {
         report.scan.t3.push(T3State {
             path: "/state".into(),
             status: "selected".into(),
-            exclusions: vec!["T3 instance x (grok) is unsupported; its spend is excluded".into()],
+            exclusions: vec![
+                "T3 instance x (grok) is unsupported; its spend is excluded".into(),
+                "T3 instance y: native history home /gone is missing".into(),
+            ],
             metadata: String::new(),
             snapshot_started_at: None,
             snapshot_finished_at: None,
@@ -8376,6 +8377,7 @@ mod tests {
             unresolved: IndexMap::from_iter([("a".into(), 1), ("b".into(), 1)]),
             removed: IndexMap::from_iter([("gone".into(), 3)]),
             unsupported: 1,
+            missing: 1,
             instances: Default::default(),
             text_generation: None,
         });
@@ -8387,7 +8389,7 @@ mod tests {
         report.scan.coverage.skipped_files = 1;
         let text = short(&report);
         assert!(
-            text.contains("\n  Left out or assumed: 1 unsupported T3 instance, 1 unattributed T3 request, 3 removed T3 requests, 4 requests with no usage, 1 unreadable line. --details says why.\n"),
+            text.contains("\n  Left out or assumed: 1 unsupported T3 instance, 1 missing T3 history home, 1 unattributed T3 request, 3 removed T3 requests, 4 requests with no usage, 1 unreadable line. --details says why.\n"),
             "{text}"
         );
         for note in ["T3 coverage:", "T3 removed:", "Profiles:", PRICES_MEAN] {
@@ -8397,6 +8399,7 @@ mod tests {
         assert!(!details.contains("Left out"), "{details}");
         for note in [
             "T3 coverage: T3 instance x (grok) is unsupported",
+            "T3 coverage: T3 instance y: native history home /gone is missing",
             "T3 unresolved: 1 request: a",
             "T3 removed: 3 requests",
             "4 requests have no recorded usage",

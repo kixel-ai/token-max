@@ -589,6 +589,7 @@ pub(crate) fn discover(
                     unresolved: IndexMap::default(),
                     removed: IndexMap::default(),
                     unsupported: 0,
+                    missing: 0,
                     instances: HashSet::default(),
                     text_generation: None,
                 });
@@ -656,6 +657,7 @@ pub(crate) fn discover(
             unresolved: IndexMap::default(),
             removed: IndexMap::default(),
             unsupported: 0,
+            missing: 0,
             instances: instances.keys().cloned().collect(),
             text_generation: Some(text_generation(&settings, &instances, &file)),
         };
@@ -754,6 +756,7 @@ pub(crate) fn discover(
             let root = match fs::canonicalize(&native_root) {
                 Ok(root) => root,
                 Err(e) if e.kind() == ErrorKind::NotFound => {
+                    state.missing += 1;
                     state.exclusions.push(format!(
                         "T3 instance {id}: native history home {} is missing",
                         native_root.display()
@@ -3075,6 +3078,18 @@ mod tests {
         assert_eq!(split.left_out("open"), Some(None));
         assert_eq!(stand_ins([None], 1), None);
         assert_eq!(stand_ins([], 0), Some(0));
+    }
+
+    #[test]
+    fn unread_instances_are_counted() {
+        let w = Workspace::new();
+        native(&w);
+        state(
+            &w,
+            json!({"providerInstances":{"codex":{"driver":"codex","config":{"homePath":w.codex}},"away":{"driver":"codex","config":{"homePath":w.home.join("unmounted")}},"other":{"driver":"grok"}}}),
+        );
+        let scan = scan(&w.scan_options()).unwrap();
+        assert_eq!((scan.t3[0].missing, scan.t3[0].unsupported), (1, 1));
     }
 
     #[test]

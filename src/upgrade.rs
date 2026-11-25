@@ -207,14 +207,18 @@ fn crabx_record_names(exe: &Path) -> bool {
     let Some(name) = exe.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    // Only a regular file: opening a named pipe there would block the run.
-    let record = entry.join("record.json");
-    if !record.is_file() {
-        return false;
-    }
-    let Ok(file) = fs::File::open(record) else {
+    // Only a regular file, checked on the open handle. A named pipe there would block an
+    // ordinary open until a writer came, so Unix opens without waiting.
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NONBLOCK);
+    let Ok(file) = options.open(entry.join("record.json")) else {
         return false;
     };
+    if !file.metadata().is_ok_and(|meta| meta.is_file()) {
+        return false;
+    }
     // A record is a few hundred bytes, so a file this size is not crabx's.
     let mut text = String::new();
     if file.take(64 << 10).read_to_string(&mut text).is_err() {
@@ -536,7 +540,7 @@ mod tests {
                 "{other}"
             );
         }
-        // A named pipe there is never opened, which would block with no writer.
+        // A named pipe there, which an ordinary open would wait on for a writer, is skipped.
         #[cfg(unix)]
         {
             fs::remove_file(entry.join("record.json")).unwrap();

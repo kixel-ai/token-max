@@ -4373,6 +4373,16 @@ impl Mark {
         }
     }
 
+    /// The word counting lines of this verdict, such as "31 kept".
+    fn tally(self) -> &'static str {
+        match self {
+            Mark::Change => "to change",
+            Mark::Consider => "to consider",
+            Mark::Keep => "kept",
+            mark => mark.word(),
+        }
+    }
+
     /// The ANSI style that carries the verdict: red, yellow, green, or dim.
     fn style(self) -> &'static str {
         match self {
@@ -4434,9 +4444,16 @@ struct Row {
     baseline: Option<crate::defaults::Baseline>,
     /// The section it is listed in, for a change `doctor` offers as an edit.
     section: Option<Membership>,
-    /// The settings `doctor`'s edit for it changes, any part naming this line alone starred,
-    /// such as `~/.claude/settings.json:skillOverrides.*`, which its section's row names.
+    /// The settings that change it, any part naming this line alone starred, such as
+    /// `~/.claude/settings.json:skillOverrides.*`, which the row of a section it is in
+    /// names; for a change `doctor` offers as an edit, the settings that edit changes.
     key: String,
+    /// The kind of feature EVERYTHING ELSE lists it with on one line, such as "Skills"; None
+    /// for a setting, which its line lists across profiles under its own name.
+    group: Option<String>,
+    /// Its profile tag before anything telling two lines of one setting apart was added, which
+    /// a line listing several names instead.
+    base_tag: String,
     /// The harness upgrade that alone would let its verdict apply.
     upgrade: Option<String>,
 }
@@ -4477,6 +4494,8 @@ impl Row {
             baseline: None,
             section: None,
             key: String::new(),
+            group: None,
+            base_tag: String::new(),
             upgrade: None,
         }
     }
@@ -4590,6 +4609,14 @@ fn by_share(a: &Row, b: &Row) -> std::cmp::Ordering {
 /// After `doctor`'s walk, the changes split into those accepted, declined and by hand.
 fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
     let mut rows = rows.to_vec();
+    for row in &mut rows {
+        // A setting's line lists it across profiles by its name before any location.
+        row.group.get_or_insert_with(|| row.name.clone());
+        row.base_tag.clone_from(&row.profile);
+        if row.key.is_empty() {
+            row.key.clone_from(&row.setting);
+        }
+    }
     let choice = |row: &Row| {
         let choices = review?.choices;
         let origin = row.origin?;
@@ -4640,11 +4667,11 @@ fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
     rows.sort_by_key(|r| r.mark);
     rows.sort_by(by_share);
     let (changes, rest): (Vec<Row>, Vec<Row>) = rows.into_iter().partition(Row::offered);
-    let mut groups: Vec<(Vec<&Row>, &str, bool)> = match review {
+    let mut groups: Vec<(Vec<&Row>, &str, Join)> = match review {
         None => vec![(
             changes.iter().collect(),
             "CHANGES  biggest saving first",
-            true,
+            Join::Sections,
         )],
         Some(_) => {
             let group = |want: fn(Option<&Choice>) -> bool| {
@@ -4657,19 +4684,19 @@ fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
                 (
                     group(|c| c == Some(&Choice::Accepted)),
                     "ACCEPTED  biggest saving first",
-                    true,
+                    Join::Sections,
                 ),
                 (
                     // A change the walk did not reach is unaccepted too.
                     group(|c| matches!(c, None | Some(Choice::Declined))),
                     "NOT ACCEPTED",
-                    true,
+                    Join::Sections,
                 ),
                 // Each step by hand keeps its own line, naming the step.
                 (
                     group(|c| matches!(c, Some(Choice::Manual(_)))),
                     "BY HAND",
-                    false,
+                    Join::Not,
                 ),
             ]
         }
@@ -4677,11 +4704,11 @@ fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
     groups.push((
         rest.iter().collect(),
         "EVERYTHING ELSE  biggest cost first",
-        false,
+        Join::Kinds,
     ));
     let groups: Vec<(Vec<Entry>, &str)> = groups
         .into_iter()
-        .map(|(rows, heading, joined)| (entries(rows, joined, out), heading))
+        .map(|(rows, heading, join)| (entries(rows, join, out), heading))
         .collect();
     let details = out.options.details;
     // Every row printed, a section's members under --details.
@@ -4772,7 +4799,7 @@ fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
         if let Some(upgrade) = &row.upgrade {
             out.line(upgrade, nested + indent, PLAIN);
         }
-        if out.options.details {
+        if out.options.details && !row.what.is_empty() {
             out.line(&format!("What: {}", row.what), nested + indent, PLAIN);
             if !row.evidence.is_empty() {
                 out.line(&row.evidence, nested + indent, PLAIN);
@@ -4815,41 +4842,62 @@ struct Entry {
     members: Vec<Row>,
 }
 
-/// `rows` as the list shows them, ranked: when `joined`, each section of two changes or more
-/// as one row, the rest as they are.
-fn entries(rows: Vec<&Row>, joined: bool, out: &Out<'_>) -> Vec<Entry> {
-    let mut sections: Vec<Vec<Row>> = vec![];
-    let mut at = crate::collections::HashMap::<usize, usize>::default();
+/// Which rows of a list share one row.
+#[derive(Clone, Copy, PartialEq)]
+enum Join {
+    /// Each row its own.
+    Not,
+    /// The changes of a section of two or more.
+    Sections,
+    /// Two lines or more of one kind of feature, or of one setting across profiles.
+    Kinds,
+}
+
+/// `rows` as the list shows them, ranked: each set of rows `join` puts together as one row,
+/// the rest as they are.
+fn entries(rows: Vec<&Row>, join: Join, out: &Out<'_>) -> Vec<Entry> {
+    let mut lists: Vec<Vec<Row>> = vec![];
+    let mut at = crate::collections::HashMap::<String, usize>::default();
     for row in rows {
-        match row.section.as_ref().filter(|_| joined) {
-            Some(m) => match at.get(&m.id) {
-                Some(&i) => sections[i].push(row.clone()),
+        let key = match join {
+            Join::Not => None,
+            Join::Sections => row.section.as_ref().map(|m| m.id.to_string()),
+            Join::Kinds => row.group.clone(),
+        };
+        match key {
+            Some(key) => match at.get(&key) {
+                Some(&i) => lists[i].push(row.clone()),
                 None => {
-                    at.insert(m.id, sections.len());
-                    sections.push(vec![row.clone()]);
+                    at.insert(key, lists.len());
+                    lists.push(vec![row.clone()]);
                 }
             },
-            None => sections.push(vec![row.clone()]),
+            None => lists.push(vec![row.clone()]),
         }
     }
     let mut entries: Vec<Entry> = vec![];
-    for members in sections {
+    for members in lists {
         let changes: IndexSet<usize> = members
             .iter()
             .filter_map(|r| r.section.as_ref().map(|m| m.fix))
             .collect();
         // Two lines making one edit are one change, so they stay lines of their own.
-        if changes.len() < 2 {
+        let one = match join {
+            Join::Kinds => members.len() < 2,
+            _ => changes.len() < 2,
+        };
+        if one {
             entries.extend(members.into_iter().map(|row| Entry {
                 row,
                 members: vec![],
             }));
             continue;
         }
-        entries.push(Entry {
-            row: section_row(&members, out),
-            members,
-        });
+        let row = match join {
+            Join::Kinds => kind_row(&members, out),
+            _ => section_row(&members, out),
+        };
+        entries.push(Entry { row, members });
     }
     // A stable sort keeps the verdict order among rows with the same figure.
     entries.sort_by_key(|e| e.row.mark);
@@ -4947,8 +4995,15 @@ fn section_row(members: &[Row], out: &Out<'_>) -> Row {
         }
     }
     // The files or profiles its members name, and the settings they change in them.
-    let tags: IndexSet<&str> = members.iter().map(|r| r.profile.as_str()).collect();
-    row.profile = match tags.len() {
+    row.profile = joined_tags(members.iter().map(|r| r.profile.as_str()));
+    row.setting = keys_text(members.iter().map(|r| r.key.as_str()), &row.profile);
+    row
+}
+
+/// One tag naming every profile or file `tags` name, each once.
+fn joined_tags<'a>(tags: impl IntoIterator<Item = &'a str>) -> String {
+    let tags: IndexSet<&str> = tags.into_iter().collect();
+    match tags.len() {
         1 => tags[0].to_string(),
         _ => format!(
             "[{}]",
@@ -4957,26 +5012,29 @@ fn section_row(members: &[Row], out: &Out<'_>) -> Row {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-    };
-    let file = one_file(&row.profile);
-    // Each file named once, before the settings in it.
-    let mut keys: IndexMap<&str, IndexSet<&str>> = IndexMap::default();
-    for r in members {
+    }
+}
+
+/// The settings `keys` name, each file once before the settings in it, and not at all when
+/// `tag` names that one file.
+fn keys_text<'a>(keys: impl IntoIterator<Item = &'a str>, tag: &str) -> String {
+    let file = one_file(tag);
+    let mut files: IndexMap<&str, IndexSet<&str>> = IndexMap::default();
+    for full in keys {
         let key = match file {
-            Some(f) => r.key.strip_prefix(f).and_then(|k| k.strip_prefix(':')),
+            Some(f) => full.strip_prefix(f).and_then(|k| k.strip_prefix(':')),
             None => None,
         };
         let (file, key) = match key {
             Some(key) => ("", key),
-            None => r
-                .key
+            None => full
                 .rsplit_once(':')
                 .filter(|(_, k)| !k.starts_with(' ') && !k.contains(['/', '\\']))
-                .unwrap_or(("", &r.key)),
+                .unwrap_or(("", full)),
         };
-        keys.entry(file).or_default().insert(key);
+        files.entry(file).or_default().insert(key);
     }
-    row.setting = keys
+    files
         .into_iter()
         .map(|(file, keys)| {
             let keys = keys.into_iter().collect::<Vec<_>>().join(", ");
@@ -4987,9 +5045,102 @@ fn section_row(members: &[Row], out: &Out<'_>) -> Row {
             }
         })
         .collect::<Vec<_>>()
-        .join("; ");
+        .join("; ")
+}
+
+/// EVERYTHING ELSE's line for several lines of one kind of feature, or of one setting across
+/// profiles: how many got each verdict, what they cost together, or else saved, their
+/// verdict the strongest member's, and the profiles and settings that change them.
+fn kind_row(members: &[Row], out: &Out<'_>) -> Row {
+    let mark = members
+        .iter()
+        .map(|r| r.mark)
+        .min()
+        .expect("a kind's line has members");
+    let name = members[0].group.clone().unwrap_or_default();
+    let mut row = Row::new(mark, name, String::new());
+    let mut tally = std::collections::BTreeMap::<Mark, usize>::new();
+    for r in members {
+        *tally.entry(r.mark).or_default() += 1;
+    }
+    row.value = tally
+        .into_iter()
+        .map(|(mark, n)| format!("{n} {}", mark.tally()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    // A member whose cost is unknown leaves the sum a lower bound.
+    let unknown = members
+        .iter()
+        .any(|r| r.cost.is_none() && matches!(r.amount, Some(("costs", _))));
+    let costs: Vec<(Estimate, bool)> = members.iter().filter_map(|r| r.cost).collect();
+    let verbs: IndexSet<&str> = members
+        .iter()
+        .filter_map(|r| r.amount.as_ref().map(|(verb, _)| *verb))
+        .collect();
+    if let Some(&(first, _)) = costs.first() {
+        let (cost, at_least) =
+            costs[1..]
+                .iter()
+                .fold((first, unknown), |(sum, at_least), (e, lower)| {
+                    let usd = sum.usd + e.usd;
+                    let margin = Margin::plus(sum.margin, e.margin);
+                    (Estimate { usd, margin }, at_least || *lower)
+                });
+        let at_least = at_least || costs[0].1;
+        row.costs(Some(cost), at_least, &out.spend);
+    } else if unknown {
+        row.costs(None, false, &out.spend);
+    } else if let ([verb], true) = (
+        verbs.iter().copied().collect::<Vec<_>>().as_slice(),
+        members
+            .iter()
+            .all(|r| r.amount.is_none() || r.saving.is_some()),
+    ) {
+        // Kept settings that each save against their default, such as one TTL across
+        // profiles, save together what they save apart.
+        let (usd, margin) = members
+            .iter()
+            .filter_map(|r| r.saving.map(|usd| (usd, r.margin)))
+            .fold((0.0, None), |(sum, margin), (usd, more)| {
+                (sum + usd, Margin::plus(margin, more))
+            });
+        row.saves(verb, Some(usd), margin, &out.spend);
+    }
+    // A line summing a setting across many profiles names the first few; --details names
+    // the rest on their own lines.
+    let tags: IndexSet<&str> = members.iter().map(|r| r.base_tag.as_str()).collect();
+    row.profile = joined_tags(tags.iter().copied().take(KIND_TAGS));
+    if tags.len() > KIND_TAGS {
+        row.profile = format!(
+            "{} and {} more]",
+            row.profile.trim_end_matches(']'),
+            tags.len() - KIND_TAGS
+        );
+    }
+    // A placeholder such as "unknown" adds nothing beside a setting, nor does a setting
+    // another one goes on from.
+    let keys: IndexSet<&str> = members.iter().map(|r| r.key.as_str()).collect();
+    let longest: Vec<&str> = keys
+        .iter()
+        .copied()
+        .filter(|k| !keys.iter().any(|o| o != k && o.starts_with(k)))
+        .collect();
+    let named: Vec<&str> = longest
+        .iter()
+        .copied()
+        .filter(|k| !matches!(*k, "none" | "unknown" | "no setting"))
+        .collect();
+    let keys = if named.is_empty() { longest } else { named };
+    row.setting = keys_text(keys.iter().copied().take(KIND_KEYS), &row.profile);
+    if keys.len() > KIND_KEYS {
+        let _ = write!(row.setting, " and {} more", keys.len() - KIND_KEYS);
+    }
     row
 }
+
+/// The most profiles or files, and settings, a kind's line names.
+const KIND_TAGS: usize = 3;
+const KIND_KEYS: usize = 2;
 
 /// The one settings file a line's tag names, such as `~/.claude/settings.json` in
 /// `[~/.claude/settings.json]`.
@@ -5038,6 +5189,7 @@ fn instruction_row(c: &ContextCost, out: &Out<'_>) -> Row {
         None => "No setting turns it off.".into(),
     };
     row.setting = "the file itself".into();
+    row.group = Some("Instruction files".into());
     row
 }
 
@@ -6179,6 +6331,61 @@ fn piece_setting(c: &ContextCost, out: &Out<'_>) -> String {
     }
 }
 
+/// The EVERYTHING ELSE line a feature of `kind` is listed on, such as "Skills"; None for a
+/// kind each of which is a setting of its own, such as a tool output cap.
+fn kind_group(kind: ContextKind) -> Option<String> {
+    match kind {
+        ContextKind::Instructions => Some("Instruction files".into()),
+        ContextKind::ToolOutput => None,
+        kind => crate::doctor::feature_noun(kind).map(capitalize),
+    }
+}
+
+/// The setting that turns a piece off, the part naming the piece alone starred, as its kind's
+/// line names it, such as `~/.claude/settings.json:skillOverrides.*`.
+fn piece_key(c: &ContextCost, out: &Out<'_>) -> String {
+    match (&c.control, &c.skill) {
+        (Some(control), s) if s.as_ref().is_none_or(|s| s.path.is_some()) => {
+            format!("{}:{}", piece_file(c, out), kind_path(&control.path))
+        }
+        _ => piece_setting(c, out),
+    }
+}
+
+/// A switch's path with the part naming one feature starred, such as
+/// `mcp_servers.*.enabled` for any MCP server's switch.
+fn kind_path(path: &[String]) -> String {
+    let named = |i: usize| match path.first().map(String::as_str) {
+        Some("mcp_servers") => i == 1 || i == 3 && path.get(2).is_some_and(|p| p == "tools"),
+        Some("skillOverrides" | "projects") => i == 1,
+        _ => false,
+    };
+    path.iter()
+        .enumerate()
+        .map(|(i, p)| if named(i) { "*" } else { p.as_str() })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+/// A subagent's model setting with each agent file it names starred, such as
+/// `model: in ~/.claude/agents/*.md`, as the subagents' line names it.
+fn agent_files(setting: &str) -> String {
+    setting
+        .split(' ')
+        .map(|word| {
+            let path = word.trim_end_matches([',', ';']);
+            match path.rsplit_once(['/', '\\']) {
+                Some((dir, file)) if file.ends_with(".md") => {
+                    let separator = &path[dir.len()..=dir.len()];
+                    format!("{dir}{separator}*.md{}", &word[path.len()..])
+                }
+                _ => word.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Each change `doctor` offers as an edit joins its section, which names the settings its
 /// edit changes; a step by hand stays its own line, naming the step.
 fn sectioned(rows: &mut [Row], fixes: &[crate::doctor::Fix], out: &Out<'_>) {
@@ -6959,6 +7166,7 @@ fn summary(
         text += &server_notes(c);
         row.evidence = text;
         row.setting = piece_setting(c, out);
+        (row.group, row.key) = (kind_group(c.kind), piece_key(c, out));
         row
     };
     let mut rows: Vec<Row> = checks.iter().map(|c| check_row(c, out)).collect();
@@ -7224,6 +7432,7 @@ fn summary(
         text += &server_notes(c);
         row.evidence = text;
         row.setting = piece_setting(c, out);
+        (row.group, row.key) = (kind_group(c.kind), piece_key(c, out));
         rows.push(row);
     }
     // Tools, skills and MCP servers a settings file turns off, which are on by default. No
@@ -7318,6 +7527,10 @@ fn summary(
             row.profile = tag(&ids, &switch, out);
             row.value = crate::defaults::switch_value(control);
             row.setting = format!("{shown}:{}", control.path.join("."));
+            (row.group, row.key) = (
+                crate::defaults::switch_kind(control).and_then(kind_group),
+                format!("{shown}:{}", kind_path(&control.path)),
+            );
             row.evidence = evidence;
             row.baseline = Some(crate::defaults::Baseline {
                 default: "on".into(),
@@ -7376,6 +7589,10 @@ fn summary(
             row.value = "on".into();
             row.costs(None, false, &spend);
             row.setting = format!("{shown}:{}", control.path.join("."));
+            (row.group, row.key) = (
+                crate::defaults::switch_kind(control).and_then(kind_group),
+                format!("{shown}:{}", kind_path(&control.path)),
+            );
             row.evidence = format!(
                 "{shown} turns it off, so no request in the window carried it, and what it costs on is unknown."
             );
@@ -7420,6 +7637,10 @@ fn summary(
                 crate::defaults::switch_value(control)
             };
             row.setting = format!("{shown}:{}", control.path.join("."));
+            (row.group, row.key) = (
+                crate::defaults::switch_kind(control).and_then(kind_group),
+                format!("{shown}:{}", kind_path(&control.path)),
+            );
             row.evidence = if allowlist {
                 format!(
                     "Policy in {shown} keeps every tool it doesn't list off, which a user can't change."
@@ -7579,6 +7800,8 @@ fn summary(
             .next()
             .unwrap_or_default()
             .to_string();
+        row.group = Some("Subagents".into());
+        row.key = agent_files(&row.setting);
         rows.push(row);
     }
     for u in &report.lsp {
@@ -7716,6 +7939,7 @@ fn summary(
         row.location = skill_location(c, out);
         row.costs(c.estimate(), false, &spend);
         row.setting = piece_setting(c, out);
+        (row.group, row.key) = (kind_group(c.kind), piece_key(c, out));
         row.evidence = match c.kind {
             ContextKind::Skill if c.skill.is_some() => {
                 format!(
@@ -7866,7 +8090,7 @@ fn summary(
     );
     if !out.options.details {
         out.line(
-            "--details shows the evidence, assumptions and sources behind each line.",
+            "--details lists each line a row sums, with the evidence, assumptions and sources behind each.",
             0,
             DIM,
         );
@@ -8961,7 +9185,7 @@ mod tests {
         .into_iter()
         .flatten()
         .collect();
-        let text = super::tests::text(&report, None, false);
+        let text = super::tests::text(&report, None, true);
         let lines = report_lines(&text);
         for name in ["Artifact tool", "Agent tool"] {
             let named: Vec<_> = lines.iter().filter(|l| l.head.starts_with(name)).collect();
@@ -8990,7 +9214,7 @@ mod tests {
         let outranking = project.home.join("settings.json");
         std::fs::write(&outranking, r#"{"enableArtifact": true}"#).unwrap();
         report.scan.profiles[0].outranking_files = vec![outranking.to_string_lossy().into()];
-        let text = super::tests::text(&report, None, false);
+        let text = super::tests::text(&report, None, true);
         assert!(
             report_line(&text, "Artifact tool on -> off")
                 .default
@@ -9006,7 +9230,7 @@ mod tests {
             }
         }
         historical(&mut report.context, "enableArtifact");
-        let text = super::tests::text(&report, None, false);
+        let text = super::tests::text(&report, None, true);
         assert!(
             !report_lines(&text)
                 .iter()
@@ -9015,7 +9239,7 @@ mod tests {
         );
         // One that sets it off too leaves it off.
         std::fs::write(&outranking, r#"{"enableArtifact": false}"#).unwrap();
-        let text = super::tests::text(&report, None, false);
+        let text = super::tests::text(&report, None, true);
         assert!(
             report_line(&text, "Artifact tool off")
                 .default
@@ -9035,7 +9259,7 @@ mod tests {
             } else {
                 report.scan.profiles.push(sharing.clone());
             }
-            let text = super::tests::text(&report, None, false);
+            let text = super::tests::text(&report, None, true);
             assert!(
                 !report_lines(&text)
                     .iter()
@@ -9368,9 +9592,39 @@ mod tests {
         let report = synthetic();
         let plain = text(&report, None, false);
         let text = text(&report, None, true);
-        // By default each setting is one line; details add its evidence under it.
+        // By default each setting is one line, and so is each kind of feature or setting
+        // that EVERYTHING ELSE lists several lines of: its count by verdict, their cost
+        // together and the settings that change them. Details list every line in its place,
+        // with its evidence under it.
         assert!(report_lines(&plain).iter().all(|r| r.evidence.is_empty()));
-        assert_eq!(report_lines(&plain).len(), report_lines(&text).len());
+        let kind = report_line(&plain, "Tools ");
+        assert_eq!(
+            (
+                kind.mark.as_str(),
+                kind.head.as_str(),
+                kind.setting.as_str()
+            ),
+            (
+                "keep",
+                "Tools 1 kept, 1 unknown costs $40 3%",
+                "/synthetic/home/.claude/settings.json:permissions.deny, enableWorkflows"
+            )
+        );
+        assert!(
+            report_line(&plain, "Instruction files 2 info costs at least $5")
+                .what
+                .is_empty()
+        );
+        assert!(
+            report_line(
+                &plain,
+                "Auto-compact window (claude-opus-5-5) 1 kept, 1 unknown"
+            )
+            .default
+            .is_empty()
+        );
+        // Tools, instruction files and the window each list two lines.
+        assert_eq!(report_lines(&plain).len() + 3, report_lines(&text).len());
         let rows = report_lines(&text);
         let line = |head: &str| report_line(&text, head);
         // The changes lead, biggest saving first; everything else follows by cost, and
@@ -9390,15 +9644,15 @@ mod tests {
             "MCP server docs",
             "System prompt and core tools",
             "Agent tool",
+            "Workflow tool",
             "Skill tools:deploy",
             "/synthetic/home/.claude/CLAUDE.md",
+            "/repo/CLAUDE.md",
             "Subagent prompt cache TTL",
             "Auto-compact window (claude-opus-5-5) 1M",
-            "Fast mode",
             "Auto-compact window (claude-opus-5-5) 200k",
+            "Fast mode",
             "Idle compaction",
-            "Workflow tool",
-            "/repo/CLAUDE.md",
             "MCP tool loading",
         ];
         assert_eq!(names.len(), expected.len(), "{names:#?}");
@@ -11232,8 +11486,7 @@ mod tests {
         for (dot, line) in [
             ("\x1b[31m●\x1b[0m ", "Artifact tool"),
             ("\x1b[33m●\x1b[0m ", "Skill example"),
-            ("\x1b[32m●\x1b[0m ", "Agent tool"),
-            ("\x1b[2m○ ", "Workflow tool"),
+            ("\x1b[32m●\x1b[0m ", "Tools"),
             ("\x1b[2m○ ", "System prompt and core tools"),
             ("\x1b[32m●\x1b[0m ", "Fast mode"),
         ] {
@@ -13460,6 +13713,50 @@ mod tests {
         saved.saves("saves", Some(4.0), None, &out.spend);
         let row = section_row(&[member(0, 2.0), saved], &out);
         assert_eq!(row.amount, Some(("saves", "$4/mo".into())));
+    }
+
+    #[test]
+    fn a_kind_line_sums_its_members_and_names_the_first_few_profiles_and_settings() {
+        let report = synthetic();
+        let out = Out::new(&report, ReportOptions::default());
+        let member = |mark: Mark, tag: &str, key: &str| {
+            let mut row = Row::new(mark, "Fast mode".into(), String::new());
+            row.group = Some("Fast mode".into());
+            row.base_tag = format!("[{tag}]");
+            row.key = key.into();
+            row
+        };
+        // A kept setting that saves against its default in each profile saves the sum.
+        let mut saving = vec![
+            member(Mark::Keep, "a", "a:service_tier"),
+            member(Mark::Keep, "b", "b:service_tier"),
+        ];
+        saving[0].saves("saves", Some(2.0), None, &out.spend);
+        saving[1].saves("saves", Some(3.0), None, &out.spend);
+        let row = kind_row(&saving, &out);
+        assert_eq!(row.value, "2 kept");
+        assert_eq!(row.amount, Some(("saves", "$5/mo".into())));
+        // A member whose cost is unknown leaves the sum a lower bound; a placeholder setting
+        // goes beside a named one, and past the first few the rest are counted.
+        let mut costly = vec![
+            member(Mark::Unknown, "a", "a:service_tier"),
+            member(Mark::Keep, "b", "unknown"),
+            member(Mark::Unknown, "c", "c:fastMode"),
+            member(Mark::Unknown, "d", "d:tier"),
+            member(Mark::Info, "e", "e:tier"),
+        ];
+        let usd = Estimate {
+            usd: 4.0,
+            margin: None,
+        };
+        costly[0].costs(Some(usd), false, &out.spend);
+        costly[1].costs(None, false, &out.spend);
+        let row = kind_row(&costly, &out);
+        assert_eq!(row.mark, Mark::Keep);
+        assert_eq!(row.value, "1 kept, 3 unknown, 1 info");
+        assert_eq!(row.amount, Some(("costs", "at least $4".into())));
+        assert_eq!(row.profile, "[a, b, c and 2 more]");
+        assert_eq!(row.setting, "a:service_tier; c:fastMode and 2 more");
     }
 
     /// Moves each profile's settings file into a fresh workspace, with the TTL lines that

@@ -374,22 +374,36 @@ pub fn switch_what(control: &Control) -> String {
             "ChatGPT apps, such as connectors to other services, that Codex can call as tools."
                 .into()
         }
-        (["mcp_servers", _, "disabled_tools"], ControlValue::Text(_)) => {
-            kind(ContextKind::McpTool).into()
+        (_, ControlValue::Text(rule)) if switch_kind(control) == Some(ContextKind::Tool) => {
+            tool(rule)
         }
-        (["mcp_servers", ..], _) | (["projects", _, "disabledMcpServers"], _) => {
-            kind(ContextKind::McpServer).into()
+        _ => switch_kind(control).map_or_else(
+            || "A feature this setting turns off.".into(),
+            |k| kind(k).into(),
+        ),
+    }
+}
+
+/// The kind of feature a switch turns off, such as a skill; None for a setting of its own,
+/// such as ChatGPT apps.
+pub fn switch_kind(control: &Control) -> Option<crate::model::ContextKind> {
+    use crate::model::ContextKind;
+    let path: Vec<&str> = control.path.iter().map(String::as_str).collect();
+    match (path.as_slice(), &control.value) {
+        (["enableArtifact" | "enableWorkflows"], _) => Some(ContextKind::Tool),
+        (["syncClaudeAiSkills"] | ["features", "apps"], _) => None,
+        (["mcp_servers", _, "disabled_tools"], ControlValue::Text(_)) => Some(ContextKind::McpTool),
+        (["mcp_servers", ..] | ["projects", _, "disabledMcpServers"], _) => {
+            Some(ContextKind::McpServer)
         }
-        (["skillOverrides", _], _) | (_, ControlValue::Skill { .. }) => {
-            kind(ContextKind::Skill).into()
-        }
-        (_, ControlValue::Text(rule)) => match rule.strip_prefix("mcp__") {
-            Some(_) if denied_server(rule).is_some() => kind(ContextKind::McpServer).into(),
-            Some(rest) if rest.contains("__") => kind(ContextKind::McpTool).into(),
-            Some(_) => kind(ContextKind::McpServer).into(),
-            None => tool(rule),
-        },
-        _ => "A feature this setting turns off.".into(),
+        (["skillOverrides", _], _) | (_, ControlValue::Skill { .. }) => Some(ContextKind::Skill),
+        (_, ControlValue::Text(rule)) => Some(match rule.strip_prefix("mcp__") {
+            Some(_) if denied_server(rule).is_some() => ContextKind::McpServer,
+            Some(rest) if rest.contains("__") => ContextKind::McpTool,
+            Some(_) => ContextKind::McpServer,
+            None => ContextKind::Tool,
+        }),
+        _ => None,
     }
 }
 

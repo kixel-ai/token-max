@@ -1185,12 +1185,24 @@ const OWNER_EVENT: &str = "SELECT EXISTS (SELECT 1 FROM orchestration_v2_project
    AND json_extract(e.payload_json,'$.providerInstanceId')=pt.provider_instance_id
    AND json_extract(e.payload_json,'$.nativeThreadRef.driver')=pt.driver
    AND json_extract(e.payload_json,'$.nativeThreadRef.nativeId')=json_extract(pt.payload_json,'$.nativeThreadRef.nativeId'))";
-// One provider thread's turns, each with its native turn reference and its thread.
-const PROVIDER_TURNS: &str = "SELECT provider_turn_id,
+// Provider turns with their native turn reference and provider thread, filtered by
+// `PROVIDER_TURNS` or `THREAD_TURNS`.
+macro_rules! provider_turns {
+    () => {
+        "SELECT provider_turn_id,
  json_extract(payload_json,'$.nativeTurnRef.driver'),
  CASE WHEN json_type(payload_json,'$.nativeTurnRef.nativeId')='text'
- THEN json_extract(payload_json,'$.nativeTurnRef.nativeId') END, thread_id
+ THEN json_extract(payload_json,'$.nativeTurnRef.nativeId') END, provider_thread_id
+ FROM orchestration_v2_projection_provider_turns"
+    };
+}
+// One Codex provider thread's turns, which join by native turn id alone.
+const PROVIDER_TURNS: &str = concat!(provider_turns!(), " WHERE provider_thread_id=?1");
+// The T3 threads holding one Claude provider thread's turns, whose items the join reads.
+const TURN_THREADS: &str = "SELECT DISTINCT thread_id
  FROM orchestration_v2_projection_provider_turns WHERE provider_thread_id=?1";
+// One T3 thread's provider turns, of every provider thread; the join keeps the selected.
+const THREAD_TURNS: &str = concat!(provider_turns!(), " WHERE thread_id=?1");
 // A Claude turn's items join it by turn item id, which `item_key` decodes. Item rows hold
 // tool outputs, so the join reads two of T3's indexes instead: a provider turn's item rows,
 // and each item's id by row within its thread.
@@ -1665,29 +1677,43 @@ fn metadata(
         })?;
     // Provider turns per native turn/item id, within each selected session's threads.
     let mut refs: HashMap<&(&str, String), HashMap<String, Vec<String>>> = HashMap::default();
+    // Codex joins by native turn id alone, reading its provider threads' turns.
     let mut provider_turns = tx.prepare(PROVIDER_TURNS)?;
-    // A Claude provider turn's T3 thread, when its driver matches the selected session's.
-    let claude_thread = |row: &rusqlite::Row<'_>, key: &(&str, String)| {
-        (key.0 == "claudeAgent" && text_column(row, 1).as_deref() == Some(key.0))
-            .then(|| text_column(row, 3))
-            .flatten()
-    };
-    // How many selected provider threads have turns in each T3 thread, so that thread's item
-    // ids are read once and released after the last of them.
-    let mut users: HashMap<String, usize> = HashMap::default();
-    for (key, list) in &threads {
+    for (key, list) in threads.iter().filter(|(key, _)| key.0 == "codex") {
+        let found = refs.entry(key).or_default();
+        let wanted = &wanted[&(key.0, key.1.as_str())];
         for thread in list {
-            let mut seen = HashSet::default();
             let mut rows = provider_turns.query([&thread.id])?;
             while let Some(row) = rows.next()? {
-                if let Some(t3) = claude_thread(row, key)
-                    && seen.insert(t3.clone())
+                if let Some(turn) = text_column(row, 0)
+                    && text_column(row, 1).as_deref() == Some(key.0)
                 {
-                    *users.entry(t3).or_default() += 1;
+                    add_turn(
+                        found,
+                        wanted,
+                        turn,
+                        text_column(row, 2).into_iter().collect(),
+                    );
                 }
             }
         }
     }
+    // Claude turns also join by item id, and T3 numbers item rows per T3 thread, so the join
+    // walks the T3 threads holding the selected Claude provider threads' turns: each one's
+    // item ids are read once and dropped before the next.
+    let mut claude_threads: HashMap<&str, &(&str, String)> = HashMap::default();
+    let mut t3_threads: HashSet<String> = HashSet::default();
+    let mut turn_threads = tx.prepare(TURN_THREADS)?;
+    for (key, list) in threads.iter().filter(|(key, _)| key.0 == "claudeAgent") {
+        for thread in list {
+            claude_threads.insert(&thread.id, key);
+            let mut rows = turn_threads.query([&thread.id])?;
+            while let Some(row) = rows.next()? {
+                t3_threads.extend(text_column(row, 0));
+            }
+        }
+    }
+    let mut thread_turns = tx.prepare(THREAD_TURNS)?;
     let mut turn_item_rows = tx.prepare(TURN_ITEM_ROWS)?;
     let mut thread_item_ids = tx.prepare(THREAD_ITEM_IDS)?;
     // Only item keys a selected request names are kept.
@@ -1696,53 +1722,38 @@ fn metadata(
         .filter(|((driver, _), _)| *driver == "claudeAgent")
         .flat_map(|(_, natives)| natives.iter().copied())
         .collect();
-    let mut item_keys: HashMap<String, HashMap<i64, String>> = HashMap::default();
-    for (key, list) in &threads {
-        let found = refs.entry(key).or_default();
-        let wanted = &wanted[&(key.0, key.1.as_str())];
-        for thread in list {
-            let mut done = HashSet::default();
-            let mut rows = provider_turns.query([&thread.id])?;
-            while let Some(row) = rows.next()? {
-                let Some(turn) = text_column(row, 0) else {
-                    continue;
-                };
-                if text_column(row, 1).as_deref() != Some(key.0) {
-                    continue;
-                }
-                let mut natives: Vec<String> = text_column(row, 2).into_iter().collect();
-                // Codex joins by turn id alone, so only Claude reads items.
-                if let Some(t3) = claude_thread(row, key) {
-                    if !item_keys.contains_key(&t3) {
-                        let mut keys = HashMap::default();
-                        let mut items = thread_item_ids.query([&t3])?;
-                        while let Some(item) = items.next()? {
-                            if let Some(native) = text_column(item, 1).and_then(|i| item_key(&i))
-                                && claude.contains(native.as_str())
-                            {
-                                keys.insert(item.get(0)?, native);
-                            }
-                        }
-                        item_keys.insert(t3.clone(), keys);
-                    }
-                    let keys = &item_keys[&t3];
-                    let mut items = turn_item_rows.query([&turn])?;
-                    while let Some(item) = items.next()? {
-                        natives.extend(keys.get(&item.get::<_, i64>(0)?).cloned());
-                    }
-                    done.insert(t3);
-                }
-                add_turn(found, wanted, turn, natives);
+    for t3 in &t3_threads {
+        let mut keys: HashMap<i64, String> = HashMap::default();
+        let mut items = thread_item_ids.query([t3])?;
+        while let Some(item) = items.next()? {
+            if let Some(native) = text_column(item, 1).and_then(|i| item_key(&i))
+                && claude.contains(native.as_str())
+            {
+                keys.insert(item.get(0)?, native);
             }
-            for t3 in done {
-                if let Some(n) = users.get_mut(&t3) {
-                    *n -= 1;
-                    if *n == 0 {
-                        users.remove(&t3);
-                        item_keys.remove(&t3);
-                    }
-                }
+        }
+        let mut rows = thread_turns.query([t3])?;
+        while let Some(row) = rows.next()? {
+            let (Some(turn), Some(key)) = (
+                text_column(row, 0),
+                text_column(row, 3).and_then(|p| claude_threads.get(p.as_str()).copied()),
+            ) else {
+                continue;
+            };
+            if text_column(row, 1).as_deref() != Some(key.0) {
+                continue;
             }
+            let mut natives: Vec<String> = text_column(row, 2).into_iter().collect();
+            let mut items = turn_item_rows.query([&turn])?;
+            while let Some(item) = items.next()? {
+                natives.extend(keys.get(&item.get::<_, i64>(0)?).cloned());
+            }
+            add_turn(
+                refs.entry(key).or_default(),
+                &wanted[&(key.0, key.1.as_str())],
+                turn,
+                natives,
+            );
         }
     }
     let mut attempt_query = tx.prepare(ATTEMPT)?;
@@ -4291,6 +4302,20 @@ mod tests {
         item(&database, "reasoning", "msg_1%3Athinking%3A1", "");
         // An item naming the turn from another thread is not the turn's.
         database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES(?1,'elsewhere','turn','assistant_message','completed','{}','2026-01-01T00:00:00Z',NULL,0)",[format!("{ITEM_PREFIX}stray-uuid")]).unwrap();
+        // The selected provider thread's turns can sit in more than one T3 thread, and a
+        // walked T3 thread can hold an unselected provider thread's turns.
+        for (turn, thread, provider, native) in [
+            ("moved-turn", "moved", "pt", "moved-uuid"),
+            (
+                "unselected-turn",
+                "thread",
+                "pt-unselected",
+                "unselected-uuid",
+            ),
+        ] {
+            database.execute("INSERT INTO orchestration_v2_projection_provider_turns VALUES(?1,?2,?3,NULL,'completed',NULL,NULL,?4,2)",params![turn,thread,provider,json!({"nativeTurnRef":{"driver":"claudeAgent"}}).to_string()]).unwrap();
+            database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES(?1,?2,?3,'assistant_message','completed','{}','2026-01-01T00:00:00Z',NULL,1)",params![format!("{ITEM_PREFIX}{native}"),thread,turn]).unwrap();
+        }
         let request = NativeRequest {
             id: "assistant",
             root: "opaque-session",
@@ -4322,13 +4347,31 @@ mod tests {
             native_turns: vec!["stray-uuid"],
             ..request
         };
+        let moved = NativeRequest {
+            id: "moved",
+            native_turns: vec!["moved-uuid"],
+            ..request
+        };
+        let unselected = NativeRequest {
+            id: "unselected",
+            native_turns: vec!["unselected-uuid"],
+            ..request
+        };
         database
             .set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, 1_048_576)
             .unwrap();
         let tx = database.transaction().unwrap();
         let data = metadata(
             &tx,
-            &[&request, &tool, &thinking, &other, &stray],
+            &[
+                &request,
+                &tool,
+                &thinking,
+                &other,
+                &stray,
+                &moved,
+                &unselected,
+            ],
             "2026-01-01T00:00:20Z",
             None,
         )
@@ -4337,8 +4380,10 @@ mod tests {
             assert_eq!(data.turns[id].count, 1, "{id}");
             assert!(data.turns[id].joined.is_some(), "{id}");
         }
-        assert_eq!(data.turns["other"].count, 0);
-        assert_eq!(data.turns["stray"].count, 0);
+        assert_eq!(data.turns["moved"].turn.as_deref(), Some("moved-turn"));
+        for id in ["other", "stray", "unselected"] {
+            assert_eq!(data.turns[id].count, 0, "{id}");
+        }
         tx.rollback().unwrap();
         let writer = Connection::open(root.join("statev2.sqlite")).unwrap();
         writer
@@ -4404,6 +4449,8 @@ mod tests {
             (PROVIDER_THREADS.to_string(), 1, false),
             (OWNER_EVENT.to_string(), 0, false),
             (PROVIDER_TURNS.to_string(), 0, false),
+            (TURN_THREADS.to_string(), 0, false),
+            (THREAD_TURNS.to_string(), 0, false),
             (TURN_ITEM_ROWS.to_string(), 0, true),
             (THREAD_ITEM_IDS.to_string(), 0, true),
             (ATTEMPT.to_string(), 0, false),

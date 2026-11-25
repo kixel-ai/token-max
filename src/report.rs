@@ -463,13 +463,18 @@ fn default_pair(model: Option<&str>, level: Option<&str>) -> String {
     }
 }
 
-/// The settings file and key a `model` owner names, null or not; None when no settings
-/// file names the model.
-fn model_setting(owner: &str) -> Option<(&str, &str)> {
-    owner
+/// The settings file and key a profile's `model` owner names, null or not, or that the
+/// Main-session default card's edit writes for a recorded model, the profile's own
+/// `settings_file`; None for an owner outside any file.
+fn model_setting(owner: &str, settings_file: &str) -> Option<(String, String)> {
+    if owner == crate::effort::RECORDED {
+        return Some((settings_file.into(), "model".into()));
+    }
+    let (file, key) = owner
         .strip_suffix(crate::effort::NULL_MODEL)
         .unwrap_or(owner)
-        .rsplit_once(':')
+        .rsplit_once(':')?;
+    Some((file.into(), key.into()))
 }
 
 /// The main-session default as `vibes` shows it: the maintainer's pick beside the default
@@ -489,16 +494,25 @@ fn default_item(e: &EffortCheck, profile: &str, how: Option<How>, out: &Out<'_>)
         .collect();
     let current = default_pair(c.model.as_deref(), c.effective.as_deref());
     // The pick reaches every profile the card covers, and every other whose model the same
-    // setting names, such as a project's, even through a symlink or as a null the edit
-    // replaces, so an allowlist among them that blocks it keeps it from being offered,
-    // unless it is the default already.
-    let setting = model_setting(&c.model_owner);
+    // setting names, such as a project's, even through a symlink, as a null the edit
+    // replaces, or as a recorded model the edit writes into a shared settings file, so an
+    // allowlist among them that blocks it keeps it from being offered, unless it is the
+    // default already.
+    let written: Vec<(String, String)> = out
+        .profiles
+        .values()
+        .filter(|p| e.base.profiles.contains(&p.id))
+        .filter_map(|p| model_setting(&c.model_owner, &p.settings_file))
+        .collect();
     let shared = |p: &Profile| {
         p.effort.as_ref().is_some_and(|o| {
-            match (setting, model_setting(&o.model_owner)) {
-                (Some((f, k)), Some((g, l))) => k == l && crate::discovery::same_file(f, g),
-                // The process environment's ANTHROPIC_MODEL names every profile's model.
-                _ => c.model_owner != crate::effort::RECORDED && o.model_owner == c.model_owner,
+            match model_setting(&o.model_owner, &p.settings_file) {
+                Some((g, l)) => written
+                    .iter()
+                    .any(|(f, k)| *k == l && crate::discovery::same_file(f, &g)),
+                // An owner outside any file, such as the shell's ANTHROPIC_MODEL, matches by
+                // name.
+                None => o.model_owner == c.model_owner,
             }
         })
     };
@@ -12016,12 +12030,12 @@ mod tests {
         let owner = format!("{file}:availableModels");
         // A Sonnet main with `advisor` set, under `allowlist`, and another profile with the
         // same model setting under `other`'s, its effort set where `other` names, and the two
-        // profiles' model owners `owners` names if not the file's `model`: the first default
-        // card and the advisor card.
+        // profiles' model owners and the second's settings file, which `owners` names if not
+        // the file's `model` and `file`: the first default card and the advisor card.
         let line = |allowlist: Option<Allowlist>,
                     advisor: Option<&str>,
                     other: Option<(Option<Allowlist>, &str)>,
-                    owners: Option<(&str, &str)>| {
+                    owners: Option<(&str, &str, &str)>| {
             let mut report = synthetic();
             report.checks.clear();
             report.context.clear();
@@ -12054,10 +12068,11 @@ mod tests {
                 other.effort.as_mut().unwrap().owner = effort.into();
                 report.scan.profiles.push(other);
             }
-            if let Some((first, second)) = owners {
+            if let Some((first, second, settings_file)) = owners {
                 for (p, owner) in report.scan.profiles.iter_mut().zip([first, second]) {
                     p.effort.as_mut().unwrap().model_owner = owner.into();
                 }
+                report.scan.profiles[1].settings_file = settings_file.into();
             }
             let checks = effort_checks(&EffortInput {
                 scan: &report.scan,
@@ -12170,20 +12185,24 @@ mod tests {
             let (default, _) = line(None, None, Some((read(&["sonnet"]), effort)), None);
             assert_eq!((&default.how, default.quiet), (&None, true), "{effort}");
         }
-        // So does one whose model the same setting names as a null the edit replaces, or
-        // through a symlink; one on another setting, or a recorded model, does not.
+        // So does one whose model the same setting names as a null the edit replaces, through
+        // a symlink, or as a recorded model in the file the edit writes; one on another
+        // setting, or a recorded model in another file, does not.
         let w = crate::test_support::Workspace::new();
         let real = w.home.join("settings.json");
         std::fs::write(&real, "{}").unwrap();
         let real = real.display().to_string();
         let null = format!("{real}:model{}", crate::effort::NULL_MODEL);
+        let recorded = crate::effort::RECORDED;
+        let elsewhere = "/elsewhere/settings.json";
         let mut cases = vec![
-            ((null.as_str(), null.as_str()), true),
-            ((crate::effort::RECORDED, crate::effort::RECORDED), false),
+            ((null.as_str(), null.as_str(), file.as_str()), true),
+            ((recorded, recorded, file.as_str()), true),
+            ((recorded, recorded, elsewhere), false),
         ];
         let set = format!("{real}:model");
         let env = format!("{real}:env.ANTHROPIC_MODEL");
-        cases.push(((set.as_str(), env.as_str()), false));
+        cases.push(((set.as_str(), env.as_str(), file.as_str()), false));
         #[cfg(unix)]
         let link = {
             let link = w.home.join("link.json");
@@ -12191,7 +12210,7 @@ mod tests {
             format!("{}:model", link.display())
         };
         #[cfg(unix)]
-        cases.push(((set.as_str(), link.as_str()), true));
+        cases.push(((set.as_str(), link.as_str(), file.as_str()), true));
         for (owners, blocked) in cases {
             let other = Some((read(&["sonnet"]), "/elsewhere/settings.json:effortLevel"));
             let (default, _) = line(None, None, other, Some(owners));

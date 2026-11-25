@@ -10,6 +10,10 @@ use crate::model::Allowlist;
 /// The setting that holds the allowlist.
 const KEY: &str = "availableModels";
 
+/// Managed keys that block models the list permits, which token-max detects but doesn't
+/// resolve; Claude Code reads them from managed settings only.
+const UNRESOLVED: [&str; 2] = ["deniedModels", "availableModelsMatch"];
+
 /// The model families an entry or an alias can name.
 const FAMILIES: [&str; 4] = ["fable", "opus", "sonnet", "haiku"];
 
@@ -21,18 +25,32 @@ pub fn control(
     managed_file: &str,
     remote: SettingsScope,
 ) -> Option<Allowlist> {
+    let sets = |s: &SettingsScope, key: &str| s.config.get(key).is_some_and(|v| !v.is_null());
     // The admin console outranks the managed file, and its cache may be stale, so a list
     // there leaves what Claude Code applies unknown.
-    if remote.config.get(KEY).is_some_and(|v| !v.is_null()) {
+    if let Some(key) = [KEY]
+        .into_iter()
+        .chain(UNRESOLVED)
+        .find(|k| sets(&remote, k))
+    {
         return Some(Allowlist::Unknown(format!(
-            "the admin console's settings, cached in {}, set {KEY}, which token-max doesn't resolve",
+            "the admin console's settings, cached in {}, set {key}, which token-max doesn't resolve",
             remote.file
         )));
     }
-    let set = |s: &&SettingsScope| s.config.get(KEY).is_some_and(|v| !v.is_null());
+    let managed = scopes.iter().find(|s| s.file == managed_file);
+    if let Some((m, key)) =
+        managed.and_then(|m| UNRESOLVED.into_iter().find(|k| sets(m, k)).map(|k| (m, k)))
+    {
+        return Some(Allowlist::Unknown(format!(
+            "{}:{key} holds back models the list permits, which token-max doesn't resolve",
+            m.file
+        )));
+    }
+    let set = |s: &&SettingsScope| sets(s, KEY);
     // A managed list alone applies; otherwise user, project and local lists concatenate.
     let mut sources: Vec<&SettingsScope> = vec![];
-    match scopes.iter().find(|s| s.file == managed_file) {
+    match managed {
         Some(managed) if set(&managed) => sources.push(managed),
         _ => {
             for scope in scopes.iter().filter(|s| s.file != managed_file).filter(set) {
@@ -186,7 +204,8 @@ impl Allowlist {
                 .iter()
                 .any(|e| matches!(e, Entry::Family(f) if *f == family));
         if alias {
-            if !specific.is_empty() {
+            // An entry token-max can't read may permit another version of the family.
+            if !specific.is_empty() && !opaque {
                 return Verdict::Narrowed(specific.iter().map(|s| s.to_string()).collect());
             }
         } else if specific
@@ -317,6 +336,29 @@ mod tests {
             ),
             Some(Allowlist::Unknown(why)) if why.contains("/u/remote-settings.json")
         ));
+        // A managed key that holds back models the list permits leaves it unknown, with or
+        // without a list; set elsewhere, Claude Code ignores it.
+        for key in UNRESOLVED {
+            assert_eq!(
+                resolve(
+                    json!({}),
+                    json!({}),
+                    json!({key: ["claude-opus-5-5"]}),
+                    json!({})
+                ),
+                Some(Allowlist::Unknown(format!(
+                    "{MANAGED}:{key} holds back models the list permits, which token-max doesn't resolve"
+                )))
+            );
+            assert!(matches!(
+                resolve(json!({}), json!({}), json!({}), json!({key: "exact"})),
+                Some(Allowlist::Unknown(why)) if why.contains(key)
+            ));
+            assert_eq!(
+                resolve(json!({key: "exact"}), json!({}), json!({}), json!({})),
+                None
+            );
+        }
         // A value that is no list of names leaves the list unknown rather than failing.
         assert_eq!(
             resolve(
@@ -386,6 +428,11 @@ mod tests {
                     .into()
             )
         );
+        // So is an alias it narrows, since the entry may permit another version.
+        assert!(matches!(
+            read(&["claude-opus-4-6", "anthropic.x"]).verdict("opus"),
+            Unknown(_)
+        ));
         // An entry shaped like an ID but malformed, which could be a pasted secret, is never
         // shown as a version.
         assert_eq!(

@@ -2034,7 +2034,9 @@ A list in the admin console's settings, which Claude Code caches in
 `remote-settings.json` in its config directory, outranks the managed file.
 token-max sees only that the cache sets one, and doesn't resolve it, since
 the cache may be stale, so the cards still offer their change and say the
-list is unknown. So do a cache that can't be read, a list that is not a
+list is unknown. So do managed `deniedModels` and `availableModelsMatch`,
+which hold back models the list permits, or a cache that sets them, a cache
+that can't be read, a list that is not a
 list of model names, and an entry token-max can't match to a model, such as a
 provider's model ID, which the card never quotes, since it could be a pasted
 credential. MDM profiles, the registry and `managed-settings.d` are

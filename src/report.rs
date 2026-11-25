@@ -4454,6 +4454,9 @@ struct Row {
     /// Its profile tag before anything telling two lines of one setting apart was added, which
     /// a line listing several names instead.
     base_tag: String,
+    /// Whether its figure prices requests no other line prices, as each subagent line's
+    /// does, so lines of one name add rather than overlap.
+    apart: bool,
     /// The harness upgrade that alone would let its verdict apply.
     upgrade: Option<String>,
 }
@@ -4496,6 +4499,7 @@ impl Row {
             key: String::new(),
             group: None,
             base_tag: String::new(),
+            apart: false,
             upgrade: None,
         }
     }
@@ -5075,6 +5079,7 @@ fn kind_row(members: &[Row], out: &Out<'_>) -> Row {
     // Lines of one name, such as one setting in two profiles, can price the same shared
     // requests, so only the largest of them counts, as a lower bound; different features add.
     let mut named: IndexMap<&str, Vec<(Estimate, bool)>> = IndexMap::default();
+    let mut apart = crate::collections::HashMap::<&str, bool>::default();
     for r in members {
         let figure = match (r.cost, r.saving) {
             (Some(cost), _) => cost,
@@ -5088,9 +5093,18 @@ fn kind_row(members: &[Row], out: &Out<'_>) -> Row {
             (None, None) => continue,
         };
         named.entry(r.name.as_str()).or_default().push(figure);
+        *apart.entry(r.name.as_str()).or_insert(true) &= r.apart;
     }
     let (mut usd, mut margin, mut at_least) = (0.0, None, unknown);
-    for figures in named.values() {
+    for (name, figures) in &named {
+        if apart[name] {
+            for (e, lower) in figures {
+                usd += e.usd;
+                margin = Margin::plus(margin, e.margin);
+                at_least |= lower;
+            }
+            continue;
+        }
         let (most, lower) = figures
             .iter()
             .copied()
@@ -5120,7 +5134,8 @@ fn kind_row(members: &[Row], out: &Out<'_>) -> Row {
         let verb = if at_least { AT_LEAST } else { "saves" };
         row.saves(verb, Some(usd), margin, &out.spend);
     }
-    // Each harness upgrade that alone would let a member's verdict apply, naming its line.
+    // Each harness upgrade that alone would let a member's verdict apply, naming its line;
+    // under --details, each member's own line shows it instead.
     let upgrades: IndexSet<String> = members
         .iter()
         .filter_map(|r| {
@@ -5131,7 +5146,7 @@ fn kind_row(members: &[Row], out: &Out<'_>) -> Row {
             })
         })
         .collect();
-    if !upgrades.is_empty() {
+    if !upgrades.is_empty() && !out.options.details {
         row.upgrade = Some(upgrades.into_iter().collect::<Vec<_>>().join(" "));
     }
     // A line summing a setting across many profiles names the first few; --details names
@@ -7951,6 +7966,8 @@ fn summary(
             .unwrap_or_default()
             .to_string();
         row.group = Some("Subagents".into());
+        // Each subagent request belongs to one line.
+        row.apart = true;
         row.key = agent_files(&row.setting);
         rows.push(row);
     }
@@ -14032,6 +14049,12 @@ mod tests {
         let row = kind_row(&saving, &out);
         assert_eq!(row.value, "2 kept");
         assert_eq!(row.amount, Some((AT_LEAST, "$3/mo".into())));
+        saving.iter_mut().for_each(|r| r.apart = true);
+        assert_eq!(
+            kind_row(&saving, &out).amount,
+            Some(("saves", "$5/mo".into()))
+        );
+        saving[1].apart = false;
         saving[1].name = "Fast mode (other)".into();
         assert_eq!(
             kind_row(&saving, &out).amount,

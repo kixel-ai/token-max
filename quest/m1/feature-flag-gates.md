@@ -16,6 +16,9 @@ Bedrock on the card but the Anthropic API in pricing.
 
 ## Plan
 
+Decided 2026-11-25 (maintainer, /quest-run): ✅ keep this quest (rejected:
+drop it, keeping only `advisor-accounting.md`).
+
 Recommendation: one shared predicate and variable list in `src/controls.rs`
 (beside `env_flag`), checked against Claude Code's
 [env-vars page](https://code.claude.com/docs/en/env-vars) and used by all four.

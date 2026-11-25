@@ -1393,7 +1393,7 @@ an exit code.
 | [Advisor model](#advisor-model) | Every Claude settings file: with no `advisorModel`, the advisor one rank above the main-session default, citing Claude Code's [advisor page](https://code.claude.com/docs/en/advisor). |
 | [Auto memory](#auto-memory-in-vibes) | Every auto memory or Codex memories line: off is advised when most main sessions ran in a repository with a CLAUDE.md or AGENTS.md. |
 
-The effort, instruction-file, subagent, Fable and advisor lines stay in `doctor`, where
+The effort, instruction-file, subagent and Fable lines stay in `doctor`, where
 their costs are measured; only the advice about them is here.
 
 On a terminal, a card that names the settings to change ends with `Change`,
@@ -1719,20 +1719,11 @@ Cloud (Anthropic managed) need no flag. An `ANTHROPIC_BASE_URL` gateway must
 pass the advisor tool on intact, and a Fable advisor needs Fable access and,
 on plans that bill Fable to usage credits, the consent `/model fable` asks
 for; the card says both. An `advisorModel` already set gets a card that
-advises nothing, unless one of those stops it loading. A blocker in the
-settings read doesn't stop a session that set the advisor elsewhere, so the
-card names any advisor calls the window recorded beside it.
+advises nothing, unless one of those stops it loading.
 
-When an advisor is set or a request recorded an advisor call, `doctor` shows
-an `Advisor model` line: how many calls ran on how many requests, on which
-models, and what the advisor iterations alone cost at API prices over the
-window, which `--details` breaks out with what could not be priced and what
-was assumed. Like the subagent lines it is evidence with no verdict, since the
-advisor's alternative is a stronger main model, which a replay can't price
-the work of. T3 Code picks each thread's main model, so T3 instances get no
-card or line of their own; their threads' advisor calls count on the line of
-the settings file they share. Calls of an instance that shares no native
-line's settings file, as in a scan of only `--t3-dir`, are not counted yet.
+`doctor` has no advisor line: what the advisor's recorded calls cost is
+not counted or priced. T3 Code picks each thread's main model, so T3
+instances get no card.
 
 ## Messages from other sessions
 

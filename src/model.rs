@@ -930,23 +930,6 @@ pub struct AdvisorControl {
     pub gateway: Option<String>,
 }
 
-/// What a line of Claude profiles' advisor calls cost over the window.
-#[derive(Clone, Debug, PartialEq)]
-pub struct AdvisorUse {
-    pub profiles: Vec<String>,
-    /// Requests that called the advisor.
-    pub requests: u64,
-    /// Advisor calls, one per advisor iteration a request recorded.
-    pub calls: u64,
-    /// The advisor models the calls ran on, most calls first.
-    pub models: Vec<Share>,
-    /// What the calls are known to cost, with what could not be priced and what was assumed.
-    pub cost: Cost,
-    /// What the calls cost, extrapolated from the priced requests to every one; None when
-    /// none was priced.
-    pub estimate: Option<Estimate>,
-}
-
 /// A profile's main-session default reasoning effort, the setting that decides it and the
 /// level its session runs at.
 #[derive(Clone, Debug, PartialEq)]
@@ -3384,8 +3367,6 @@ pub struct Report {
     pub checks: Vec<CheckResult>,
     /// Each foreground Bash timeout cap and its long waits, which `vibes` shows as advice.
     pub bash: Vec<BashCap>,
-    /// Each Claude `advisorModel` line's advisor calls, as evidence beside `vibes`' card.
-    pub advisor: Vec<AdvisorUse>,
     /// What the report assumes beyond the measurements.
     pub assumptions: Vec<String>,
 }

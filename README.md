@@ -124,7 +124,6 @@ token-max doctor --help
 | Keepalive pings | Whether pinging idle sessions would beat the cache misses |
 | Subagent types | What each cost, which model and effort it ran on, and the same tokens on the cheapest current model |
 | Fable weekly use | Each week's Fable spend |
-| Advisor model | What the advisor's recorded calls cost, when one is set or was called |
 | Messages from other sessions | What the turns messages from your other Claude Code sessions started cost, and how many arrived |
 
 Every line of that report is measured. Advice the transcripts can't price is

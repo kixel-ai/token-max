@@ -327,11 +327,8 @@ fn claude_parts(raw: &Value, model: Option<Text>) -> Result<Vec<BillingPart>, Sc
                 Some("message") => PartKind::Message,
                 _ => PartKind::Unknown,
             };
+            let mut p = part(iteration, model.clone(), kind)?;
             let advisor = kind == PartKind::Advisor;
-            // An advisor runs on its own model, never the executor's, so one it doesn't
-            // record stays unknown.
-            let fallback = if advisor { None } else { model.clone() };
-            let mut p = part(iteration, fallback, kind)?;
             if p.tier.is_none() && !advisor {
                 p.tier = text(member(u, "service_tier"));
             }
@@ -1942,14 +1939,10 @@ fn add(requests: &mut Requests, strings: &mut Interner, r: Request) -> Option<Te
             && end_time >= previous.end_time)
     {
         for (index, p) in parts.iter_mut().enumerate() {
-            // A later snapshot that omits a model the earlier one recorded is the same part.
             if let Some(old) = previous.parts.get(index)
                 && old.kind == p.kind
-                && (old.model == p.model || p.model.is_none())
+                && old.model == p.model
             {
-                if p.model.is_none() {
-                    p.model = old.model.clone();
-                }
                 fill(&mut p.usage, &old.usage);
                 if p.tier.is_none() {
                     p.tier = old.tier.clone();
@@ -1960,13 +1953,6 @@ fn add(requests: &mut Requests, strings: &mut Interner, r: Request) -> Option<Te
         previous.evidence = evidence;
         if incoming.server_tools.is_some() {
             meta.server_tools = incoming.server_tools.clone();
-        }
-    } else {
-        // An older snapshot read after a newer one still names a model the newer omitted.
-        for (old, new) in previous.parts.iter_mut().zip(&parts) {
-            if old.kind == new.kind && old.model.is_none() {
-                old.model = new.model.clone();
-            }
         }
     }
     let mut answered = None;
@@ -2553,40 +2539,6 @@ mod tests {
         let data = scan(&options(&w)).unwrap();
         assert_eq!(data.requests.len(), 1);
         assert_eq!(data.requests[0].effort.as_deref(), Some("high"));
-    }
-
-    #[test]
-    fn a_later_snapshot_keeps_the_advisor_model_an_earlier_one_recorded() {
-        let w = Workspace::new();
-        let snapshot = |model: Option<&str>, output: i64| {
-            let mut advisor = json!({"type": "advisor_message", "input_tokens": 9, "output_tokens": output, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0});
-            if let Some(m) = model {
-                advisor["model"] = m.into();
-            }
-            let mut record = assistant("session", "message");
-            record["message"]["usage"]["iterations"] = json!([
-                {"type": "message", "input_tokens": 1, "output_tokens": 2, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
-                advisor,
-            ]);
-            record
-        };
-        // In either order, as copies of a transcript may be read.
-        for records in [
-            [snapshot(Some("claude-fable-5-2"), 1), snapshot(None, 3)],
-            [snapshot(None, 3), snapshot(Some("claude-fable-5-2"), 1)],
-        ] {
-            write(
-                w.claude.join("projects/project/main.jsonl"),
-                jsonl(&records),
-            );
-            let data = scan(&options(&w)).unwrap();
-            assert_eq!(data.requests.len(), 1);
-            let advisor = &data.requests[0].parts[1];
-            assert_eq!(
-                (advisor.model.as_deref(), advisor.usage.output),
-                (Some("claude-fable-5-2"), Some(3))
-            );
-        }
     }
 
     #[test]
@@ -3200,30 +3152,6 @@ mod tests {
         let result = scan(&options(&w)).unwrap();
         assert_eq!(result.requests.len(), 1);
         assert_eq!(result.requests[0].locations.len(), 2);
-    }
-
-    #[test]
-    fn an_advisor_iteration_keeps_only_its_own_model() {
-        let usage = |model: Option<&str>| {
-            let mut advisor = serde_json::json!({"type": "advisor_message", "input_tokens": 9, "output_tokens": 1});
-            if let Some(m) = model {
-                advisor["model"] = m.into();
-            }
-            serde_json::json!({
-                "input_tokens": 5,
-                "output_tokens": 1,
-                "service_tier": "standard",
-                "iterations": [{"type": "message", "input_tokens": 5, "output_tokens": 1}, advisor],
-            })
-        };
-        let executor = Some(Text::from("claude-sonnet-5-5"));
-        let parts = claude_parts(&usage(Some("claude-opus-5-5")), executor.clone()).unwrap();
-        assert_eq!(parts[0].model.as_deref(), Some("claude-sonnet-5-5"));
-        assert_eq!(parts[1].model.as_deref(), Some("claude-opus-5-5"));
-        // Nor the executor's tier: Priority Tier is committed per model.
-        assert_eq!(parts[1].tier, None);
-        let parts = claude_parts(&usage(None), executor).unwrap();
-        assert_eq!(parts[1].model, None);
     }
 
     #[test]

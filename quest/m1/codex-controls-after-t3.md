@@ -12,6 +12,9 @@ request naming the profile.
 
 ## Plan
 
+Decided 2026-11-25 (maintainer, /quest-run): ✅ keep this quest (rejected:
+drop it, keeping only `advisor-accounting.md`).
+
 Recommendation: move Codex's latest-directory pass after `t3::enrich` with
 the same `owned_by` filter, sharing one helper that returns the settled
 latest directory and its scopes for both harnesses and `discover_inbound`.

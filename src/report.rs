@@ -5530,14 +5530,17 @@ fn preamble(report: &Report, conditional: u64, out: &mut Out<'_>) {
 /// an assumed service tier.
 fn left_out(report: &Report, conditional: u64) -> String {
     let coverage = &report.scan.coverage;
-    let t3 = report.scan.t3.iter().filter(|s| s.status == "selected");
-    let unsupported: u64 = t3.clone().map(|s| s.unsupported).sum();
-    let unattributed: u64 = t3.clone().flat_map(|s| s.unresolved.values()).sum();
-    let removed: u64 = t3.flat_map(|s| s.removed.values()).sum();
+    let unsupported: u64 = report
+        .scan
+        .t3
+        .iter()
+        .filter(|s| s.status == "selected")
+        .map(|s| s.unsupported)
+        .sum();
     let counts = [
         (unsupported, "unsupported T3 instance", ""),
-        (unattributed, "unattributed T3 request", ""),
-        (removed, "removed T3 request", ""),
+        (coverage.t3_unattributed, "unattributed T3 request", ""),
+        (coverage.t3_removed, "removed T3 request", ""),
         (coverage.missing_usage, "request", " with no usage"),
         (coverage.skipped_lines, "unreadable line", ""),
         (conditional, "request", " at an assumed service tier"),
@@ -7912,6 +7915,7 @@ mod tests {
                     skipped_lines: 2,
                     skipped_files: 1,
                     issues: vec!["synthetic coverage limit".into()],
+                    ..ScanCoverage::default()
                 },
             },
             prices: PriceSource {
@@ -8375,12 +8379,15 @@ mod tests {
             instances: Default::default(),
             text_generation: None,
         });
+        // One request unresolved in two states counts once.
+        report.scan.coverage.t3_unattributed = 1;
+        report.scan.coverage.t3_removed = 3;
         report.scan.coverage.missing_usage = 4;
         report.scan.coverage.skipped_lines = 1;
         report.scan.coverage.skipped_files = 1;
         let text = short(&report);
         assert!(
-            text.contains("\n  Left out or assumed: 1 unsupported T3 instance, 2 unattributed T3 requests, 3 removed T3 requests, 4 requests with no usage, 1 unreadable line. --details says why.\n"),
+            text.contains("\n  Left out or assumed: 1 unsupported T3 instance, 1 unattributed T3 request, 3 removed T3 requests, 4 requests with no usage, 1 unreadable line. --details says why.\n"),
             "{text}"
         );
         for note in ["T3 coverage:", "T3 removed:", "Profiles:", PRICES_MEAN] {

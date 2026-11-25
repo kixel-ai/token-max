@@ -481,10 +481,11 @@ requests with no recorded usage, unreadable lines, and requests priced at an
 assumed service tier, such as "Left out or assumed: 2 unsupported T3 instances,
 12 unreadable lines. --details says why." It is left out when there is nothing
 to count. When a figure carries a `~`, one more line says what it assumes, and
-on a terminal a legend names the dots. `--details` puts the rest before the
-headline instead of the count: the profiles read, each T3 state and its
-coverage, what the prices mean, each count with its reason, what each percent
-is of and which features the rules recommend off.
+on a terminal a legend names the dots. `--details` replaces the count: before
+the headline it names the profiles read, each T3 state and its coverage, what
+the prices mean and each count with its reason, and after the savings against
+the defaults it says what each percent is of and which features the rules
+recommend off.
 
 Then the report gives every setting and feature one line. Each line names its verdict, the
 setting or feature, its current value (and the value to change to, for a

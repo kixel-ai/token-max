@@ -2237,7 +2237,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     {
         reading.step(Some("Reading T3 Code's database"));
     }
-    crate::t3::enrich(
+    let unplaced = crate::t3::enrich(
         &mut t3,
         &mut profiles,
         &mut requests,
@@ -2287,6 +2287,8 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         );
     }
     let coverage = ScanCoverage {
+        t3_unattributed: unplaced.unattributed,
+        t3_removed: unplaced.removed,
         requests: requests.len() as u64,
         source_known: requests
             .iter()

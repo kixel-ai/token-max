@@ -3216,6 +3216,10 @@ pub struct ScanCoverage {
     /// Unreadable complete lines skipped; their usage counts as missing.
     pub skipped_lines: u64,
     pub skipped_files: u64,
+    /// Selected requests T3 could not attribute to one owner, each counted once.
+    pub t3_unattributed: u64,
+    /// Selected requests whose every T3 owner was removed from its settings, each counted once.
+    pub t3_removed: u64,
     pub issues: Vec<String>,
 }
 

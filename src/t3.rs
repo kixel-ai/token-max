@@ -2015,7 +2015,18 @@ pub(crate) fn reads_database(states: &[T3State]) -> bool {
         .any(|s| s.status == "selected" && Path::new(&s.path).join("statev2.sqlite").is_file())
 }
 
-/// Freeze optional projection metadata in one read-only WAL transaction, then close it before analysis.
+/// Selected requests T3 left out of every current profile's checks, each counted once however
+/// many states or owners it touches; each state's own counts break them down.
+#[derive(Default)]
+pub(crate) struct Unplaced {
+    /// Requests whose owner stays unresolved.
+    pub unattributed: u64,
+    /// Requests every T3 owner of which was removed from its settings.
+    pub removed: u64,
+}
+
+/// Freeze optional projection metadata in one read-only WAL transaction, then close it before
+/// analysis. Returns the selected requests it could not place in any current profile.
 pub(crate) fn enrich(
     states: &mut [T3State],
     profiles: &mut [Profile],
@@ -2024,7 +2035,8 @@ pub(crate) fn enrich(
     ids: &NativeIds,
     bound: &str,
     since: Option<Millis>,
-) {
+) -> Unplaced {
+    let mut unplaced = Unplaced::default();
     let mut projections: Vec<NativeRequest<'_>> = requests
         .iter()
         .filter_map(|r| native_request(r, ids))
@@ -2384,6 +2396,9 @@ pub(crate) fn enrich(
                     if selected {
                         let states: HashSet<String> =
                             r.profiles.iter().filter_map(state_of).collect();
+                        if !states.is_empty() {
+                            unplaced.unattributed += 1;
+                        }
                         for state in states {
                             *unresolved.entry((state, c)).or_default() += 1;
                         }
@@ -2404,6 +2419,9 @@ pub(crate) fn enrich(
             }
         }
         if selected && !removed.is_empty() {
+            if r.profiles.iter().any(|p| removed.contains_key(p)) {
+                unplaced.removed += 1;
+            }
             for p in r.profiles.iter() {
                 if let Some(owner) = removed.get(p) {
                     *removed_requests.entry(owner).or_default() += 1;
@@ -2530,6 +2548,7 @@ pub(crate) fn enrich(
             cap.unresolved = Some(REASON.into());
         }
     }
+    unplaced
 }
 
 /// A control whose current value T3's unsettled ownership can leave unknown. Idle
@@ -3059,6 +3078,31 @@ mod tests {
     }
 
     #[test]
+    fn a_request_unresolved_in_two_states_counts_once() {
+        let w = Workspace::new();
+        native(&w);
+        let settings =
+            json!({"providerInstances":{"codex":{"driver":"codex","config":{"homePath":w.codex}}}});
+        // Both states, sharing the home, claim the native session, so the request stays
+        // unresolved in each.
+        let first = state(&w, settings.clone());
+        seed(&db(&first), "codex", "codex");
+        let second = w.home.join("t3-dev");
+        write(second.join("settings.json"), settings.to_string());
+        seed(&db(&second), "codex", "codex");
+        let mut options = w.scan_options();
+        options.discovery.t3_dirs = vec![
+            first.to_string_lossy().into(),
+            second.to_string_lossy().into(),
+        ];
+        let scan = scan(&options).unwrap();
+        assert_eq!(scan.requests.len(), 1);
+        let per_state: u64 = scan.t3.iter().flat_map(|s| s.unresolved.values()).sum();
+        assert_eq!(per_state, 2, "{:?}", scan.t3);
+        assert_eq!(scan.coverage.t3_unattributed, 1);
+    }
+
+    #[test]
     fn removed_owners_stay_billed_outside_current_checks() {
         // `gone` is no longer in settings; `elsewhere` is, but under another home.
         for (owner, removed) in [("gone", true), ("elsewhere", false)] {
@@ -3113,9 +3157,17 @@ mod tests {
                 assert!(r.t3.is_some(), "joined evidence still applies");
                 assert_eq!(t3.removed, IndexMap::from_iter([("gone".into(), 1)]));
                 assert!(t3.unresolved.is_empty(), "{:?}", t3.unresolved);
+                assert_eq!(
+                    (scan.coverage.t3_removed, scan.coverage.t3_unattributed),
+                    (1, 0)
+                );
             } else {
                 assert!(r.profiles.contains(&current.id));
                 assert!(t3.removed.is_empty());
+                assert_eq!(
+                    (scan.coverage.t3_removed, scan.coverage.t3_unattributed),
+                    (0, 1)
+                );
                 assert!(
                     t3.unresolved
                         .keys()

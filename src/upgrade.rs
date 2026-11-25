@@ -160,7 +160,9 @@ impl Paths {
         // be a guess. Each entry is `<version>/bin/<binary>` beside `<version>/record.json`,
         // whose `bins` crabx writes to name each binary, so it marks the entry wherever a
         // symlink above it points. Any `crabx/v<n>` on the path also matches, so a later cache
-        // format keeps its binary too. A false match only withholds the offer.
+        // format keeps its binary too. A false match only withholds the offer. Layouts crabx
+        // never creates, such as an entry whose `bin` alone is symlinked elsewhere, or an
+        // unrelated install under `crabx/v<n>`, are accepted misses and false matches.
         if crabx_record_names(&self.exe) || self.exe.ancestors().any(crabx_cache_format) {
             return Install::Manager(
                 "crabx manages this binary: an unpinned crabx token-max picks up the new release \
@@ -205,7 +207,12 @@ fn crabx_record_names(exe: &Path) -> bool {
     let Some(name) = exe.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    let Ok(file) = fs::File::open(entry.join("record.json")) else {
+    // Only a regular file: opening a named pipe there would block the run.
+    let record = entry.join("record.json");
+    if !record.is_file() {
+        return false;
+    }
+    let Ok(file) = fs::File::open(record) else {
         return false;
     };
     // A record is a few hundred bytes, so a file this size is not crabx's.
@@ -528,6 +535,21 @@ mod tests {
                 matches!(paths(path, None).install(), Install::Replace { .. }),
                 "{other}"
             );
+        }
+        // A named pipe there is never opened, which would block with no writer.
+        #[cfg(unix)]
+        {
+            fs::remove_file(entry.join("record.json")).unwrap();
+            let fifo = Command::new("mkfifo")
+                .arg(entry.join("record.json"))
+                .status()
+                .unwrap();
+            assert!(fifo.success());
+            assert!(matches!(
+                paths(path, None).install(),
+                Install::Replace { .. }
+            ));
+            fs::remove_file(entry.join("record.json")).unwrap();
         }
         fs::write(
             entry.join("record.json"),

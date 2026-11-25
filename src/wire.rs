@@ -43,6 +43,8 @@ pub fn build() -> String {
             include_str!("sessions.rs"),
             include_str!("repository.rs"),
             include_str!("totals.rs"),
+            // Its `Credit` is a field of the totals a report carries.
+            include_str!("defaults.rs"),
             // Its `Total` is a field of the totals a report carries, and its offers and
             // answers cross for a walk, with `mcp.rs`'s entries and `report.rs`'s choices.
             include_str!("doctor.rs"),
@@ -162,7 +164,7 @@ pub enum Outcome {
         /// Whether the report recommends a change, which sets the exit code.
         change: bool,
         /// What the report adds to a total across hosts.
-        totals: Totals,
+        totals: Box<Totals>,
         /// The changes the destination offers, when this host walks through them.
         offers: Option<Box<Offers>>,
         /// How many pieces of advice `vibes` has there, which `doctor` offers to show.
@@ -350,7 +352,7 @@ mod tests {
                 since: None,
                 text: "report\n".into(),
                 change: true,
-                totals: Totals::default(),
+                totals: Box::default(),
                 offers: None,
                 vibes: 0,
             },

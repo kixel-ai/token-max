@@ -74,7 +74,11 @@ run the latest release, so they never see the offer.
 
 On a terminal, `doctor` opens with one header line naming what it read: the
 requests, the sessions they ran in (each subagent counted with the session
-that spawned it), the window and their cost. It then walks through each change it can
+that spawned it), the window and their cost. The
+[savings against the defaults](#savings-against-the-defaults) line follows it,
+so a run with nothing to change still shows what the settings already save;
+with `--ssh`, one total across hosts and its one such line come first instead,
+and under `--defaults` there is no such line. It then walks through each change it can
 make, after a headline counting its questions and the changes they cover,
 across every settings file, recommended and worth considering alike, biggest
 monthly saving first. Each change is a card. Its first line is a counter, such
@@ -588,7 +592,11 @@ or `costs $12/mo more` when the current value costs more. The line shows on
 every run, including one with nothing left to change, and reads "No
 setting was found to differ from its Claude Code or Codex default." when none
 differs. A line whose current value is unknown gets no note, and that
-sentence does not claim it matches its default.
+sentence does not claim it matches its default. On a terminal the same line
+also opens `doctor`'s walk, under its header, before the first question.
+With `--ssh`, the total that heads the run adds every host's savings before
+rounding into one such line, each percent of the hosts' spend together, while
+each host's section keeps its own.
 
 Each saving is priced like its line's own comparison, holding every other
 setting at its current value, so the sum adds savings that may count the same
@@ -937,10 +945,16 @@ model's latest observed automatic-compaction trigger, else Claude Code's
 documented default. A window larger than the model's context window replays
 at that context window, as Claude Code caps it. Unresolved defaults, disabled
 compaction, unsupported versions/scopes, and ambiguous named Codex profiles stay
-advisory. A Codex limit that is set still gets its line when no selected request
+advisory. A window that is set still gets its line when no selected request
 exists, such as under a `--since` that excludes every one: the value and its
-setting, with no verdict and no edit, since nothing replays it. An unset limit
-gets none.
+setting, with no verdict and no edit, since nothing replays it. An unset window,
+or Claude's `"auto"`, gets none. With no request to name a model, Claude gets one
+line per setting in force: the top-level `autoCompactWindow` and each
+`modelSettings` row that names a window, or the single override above them,
+such as `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, whose evidence names the settings it
+outranks. Under `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` each line still shows the
+window and its evidence says the trigger falls below it; with no model to
+resolve that trigger against, `vibes` gives no cap for it.
 
 `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` resolves into the replayed trigger from every
 environment the window reads, a T3 instance's included. An explicit window
@@ -1211,7 +1225,8 @@ linked build to run here instead, such as the release installers'.
 Each host is analyzed on its own and gets its own section, labeled with the
 destination, or `this host`. A run of several hosts heads its report with one
 total: the hosts' requests, the input and output tokens they recorded (cache reads and writes included) and their sessions, their spend at API prices, and the sum of what the
-changes they offer save every 30 days, with each saving's percent of the hosts'
+changes they offer save every 30 days and of what their settings save against
+the defaults, with each saving's percent of the hosts'
 spend together. Offered changes may overlap, within a host or between hosts, so
 applying them all can save less than that sum, as the total says. The hosts' figures are added as they are, so a history copied between
 hosts counts on each, and the total counts it twice; token-max does not

@@ -1,5 +1,5 @@
-//! What the hosts of one `doctor` run add up to: their requests, sessions, spend and offered
-//! savings.
+//! What the hosts of one `doctor` run add up to: their requests, sessions, spend, offered
+//! savings, and what their settings save against the defaults.
 //!
 //! Each host sums its own figures beside its report, so a destination's text still never
 //! carries its scan. The hosts' figures are added as they are: a history copied between hosts
@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::defaults::Credit;
 use crate::doctor::{Fix, Total};
 use crate::model::{Margin, Report, Request};
 use crate::report::Spend;
@@ -32,11 +33,15 @@ pub struct Totals {
     pub monthly: f64,
     /// What the changes the report offers save every 30 days.
     pub savings: Total,
+    /// What the settings save every 30 days against the defaults; None under `--defaults`,
+    /// where every setting is its default.
+    pub credit: Option<Credit>,
 }
 
 impl Totals {
-    /// One host's report and the changes it offers.
-    pub fn new(report: &Report, fixes: &[Fix]) -> Self {
+    /// One host's report, the changes it offers, and what its settings save against the
+    /// defaults, None under `--defaults`.
+    pub fn new(report: &Report, fixes: &[Fix], credit: Option<Credit>) -> Self {
         let spend = Spend::new(report);
         let mut savings = Total::of(fixes);
         savings.set_share(spend.monthly());
@@ -50,6 +55,7 @@ impl Totals {
             partial: spend.partial,
             monthly: spend.monthly(),
             savings,
+            credit,
         }
     }
 
@@ -66,6 +72,17 @@ impl Totals {
         self.monthly += other.monthly;
         self.savings.merge(&other.savings);
         self.savings.set_share(self.monthly);
+        // Every host runs with the same `--defaults`, so either both have a credit or neither.
+        if let (Some(credit), Some(other)) = (&mut self.credit, &other.credit) {
+            credit.merge(other);
+        }
+    }
+
+    /// The line naming what the settings save against the defaults, each percent of the
+    /// spend of `whose`, such as "these hosts'"; None under `--defaults`.
+    pub fn credit(&self, whose: &str) -> Option<String> {
+        let credit = self.credit.as_ref()?;
+        Some(credit.text(self.monthly, whose))
     }
 }
 
@@ -132,6 +149,29 @@ mod tests {
             spend_text(total.spend, total.margin, total.floor, total.partial),
             "$100 plus at least $7"
         );
+    }
+
+    #[test]
+    fn credits_add_up_and_take_their_share_of_every_hosts_spend() {
+        use crate::defaults::{Baseline, Saving};
+        let host = |monthly, usd| Totals {
+            monthly,
+            credit: Some(Credit::of(&[Baseline {
+                default: "5m".into(),
+                saving: Saving::Saves(usd),
+                margin: None,
+            }])),
+            ..Totals::default()
+        };
+        // 10% of $1,000 and 3% of $3,000 are 5% of the $4,000 together.
+        let mut total = host(1000.0, 100.0);
+        total.merge(&host(3000.0, 100.0));
+        assert_eq!(
+            total.credit("these hosts'").unwrap(),
+            "Compared with defaults, your settings save about $200/mo, 5% of these hosts' spend. Overlapping settings may save less."
+        );
+        // Under --defaults no host has one.
+        assert_eq!(Totals::default().credit("this host's"), None);
     }
 
     #[test]

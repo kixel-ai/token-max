@@ -905,7 +905,8 @@ fn effort_edit(harness: Harness, key: &str, level: &str) -> Option<Edit> {
     }
 }
 
-fn check_how(result: &CheckResult, profile: &Profile) -> How {
+/// The edit or step that makes a check's change in `profile`'s settings.
+pub(crate) fn check_how(result: &CheckResult, profile: &Profile) -> How {
     let file = profile.settings_file.as_str();
     match result {
         CheckResult::Ttl(t) => {
@@ -1898,7 +1899,14 @@ fn writable(path: &Path) -> bool {
 }
 
 /// A question saving less than this every 30 days in total is not asked.
-const ASKED_USD: f64 = 1.0;
+pub(crate) const ASKED_USD: f64 = 1.0;
+
+/// Whether the walk takes up `fix`, a change no other joins in a group: it names a step by
+/// hand whatever it saves, and asks about an edit only as `ask` asks any question.
+pub(crate) fn takes_up(fix: &Fix) -> bool {
+    debug_assert!(fix.group.is_none(), "a grouped change shares its question");
+    !matches!(fix.how, How::Edit(_)) || Total::of(std::slice::from_ref(fix)).asked()
+}
 
 /// A file's accepted changes: settings to set, and MCP server entries to remove.
 #[derive(Debug)]
@@ -2031,6 +2039,18 @@ impl Total {
                 0.0
             };
         }
+    }
+
+    /// What the changes save every 30 days, a saving that depends on a default included;
+    /// none when one was not measured.
+    fn usd(&self) -> Option<f64> {
+        (self.unmeasured == 0).then_some(self.measured.usd + self.up_to.usd)
+    }
+
+    /// Whether the walk asks about these changes as one question: they save at least
+    /// `ASKED_USD` together, or one's saving was not measured.
+    fn asked(&self) -> bool {
+        self.usd().is_none_or(|usd| usd >= ASKED_USD)
     }
 
     fn add(&mut self, fix: &Fix) {
@@ -2941,8 +2961,7 @@ impl Question<'_> {
     /// What the members save every 30 days, a saving that depends on a default included;
     /// none when it was not measured.
     fn usd(&self) -> Option<f64> {
-        let total = self.together();
-        (total.unmeasured == 0).then_some(total.measured.usd + total.up_to.usd)
+        self.together().usd()
     }
 
     /// What the members save together, such as ("saves $9.40/mo", "2%"): up to that
@@ -3288,9 +3307,8 @@ pub fn ask(
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => std::cmp::Ordering::Equal,
     });
-    let (questions, skipped): (Vec<_>, Vec<_>) = questions
-        .into_iter()
-        .partition(|q| q.usd().is_none_or(|usd| usd >= ASKED_USD));
+    let (questions, skipped): (Vec<_>, Vec<_>) =
+        questions.into_iter().partition(|q| q.together().asked());
     let cleanups: Vec<usize> = (0..hosts.len())
         .filter(|h| !hosts[*h].offers.cleanup.is_empty())
         .collect();

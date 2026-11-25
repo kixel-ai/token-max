@@ -1226,6 +1226,66 @@ pub fn discover_latest_claude_controls(
     Ok(())
 }
 
+/// Where a repository checks in instructions for its agents, under each directory from a
+/// session's own to its checkout's root.
+pub(crate) const PROJECT_INSTRUCTIONS: [&[&str]; 3] =
+    [&["CLAUDE.md"], &[".claude", "CLAUDE.md"], &["AGENTS.md"]];
+
+/// For each profile with a memory control, whether each directory its main sessions since
+/// `since` ran in holds a project instruction file now, for `vibes`' memory card.
+pub fn discover_instructions(
+    profiles: &mut [Profile],
+    requests: &[Request],
+    since: Option<crate::model::Millis>,
+) -> Result<(), ScanError> {
+    for profile in profiles.iter_mut() {
+        let Some(memory) = &mut profile.memory else {
+            continue;
+        };
+        let mine = requests.iter().filter(|r| {
+            r.agent == Agent::Main
+                && r.profiles.contains(&profile.id)
+                && since.is_none_or(|since| r.time >= since)
+        });
+        for cwd in directories(mine) {
+            let found = match existing_directory(cwd)? {
+                true => Some(project_instructions(cwd, &profile.root)?),
+                false => None,
+            };
+            memory.instructed.insert(cwd.into(), found);
+        }
+    }
+    Ok(())
+}
+
+/// Whether a project instruction file sits between `cwd` and the root of the Git checkout
+/// that holds it, outside `root`, the profile's own directory, where the user's own
+/// instructions live. A directory in no checkout has none to check in.
+fn project_instructions(cwd: &str, root: &str) -> Result<bool, ScanError> {
+    // A symlinked directory sits in the checkout its target does, not its link's.
+    let cwd = realpath(cwd).map_err(|_| error("cannot resolve working directory", cwd, 0))?;
+    let paths = project_directories(&cwd, &[".git".into()])?;
+    let top = paths.last().expect("cwd is included");
+    if git_dir(top)?.is_none() {
+        return Ok(false);
+    }
+    for path in &paths {
+        for parts in PROJECT_INSTRUCTIONS {
+            let file = join(&[&[path.as_str()], parts].concat());
+            if std::path::Path::new(&file).starts_with(root) {
+                continue;
+            }
+            match fs::metadata(&file) {
+                Ok(meta) if meta.is_file() => return Ok(true),
+                Ok(_) => {}
+                Err(e) if absent(e.kind()) => {}
+                Err(_) => return Err(error("cannot inspect instruction file", &file, 0)),
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// Resolve current project/local controls at recorded directories, preserving every owner.
 pub fn discover_claude_controls(
     options: &DiscoveryOptions,
@@ -2889,6 +2949,76 @@ mod tests {
     use super::*;
     use crate::test_support::{Workspace, make_request, native_path};
     use std::path::Path;
+
+    #[test]
+    fn project_instructions_sit_between_a_directory_and_its_checkout_root() {
+        let w = Workspace::new();
+        let path = |p: &Path| p.to_string_lossy().into_owned();
+        let found = |dir: &Path| project_instructions(&path(dir), &path(&w.claude)).unwrap();
+        let repo = w.home.join("repo");
+        let deep = repo.join("a").join("b");
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(repo.join("AGENTS.md"), "synthetic\n").unwrap();
+        // Outside any checkout there is nothing to check in, unless the scratch directory
+        // itself sits in one.
+        let top = project_directories(&path(&w.home), &[".git".into()]).unwrap();
+        if git_dir(top.last().unwrap()).unwrap().is_none() {
+            assert!(!found(&deep));
+        }
+        fs::create_dir(repo.join(".git")).unwrap();
+        assert!(found(&deep) && found(&repo));
+        // A directory by the file's name is no file; a .claude/CLAUDE.md partway up is.
+        fs::remove_file(repo.join("AGENTS.md")).unwrap();
+        fs::create_dir(repo.join("AGENTS.md")).unwrap();
+        assert!(!found(&deep));
+        fs::create_dir_all(repo.join("a").join(".claude")).unwrap();
+        fs::write(
+            repo.join("a").join(".claude").join("CLAUDE.md"),
+            "synthetic\n",
+        )
+        .unwrap();
+        assert!(found(&deep) && !found(&repo));
+        // A home directory that is itself a checkout keeps the user's own file in the
+        // profile's directory, which is no project's.
+        fs::create_dir(w.home.join(".git")).unwrap();
+        fs::write(w.claude.join("CLAUDE.md"), "synthetic\n").unwrap();
+        assert!(!found(&w.home));
+        // A link to a directory in the checkout is read at its target.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&deep, w.home.join("link")).unwrap();
+            assert!(found(&w.home.join("link")));
+        }
+
+        // Each main session's directory since the window's start, and none that is gone.
+        let mut profile = crate::test_support::make_profile("profile", &path(&w.claude));
+        profile.memory = Some(claude_memory(&[], &Env::default()).unwrap());
+        let gone = path(&w.home.join("gone"));
+        let request = |time, cwd: &str, agent| {
+            let mut r = make_request();
+            r.time = time;
+            let meta = std::sync::Arc::make_mut(&mut r.meta);
+            meta.cwd = Some(cwd.into());
+            meta.agent = agent;
+            r
+        };
+        let requests = [
+            request(0, &path(&repo), Agent::Main),
+            request(5, &path(&deep), Agent::Main),
+            request(5, &gone, Agent::Main),
+            request(5, &path(&w.home), Agent::Subagent),
+        ];
+        let mut profiles = [profile];
+        discover_instructions(&mut profiles, &requests, Some(5)).unwrap();
+        let instructed = &profiles[0].memory.as_ref().unwrap().instructed;
+        assert_eq!(
+            instructed
+                .iter()
+                .map(|(d, f)| (d.clone(), *f))
+                .collect::<Vec<_>>(),
+            [(path(&deep), Some(true)), (gone, None)]
+        );
+    }
 
     #[test]
     fn a_settings_file_names_the_switches_it_turns_off() {
@@ -4698,7 +4828,7 @@ mod tests {
         let profile = claude(&data).clone();
         data.profiles.push(crate::test_support::make_t3_profile(
             "t3",
-            &native_path(&w.home.join("t3")),
+            &native_path(w.home.join("t3")),
         ));
         let mut earlier = request(&profile, Some(&mine));
         earlier.time = 1;

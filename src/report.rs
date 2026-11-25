@@ -1324,7 +1324,7 @@ pub(crate) fn opening_note(credit: &str, partial: bool) -> String {
         notes.push(TILDE);
     }
     if partial && credit.contains('%') {
-        notes.push("Each percent is of only the spend that could be priced, since a profile priced none of its requests, so a true share may be smaller.");
+        notes.push("Each percent is of a spend to which a profile that priced none of its requests adds only what could be priced, so a true share may be smaller.");
     }
     notes.join(" ")
 }
@@ -11007,7 +11007,7 @@ mod tests {
 
     #[test]
     fn the_opening_note_explains_only_what_the_credit_shows() {
-        let partial = "Each percent is of only the spend that could be priced, since a profile priced none of its requests, so a true share may be smaller.";
+        let partial = "Each percent is of a spend to which a profile that priced none of its requests adds only what could be priced, so a true share may be smaller.";
         let exact =
             "Compared with defaults, your settings save about $40/mo, 9% of this host's spend.";
         let sampled = "Compared with defaults, your settings save ~$40/mo ± $6.";

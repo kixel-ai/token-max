@@ -37,5 +37,4 @@ main.
 
 ## Required
 
-- [crabx upgrade guard](/quest/m1/crabx-upgrade.md) - 0.1.0 is the first release with the upgrade offer, so it must leave crabx's cache alone
 - [Advisor after default](/quest/m1/vibes/advisor-after-default.md) - ranks the advisor card against a default accepted in the same walk, so 0.1.0 can't write an Opus advisor under an Opus main

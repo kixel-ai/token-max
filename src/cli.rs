@@ -1872,8 +1872,8 @@ fn offer_upgrade(
                 return Ok(None);
             }
         },
-        Install::Manager(command) => {
-            let text = format!("\ntoken-max {} Upgrade with {command}.", stale(&latest));
+        Install::Manager(advice) => {
+            let text = format!("\ntoken-max {} {advice}", stale(&latest));
             say(&mut stdout, &text, false)?;
             return Ok(None);
         }
@@ -1983,7 +1983,7 @@ fn warn_upgrade(check: Check) {
         Check::Newer(latest) => {
             let how = match upgrade::install() {
                 Install::Replace { .. } => "Run token-max doctor on a terminal to upgrade.".into(),
-                Install::Manager(command) => format!("Upgrade with {command}."),
+                Install::Manager(advice) => advice.into(),
                 Install::Reinstall(why) => reinstall(&why),
             };
             format!("{} {how}", stale(&latest))

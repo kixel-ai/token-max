@@ -59,7 +59,8 @@ advisor iterations. An absent or empty iteration list uses the top-level usage;
 an empty list is a valid older client shape, not zero spend. When nonempty
 iterations exist, pricing uses that list alone, with
 each iteration's model. Advisor service tier is independent; an omitted tier stays
-unknown unless every executor iteration on the request is standard, as
+unknown unless every executor iteration on the request is standard (its message
+iterations, or its compaction ones when it has none), as
 [Advisor model](#advisor-model) explains. Unsupported iteration kinds stay unpriced. These semantics come from
 [threshold compaction](https://platform.claude.com/docs/en/build-with-claude/compaction-threshold)
 and [advisor billing](https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool),
@@ -1513,15 +1514,18 @@ such line, then to the lines below. A request counts when it recorded an `adviso
 each iteration is a call, and only those iterations are priced, at the model
 the iteration names (one that names none stays unknown, never the
 executor's). An iteration records no service tier, so it is priced at
-standard when every executor iteration of its request, message or compaction,
-is, since Priority
+standard when every executor iteration of its request is: its message
+iterations, or its compaction ones only when it has none, as in a summary
+request, since Priority
 Tier is committed per model; otherwise it is unknown. Unpriced requests are
 extrapolated from the priced ones, never below what each is known to cost.
 A T3 instance's requests count on the first line whose `advisorModel` its
 settings file owns, since its threads read that file; a line whose owner is
 another file, such as a project's, takes none, nor does any line take an
 instance whose launch settings, unresolved, may replace that file. The rest get a line per
-settings file of their own, with no card, and a T3 instance removed from T3's
+settings file of their own, with no card, naming that file's `advisorModel`
+(a thread's project may override it, the per-profile approximation native
+lines make too) or, for unresolved launch settings, no setting, and a T3 instance removed from T3's
 settings a line of its own for the requests its history still names. A
 request naming profiles on several lines counts on none of them but once on a
 shared entry for that set of lines, whose profiles are theirs together, and

@@ -118,31 +118,52 @@ pub fn fixes(items: &[Item]) -> Vec<Fix> {
         .filter_map(|(index, item)| fix(item, Origin::Vibe(index)))
         .collect();
     let mut fixes = crate::doctor::fixes_from(base.clone());
-    for (index, item) in items.iter().enumerate() {
-        for (n, after) in item.after.iter().enumerate().filter(|(_, a)| a.walked()) {
-            let origin = Origin::Walked(index, n);
-            let Some(rebuilt) = fix(&after.item, origin) else {
-                continue;
-            };
-            // Weighed after every other card's change, so it shares an identical edit and a
-            // clash leaves it by hand.
-            let others = base
+    // Cards rebuilt on the same accepted changes show together, so each group's changes are
+    // weighed in place of the cards they replace, after every other card's: an identical edit
+    // shares its question, and a clash leaves one by hand.
+    let walked = || {
+        items.iter().enumerate().flat_map(|(index, item)| {
+            item.after
                 .iter()
-                .filter(|f| !f.origins.contains(&Origin::Vibe(index)))
-                .cloned();
-            let weighed = crate::doctor::fixes_from(others.chain([rebuilt]).collect());
-            let weighed = weighed
-                .into_iter()
-                .find(|f| f.origins.contains(&origin))
-                .expect("the rebuilt change is weighed");
+                .enumerate()
+                .filter(|(_, a)| a.walked())
+                .map(move |(n, a)| (index, n, a))
+        })
+    };
+    let mut groups: Vec<&[Origin]> = vec![];
+    for (_, _, after) in walked() {
+        if !groups.contains(&after.origins.as_slice()) {
+            groups.push(&after.origins);
+        }
+    }
+    for group in groups {
+        let mut replaced = vec![];
+        let mut rebuilt = vec![];
+        for (index, n, after) in walked().filter(|(_, _, a)| a.origins == group) {
+            replaced.push(Origin::Vibe(index));
+            rebuilt.extend(fix(&after.item, Origin::Walked(index, n)));
+        }
+        let others = base
+            .iter()
+            .filter(|f| !f.origins.iter().any(|o| replaced.contains(o)))
+            .cloned();
+        for weighed in crate::doctor::fixes_from(others.chain(rebuilt).collect()) {
+            let (walked, kept): (Vec<Origin>, Vec<Origin>) = weighed
+                .origins
+                .iter()
+                .partition(|o| matches!(o, Origin::Walked(..)));
+            if walked.is_empty() {
+                continue;
+            }
+            // A card it shares an edit with here may clash with a card it replaces, and is
+            // then by hand on its own.
             match fixes
                 .iter_mut()
-                .find(|f| weighed.origins.len() > 1 && f.how == weighed.how)
+                .find(|f| !kept.is_empty() && f.how == weighed.how)
             {
-                Some(same) => same.origins.push(origin),
-                // The cards it shares an edit with here may clash with the card it replaces.
+                Some(same) => same.origins.extend(walked),
                 None => fixes.push(Fix {
-                    origins: vec![origin],
+                    origins: walked,
                     ..weighed
                 }),
             }
@@ -569,6 +590,15 @@ mod tests {
             assert_eq!(rebuilt.contains("by hand"), by_hand, "{text}");
             assert_eq!(text.matches("Accept?").count(), 2, "{text}");
         }
+        // Two cards rebuilt on the same change are weighed together, not against the cards
+        // they replace: they agree, so the second shares the first's question.
+        let mut items = items.clone();
+        items.push(items[1].clone());
+        let (text, events, _) = walk(&w, &items, "y\ny\n");
+        assert!(!text.contains("by hand"), "{text}");
+        assert!(text.contains("The same edit as a card above."), "{text}");
+        assert_eq!(text.matches("none -> fable").count(), 2, "{text}");
+        assert_eq!(events.len(), 2);
     }
 
     #[test]

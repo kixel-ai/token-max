@@ -7238,12 +7238,23 @@ fn summary(
             if let Some(note) = default_note(&item, &rebuilt, name, model) {
                 item.text += &note;
             }
-            // Another profile's card may make the same edit to the same file, under a name a
-            // symlink makes one, and accepting either writes this default.
+            // Another profile's card may write the same model to the same file, under a name a
+            // symlink makes one, beside a different effort, and accepting either writes this
+            // main model.
+            let model_edit = |p: &crate::doctor::Patch| {
+                p.edits
+                    .iter()
+                    .find(|e| e.path == ["model"] || e.path == ["env", "ANTHROPIC_MODEL"])
+                    .cloned()
+            };
+            let mine = model_edit(patch);
             let origins = defaults
                 .iter()
                 .filter(|(_, _, _, p)| {
-                    p.edits == patch.edits && crate::discovery::same_file(&p.file, &patch.file)
+                    std::ptr::eq(p, patch)
+                        || (mine.is_some()
+                            && model_edit(p) == mine
+                            && crate::discovery::same_file(&p.file, &patch.file))
                 })
                 .map(|(index, ..)| Origin::Vibe(*index))
                 .collect();

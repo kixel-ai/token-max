@@ -5535,7 +5535,7 @@ fn left_out(report: &Report, conditional: u64) -> String {
     let missing: u64 = t3.map(|s| s.missing).sum();
     let counts = [
         (unsupported, "unsupported T3 instance", ""),
-        (missing, "missing T3 history home", ""),
+        (missing, "T3 instance", " with a missing history home"),
         (coverage.t3_unattributed, "unattributed T3 request", ""),
         (coverage.t3_removed, "removed T3 request", ""),
         (coverage.missing_usage, "request", " with no usage"),
@@ -8389,7 +8389,7 @@ mod tests {
         report.scan.coverage.skipped_files = 1;
         let text = short(&report);
         assert!(
-            text.contains("\n  Left out or assumed: 1 unsupported T3 instance, 1 missing T3 history home, 1 unattributed T3 request, 3 removed T3 requests, 4 requests with no usage, 1 unreadable line. --details says why.\n"),
+            text.contains("\n  Left out or assumed: 1 unsupported T3 instance, 1 T3 instance with a missing history home, 1 unattributed T3 request, 3 removed T3 requests, 4 requests with no usage, 1 unreadable line. --details says why.\n"),
             "{text}"
         );
         for note in ["T3 coverage:", "T3 removed:", "Profiles:", PRICES_MEAN] {

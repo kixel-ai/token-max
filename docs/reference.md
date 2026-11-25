@@ -476,8 +476,8 @@ The default report opens with a header line saying what was read and what it
 cost at API prices, the headline counting the changes, the line summing what
 they save together, and the [savings against the
 defaults](#savings-against-the-defaults). One dim line then counts what was left
-out or assumed: unsupported T3 instances, T3 history homes that don't exist,
-such as one on an unmounted volume, unattributed or removed T3 requests,
+out or assumed: unsupported T3 instances, T3 instances its settings name whose
+history home doesn't exist, such as one on an unmounted volume, unattributed or removed T3 requests,
 requests with no recorded usage, unreadable lines, and requests priced at an
 assumed service tier, such as "Left out or assumed: 2 unsupported T3 instances,
 12 unreadable lines. --details says why." It is left out when there is nothing

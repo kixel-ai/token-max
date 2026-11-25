@@ -1175,8 +1175,9 @@ pub struct T3State {
     pub removed: IndexMap<String, u64>,
     /// Provider instances whose driver token-max can't read, whose spend is excluded.
     pub unsupported: u64,
-    /// Provider instances whose configured history home doesn't exist, such as one on an
-    /// unmounted volume, so none of their history was read.
+    /// Provider instances T3's settings name whose history home doesn't exist, such as one
+    /// on an unmounted volume, so none of their history was read. An unnamed built-in
+    /// instance's absent default home isn't counted.
     pub missing: u64,
     /// Every instance the settings name, which tells a removed owner from one not selected.
     pub(crate) instances: HashSet<String>,

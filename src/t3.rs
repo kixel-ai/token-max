@@ -639,6 +639,9 @@ pub(crate) fn discover(
                 Some(LegacyIdle::Bool(true)) => T3IdleMode::BeforeCacheExpires,
                 _ => T3IdleMode::OnReturn,
             });
+        // Only an instance the settings name counts as a missing history home: T3 adds the
+        // built-ins below even for a user who never set up that provider.
+        let named: HashSet<String> = instances.keys().cloned().collect();
         // T3 restores these built-in instances even before settings have been saved.
         for driver in ["claudeAgent", "codex"] {
             instances.entry(driver.into()).or_insert(Instance {
@@ -756,7 +759,9 @@ pub(crate) fn discover(
             let root = match fs::canonicalize(&native_root) {
                 Ok(root) => root,
                 Err(e) if e.kind() == ErrorKind::NotFound => {
-                    state.missing += 1;
+                    if named.contains(&id) {
+                        state.missing += 1;
+                    }
                     state.exclusions.push(format!(
                         "T3 instance {id}: native history home {} is missing",
                         native_root.display()
@@ -3084,11 +3089,19 @@ mod tests {
     fn unread_instances_are_counted() {
         let w = Workspace::new();
         native(&w);
+        fs::remove_dir_all(w.home.join(".claude")).unwrap();
         state(
             &w,
             json!({"providerInstances":{"codex":{"driver":"codex","config":{"homePath":w.codex}},"away":{"driver":"codex","config":{"homePath":w.home.join("unmounted")}},"other":{"driver":"grok"}}}),
         );
         let scan = scan(&w.scan_options()).unwrap();
+        // The built-in claudeAgent's default home is absent too, but no setting names it.
+        assert!(
+            scan.t3[0]
+                .exclusions
+                .iter()
+                .any(|e| e.contains("instance claudeAgent"))
+        );
         assert_eq!((scan.t3[0].missing, scan.t3[0].unsupported), (1, 1));
     }
 

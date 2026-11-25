@@ -15,7 +15,7 @@ upgrade a harness itself.
 Decided 2026-11-25 (maintainer, /quest-plan over five cost tips from
 @TekonBurns's posts). The maintainer asked "maybe detect the version and
 recommend upgrading?" ✅ A quest for every version-gated check (rejected:
-upgrade advice only in [the subagent card](/quest/m1/vibes/subagent-default.md)
+upgrade advice only in the subagent card
 and #206's OpenCode note; only in the subagent card). Most users
 auto-update, so few will see it, but one owner keeps the wording and version
 logic in one place.
@@ -24,7 +24,7 @@ Recommendations:
 
 - The gates live at the `claude_at_least` and `codex_at_least` calls
   (`src/version.rs`), in `idle.rs`, `replay.rs`, `compaction.rs`,
-  `turn_end.rs`, `subagents.rs` and `doctor.rs`'s `deniedMcpServers` gate,
+  `turn_end.rs`, `subagents.rs`, `report.rs`'s `Subagent default` card and `doctor.rs`'s `deniedMcpServers` gate,
   which already names the version in its step by hand. Route them through
   one helper that returns the version that unlocks the check, and word
   every line the same way.

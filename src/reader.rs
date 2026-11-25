@@ -8,8 +8,8 @@ use std::fs::File;
 use std::hash::BuildHasher;
 use std::io::{ErrorKind, Read};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -26,10 +26,13 @@ use crate::model::{
     Profiles, Request, RequestEvidence, RequestMeta, RequestedSpeed, Scan, ScanCoverage, Settings,
     ShellCall, Snapshot, StructuralEvent, Subagent, Text, Usage,
 };
+use crate::prices::Catalog;
 use crate::safe::{
     MAX_SAFE_INTEGER, ScanError, count, digest, id, identity, iso, label, object, timestamp, truthy,
 };
 use crate::sessions::{Record, Sessions};
+use crate::tally::{Basis, Tally};
+use crate::totals::Counts;
 use crate::unreadable::ToolIds;
 
 /// Select a time window and local roots.
@@ -54,22 +57,77 @@ pub enum Reach {
     Window,
 }
 
-/// How far a scan has read its transcripts, which another thread may watch.
+/// How far a scan has read its transcripts and what it has counted, which another thread may
+/// watch; a scan given one also counts as it reads.
 #[derive(Debug, Default)]
 pub struct Reading {
     /// Bytes in every transcript the scan reads; zero until it knows which those are.
     pub total: AtomicU64,
     /// Bytes in the transcripts read so far.
     pub read: AtomicU64,
+    /// What the requests read so far count to, as the report's header would count them,
+    /// until the analysis replaces it with the header's own; None until the scan counts.
+    pub counts: Mutex<Option<Counts>>,
+    /// Public prices once they load, which the scan prices what it has read with.
+    pub catalog: OnceLock<Catalog>,
+    /// The counts when reading ended, before the full recount after reconciliation replaces
+    /// them, so a test can check what was counted as the scan read.
+    #[cfg(test)]
+    read_end: Mutex<Option<Counts>>,
+    /// Count after every record, so a test sees each change the tally must catch.
+    #[cfg(test)]
+    every_record: bool,
     /// A step the scan takes after reading, and when it began, while it runs.
     pub step: Mutex<Option<(&'static str, Instant)>>,
 }
 
 impl Reading {
+    /// Whether the counts hold a spend.
+    pub(crate) fn priced(&self) -> bool {
+        self.counts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some_and(|counts| counts.spend.is_some())
+    }
+
     /// Show `step` on the progress line from now, or clear it.
     fn step(&self, step: Option<&'static str>) {
         *self.step.lock().unwrap_or_else(PoisonError::into_inner) =
             step.map(|step| (step, Instant::now()));
+    }
+}
+
+/// When the scan next brings a [`Reading`]'s counts up to date: as often as the line redraws,
+/// but never so often that counting, whose cost grows with what was read, takes more than a
+/// small share of the scan; and at once when prices load, so the spend shows without waiting.
+struct Pace {
+    next: Instant,
+    /// Whether the last count had prices.
+    priced: bool,
+}
+
+impl Pace {
+    /// The progress line's redraw interval.
+    const EVERY: Duration = Duration::from_millis(100);
+    /// The time spent reading for each unit of time spent counting, at least.
+    const READ_PER_COUNT: u32 = 9;
+
+    fn new(now: Instant) -> Self {
+        Self {
+            next: now + Self::EVERY,
+            priced: false,
+        }
+    }
+
+    /// Whether to count at `now`, with prices loaded or not.
+    fn due(&self, now: Instant, prices: bool) -> bool {
+        now >= self.next || prices && !self.priced
+    }
+
+    /// Schedule the next count after one that ran from `started` to `now`, with prices or not.
+    fn counted(&mut self, started: Instant, now: Instant, prices: bool) {
+        self.next = now + Self::EVERY.max((now - started) * Self::READ_PER_COUNT);
+        self.priced = prices;
     }
 }
 
@@ -900,6 +958,8 @@ struct Link {
 struct Requests {
     list: Vec<Request>,
     ids: HashMap<Text, usize>,
+    /// What the list counts to so far, when a progress line shows it.
+    tally: Option<Tally>,
 }
 
 /// Each event's position by id without a second copy of the id: a position is found by the
@@ -1068,6 +1128,29 @@ impl Reader {
                 self.subagents.insert(subagent.session.clone(), subagent);
             }
         }
+    }
+
+    /// Bring `reading`'s counts up to date with the requests read so far, priced at `catalog`
+    /// when it has loaded.
+    fn count(&mut self, reading: &Reading, catalog: Option<&Catalog>, profiles: &[Profile]) {
+        let Some(tally) = &mut self.requests.tally else {
+            return;
+        };
+        let counts = tally.count(
+            &mut self.requests.list,
+            &mut self.legacy,
+            &Basis {
+                since: self.since,
+                modern: &self.modern_totals,
+                subagents: &self.subagents,
+                profiles: Some(profiles),
+                catalog,
+            },
+        );
+        *reading
+            .counts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(counts);
     }
 
     fn add(&mut self, mut r: Request) {
@@ -1671,11 +1754,15 @@ impl Reader {
             let total = nested(p, "thread_token_usage");
             if !total.is_empty() {
                 let total = usage_of(total, Harness::Codex)?;
-                self.modern_totals.insert(format!(
+                let total = format!(
                     "{}:{}",
                     context.session,
                     serde_json::to_string(&total).expect("usage serializes")
-                ));
+                );
+                if let Some(tally) = &mut self.requests.tally {
+                    tally.supersede(&total);
+                }
+                self.modern_totals.insert(total);
             }
             self.add(r);
         } else if kind == Some("event_msg") && payload_kind == Some("token_count") {
@@ -1879,10 +1966,16 @@ impl Reader {
 fn add(requests: &mut Requests, strings: &mut Interner, r: Request) -> Option<Text> {
     let Some(&index) = requests.ids.get(&r.id) else {
         let answered = r.reference.clone();
+        if let Some(tally) = &mut requests.tally {
+            tally.touch(requests.list.len());
+        }
         requests.ids.insert(r.id.clone(), requests.list.len());
         requests.list.push(r);
         return answered;
     };
+    if let Some(tally) = &mut requests.tally {
+        tally.touch(index);
+    }
     let Request {
         evidence,
         time,
@@ -2017,6 +2110,10 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     if let Some(reading) = &options.reading {
         reading.total.store(0, Ordering::Relaxed);
         reading.read.store(0, Ordering::Relaxed);
+        *reading
+            .counts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
     }
     let snapshot_started_at = iso(now());
     let Discovery {
@@ -2041,7 +2138,10 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         since,
         exposure: ExposureCollector::new(since),
         strings: Interner::default(),
-        requests: Requests::default(),
+        requests: Requests {
+            tally: options.reading.as_ref().map(|_| Tally::default()),
+            ..Requests::default()
+        },
         events: vec![],
         event_ids: EventIndex::default(),
         compact_parents: HashMap::default(),
@@ -2057,6 +2157,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     reader.exposure.roots(&profiles);
     // Bytes in the transcripts already read.
     let mut finished = 0;
+    let mut pace = Pace::new(Instant::now());
     for snapshot in &mut snapshots {
         // Records update the snapshot's counters while records are consumed against its metadata.
         let view = snapshot.clone();
@@ -2076,6 +2177,16 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
             if let Some(reading) = &options.reading {
                 let read = finished + records.position;
                 reading.read.store(read, Ordering::Relaxed);
+                let now = Instant::now();
+                let catalog = reading.catalog.get();
+                #[cfg(not(test))]
+                let every_record = false;
+                #[cfg(test)]
+                let every_record = reading.every_record;
+                if every_record || pace.due(now, catalog.is_some()) {
+                    reader.count(reading, catalog, &profiles);
+                    pace.counted(now, Instant::now(), catalog.is_some());
+                }
             }
         }
         snapshot.unreadable.finish(&ids, snapshot.skipped_lines);
@@ -2126,11 +2237,37 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     for r in unanswered {
         add(&mut requests, &mut strings, r);
     }
+    // Legacy records and unanswered request records are requests now, so count them as such,
+    // pricing everything if prices loaded since the last count. What changes after this, the
+    // analysis settles with the header's own counts.
+    if let (Some(reading), Some(tally)) = (&options.reading, &mut requests.tally) {
+        tally.forget_legacy();
+        let counts = tally.count(
+            &mut requests.list,
+            &mut [],
+            &Basis {
+                since,
+                modern: &modern_totals,
+                subagents: &subagents,
+                profiles: Some(&profiles),
+                catalog: reading.catalog.get(),
+            },
+        );
+        #[cfg(test)]
+        {
+            *reading.read_end.lock().unwrap() = Some(counts);
+        }
+        *reading
+            .counts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(counts);
+    }
     let Requests {
         list: mut requests,
         ids,
+        tally,
     } = requests;
-    drop(ids);
+    drop((ids, tally));
     let mut ref_to_request: HashMap<Text, Text> = HashMap::default();
     for r in &mut requests {
         if let Some(reference) = &r.reference {
@@ -2248,9 +2385,20 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     );
     if let Some(reading) = &options.reading {
         reading.step(None);
+        // Linking request records can move a request's time or profiles, and T3 can move a
+        // shared request to another profile, which changes the group its spend is extrapolated
+        // in, so count the window once more as the header will, with prices that may have
+        // loaded since the last count.
+        let split = requests.partition_point(|r| since.is_some_and(|since| r.time < since));
+        crate::tally::recount(reading, &mut requests[split..], &subagents);
     }
     // After T3 attribution, so each instance reads its own sessions' directory.
     crate::discovery::discover_inbound(&options.discovery, &mut profiles, &requests)?;
+    crate::discovery::discover_latest_claude_controls(
+        &options.discovery,
+        &mut profiles,
+        &requests,
+    )?;
     crate::discovery::discover_instructions(&mut profiles, &requests, since)?;
     // What T3 changed holds its own copy of the shared fields; share them again.
     for r in &mut requests {
@@ -2313,6 +2461,13 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         skipped_files: snapshots.iter().filter(|s| s.skipped_lines > 0).count() as u64,
         issues: issues.into_iter().map(|issue| issue.to_string()).collect(),
     };
+    // Prices that loaded since the last count price the window's requests now.
+    if let Some(reading) = &options.reading
+        && reading.catalog.get().is_some()
+        && !reading.priced()
+    {
+        crate::tally::recount(reading, &mut requests, &subagents);
+    }
     Ok(Scan {
         snapshot_started_at,
         snapshot_finished_at,
@@ -2529,6 +2684,137 @@ mod tests {
         .unwrap();
         let progress = |n: &AtomicU64| n.load(Ordering::Relaxed);
         assert_eq!((progress(&reading.total), progress(&reading.read)), (0, 0));
+    }
+
+    #[test]
+    fn counting_waits_for_the_redraw_and_stays_a_small_share_of_the_scan() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut pace = Pace::new(start);
+        assert!(!pace.due(at(99), false));
+        assert!(pace.due(at(100), false));
+        // A quick count waits only for the next redraw.
+        pace.counted(at(100), at(101), false);
+        assert!(!pace.due(at(200), false));
+        assert!(pace.due(at(201), false));
+        // A slow one waits nine times as long as it took, unless prices load meanwhile.
+        pace.counted(at(201), at(251), false);
+        assert!(!pace.due(at(700), false));
+        assert!(pace.due(at(252), true));
+        pace.counted(at(252), at(302), true);
+        assert!(!pace.due(at(751), true));
+        assert!(pace.due(at(752), true));
+    }
+
+    /// What a scan counts as it reads, against what the header counts once the scan is
+    /// analyzed: across streamed chunks, profiles sharing a history, a subagent's session
+    /// and the window, priced at prices that loaded before reading.
+    #[test]
+    fn the_counts_read_so_far_end_on_the_headers() {
+        use crate::replay::{AnalyzeOptions, analyze};
+        let w = Workspace::new();
+        let projects = w.claude.join("projects/project");
+        w.fixture(projects.join("main.jsonl"), "claude.jsonl");
+        w.fixture(w.codex.join("sessions/main.jsonl"), "codex.jsonl");
+        write(
+            projects.join("parent.jsonl"),
+            jsonl(&[assistant("parent", "parent-message")]),
+        );
+        write(
+            projects.join("parent/subagents/agent-a.jsonl"),
+            jsonl(&[assistant("parent", "child-message")]),
+        );
+        write(
+            projects.join("parent/subagents/agent-a.meta.json"),
+            json!({ "agentType": "Explore" }).to_string(),
+        );
+        let mut old = assistant("old", "old-message");
+        old["timestamp"] = json!("2026-10-01T00:00:00Z");
+        write(projects.join("old.jsonl"), jsonl(&[old]));
+        // A fork whose legacy counter comes before the modern record that supersedes it.
+        let codex = std::fs::read_to_string(crate::test_support::fixture_path("codex.jsonl"))
+            .unwrap()
+            .replace("thread-a", "thread-b");
+        let mut lines: Vec<&str> = codex.lines().collect();
+        lines.swap(4, 5);
+        write(w.codex.join("sessions/copy.jsonl"), lines.join("\n") + "\n");
+        // A legacy session, which only counters record.
+        let counter = |minute: u32, total: i64| {
+            let u = json!({ "input_tokens": total, "cached_input_tokens": 0, "output_tokens": 1 });
+            json!({
+                "type": "event_msg",
+                "timestamp": format!("2026-11-01T00:0{minute}:00Z"),
+                "payload": { "type": "token_count", "info": { "total_token_usage": u, "last_token_usage": u } },
+            })
+        };
+        write(
+            w.codex.join("sessions/legacy.jsonl"),
+            jsonl(&[
+                json!({
+                    "type": "session_meta",
+                    "timestamp": "2026-11-01T00:00:00Z",
+                    "payload": { "id": "legacy", "source": "cli", "model_provider": "openai" },
+                }),
+                json!({
+                    "type": "turn_context",
+                    "timestamp": "2026-11-01T00:00:00Z",
+                    "payload": { "model": "gpt-6.1-sol" },
+                }),
+                counter(1, 100),
+                counter(2, 300),
+            ]),
+        );
+        #[cfg(unix)]
+        {
+            let alternate = w.home.join(".claude-work");
+            std::fs::create_dir(&alternate).unwrap();
+            std::os::unix::fs::symlink(w.claude.join("projects"), alternate.join("projects"))
+                .unwrap();
+        }
+        let since = timestamp(&json!("2026-10-15T00:00:00Z"));
+        let reading = Arc::new(Reading {
+            every_record: true,
+            ..Reading::default()
+        });
+        let catalog = crate::test_support::prices();
+        reading.catalog.set(catalog.clone()).unwrap();
+        let data = scan(&ScanOptions {
+            since,
+            reading: Some(reading.clone()),
+            ..options(&w)
+        })
+        .unwrap();
+        // The counts the scan kept as it read, counting after every record, before the recount
+        // after reconciliation could rebuild them: nothing here moves in reconciliation, so
+        // they already end on the header's.
+        let read = reading.read_end.lock().unwrap().unwrap();
+        let counts = || reading.counts.lock().unwrap().unwrap();
+        assert_eq!(counts(), read);
+        let report = analyze(AnalyzeOptions {
+            scan: data,
+            catalog: &catalog,
+            since,
+            now: timestamp(&json!("2026-11-02T00:00:00Z")).unwrap(),
+            max_cost_per_use_usd: 1.0,
+            reading: Some(&reading),
+        })
+        .unwrap();
+        let settled = counts();
+        assert_eq!(
+            settled,
+            crate::totals::Totals::new(&report, &[], None).counts()
+        );
+        // Two Claude requests, one streamed in chunks, a subagent's in its parent's session,
+        // Codex's once across its copy, and two legacy counters; the old one is before the
+        // window.
+        assert_eq!((settled.requests, settled.sessions), (7, 4));
+        assert_eq!(
+            (read.requests, read.tokens, read.sessions),
+            (settled.requests, settled.tokens, settled.sessions)
+        );
+        let spend = |c: Counts| c.spend.map(|s| s.text());
+        assert!(spend(settled).is_some());
+        assert_eq!(spend(read), spend(settled));
     }
 
     #[test]

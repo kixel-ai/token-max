@@ -852,6 +852,24 @@ long each has run. Reading T3 Code's database, which follows the transcripts,
 holds the line as the bar does, so under `--ssh` it shows over a later phase
 until it ends.
 
+Beside the bar and each phase after it, the line counts the requests,
+sessions, tokens and API-price spend read so far, as the report's header
+counts them: requests once across profiles that share a history and across a
+response's streamed chunks, only those in the window, and each subagent in the
+session that spawned it. The spend appears once public prices load, at first
+pricing everything already read, and is extrapolated per profile and marked
+`~` as the header's is. Some figures only settle after reading, such as a
+request record no response answers or a request T3 moves to another profile,
+so the scan counts again once those are known, and once the analysis has
+priced the scan the counts become the header's own. Each SSH host's totals
+join them as its report arrives. The line `doctor` clears shows the header's
+figures, or the total across hosts. Under `vibes --ssh` the destinations send
+no usage, so the line counts this host alone and says so. On a narrow
+terminal the line keeps the most useful figures that fit: the spend, the
+requests, the time left to read, the sessions, the tokens, then the bytes read.
+A figure too wide for the room left is skipped, and narrower ones after it
+still show.
+
 On a terminal, `doctor` opens with its name, says it is about to scan this
 host's transcripts, and lists each profile root it found with its transcript
 files and their size, then the SSH destinations it adds, or how to add one with
@@ -1420,9 +1438,11 @@ an exit code.
 | [Transcript retention](#transcript-retention) | A Claude profile whose `cleanupPeriodDays` is under 365, the default of 30 included: the disk its transcripts take, and the change to 365. |
 | [Auto-compact window](#auto-compact-window-cap) | Every compaction window line: the maintainer's cap of 400K for Claude and 240K for Codex, beside `doctor`'s replay of it. |
 | [Main-session default](#main-session-default) | Every resolved main-session default: the maintainer's pick of a model and effort beside what each recorded pair cost, and past `high` the provider's guidance. |
+| [Subagent default](#subagent-default) | A profile that sets `CLAUDE_CODE_SUBAGENT_EFFORT` or Codex's `agents.default_subagent_reasoning_effort`: past `high` the provider's guidance and the change to `high`, and an upgrade when the latest Claude Code ignores the variable. |
 | An instruction file | A CLAUDE.md of 200 lines or more, past Claude Code's [guidance](https://code.claude.com/docs/en/memory#write-effective-instructions), or an AGENTS.md at or above the byte budget Codex [loads](https://learn.chatgpt.com/docs/agent-configuration/agents-md), with what each 100 lines of it costs. |
 | Explore subagent | Claude's built-in Explore ran off Haiku: what it cost, the same tokens on the cheapest model, the model guide's tip, and the agent file that follows it as a step by hand. |
 | Fable weekly use | Any Fable request in the window: what they cost, and Anthropic's [plan rule](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan). |
+| [Advisor model](#advisor-model) | Every Claude settings file: with no `advisorModel`, the advisor one rank above the main-session default, citing Claude Code's [advisor page](https://code.claude.com/docs/en/advisor). |
 | [Auto memory](#auto-memory-in-vibes) | Every auto memory or Codex memories line: off is advised when most main sessions ran in a repository with a CLAUDE.md or AGENTS.md. |
 | [Code intelligence](#code-intelligence) | Claude sessions read or edited files of a typed language whose official language server plugin a new session wouldn't load: Anthropic's [costs page](https://code.claude.com/docs/en/costs#install-code-intelligence-plugins-for-typed-languages). |
 
@@ -1592,6 +1612,44 @@ either setting, or a `maxEffortLevel` below the pick's level would lower it,
 the whole change is a step by hand naming each setting; so is a new model on
 a cloud provider, such as Bedrock, which spells model IDs its own way, whether
 the profile's or the project's settings turn it on. A Codex level with no model set or recorded has no card.
+
+### Subagent default
+
+A profile that sets a default subagent effort, Claude Code's
+`CLAUDE_CODE_SUBAGENT_EFFORT` or Codex's
+`agents.default_subagent_reasoning_effort`, gets a card naming the level and
+the model it pairs with: `CLAUDE_CODE_SUBAGENT_MODEL` or
+`agents.default_subagent_model` when set, else the main session's model. It
+applies when neither the Agent call nor the agent's definition names an
+effort. Unset, subagents follow the main session, which the
+[`Main-session default`](#main-session-default) card covers, so there is no
+card.
+
+Past `high`, the card quotes the same provider guidance as the main-session
+card and offers the maintainer's pick, `high`, which every model that takes
+effort accepts. The edit sets the variable where it is set now: `env` in the
+profile's Claude `settings.json` or the key in its Codex `config.toml`. A
+shell variable, a T3 instance's own `environment` entry, or another file that
+sets it makes the change a step by hand naming that setting.
+An agent file's `effort:` or an Agent call's effort overrides the default and
+is left alone; the [subagent lines](#subagent-models) show it. At or below
+`high` the card advises nothing.
+
+Claude Code reads `CLAUDE_CODE_SUBAGENT_EFFORT` from 2.1.316
+([changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md)).
+When a profile's latest request ran an older Claude Code, the card says the
+variable is ignored and advises upgrading; past `high` it still offers the
+change to `high`, which applies once Claude Code is upgraded. Profiles that
+share the setting but pair it with different subagent models get a card each.
+Only the profile's own settings and environment, or a T3 instance's, are
+read; a project's settings that set the variable are not.
+
+A T3 instance can set these variables as secret or sensitive entries, which
+token-max never reads. A secret subagent model, `_MODEL_FORCE` or Explore cap
+gets its own card that names the model as one token-max cannot resolve and
+says which entry it couldn't read. A secret effort gives no card, and the
+[subagent lines](#subagent-models) mark only the effort unresolved, keeping
+their model attribution.
 
 ### Auto memory in vibes
 
@@ -1801,6 +1859,69 @@ with `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` or
 `CLAUDE_CODE_USE_FOUNDRY` is billed by its cloud provider and gets no line.
 Change the model with `/model` or the `model` setting.
 See [Fable weekly use](semantics.md#fable-weekly-use).
+
+## Advisor model
+
+Claude Code's [advisor](https://code.claude.com/docs/en/advisor) is a
+second model Claude consults at decision points, which reads the whole
+conversation at its own rates. Each Claude settings file gets a
+[`vibes`](#vibes) card for it, ranked against the main-session default that
+[effort](semantics.md#main-session-effort) resolves: the `model` setting or
+`ANTHROPIC_MODEL`, else the latest recorded main-session model.
+
+With no `advisorModel` set, the card suggests one rank above that default,
+the maintainer's pick: `opus` for a Haiku or Sonnet main, `fable` for an Opus
+main, and none for a Fable main, which Claude Code pairs only with a Fable
+advisor. It cites the page's claim that a faster main model with a stronger
+advisor "typically costs less than running the stronger model throughout",
+and offers to write `advisorModel` to the profile's settings file, saying
+that a project whose own settings pick another main model takes it too, since
+the edit pairs the advisor with every project's model. When no setting names
+the main model, or `model` is null, the card ranks against the latest recorded
+main-session model and says a session's `/model` or `--model` choice may run
+another one. When a project's settings file sets the main model, in `model`
+or `env.ANTHROPIC_MODEL`, the card offers no edit, since an advisor in the
+profile's file would pair with every project's model. The card doesn't read
+other recorded projects' settings for a model they set; its caveat covers
+them. What the
+pairing saves or costs is not measured. A main model Claude Code attaches no
+advisor to (Sonnet or Opus before 4.6, Haiku before 4.5), or one token-max
+can't resolve, gets a card that advises nothing.
+
+The card says no advisor would load, and offers no edit, when the settings or
+environment read set `CLAUDE_CODE_DISABLE_ADVISOR_TOOL`, send requests to
+Amazon Bedrock (or its Mantle endpoint), Google Cloud's Agent Platform or
+Microsoft Foundry, or turn off the feature flag the advisor needs:
+`DISABLE_TELEMETRY` or `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` with any
+value, or a true `DO_NOT_TRACK`, `CLAUDE_CODE_DISABLE_FEATURE_FLAGS` or
+`DISABLE_GROWTHBOOK`. Claude Platform on AWS and Claude Models on Google
+Cloud (Anthropic managed) need no flag. An `ANTHROPIC_BASE_URL` gateway must
+pass the advisor tool on intact, and a Fable advisor needs Fable access and,
+on plans that bill Fable to usage credits, the consent `/model fable` asks
+for; the card says both. An `advisorModel` already set gets a card that
+advises nothing, unless one of those stops it loading, its value is no model
+name Claude Code recognizes (an alias, or a Claude model ID of a family that
+can advise; the card names only its kind, never the value, which could be a
+pasted credential), the main model takes no
+advisor, or Claude Code's [pairing table](https://code.claude.com/docs/en/advisor#choose-an-advisor-model)
+rejects the pair; then it says so and offers no edit. The table is checked for
+a full model ID such as `claude-sonnet-5-5`, in any case and with or without a
+`[1m]` or `[2m]` suffix, as Claude Code reads it. An alias such as `opus` resolves
+to a version that changes with Claude Code releases, so only a Fable main
+model, which takes no other family, judges one. The card doesn't yet read an
+`availableModels` allowlist, which can disable a set advisor or block the one
+it suggests.
+
+T3 Code picks each thread's main model, so T3 instances get no card; when an
+enabled one reads the same settings file, the card says each of its threads whose model
+and provider take the advisor would use it, unless the instance's launch arguments, secret
+environment or machine policy, which token-max can't resolve, override that
+file. `doctor` has no advisor line. An advisor call
+whose iteration records no service tier leaves its request with no price of its
+own: that request is extrapolated from its profile's priced requests like any
+other unpriced one, or, when none of them priced, adds only its known part as a
+lower bound ([spend](#reading-the-report)). No line says how many calls ran or
+what they cost.
 
 ## Messages from other sessions
 

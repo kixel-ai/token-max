@@ -917,6 +917,23 @@ pub struct SpeedControl {
     pub reason: String,
 }
 
+/// Claude Code's `advisorModel` as the settings read now set it, and what keeps an advisor
+/// from loading.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdvisorControl {
+    /// The advisor model as set, such as `opus`, or the type of a value that is no model
+    /// name, such as `a boolean`; None when no settings file sets one.
+    pub model: Option<String>,
+    /// The `advisorModel` setting that sets it, or the user file's to set it in.
+    pub owner: String,
+    /// Why Claude Code loads no advisor, naming the variable that stops it; None when
+    /// nothing read does.
+    pub blocked: Option<String>,
+    /// The variable that sends requests through an LLM gateway, which must pass the advisor
+    /// tool on intact.
+    pub gateway: Option<String>,
+}
+
 /// A profile's main-session default reasoning effort, the setting that decides it and the
 /// level its session runs at.
 #[derive(Clone, Debug, PartialEq)]
@@ -1016,6 +1033,8 @@ pub struct Profile {
     pub turn_end: Option<TurnEndControl>,
     /// The main session's default reasoning effort.
     pub effort: Option<EffortControl>,
+    /// Claude Code's advisor model; None for Codex and T3, whose threads pick their own model.
+    pub advisor: Option<AdvisorControl>,
     pub speed_directories: Option<IndexMap<String, SpeedControl>>,
     /// Current project controls observed at recorded working directories.
     pub idle_directories: Option<IndexMap<String, IdleControl>>,
@@ -1095,6 +1114,9 @@ pub struct AgentControls {
     pub declared: IndexMap<String, String>,
     /// Why these controls may not be the ones a run used, such as a project of unknown trust.
     pub unresolved: Option<String>,
+    /// Why the default subagent effort alone can't be read, such as a secret value; the
+    /// model's attribution still holds.
+    pub effort_unresolved: Option<String>,
     /// The controls at each recorded subagent working directory whose project settings or
     /// agent files change them; other directories use these.
     pub directories: IndexMap<String, AgentControls>,

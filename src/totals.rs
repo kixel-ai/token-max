@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::defaults::Credit;
 use crate::doctor::{Fix, Total};
-use crate::model::{Margin, Report, Request};
-use crate::report::Spend;
+use crate::model::{Estimate, HistoricalCost, Margin, Report, Request, Scan};
+use crate::report::{Spend, spend_text};
 
 /// One host's figures, or the sum of several.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -45,10 +45,16 @@ impl Totals {
         let spend = Spend::new(report);
         let mut savings = Total::of(fixes);
         savings.set_share(spend.monthly());
+        let Counts {
+            requests,
+            tokens,
+            sessions,
+            ..
+        } = Counts::of(&report.scan, None);
         Totals {
-            requests: report.scan.coverage.requests,
-            tokens: tokens(&report.scan.requests),
-            sessions: crate::report::sessions(&report.scan),
+            requests,
+            tokens,
+            sessions,
             spend: spend.usd,
             margin: spend.margin,
             floor: spend.floor,
@@ -78,6 +84,21 @@ impl Totals {
         }
     }
 
+    /// What these figures count, for a progress line.
+    pub fn counts(&self) -> Counts {
+        Counts {
+            requests: self.requests,
+            tokens: self.tokens,
+            sessions: self.sessions,
+            spend: Some(Spent {
+                usd: self.spend,
+                margin: self.margin,
+                floor: self.floor,
+                partial: self.partial,
+            }),
+        }
+    }
+
     /// The line naming what the settings save against the defaults, each percent of the
     /// spend of `whose`, such as "these hosts'"; None under `--defaults`.
     pub fn credit(&self, whose: &str) -> Option<String> {
@@ -86,11 +107,126 @@ impl Totals {
     }
 }
 
-/// The input and output tokens `requests` recorded; a count a record left out adds none.
-fn tokens(requests: &[Request]) -> u64 {
-    requests
+/// What a progress line counts: requests, their tokens and sessions as a report's header
+/// counts them, and what they cost once priced.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Counts {
+    pub requests: u64,
+    pub tokens: u64,
+    pub sessions: u64,
+    /// None until prices load.
+    pub spend: Option<Spent>,
+}
+
+impl Counts {
+    /// What a scan's selected requests count to, as its report's header counts them, with
+    /// what they cost when `historical` prices them.
+    pub fn of(scan: &Scan, historical: Option<&[HistoricalCost]>) -> Self {
+        Counts {
+            requests: scan.coverage.requests,
+            tokens: scan.requests.iter().map(tokens).sum(),
+            sessions: crate::report::sessions(scan),
+            spend: historical.map(Spent::of),
+        }
+    }
+
+    /// Another host's counts added to these; the spend only while both have one.
+    pub fn merge(&mut self, other: &Counts) {
+        self.requests += other.requests;
+        self.tokens += other.tokens;
+        self.sessions += other.sessions;
+        self.spend = match (&mut self.spend, &other.spend) {
+            (Some(spend), Some(other)) => {
+                spend.merge(other);
+                Some(*spend)
+            }
+            _ => None,
+        };
+    }
+}
+
+/// What requests cost at API prices, extrapolated over the ones that could not be priced.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Spent {
+    /// The total, extrapolated over unpriced requests, plus `floor`.
+    pub usd: f64,
+    /// How far the extrapolated part may be off; None when nothing was extrapolated.
+    pub margin: Option<Margin>,
+    /// What the groups that priced none of their requests are known to cost, a lower bound
+    /// with nothing to extrapolate from.
+    pub floor: f64,
+    /// Whether some group priced none of its requests, even one with no known charge.
+    pub partial: bool,
+}
+
+impl Spent {
+    /// What groups of requests cost, each group a profile's history.
+    pub fn of(groups: &[HistoricalCost]) -> Self {
+        Self::estimated(
+            groups
+                .iter()
+                .map(|g| (g.estimate, g.cost.known_usd.to_f64())),
+        )
+    }
+
+    /// What groups of requests cost from each group's estimate, None when it priced none of
+    /// its requests, and what its requests are known to cost.
+    pub fn estimated(groups: impl IntoIterator<Item = (Option<Estimate>, f64)>) -> Self {
+        let mut usd = 0.0;
+        // Each group is a separate sample, so their errors are independent and their margins
+        // add in quadrature.
+        let mut variance = 0.0;
+        let (mut extrapolated, mut unmeasured, mut floor, mut partial) = (false, false, 0.0, false);
+        for (estimate, known) in groups {
+            match estimate {
+                Some(estimate) => {
+                    usd += estimate.usd;
+                    match estimate.margin {
+                        None => {}
+                        Some(Margin::Usd(m)) => {
+                            extrapolated = true;
+                            variance += m * m;
+                        }
+                        Some(Margin::Unmeasured) => unmeasured = true,
+                    }
+                }
+                None => {
+                    usd += known;
+                    floor += known;
+                    partial = true;
+                }
+            }
+        }
+        Spent {
+            usd,
+            margin: if unmeasured {
+                Some(Margin::Unmeasured)
+            } else {
+                extrapolated.then(|| Margin::Usd(variance.sqrt()))
+            },
+            floor,
+            partial,
+        }
+    }
+
+    /// Another host's spend added to this one, as [`Totals::merge`] adds it.
+    pub fn merge(&mut self, other: &Spent) {
+        self.usd += other.usd;
+        self.margin = Margin::independent(self.margin, other.margin);
+        self.floor += other.floor;
+        self.partial |= other.partial;
+    }
+
+    /// The spend as a report's header writes it, such as "~$9,392 ± $4.72".
+    pub fn text(&self) -> String {
+        spend_text(self.usd, self.margin, self.floor, self.partial)
+    }
+}
+
+/// The input and output tokens a request recorded; a count a record left out adds none.
+pub fn tokens(r: &Request) -> u64 {
+    r.parts
         .iter()
-        .flat_map(|r| &r.parts)
         .map(|p| {
             let u = &p.usage;
             // Input counts cache reads and writes; output counts reasoning.

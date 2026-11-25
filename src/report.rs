@@ -1342,6 +1342,18 @@ pub fn format_report<'a>(
     if options.details {
         details(report, &mut out);
     }
+    // Files are named as the walk's confirm names them, after their host under --ssh.
+    let style = crate::doctor::Style {
+        color: options.color,
+        unicode: options.unicode,
+        width: options.width,
+        home: out.home.clone(),
+        host: options
+            .host
+            .filter(|h| h.name != "this host")
+            .map(|h| h.name.to_string()),
+    };
+    let remaining = crate::doctor::Remaining::of(fixes, &style);
     Listing {
         title,
         head,
@@ -1355,7 +1367,46 @@ pub fn format_report<'a>(
         home: out.home,
         spend: out.spend,
         credit,
+        remaining,
     }
+}
+
+/// The edits and steps left to make, after the rest of a report or walk: a section titled
+/// `title` for each file, one line per key, then the steps by hand; empty with none left.
+pub(crate) fn closing(
+    remaining: &crate::doctor::Remaining,
+    title: &str,
+    options: ReportOptions<'_>,
+) -> String {
+    let mut out = Out {
+        text: String::new(),
+        options,
+        arrow: if options.unicode { "→" } else { "->" },
+        home: None,
+        profiles: IndexMap::default(),
+        removed: crate::collections::HashMap::default(),
+        spend: Spend {
+            usd: 0.0,
+            margin: None,
+            floor: 0.0,
+            partial: false,
+            since: None,
+            until: 0,
+        },
+    };
+    for (file, lines) in remaining.files(options.details) {
+        out.section(&format!("{title}  {file}"));
+        for line in lines {
+            out.wrap(&line, 2, Some(4), PLAIN);
+        }
+    }
+    if !remaining.steps().is_empty() {
+        out.section("STEPS BY HAND");
+        for (name, step) in remaining.steps() {
+            out.wrap(&format!("{name}: {step}"), 2, Some(4), PLAIN);
+        }
+    }
+    out.text
 }
 
 /// The report as `token-max doctor` prints it, naming the edits it would offer.
@@ -1397,6 +1448,8 @@ pub struct Listing {
     spend: Spend,
     /// What the settings its lines name save against the defaults; None under `--defaults`.
     credit: Option<crate::defaults::Credit>,
+    /// The edits and steps its changes name, which the report without a terminal ends with.
+    remaining: crate::doctor::Remaining,
 }
 
 /// What became of a change in `doctor`'s walk, for the list printed after it.
@@ -1406,14 +1459,19 @@ pub enum Choice {
     Accepted,
     /// Answered no, or left when the walk ended early.
     Declined,
-    /// A step to take by hand, as the line's setting column reads.
+    /// A step to take by hand, as the walk's card names it.
     Manual(String),
 }
 
 impl Listing {
-    /// The report as printed without a terminal.
+    /// The report as printed without a terminal, ending with the edits its changes name.
     pub fn text(&self) -> String {
-        format!("{}{}", self.title, self.with_list(None))
+        format!(
+            "{}{}{}",
+            self.title,
+            self.with_list(None),
+            closing(&self.remaining, "EDITS", self.options)
+        )
     }
 
     /// The one-line header naming what was read, which the walk prints before its questions.
@@ -4349,12 +4407,6 @@ fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
         let origin = row.origin?;
         choices.iter().find(|(o, _)| *o == origin).map(|(_, c)| c)
     };
-    // A change the walk could not make reads as the step it became.
-    for row in &mut rows {
-        if let Some(Choice::Manual(setting)) = choice(row) {
-            row.setting = setting.clone();
-        }
-    }
     // Name where a line was found only when two lines of one profile would read the same.
     let mut seen = crate::collections::HashMap::<(String, String), usize>::default();
     for row in &rows {
@@ -5654,13 +5706,6 @@ fn summary(
     };
     // A tool, skill or MCP switch lives in each profile's own settings file.
     let switch = |p: &Profile| format!("{}:", p.settings_file);
-    // The edit or step `doctor` offers for a line, which names its setting.
-    let offer = |origin: Origin, out: &Out<'_>| {
-        fixes
-            .iter()
-            .find(|f| f.origins.contains(&origin))
-            .map(|f| crate::doctor::setting(f, out.home.as_deref()))
-    };
     // A switch the settings file already sets shows as off below, even while the latest
     // request, made before the change, still carried the feature.
     let applied = |c: &ContextCost| crate::defaults::applied(report, c).is_some();
@@ -6074,11 +6119,10 @@ fn summary(
                 _ => {}
             }
         }
-        row.setting = match offer(Origin::Check(*index), out) {
-            Some(setting) if row.offered() => setting,
-            // Why nothing can be set is evidence, under details.
-            _ if r.owner.starts_with("no setting") => "no setting".into(),
-            _ => out.home(r.owner),
+        // Why nothing can be set is evidence, under details.
+        row.setting = match r.owner.starts_with("no setting") {
+            true => "no setting".into(),
+            false => out.home(r.owner),
         };
         row
     };
@@ -6164,10 +6208,7 @@ fn summary(
         }
         text += &server_notes(c);
         row.evidence = text;
-        row.setting = match offer(Origin::Context(*index), out) {
-            Some(setting) if row.offered() => setting,
-            _ => piece_setting(c, out),
-        };
+        row.setting = piece_setting(c, out);
         row
     };
     let mut rows: Vec<Row> = checks.iter().map(|c| check_row(c, out)).collect();
@@ -8560,10 +8601,19 @@ mod tests {
             "change",
             "Replayed at 5m and 1h, assuming the same sessions, extrapolated from the 99.5% of requests with measured usage to the rest, assuming they resemble each other; 1h costs less. Set in /synthetic/home/.claude/settings.json:promptCacheTtl.",
         );
-        // A change names the edit `doctor` offers for it.
+        // A change names its setting, and the report ends with the edit `doctor` offers.
         assert_eq!(
             line("Main-agent prompt cache TTL").setting,
-            r#""promptCacheTtl": "1h" in /synthetic/home/.claude/settings.json"#
+            "/synthetic/home/.claude/settings.json:promptCacheTtl"
+        );
+        let edits = text
+            .split_once("\n  EDITS  /synthetic/home/.claude/settings.json\n")
+            .map(|(_, edits)| edits)
+            .unwrap_or_else(|| panic!("{text}"));
+        // Under details, as the exact JSON.
+        assert!(
+            edits.contains("\n    \"promptCacheTtl\": \"1h\"\n"),
+            "{edits}"
         );
         has(
             "Artifact tool on -> off saves $90/mo 6%",
@@ -9405,7 +9455,12 @@ mod tests {
         assert!(line.evidence.contains("Included in its server's cost."));
         assert_eq!(
             line.setting,
-            r#"mcp_servers.docs.disabled_tools = ["write"] (added to the list) in /synthetic/.codex/config.toml"#
+            "/synthetic/.codex/config.toml:mcp_servers.docs.disabled_tools"
+        );
+        // Under details, the closing section shows the exact TOML.
+        assert!(
+            rendered.contains("\n  EDITS  /synthetic/.codex/config.toml\n    mcp_servers.docs.disabled_tools = [\"write\"] (added to the list)\n"),
+            "{rendered}"
         );
         let patch = changes(&report);
         assert!(patch.contains("disabled_tools = [\"write\"]"));
@@ -9850,7 +9905,7 @@ mod tests {
             "ChatGPT apps on -> off saves $30/mo 2%"
         );
         assert!(
-            line("ChatGPT apps").setting == "[/synthetic/.codex/config.toml] features.apps = false",
+            line("ChatGPT apps").setting == "[/synthetic/.codex/config.toml] features.apps",
             "{text}"
         );
         assert!(
@@ -11716,14 +11771,21 @@ mod tests {
             verdict: Some(Verdict::Off),
         };
         report.context = vec![skill.clone()];
-        // A change names its whole edit and file, so it can be copied from redirected output.
-        let setting =
-            report_line(&text(&report, None, false), "Skill google-drive-comments").setting;
-        let edit = format!(r#""skillOverrides": {{"{name}": "user-invocable-only"}} in "#);
-        let file = std::path::Path::new(&setting[edit.len().min(setting.len())..]);
-        assert!(setting.starts_with(&edit), "{setting}");
-        // slash ok: Path::ends_with compares components
-        assert!(file.ends_with(".claude/settings.json"), "{setting}");
+        // Redirected output ends with each file's edits, so they can be copied from it.
+        let plain = text(&report, None, false);
+        let (file, edits) = plain
+            .rsplit_once("\n  EDITS  ")
+            .and_then(|(_, rest)| rest.split_once('\n'))
+            .unwrap_or_else(|| panic!("{plain}"));
+        // Path::ends_with compares components.
+        let file = std::path::Path::new(file);
+        assert!(file.ends_with(".claude/settings.json"), "{plain}"); // slash ok: compares components
+        assert!(
+            edits.starts_with(&format!(
+                "    skillOverrides.{name} = \"user-invocable-only\"\n"
+            )),
+            "{plain}"
+        );
         // An offered change's saving scales to 30 days, however short the window, and its
         // evidence keeps the window's total.
         let line = report_line(&text(&report, None, true), "Skill google-drive-comments");

@@ -936,7 +936,10 @@ fn recorded_request_shapes_price_each_piece_at_its_cache_position_and_count_its_
     let off: Vec<String> = crate::doctor::fixes(&strict, false)
         .iter()
         .filter(|f| !f.suggested)
-        .map(|f| crate::doctor::setting(f, None))
+        .flat_map(|f| match &f.how {
+            crate::doctor::How::Edit(p) => p.edits.iter().map(|e| e.text(p.harness)).collect(),
+            crate::doctor::How::Manual { step, .. } => vec![step.clone()],
+        })
         .collect();
     let off = off.join("\n");
     assert!(off.contains(r#""enableArtifact": false"#), "{off}");

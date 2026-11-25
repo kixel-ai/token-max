@@ -145,9 +145,11 @@ variable in a Claude settings file's `env` block that no accepted change sets,
 and each in Codex's `shell_environment_policy.set`. Then one question asks whether to write the accepted
 changes, naming each file; nothing is written before that yes, end of input is a no,
 and a no says nothing was written. Each file is then written once, with every
-edit accepted for it. A change not accepted keeps its edit in the list, to
-make by hand, which also suits a file another tool rewrites, such as a dotfiles
-manager. Either answer exits 0.
+edit accepted for it. After the confirm, a **Not written** section per file
+lists every edit left unwritten, whether declined at its question or at the
+confirm, one line per key as the report's closing sections show them, then the
+steps by hand, so each can still be made by hand, which also suits a file
+another tool rewrites, such as a dotfiles manager. Either answer exits 0.
 
 Only a profile's own `settings.json` or Codex `config.toml` is edited,
 including Claude's `env` block. An edit sets the setting that decides the
@@ -284,8 +286,8 @@ takes it over itself. Claude Code re-reads the file under that lock before each 
 so the removal survives sessions already running, which keep the server until
 they restart.
 
-Without a terminal, `doctor` changes nothing: each change's line ends with its
-edit and file, or its step by hand.
+Without a terminal, `doctor` changes nothing: the report ends with the edits
+its changes name, as [Reading the report](#reading-the-report) describes.
 
 ### On SSH hosts
 
@@ -477,8 +479,17 @@ gives every setting and feature one line. Each line names its verdict, the
 setting or feature, its current value (and the value to change to, for a
 change), what it saves per 30 days or costs over the window, that figure's
 share of this host's spend, the profile when several were read, and the
-setting that changes it. For a change `doctor` offers,
-that last column is the exact edit and file, or the step to take by hand.
+setting that changes it.
+
+The report ends with the edits its changes name, so the lines above stay one
+row each: an **Edits** section per settings file, named as `host:path` under
+`--ssh`, with one line per key. A list's added members share one line with
+their count, such as `permissions.deny += ScheduleWakeup, ReportFindings (2)`,
+and settings under one parent set to one value share one too, such as
+`skillOverrides.{a, b} = "off" (2)` for two skills turned off. `--details`
+shows each edit's exact JSON or TOML instead. Steps to take by hand, such as
+one a shell variable would override, follow in a **Steps by hand** section,
+each naming its line.
 
 Every line is measured: replayed or priced from your own transcripts at public
 API prices, or marked unknown where they can't price it. No verdict rests on

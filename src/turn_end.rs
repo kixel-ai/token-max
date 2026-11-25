@@ -1352,8 +1352,9 @@ mod tests {
             .expect("the line is shown");
         assert!(line.contains("off (default) -> 100%"), "{line}");
         assert!(
-            line.contains(&format!("{TURN_END_KEY} = 100 in {FILE}")),
-            "{line}"
+            text.contains(&format!("\n  EDITS  {FILE}\n"))
+                && text.contains(&format!("\n    {TURN_END_KEY} = 100\n")),
+            "{text}"
         );
         let mut explained = fixes.clone();
         let listing =

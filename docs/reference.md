@@ -556,6 +556,8 @@ of feature, such as tools, skills, MCP servers, MCP tools, subagents or
 instruction files, and one per setting across profiles, such as fast mode:
 its name, how many of its lines got each verdict, such as `31 kept, 4
 unknown`, what they cost together, `at least` when one's cost is unknown, the
+largest alone, also `at least`, for one setting's lines in several profiles,
+which can price the same requests, the
 strongest verdict, and the first three profiles or files and first two
 settings that change them, with a count of the rest. A kind or setting with one
 line shows that line. `--details` lists every line under its row, each naming

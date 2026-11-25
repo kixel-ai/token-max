@@ -4454,8 +4454,8 @@ struct Row {
     /// Its profile tag before anything telling two lines of one setting apart was added, which
     /// a line listing several names instead.
     base_tag: String,
-    /// Whether its figure prices requests no other line prices, as each subagent line's
-    /// does, so lines of one name add rather than overlap.
+    /// Whether its figure prices requests no other line prices, as a subagent's, feature's or
+    /// instruction file's line does, each request belonging to one, so lines of one name add.
     apart: bool,
     /// The harness upgrade that alone would let its verdict apply.
     upgrade: Option<String>,
@@ -5247,6 +5247,8 @@ fn instruction_row(c: &ContextCost, out: &Out<'_>) -> Row {
     };
     row.setting = "the file itself".into();
     row.group = Some("Instruction files".into());
+    // Each request belongs to one settings owner, whose files are its own lines.
+    row.apart = true;
     row
 }
 
@@ -7324,6 +7326,8 @@ fn summary(
         row.evidence = text;
         row.setting = piece_setting(c, out);
         (row.group, row.key) = (kind_group(c.kind), piece_key(c, out));
+        // Each request belongs to one settings owner, whose pieces are its own lines.
+        row.apart = true;
         row
     };
     let mut rows: Vec<Row> = checks.iter().map(|c| check_row(c, out)).collect();
@@ -7598,6 +7602,8 @@ fn summary(
         row.evidence = text;
         row.setting = piece_setting(c, out);
         (row.group, row.key) = (kind_group(c.kind), piece_key(c, out));
+        // Each request belongs to one settings owner, whose pieces are its own lines.
+        row.apart = true;
         rows.push(row);
     }
     // Tools, skills and MCP servers a settings file turns off, which are on by default. No
@@ -8147,6 +8153,8 @@ fn summary(
         row.costs(c.estimate(), false, &spend);
         row.setting = piece_setting(c, out);
         (row.group, row.key) = (kind_group(c.kind), piece_key(c, out));
+        // Each request belongs to one settings owner, whose pieces are its own lines.
+        row.apart = true;
         row.evidence = match c.kind {
             ContextKind::Skill if c.skill.is_some() => {
                 format!(
@@ -9897,6 +9905,30 @@ mod tests {
                 .starts_with("Not enough evidence: T3 could not settle some sessions"),
             "{row:?}"
         );
+    }
+
+    #[test]
+    fn one_instruction_file_sent_by_two_settings_owners_adds_up() {
+        let mut report = synthetic();
+        // Each request belongs to one settings owner, so the file's two lines price
+        // different requests and the row adds them.
+        let mut other = make_profile("other", ROOT);
+        other.settings_file = "/synthetic/other/settings.json".into();
+        report.scan.profiles.push(other);
+        report
+            .context
+            .retain(|c| !(c.kind == ContextKind::Instructions && c.estimated_usd.is_none()));
+        let mut copy = report
+            .context
+            .iter()
+            .find(|c| c.kind == ContextKind::Instructions)
+            .expect("an instruction file")
+            .clone();
+        copy.profiles = vec!["other".into()];
+        copy.estimated_usd = Some(6.0);
+        report.context.push(copy);
+        let plain = text(&report, None, false);
+        report_line(&plain, "Instruction files 2 info costs $11");
     }
 
     #[test]

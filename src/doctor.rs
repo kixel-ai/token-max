@@ -143,23 +143,22 @@ pub(crate) fn section_value<'a>(
     match members.as_slice() {
         [] => String::new(),
         [(_, _, value)] => (*value).to_string(),
-        [(first, _, _), ..] if first.kind == Kind::CacheTtl => members
-            .iter()
-            .map(|(s, profile, v)| {
-                // A TTL changed in several profiles names each one's profile.
-                let shared = members
-                    .iter()
-                    .filter(|(o, ..)| o.member == s.member)
-                    .count()
-                    > 1;
-                if shared && !profile.is_empty() {
-                    format!("{} ({profile}) {v}", s.member)
-                } else {
-                    format!("{} {v}", s.member)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", "),
+        [(first, _, _), ..] if first.kind == Kind::CacheTtl => {
+            // A section spanning several profiles names each change's profile.
+            let profiles: IndexSet<&str> = members.iter().map(|(_, p, _)| *p).collect();
+            let spans = profiles.len() > 1;
+            members
+                .iter()
+                .map(|(s, profile, v)| {
+                    if spans && !profile.is_empty() {
+                        format!("{} ({profile}) {v}", s.member)
+                    } else {
+                        format!("{} {v}", s.member)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
         [(_, _, value), ..] => format!("{} {arrow} {}", members.len(), target(value)),
     }
 }
@@ -1971,17 +1970,21 @@ fn writable(path: &Path) -> bool {
 /// A question saving less than this every 30 days in total is not asked.
 pub(crate) const ASKED_USD: f64 = 1.0;
 
+/// Whether the walk offers `fix` as an edit: a member whose file refuses its edit becomes a
+/// step by hand, outside its section's question.
+pub(crate) fn offered(fix: &Fix) -> bool {
+    match &fix.how {
+        How::Edit(patch) => Target::open(&patch.file, patch.harness)
+            .is_ok_and(|target| apply(&target, &patch.edits, &[]).is_ok()),
+        How::Manual { .. } => false,
+    }
+}
+
 /// Whether the walk takes up `fix`, one of `fixes`: it names a step by hand whatever it
 /// saves, including an edit its file refuses, and asks about an edit only when its section
 /// saves enough to ask: `fix` and the other edits in `fixes` it joins whose files take them,
 /// as `Owner::new` checks each offer.
 pub(crate) fn takes_up(fix: &Fix, fixes: &[Fix]) -> bool {
-    // A member whose file refuses its edit becomes a step by hand, outside the question.
-    let offered = |f: &Fix| match &f.how {
-        How::Edit(patch) => Target::open(&patch.file, patch.harness)
-            .is_ok_and(|target| apply(&target, &patch.edits, &[]).is_ok()),
-        How::Manual { .. } => false,
-    };
     if !offered(fix) {
         return true;
     }
@@ -5289,7 +5292,7 @@ mod tests {
                 ],
                 "->"
             ),
-            "main (a) 5m -> 1h, main (b) 5m -> 1h, main (c) 1h -> 5m, subagent 1h -> 5m"
+            "main (a) 5m -> 1h, main (b) 5m -> 1h, main (c) 1h -> 5m, subagent (a) 1h -> 5m"
         );
     }
 

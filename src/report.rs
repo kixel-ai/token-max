@@ -5697,14 +5697,16 @@ fn piece_setting(c: &ContextCost, out: &Out<'_>) -> String {
 /// Each change `doctor` offers as an edit joins its section, which names the settings its
 /// edit changes; a step by hand stays its own line, naming the step.
 fn sectioned(rows: &mut [Row], fixes: &[crate::doctor::Fix], out: &Out<'_>) {
-    let edit = |f: &crate::doctor::Fix| matches!(f.how, crate::doctor::How::Edit(_));
+    // The walk's own test, so an edit its file refuses stays a step by hand of its own.
+    let offered: Vec<bool> = fixes.iter().map(crate::doctor::offered).collect();
     for row in rows {
         let Some(origin) = row.origin.filter(|_| row.offered()) else {
             continue;
         };
         let Some(fix) = fixes
             .iter()
-            .position(|f| edit(f) && f.origins.contains(&origin))
+            .enumerate()
+            .position(|(i, f)| offered[i] && f.origins.contains(&origin))
         else {
             continue;
         };
@@ -5724,7 +5726,8 @@ fn sectioned(rows: &mut [Row], fixes: &[crate::doctor::Fix], out: &Out<'_>) {
         }
         let id = fixes
             .iter()
-            .position(|f| edit(f) && f.joins(&fixes[fix]))
+            .enumerate()
+            .position(|(i, f)| offered[i] && f.joins(&fixes[fix]))
             .expect("a change joins its own section");
         row.section = Some(Membership {
             id,
@@ -12245,6 +12248,34 @@ mod tests {
         }
     }
 
+    /// Moves each profile's settings file into a fresh workspace, with the TTL lines that
+    /// name it, so the walk's edits take; `shown` maps the report's text back.
+    fn writable(report: &mut Report) -> (Workspace, impl Fn(String) -> String + use<>) {
+        let w = Workspace::new();
+        let mut moved = vec![];
+        for p in &mut report.scan.profiles {
+            let dir = w.home.join(&p.id);
+            std::fs::create_dir_all(&dir).unwrap();
+            let file = dir.join("settings.json");
+            std::fs::write(&file, "{}").unwrap();
+            let file = file.to_string_lossy().into_owned();
+            let old = std::mem::replace(&mut p.settings_file, file.clone());
+            for c in &mut report.checks {
+                if let CheckResult::Ttl(t) = c
+                    && t.base.profile == p.id
+                {
+                    t.base.owner = t.base.owner.replace(&old, &file);
+                }
+            }
+            moved.push((file, old));
+        }
+        (w, move |text: String| {
+            moved
+                .iter()
+                .fold(text, |text, (file, old)| text.replace(file, old))
+        })
+    }
+
     #[test]
     fn a_section_of_changes_is_one_row_and_details_list_its_members() {
         let mut report = synthetic();
@@ -12261,7 +12292,18 @@ mod tests {
         sub.base.recommended = Some(Ttl::FiveMinutes);
         sub.base.monthly_savings_usd = Some(10.0);
         sub.base.owner = format!("{ROOT}/settings.json:subagentPromptCacheTtl");
-        let plain = text(&report, None, false);
+        // While its file refuses the edits, as the walk would, each stays its own step.
+        let refused = text(&report, None, false);
+        assert_eq!(
+            refused
+                .lines()
+                .filter(|l| l.contains("prompt cache TTL") && l.contains("change"))
+                .count(),
+            2,
+            "{refused}"
+        );
+        let (_w, shown) = writable(&mut report);
+        let plain = shown(text(&report, None, false));
         let changes: Vec<&str> = plain
             .lines()
             .skip_while(|l| !l.contains("CHANGES"))
@@ -12286,7 +12328,7 @@ mod tests {
             .unwrap();
         profile.ttl.main.value = None;
         profile.ttl.main.reason = TTL_BILLING_UNKNOWN.into();
-        let unset = text(&report, None, false);
+        let unset = shown(text(&report, None, false));
         let row = unset
             .lines()
             .find(|l| l.contains("Prompt cache TTL"))
@@ -12295,7 +12337,7 @@ mod tests {
             compact(row).contains(&compact("saves $10/mo + up to ~$12/mo ± $1.25")),
             "{unset}"
         );
-        let details = text(&report, None, true);
+        let details = shown(text(&report, None, true));
         let member = details
             .lines()
             .find(|l| {
@@ -12327,7 +12369,8 @@ mod tests {
         copy.base.profiles = vec!["other".into()];
         copy.base.owner = "/synthetic/other/settings.json:promptCacheTtl".into();
         report.checks.push(CheckResult::Ttl(copy));
-        let plain = text(&report, None, false);
+        let (_w, shown) = writable(&mut report);
+        let plain = shown(text(&report, None, false));
         let row = plain
             .lines()
             .find(|l| l.contains("Prompt cache TTL"))

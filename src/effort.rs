@@ -744,6 +744,7 @@ fn check(
             ],
             uncertainty,
             sources: SOURCES.map(String::from).into(),
+            upgrade: None,
         },
         harness: profile.harness,
         control: control.clone(),

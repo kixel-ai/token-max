@@ -32,7 +32,7 @@ use crate::safe::{
 };
 use crate::sessions::{Record, Sessions};
 use crate::tally::{Basis, Tally};
-use crate::totals::Counts;
+use crate::totals::{Checked, Counts};
 use crate::unreadable::ToolIds;
 
 /// Select a time window and local roots.
@@ -79,6 +79,8 @@ pub struct Reading {
     every_record: bool,
     /// A step the scan takes after reading, and when it began, while it runs.
     pub step: Mutex<Option<(&'static str, Instant)>>,
+    /// What the analysis has checked so far; None until it starts checking.
+    pub checked: Mutex<Option<Checked>>,
 }
 
 impl Reading {
@@ -285,32 +287,45 @@ fn usage_of(u: &Map<String, Value>, harness: Harness) -> Result<Usage, ScanError
 
 /// Keep known counters from an earlier snapshot of the same streamed part.
 fn fill(usage: &mut Usage, old: &Usage) {
-    let fields = [
-        (&mut usage.input, old.input),
-        (&mut usage.output, old.output),
-        (&mut usage.read, old.read),
-        (&mut usage.write, old.write),
-        (&mut usage.reasoning, old.reasoning),
-    ];
-    for (value, old) in fields {
-        if value.is_none() {
+    let keep = |value: &mut Option<i64>, old: Option<i64>| {
+        let filled = value.is_none() && old.is_some();
+        if filled {
             *value = old;
         }
+        filled
+    };
+    keep(&mut usage.input, old.input);
+    keep(&mut usage.output, old.output);
+    let read = keep(&mut usage.read, old.read);
+    let write = keep(&mut usage.write, old.write);
+    let reasoning = keep(&mut usage.reasoning, old.reasoning);
+    // A subset filled beside another snapshot's total may exceed it; it stays unknown then,
+    // as `usage_of` would refuse the merged counters.
+    if usage
+        .input
+        .is_some_and(|input| usage.read.unwrap_or(0) + usage.write.unwrap_or(0) > input)
+    {
+        if read {
+            usage.read = None;
+        }
+        if write {
+            usage.write = None;
+        }
+    }
+    if reasoning
+        && usage
+            .output
+            .is_some_and(|output| usage.reasoning.unwrap_or(0) > output)
+    {
+        usage.reasoning = None;
     }
     // A lifetime split belongs to its write total: one copied beside a different total
     // would price only part of the writes, so it stays unknown instead.
     if usage.write == old.write {
-        let splits = [
-            (&mut usage.write5m, old.write5m),
-            (&mut usage.write1h, old.write1h),
-            (&mut usage.write30m, old.write30m),
-            (&mut usage.write12h, old.write12h),
-        ];
-        for (value, old) in splits {
-            if value.is_none() {
-                *value = old;
-            }
-        }
+        keep(&mut usage.write5m, old.write5m);
+        keep(&mut usage.write1h, old.write1h);
+        keep(&mut usage.write30m, old.write30m);
+        keep(&mut usage.write12h, old.write12h);
     }
 }
 
@@ -2437,6 +2452,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         &mut profiles,
         &requests,
     )?;
+    crate::discovery::discover_latest_codex_controls(&options.discovery, &mut profiles, &requests)?;
     crate::discovery::discover_instructions(&mut profiles, &requests, since)?;
     // What T3 changed holds its own copy of the shared fields; share them again.
     for r in &mut requests {
@@ -2842,6 +2858,9 @@ mod tests {
             settled,
             crate::totals::Totals::new(&report, &[], None).counts()
         );
+        // The analysis counted every check it ran.
+        let checked = reading.checked.lock().unwrap().clone().unwrap();
+        assert!(checked.of > 0 && checked.done == checked.of, "{checked:?}");
         // Two Claude requests, one streamed in chunks, a subagent's in its parent's session,
         // Codex's once across its copy, and two legacy counters; the old one is before the
         // window.
@@ -2906,6 +2925,36 @@ mod tests {
         let mut unset = Usage::default();
         fill(&mut unset, &old);
         assert_eq!((unset.write, unset.write5m), (Some(100), Some(100)));
+    }
+
+    #[test]
+    fn a_filled_subset_never_exceeds_its_total() {
+        let old = Usage {
+            input: Some(300),
+            read: Some(200),
+            write: Some(0),
+            output: Some(9),
+            reasoning: Some(5),
+            ..Usage::default()
+        };
+        let mut new = Usage {
+            input: Some(100),
+            output: Some(2),
+            ..Usage::default()
+        };
+        fill(&mut new, &old);
+        assert_eq!((new.read, new.write, new.reasoning), (None, None, None));
+        let mut fits = Usage {
+            input: Some(250),
+            write: Some(50),
+            output: Some(5),
+            ..Usage::default()
+        };
+        fill(&mut fits, &old);
+        assert_eq!(
+            (fits.read, fits.write, fits.reasoning),
+            (Some(200), Some(50), Some(5))
+        );
     }
 
     #[test]

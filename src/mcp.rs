@@ -162,7 +162,43 @@ pub fn definitions(server: &str, control: &Control, profiles: &[&Profile]) -> Ve
     // A plugin's server and a claude.ai connector live in no file token-max reads, but a
     // declared key may spell the same prefix.
     let source = if let Some(rest) = server.strip_prefix("plugin_") {
-        let step = "uninstall or disable the plugin that provides it, with /plugin in Claude Code";
+        // Each profile, or launcher with its own plugins directory, installs its own plugins,
+        // and another may share this one, so the step names how to start the Claude Code whose
+        // settings turn the server off.
+        let places: IndexSet<String> = profiles
+            .iter()
+            .map(|p| {
+                let app = match &p.t3 {
+                    Some(t3) => format!("the Claude Code T3 instance {} starts", t3.instance),
+                    None => "Claude Code".into(),
+                };
+                match &p.plugins {
+                    // A relative cache depends on where Claude Code starts, which no step knows.
+                    Some(plugins)
+                        if plugins.dir.is_some()
+                            && plugins
+                                .cache_dir
+                                .as_deref()
+                                .is_none_or(|d| Path::new(d).is_absolute()) =>
+                    {
+                        format!(
+                            "in {app} with {}",
+                            crate::lsp::variables(
+                                plugins.named,
+                                &p.root,
+                                plugins.cache_dir.as_deref()
+                            )
+                        )
+                    }
+                    // A plugins directory token-max could not read, or a report that read none.
+                    _ => format!("in {app} for {}, started the way it usually is", p.root),
+                }
+            })
+            .collect();
+        let step = format!(
+            "uninstall or disable the plugin that provides it with /plugin {}",
+            places.into_iter().collect::<Vec<_>>().join(", and again ")
+        );
         let reason = "a plugin adds it";
         // Claude Code names it `plugin:<plugin>:<server>`, whose colons its tools carry as
         // `_`; with no other `_` in the prefix, neither name held one or a character read
@@ -174,12 +210,12 @@ pub fn definitions(server: &str, control: &Control, profiles: &[&Profile]) -> Ve
                 Definition::Deny(Deny {
                     name: format!("plugin:{plugin}:{name}"),
                     since: PLUGIN,
-                    step: step.into(),
+                    step: step.clone(),
                     reason: reason.into(),
                 })
             }
             _ => Definition::Manual {
-                step: step.into(),
+                step,
                 reason: format!("{reason}, and its tools' prefix does not spell its name"),
             },
         })
@@ -777,6 +813,64 @@ mod tests {
         assert_eq!(
             denied("plugin_my-tools_my-docs"),
             ("plugin:my-tools:my-docs".into(), PLUGIN)
+        );
+        // Each profile, or launcher with its own plugins directory, installs its own plugins,
+        // so the step says how to start each Claude Code the change covers.
+        let step = |profiles: &[&Profile]| match definitions(
+            "plugin_github_github",
+            &deny("plugin_github_github"),
+            profiles,
+        )
+        .as_slice()
+        {
+            [Definition::Deny(d)] => d.step.clone(),
+            all => panic!("{all:?}"),
+        };
+        // A report that read no plugins names the profile alone.
+        assert_eq!(
+            step(&[&p]),
+            format!(
+                "uninstall or disable the plugin that provides it with /plugin in Claude Code for {}, started the way it usually is",
+                p.root
+            )
+        );
+        let plugins = |named: bool, cache_dir: Option<&str>| crate::lsp::Plugins {
+            dir: Some("/synthetic/plugins".into()),
+            cache_dir: cache_dir.map(String::from),
+            named,
+            denied: None,
+            home: w.home.to_string_lossy().into_owned(),
+            user: Ok(Map::new()),
+            managed: Ok(Map::new()),
+        };
+        let mut native = p.clone();
+        native.plugins = Some(plugins(false, None));
+        // A launcher sharing the root with a plugins directory of its own.
+        let mut t3 = crate::test_support::make_t3_profile("claudeAgent", &p.root);
+        t3.claude_config = p.claude_config.clone();
+        // A report that read no plugins still tells the native and T3 launchers apart.
+        assert_eq!(
+            step(&[&p, &t3]),
+            format!(
+                "uninstall or disable the plugin that provides it with /plugin in Claude Code for {0}, started the way it usually is, and again in the Claude Code T3 instance claudeAgent starts for {0}, started the way it usually is",
+                p.root
+            )
+        );
+        // A relative cache depends on where Claude Code starts, so it is not named.
+        t3.plugins = Some(plugins(true, Some("./plugins")));
+        assert!(
+            step(&[&t3]).ends_with(&format!("for {}, started the way it usually is", p.root)),
+            "{}",
+            step(&[&t3])
+        );
+        let cache = w.home.join("t3-plugins").to_string_lossy().into_owned();
+        t3.plugins = Some(plugins(true, Some(&cache)));
+        assert_eq!(
+            step(&[&native, &t3, &native]),
+            format!(
+                "uninstall or disable the plugin that provides it with /plugin in Claude Code with CLAUDE_CONFIG_DIR and CLAUDE_CODE_PLUGIN_CACHE_DIR unset, and again in the Claude Code T3 instance claudeAgent starts with CLAUDE_CONFIG_DIR set to {} and CLAUDE_CODE_PLUGIN_CACHE_DIR set to {}",
+                p.root, cache
+            )
         );
         for server in ["plugin_a_b_c", "plugin_github", "plugin__x"] {
             assert!(

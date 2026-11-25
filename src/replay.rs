@@ -30,10 +30,10 @@ use crate::safe::{ScanError, identity, iso};
 use crate::scenarios::{
     AttemptScenario, ReplayOptions, ReplayTtls, ReplayedPart, cache_bucket, replay_parts,
 };
-use crate::version::claude_at_least;
+use crate::version::Needs;
 
 /// The v2.1 patch release that added TTL controls.
-const TTL_CONTROLS_PATCH: u64 = 242;
+const TTL_CONTROLS: Needs = Needs::claude(1, 242);
 
 const TTL_SOURCE: &str = "https://code.claude.com/docs/en/prompt-caching (2026-11-07)";
 
@@ -279,14 +279,21 @@ pub fn compaction_charges(scan: &mut Scan, catalog: &Catalog) -> Vec<CompactionC
                 }
             };
             claimed[i] = true;
+            // The request replay prices the linked request's own parts, so the TTL totals
+            // add only a summary it never recorded.
+            let unpriced = if cost.total_usd.is_none() && !has_compaction(r) {
+                cost.clone()
+            } else {
+                zero_cost()
+            };
             result.push(CompactionCharge {
                 event: e.id.clone(),
                 request: Some(r.id.clone()),
                 evidence: Evidence::Measured,
                 cost,
                 ttl_cost: PerTtl {
-                    five_minutes: zero_cost(),
-                    one_hour: zero_cost(),
+                    five_minutes: unpriced.clone(),
+                    one_hour: unpriced,
                 },
                 assumptions: assumptions
                     .into_iter()
@@ -601,13 +608,14 @@ fn ttl_check(
         .filter(|e| e.time >= since)
         .map(|e| &e.id)
         .collect();
-    let unmatched: Vec<&CompactionCharge> = summaries
+    // A linked charge's TTL cost is zero unless its summary went unrecorded.
+    let charged: Vec<&CompactionCharge> = summaries
         .iter()
-        .filter(|s| summary_ids.contains(&s.event) && s.request.is_none())
+        .filter(|s| summary_ids.contains(&s.event))
         .collect();
     let summary_cost = PerTtl {
-        five_minutes: add_costs(unmatched.iter().map(|s| &s.ttl_cost.five_minutes)),
-        one_hour: add_costs(unmatched.iter().map(|s| &s.ttl_cost.one_hour)),
+        five_minutes: add_costs(charged.iter().map(|s| &s.ttl_cost.five_minutes)),
+        one_hour: add_costs(charged.iter().map(|s| &s.ttl_cost.one_hour)),
     };
     let replayer = Replayer {
         input,
@@ -687,25 +695,18 @@ fn ttl_check(
         Some(_) => current.value,
     };
     // Each source's current client must honor the setting, since one file sets it for all.
-    fn latest<'r>(list: &[&'r Request], id: &String) -> Option<&'r str> {
-        list.iter()
-            .rev()
-            .find(|r| r.profiles.contains(id))
-            .and_then(|r| r.version.as_deref())
-    }
-    let versions: Vec<Option<&str>> = group
-        .ids
-        .iter()
-        .filter(|id| requests.iter().any(|r| r.profiles.contains(id)))
-        .map(|id| latest(&relevant, id).or_else(|| latest(requests, id)))
-        .collect();
-    let supported = !versions.is_empty()
-        && versions
-            .into_iter()
-            .all(|v| claude_at_least(v, 1, TTL_CONTROLS_PATCH));
+    let versions = crate::version::latest(&group.members, requests.iter().copied());
+    let upgrade = TTL_CONTROLS.unmet(versions.iter().copied());
+    let supported = !versions.is_empty() && upgrade.is_none();
     // An unset main TTL varies with billing, so pinning the replay's winner is a change either way.
     let pinnable = current.value.is_none() && current.reason == TTL_BILLING_UNKNOWN;
-    let applies = supported && (current.value.is_some() || pinnable);
+    let settable = current.value.is_some() || pinnable;
+    let applies = supported && settable;
+    // Advice names only the install an upgrade reaches, and none while an SDK app on the
+    // same file is also too old.
+    let upgrade = upgrade
+        .filter(|_| settable)
+        .and_then(|_| TTL_CONTROLS.advice(&group.members, requests.iter().copied()));
     let action = match recommended {
         Some(recommended) if applies => {
             if Some(recommended) != current.value {
@@ -831,6 +832,7 @@ fn ttl_check(
                 .chain(PRICE_SOURCES)
                 .map(String::from)
                 .collect(),
+            upgrade,
         },
         window_basis_kind: if input.since.is_some() {
             WindowBasisKind::Explicit
@@ -857,6 +859,47 @@ fn ttl_check(
             unlinked,
         },
     })
+}
+
+/// How many checks an analysis runs, each counted on a progress line once it lands.
+const CHECKS: usize = 11;
+
+/// What an analysis has checked so far, which a progress line watching it shows.
+struct Checking<'a> {
+    reading: Option<&'a crate::reader::Reading>,
+    checked: crate::totals::Checked,
+}
+
+impl Checking<'_> {
+    /// Show what was checked so far on the progress line, if one watches.
+    fn show(&self) {
+        if let Some(reading) = self.reading {
+            *reading
+                .checked
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(self.checked.clone());
+        }
+    }
+
+    /// One check done, its `results` in `scan` tallied.
+    fn land(&mut self, results: &[CheckResult], scan: &Scan) {
+        self.checked.done += 1;
+        if self.reading.is_some() {
+            self.checked.check(results, scan);
+        }
+        self.show();
+    }
+
+    /// The context check done, the changes its lines offer tallied: `scan`'s, in a report
+    /// generated at `now`.
+    fn land_context(&mut self, context: &[crate::model::ContextCost], scan: &Scan, now: Millis) {
+        self.checked.done += 1;
+        if self.reading.is_some() {
+            let found = crate::report::context_tally(context, scan, now);
+            self.checked.find(found);
+        }
+        self.show();
+    }
 }
 
 /// Inputs to one report.
@@ -960,6 +1003,11 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(counts);
     }
+    let mut checking = Checking {
+        reading,
+        checked: crate::totals::Checked::new(CHECKS, scan.defaults),
+    };
+    checking.show();
     let boundaries = CacheBoundaries::new(scan.cache_context.boundaries.iter().chain(&scan.events));
     let input = TtlInput {
         scan: &scan,
@@ -992,7 +1040,15 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     for check in &mut ttls {
         crate::t3::constrain(&mut check.base, &scan.profiles);
     }
-    let ttl_refs: Vec<&TtlCheck> = ttls.iter().collect();
+    let ttls: Vec<CheckResult> = ttls.into_iter().map(CheckResult::Ttl).collect();
+    checking.land(&ttls, &scan);
+    let ttl_refs: Vec<&TtlCheck> = ttls
+        .iter()
+        .filter_map(|c| match c {
+            CheckResult::Ttl(t) => Some(t),
+            _ => None,
+        })
+        .collect();
     let mut windows = compaction_checks(&CompactionOptions {
         scan: &scan,
         catalog,
@@ -1005,7 +1061,15 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     for check in &mut windows {
         crate::t3::constrain(&mut check.base, &scan.profiles);
     }
-    let window_refs: Vec<_> = windows.iter().collect();
+    let windows: Vec<CheckResult> = windows.into_iter().map(CheckResult::Compaction).collect();
+    checking.land(&windows, &scan);
+    let window_refs: Vec<_> = windows
+        .iter()
+        .filter_map(|c| match c {
+            CheckResult::Compaction(c) => Some(c),
+            _ => None,
+        })
+        .collect();
     let mut turn_ends = crate::turn_end::turn_end_checks(&crate::turn_end::TurnEndOptions {
         scan: &scan,
         catalog,
@@ -1018,7 +1082,9 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     for check in &mut turn_ends {
         crate::t3::constrain(&mut check.base, &scan.profiles);
     }
-    let idle = idle_checks(&IdleOptions {
+    let turn_ends: Vec<CheckResult> = turn_ends.into_iter().map(CheckResult::TurnEnd).collect();
+    checking.land(&turn_ends, &scan);
+    let idle: Vec<CheckResult> = idle_checks(&IdleOptions {
         scan: &scan,
         catalog,
         summaries: &compactions,
@@ -1027,9 +1093,19 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         windows: &window_refs,
         since,
         now,
-    });
-    let idle_refs: Vec<_> = idle.iter().collect();
-    let keepalive = keepalive_checks(&KeepaliveOptions {
+    })
+    .into_iter()
+    .map(CheckResult::Idle)
+    .collect();
+    checking.land(&idle, &scan);
+    let idle_refs: Vec<_> = idle
+        .iter()
+        .filter_map(|c| match c {
+            CheckResult::Idle(i) => Some(i),
+            _ => None,
+        })
+        .collect();
+    let keepalive: Vec<CheckResult> = keepalive_checks(&KeepaliveOptions {
         scan: &scan,
         catalog,
         ttls: &ttl_refs,
@@ -1039,26 +1115,39 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         estimates: &estimates,
         since,
         now,
-    });
-    let speed = speed_checks(&SpeedInput {
+    })
+    .into_iter()
+    .map(CheckResult::Keepalive)
+    .collect();
+    checking.land(&keepalive, &scan);
+    let speed: Vec<CheckResult> = speed_checks(&SpeedInput {
         scan: &scan,
         catalog,
         since,
         now,
-    });
-    let background = background_checks(&BackgroundInput {
+    })
+    .into_iter()
+    .map(CheckResult::Speed)
+    .collect();
+    checking.land(&speed, &scan);
+    let background: Vec<CheckResult> = background_checks(&BackgroundInput {
         scan: &scan,
         catalog,
         since,
         now,
         max_cost_per_use_usd,
-    });
+    })
+    .into_iter()
+    .map(CheckResult::Background)
+    .collect();
+    checking.land(&background, &scan);
+    // The Bash timeout cap is advice `vibes` gives, not a check.
     let bash = bash_caps(&BashInput {
         scan: &scan,
         catalog,
         since,
     });
-    let t3_idle = crate::idle::t3_idle_checks(&IdleOptions {
+    let t3_idle: Vec<CheckResult> = crate::idle::t3_idle_checks(&IdleOptions {
         scan: &scan,
         catalog,
         summaries: &compactions,
@@ -1067,7 +1156,11 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         windows: &window_refs,
         since,
         now,
-    });
+    })
+    .into_iter()
+    .map(CheckResult::T3Idle)
+    .collect();
+    checking.land(&t3_idle, &scan);
     let context = context_costs(&ContextInput {
         scan: &scan.exposure,
         requests: &scan.requests,
@@ -1076,33 +1169,37 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         snapshots: &scan.snapshots,
         max_cost_per_use_usd,
     });
-    let memory = memory_checks(&MemoryInput {
+    checking.land_context(&context, &scan, now);
+    let memory: Vec<CheckResult> = memory_checks(&MemoryInput {
         scan: &scan,
         context: &context,
         catalog,
         since,
         now,
         max_cost_per_use_usd,
-    });
-    let effort = crate::effort::effort_checks(&crate::effort::EffortInput {
+    })
+    .into_iter()
+    .map(CheckResult::Memory)
+    .collect();
+    checking.land(&memory, &scan);
+    let effort: Vec<CheckResult> = crate::effort::effort_checks(&crate::effort::EffortInput {
         scan: &scan,
         catalog,
         since,
         now,
-    });
-    let checks = ttls
-        .into_iter()
-        .map(CheckResult::Ttl)
-        .chain(windows.into_iter().map(CheckResult::Compaction))
-        .chain(turn_ends.into_iter().map(CheckResult::TurnEnd))
-        .chain(idle.into_iter().map(CheckResult::Idle))
-        .chain(t3_idle.into_iter().map(CheckResult::T3Idle))
-        .chain(keepalive.into_iter().map(CheckResult::Keepalive))
-        .chain(speed.into_iter().map(CheckResult::Speed))
-        .chain(background.into_iter().map(CheckResult::Background))
-        .chain(memory.into_iter().map(CheckResult::Memory))
-        .chain(effort.into_iter().map(CheckResult::Effort))
-        .collect();
+    })
+    .into_iter()
+    .map(CheckResult::Effort)
+    .collect();
+    checking.land(&effort, &scan);
+    debug_assert_eq!(checking.checked.done, CHECKS, "every check counted once");
+    drop((ttl_refs, window_refs, idle_refs));
+    let checks = [
+        ttls, windows, turn_ends, idle, t3_idle, keepalive, speed, background, memory, effort,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     let exposure = ExposureSummary {
         calibration: calibrate(&scan.exposure, &scan.requests),
         assumptions: [
@@ -1565,10 +1662,37 @@ mod tests {
         assert!(pinned.base.recommended.is_some());
         assert_eq!(pinned.base.savings_usd, None);
         s.profiles[0].ttl.main.reason = "prompt caching is disabled".into();
-        assert_eq!(check(&s, None, 100).base.action, Action::Advisory);
-        s.profiles[0].ttl.main.value = Some(H1);
         s.requests[0].version = Some("2.1.100".into());
-        assert_eq!(check(&s, None, 100).base.action, Action::Advisory);
+        let disabled = check(&s, None, 100);
+        assert_eq!(disabled.base.action, Action::Advisory);
+        // An upgrade alone would not let it apply.
+        assert_eq!(disabled.base.upgrade, None);
+        s.profiles[0].ttl.main.value = Some(H1);
+        // An Agent SDK app pins its own Claude Code, so its old version names no upgrade.
+        let sdk = check(&s, None, 100);
+        assert_eq!(sdk.base.action, Action::Advisory);
+        assert_eq!(sdk.base.upgrade, None);
+        s.requests[0].client = Some("cli".into());
+        let old = check(&s, None, 100);
+        assert_eq!(old.base.action, Action::Advisory);
+        let upgrade = old.base.upgrade.expect("only the version holds it back");
+        assert_eq!(
+            (upgrade.needs, upgrade.ran.as_deref()),
+            (TTL_CONTROLS, Some("2.1.100"))
+        );
+        // An SDK app on the same file just as old would still hold it back after the
+        // install's upgrade, so neither names one; a new enough one leaves the advice.
+        let mut sdk = s.requests[0].clone();
+        sdk.id = "sdk".into();
+        sdk.time -= 1;
+        sdk.client = Some("sdk-ts".into());
+        s.requests.insert(0, sdk);
+        let both = check(&s, None, 100);
+        assert_eq!(both.base.action, Action::Advisory);
+        assert_eq!(both.base.upgrade, None);
+        s.requests[0].version = Some("2.1.242".into());
+        assert!(check(&s, None, 100).base.upgrade.is_some());
+        s.requests.remove(0);
         s.requests[0].parts[0].model = Some("private-internal".into());
         let result = check(&s, None, 100);
         assert_eq!(result.base.recommended, None);
@@ -1835,6 +1959,8 @@ mod tests {
         let charges = compaction_charges(&mut scan, &prices());
         assert_eq!(scan.requests[0].parts[0].kind, PartKind::Advisor);
         assert_eq!(charges[0].cost.total_usd, None);
+        assert_eq!(charges[0].ttl_cost.five_minutes.total_usd, None);
+        assert_eq!(charges[0].ttl_cost.one_hour.total_usd, None);
     }
 
     #[test]

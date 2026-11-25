@@ -151,9 +151,9 @@ fn setting_start(text: &str) -> Option<usize> {
     }
 }
 
-/// A plain report's line whose heading starts with `head`: its verdict word, heading
-/// (name, value, figure and percent) with padding collapsed, and the evidence under it,
-/// which only details show. The evidence cards after the lines are not searched.
+/// A plain report's line whose heading starts with `head`, a section's member included: its
+/// verdict word, heading (name, value, figure and percent) with padding collapsed, and the
+/// evidence under it, which only details show. The evidence cards after the lines are not searched.
 fn report_line(text: &str, head: &str) -> (String, String, String) {
     // Every line but the header sits inside the report's two-cell margin.
     let lines: Vec<&str> = text
@@ -165,6 +165,11 @@ fn report_line(text: &str, head: &str) -> (String, String, String) {
         .iter()
         .enumerate()
         .find_map(|(i, line)| {
+            // A section's members sit two cells in under its row.
+            let (line, margin) = match line.strip_prefix("  ") {
+                Some(member) => (member, "           "),
+                None => (*line, "         "),
+            };
             let (word, _) = line.split_once(' ')?;
             if !["change", "consider", "keep", "unknown", "info"].contains(&word) {
                 return None;
@@ -176,7 +181,7 @@ fn report_line(text: &str, head: &str) -> (String, String, String) {
             let under = |n: usize| {
                 lines
                     .get(i + n)
-                    .and_then(|l| l.strip_prefix("         "))
+                    .and_then(|l| l.strip_prefix(margin))
                     .unwrap_or_default()
             };
             // Details open each line with what it does, then its evidence.
@@ -1596,6 +1601,20 @@ mod unix {
         ] {
             assert!(!stdout.contains(leak), "{leak}");
         }
+        // On a row wide enough, the line counts the checks and ends on the report's total.
+        let mut c = command(&w, &args(&base, &[]));
+        let (status, stdout, stderr) = tty(&mut c, 200);
+        assert_eq!(status, 1, "{stderr}");
+        let (_, together) = stdout
+            .split_once("Together, these changes save about ")
+            .or_else(|| stdout.split_once("Together, these changes save "))
+            .expect("a total under the headline");
+        let amount = format!("{}/mo", together.split("/mo").next().unwrap());
+        assert!(stderr.contains("checks  "), "{stderr}");
+        assert!(
+            stderr.contains(&format!("found {amount} more")),
+            "{amount}: {stderr}"
+        );
         let (status, stdout, stderr) = invoke(&[], &[("NO_COLOR", "1")]);
         assert_eq!(status, 1, "{stderr}");
         assert!(!stdout.contains('\x1b'));

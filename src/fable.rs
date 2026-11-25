@@ -1,6 +1,6 @@
 //! Each Claude profile's Fable spend per week, for comparing with a plan's documented Fable cap.
 
-use crate::model::{FableUse, FableWeek, Harness, Millis, Request, Scan, Usd};
+use crate::model::{FableUse, FableWeek, Harness, Millis, PartKind, Request, Scan, Usd};
 use crate::prices::{
     Catalog, Sample, Sum, add_costs, price_part, request_evidence, server_cost, unknown_cost,
 };
@@ -12,6 +12,13 @@ fn is_fable(model: &str) -> bool {
     model.contains("fable")
 }
 
+/// Whether a request made an advisor call that recorded no model, which may have run on Fable.
+fn unrecorded_advisor(r: &Request) -> bool {
+    r.parts
+        .iter()
+        .any(|p| p.kind == PartKind::Advisor && p.model.is_none())
+}
+
 /// What a request's Fable parts cost, or `None` when no part ran on Fable.
 ///
 /// An advisor iteration records its own model, so a request can mix Fable with another model;
@@ -19,7 +26,7 @@ fn is_fable(model: &str) -> bool {
 /// and are unknown when it recorded none.
 fn fable_cost(catalog: &Catalog, r: &Request) -> Option<crate::model::Cost> {
     let fable = |m: Option<&str>| m.is_some_and(is_fable);
-    let parts: Vec<_> = r
+    let mut parts: Vec<_> = r
         .parts
         .iter()
         .filter(|p| fable(p.model.as_deref()))
@@ -27,6 +34,13 @@ fn fable_cost(catalog: &Catalog, r: &Request) -> Option<crate::model::Cost> {
         .collect();
     if parts.is_empty() {
         return None;
+    }
+    // Claude Code pairs a Fable main model only with a Fable advisor, so beside Fable parts a
+    // call that recorded no model likely ran on Fable too, at rates not recorded.
+    if unrecorded_advisor(r) {
+        parts.push(unknown_cost(
+            "an advisor call recorded no model, and may have run on Fable",
+        ));
     }
     let server = match r.model.as_deref() {
         Some(m) if is_fable(m) => Some(server_cost(r)),
@@ -92,7 +106,7 @@ pub fn fable_use(
                     && r.profiles.iter().any(mine)
             }) {
                 let Some(cost) = fable_cost(catalog, r) else {
-                    if r.model.is_none() {
+                    if r.model.is_none() || unrecorded_advisor(r) {
                         unrecorded += 1;
                     }
                     continue;
@@ -316,7 +330,12 @@ mod tests {
         let mut part = opus.parts[0].clone();
         part.kind = crate::model::PartKind::Advisor;
         reverse.parts.push(part);
-        let uses = fable_use(&scan(vec![advised, reverse], None), &catalog, None, now);
+        let uses = fable_use(
+            &scan(vec![advised.clone(), reverse.clone()], None),
+            &catalog,
+            None,
+            now,
+        );
         assert_eq!((uses[0].requests, uses[0].unrecorded), (2, 0));
         let fable_part = price_part(&catalog, &fable, &fable.parts[0])
             .total_usd
@@ -325,6 +344,22 @@ mod tests {
         let total = uses[0].weeks.last().unwrap().cost.total_usd.unwrap();
         // Two Fable parts and one request's fees; neither Opus part.
         assert_eq!(total, fable_part + fable_part + fees);
+        // An advisor call that recorded no model may be Fable's under an Opus main model, and
+        // is Fable's, unpriced, under a Fable one.
+        let unrecorded = |mut r: crate::model::Request| {
+            r.parts.last_mut().unwrap().model = None;
+            r
+        };
+        let uses = fable_use(
+            &scan(vec![unrecorded(advised), unrecorded(reverse)], None),
+            &catalog,
+            None,
+            now,
+        );
+        assert_eq!((uses[0].requests, uses[0].unrecorded), (1, 1));
+        let week = uses[0].weeks.last().unwrap();
+        assert_eq!(week.cost.total_usd, None);
+        assert_eq!(week.cost.known_usd, fable_part + fees);
     }
 
     #[test]

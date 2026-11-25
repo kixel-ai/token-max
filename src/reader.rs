@@ -395,8 +395,11 @@ fn claude_parts(raw: &Value, model: Option<Text>) -> Result<Vec<BillingPart>, Sc
                 Some("message") => PartKind::Message,
                 _ => PartKind::Unknown,
             };
-            let mut p = part(iteration, model.clone(), kind)?;
             let advisor = kind == PartKind::Advisor;
+            // An advisor runs on its own model, never the executor's, so one it doesn't
+            // record stays unknown.
+            let fallback = if advisor { None } else { model.clone() };
+            let mut p = part(iteration, fallback, kind)?;
             if p.tier.is_none() && !advisor {
                 p.tier = text(member(u, "service_tier"));
             }
@@ -2047,10 +2050,14 @@ fn add(requests: &mut Requests, strings: &mut Interner, r: Request) -> Option<Te
             && end_time >= previous.end_time)
     {
         for (index, p) in parts.iter_mut().enumerate() {
+            // A later snapshot that omits a model the earlier one recorded is the same part.
             if let Some(old) = previous.parts.get(index)
                 && old.kind == p.kind
-                && old.model == p.model
+                && (old.model == p.model || p.model.is_none())
             {
+                if p.model.is_none() {
+                    p.model = old.model.clone();
+                }
                 fill(&mut p.usage, &old.usage);
                 if p.tier.is_none() {
                     p.tier = old.tier.clone();
@@ -2061,6 +2068,20 @@ fn add(requests: &mut Requests, strings: &mut Interner, r: Request) -> Option<Te
         previous.evidence = evidence;
         if incoming.server_tools.is_some() {
             meta.server_tools = incoming.server_tools.clone();
+        }
+    } else {
+        // An older snapshot read after a newer one still fills what the newer omitted: a
+        // model, a counter or a tier.
+        for (old, new) in previous.parts.iter_mut().zip(&parts) {
+            if old.kind == new.kind && (old.model == new.model || old.model.is_none()) {
+                if old.model.is_none() {
+                    old.model = new.model.clone();
+                }
+                fill(&mut old.usage, &new.usage);
+                if old.tier.is_none() {
+                    old.tier = new.tier.clone();
+                }
+            }
         }
     }
     let mut answered = None;
@@ -2290,8 +2311,10 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         if r.source.as_deref().is_some_and(|s| s.starts_with("agent:")) {
             r.agent = Agent::Subagent;
         }
+        // A compact request's own iterations are summary work; an advisor call it made is
+        // still the advisor's, billed at the advisor's model.
         if matches!(r.source.as_deref(), Some("compact" | "compaction")) {
-            for p in &mut r.parts {
+            for p in r.parts.iter_mut().filter(|p| p.kind != PartKind::Advisor) {
                 p.kind = PartKind::Compaction;
             }
         }
@@ -2844,6 +2867,68 @@ mod tests {
         let data = scan(&options(&w)).unwrap();
         assert_eq!(data.requests.len(), 1);
         assert_eq!(data.requests[0].effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn snapshots_of_one_request_keep_what_either_recorded_in_either_order() {
+        let w = Workspace::new();
+        // The earlier snapshot alone records the advisor's model, a cache counter and the
+        // tier; the later one alone records the final output.
+        let snapshot = |early: bool| {
+            let mut advisor = json!({"type": "advisor_message", "input_tokens": 9, "output_tokens": if early { 1 } else { 3 }, "cache_creation_input_tokens": 0});
+            let mut record = assistant("session", "message");
+            if early {
+                advisor["model"] = "claude-fable-5-2".into();
+                advisor["cache_read_input_tokens"] = 4.into();
+                record["message"]["usage"]["service_tier"] = "standard".into();
+            }
+            record["message"]["usage"]["iterations"] = json!([
+                {"type": "message", "input_tokens": 1, "output_tokens": 2, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0},
+                advisor,
+            ]);
+            record
+        };
+        // In either order, as copies of a transcript may be read.
+        for records in [
+            [snapshot(true), snapshot(false)],
+            [snapshot(false), snapshot(true)],
+        ] {
+            write(
+                w.claude.join("projects/project/main.jsonl"),
+                jsonl(&records),
+            );
+            let data = scan(&options(&w)).unwrap();
+            assert_eq!(data.requests.len(), 1);
+            let parts = &data.requests[0].parts;
+            assert_eq!(parts[0].tier.as_deref(), Some("standard"));
+            let advisor = &parts[1];
+            assert_eq!(
+                (
+                    advisor.model.as_deref(),
+                    advisor.usage.output,
+                    advisor.usage.read
+                ),
+                (Some("claude-fable-5-2"), Some(3), Some(4))
+            );
+        }
+    }
+
+    #[test]
+    fn a_compact_request_keeps_its_advisor_call() {
+        let w = Workspace::new();
+        let mut record = assistant("session", "message");
+        record["querySource"] = "compact".into();
+        record["message"]["usage"]["iterations"] = json!([
+            {"type": "message", "input_tokens": 1, "output_tokens": 2},
+            {"type": "advisor_message", "model": "claude-fable-5-2", "input_tokens": 9, "output_tokens": 1},
+        ]);
+        write(
+            w.claude.join("projects/project/main.jsonl"),
+            jsonl(&[record]),
+        );
+        let data = scan(&options(&w)).unwrap();
+        let kinds: Vec<_> = data.requests[0].parts.iter().map(|p| p.kind).collect();
+        assert_eq!(kinds, [PartKind::Compaction, PartKind::Advisor]);
     }
 
     #[test]
@@ -3457,6 +3542,30 @@ mod tests {
         let result = scan(&options(&w)).unwrap();
         assert_eq!(result.requests.len(), 1);
         assert_eq!(result.requests[0].locations.len(), 2);
+    }
+
+    #[test]
+    fn an_advisor_iteration_keeps_only_its_own_model() {
+        let usage = |model: Option<&str>| {
+            let mut advisor = serde_json::json!({"type": "advisor_message", "input_tokens": 9, "output_tokens": 1});
+            if let Some(m) = model {
+                advisor["model"] = m.into();
+            }
+            serde_json::json!({
+                "input_tokens": 5,
+                "output_tokens": 1,
+                "service_tier": "standard",
+                "iterations": [{"type": "message", "input_tokens": 5, "output_tokens": 1}, advisor],
+            })
+        };
+        let executor = Some(Text::from("claude-sonnet-5-5"));
+        let parts = claude_parts(&usage(Some("claude-opus-5-5")), executor.clone()).unwrap();
+        assert_eq!(parts[0].model.as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(parts[1].model.as_deref(), Some("claude-opus-5-5"));
+        // Nor the executor's tier: Priority Tier is committed per model.
+        assert_eq!(parts[1].tier, None);
+        let parts = claude_parts(&usage(None), executor).unwrap();
+        assert_eq!(parts[1].model, None);
     }
 
     #[test]

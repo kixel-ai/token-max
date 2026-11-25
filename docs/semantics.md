@@ -59,7 +59,8 @@ advisor iterations. An absent or empty iteration list uses the top-level usage;
 an empty list is a valid older client shape, not zero spend. When nonempty
 iterations exist, pricing uses that list alone, with
 each iteration's model. Advisor service tier is independent; an omitted tier stays
-unknown. Unsupported iteration kinds stay unpriced. These semantics come from
+unknown unless every executor iteration on the request is standard, as
+[Advisor model](#advisor-model) explains. Unsupported iteration kinds stay unpriced. These semantics come from
 [threshold compaction](https://platform.claude.com/docs/en/build-with-claude/compaction-threshold)
 and [advisor billing](https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool),
 checked 2026-11-07. The metadata-only local sample had 4,180 usage records whose
@@ -1470,8 +1471,9 @@ profile's first Fable request are dropped, so a long history adds no empty
 weeks. A model is Fable when its recorded ID contains `fable`. A request counts
 when any of its parts ran on Fable, such as an advisor iteration under another
 main model, and only those parts are priced; server-tool fees go with the
-request's own model, and are unknown when it recorded none. A request that recorded no model is counted apart, as
-possibly Fable. A request shared
+request's own model, and are unknown when it recorded none. A request that recorded no model, or an advisor
+iteration that recorded none, is counted apart, as possibly Fable; beside a Fable part, such an advisor
+iteration leaves its request unpriced, extrapolated like any other. A request shared
 by profiles of several files, as when two homes read the same transcripts,
 counts in each, since each line describes one file's sessions; the line says
 how many were shared, since whose they were is unknown.
@@ -1505,10 +1507,24 @@ Google Cloud (Anthropic managed) don't need. T3 instances have none.
 
 `vibes` gives one card to each group of profiles that share the
 `advisorModel` owner, the resolved main-session default and the setting that
-names it, and what stops the advisor. `doctor` has no advisor line. The
-suggested advisor is `advisor::pick`: Opus above Haiku 4.5 or later and
-Sonnet 4.6 or later, Fable above Opus 4.6 or later, none above Fable, by the
-main model's canonical ID.
+names it, and what stops the advisor, and `Report.advisor` one entry to each
+such line, then to the lines below. A request counts when it recorded an `advisor_message` iteration,
+each iteration is a call, and only those iterations are priced, at the model
+the iteration names (one that names none stays unknown, never the
+executor's). An iteration records no service tier, so it is priced at
+standard when every executor iteration of its request is, since Priority
+Tier is committed per model; otherwise it is unknown. Unpriced requests are
+extrapolated from the priced ones, never below what each is known to cost.
+A T3 instance's requests count on the first line of the settings file it
+shares, since its threads read that file's `advisorModel`; instances that share
+no line's file get a line per settings file of their own, with no card. A
+request naming profiles on several lines counts on none of them but once on a
+shared entry for that set of lines, whose profiles are theirs together, and
+each of those lines counts it as shared. A compact request's `advisor_message`
+iterations stay advisor calls rather than summary work. The suggested
+advisor is `advisor::pick`: Opus above Haiku 4.5 or later and Sonnet 4.6 or
+later, Fable above Opus 4.6 or later, none above Fable, by the main model's
+canonical ID.
 
 ## Messages from other sessions
 

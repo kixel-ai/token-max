@@ -1,10 +1,15 @@
-//! Claude Code's advisor: the `advisorModel` set now, what stops it loading, and the advisor
-//! `vibes` suggests one rank above the main-session default.
+//! Claude Code's advisor: the `advisorModel` set now, what stops it loading, what its recorded
+//! calls cost, and the advisor `vibes` suggests one rank above the main-session default.
 
 use serde_json::Value;
 
+use crate::collections::IndexMap;
 use crate::controls::{Env, SettingsScope, env_flag, js_string, scoped_environment};
-use crate::model::{AdvisorControl, Profile};
+use crate::model::{
+    AdvisorControl, AdvisorLine, AdvisorUse, Cost, Estimate, Harness, Millis, PartKind, Profile,
+    Request, Scan, Share,
+};
+use crate::prices::{Catalog, Sample, add_costs, price_part, request_evidence};
 
 /// Claude Code's page on the advisor tool.
 pub(crate) const DOCS: &str = "https://code.claude.com/docs/en/advisor";
@@ -114,8 +119,8 @@ pub fn control(scopes: &[SettingsScope], env: &Env, user_file: &str) -> AdvisorC
     }
 }
 
-/// What puts profiles on one advisor card: the `advisorModel` owner, and the main-session
-/// default and control the card reads. None without an advisor control.
+/// What puts a profile on an advisor line: the `advisorModel` owner, and the main-session
+/// default and control the line's card reads. None without an advisor control.
 pub(crate) fn owner(p: &Profile) -> Option<String> {
     let a = p.advisor.as_ref()?;
     let main = p
@@ -218,6 +223,162 @@ pub(crate) fn accepts(main: &str, advisor: &str) -> Option<bool> {
     Some(min.is_some_and(|min| at >= min))
 }
 
+/// The advisor calls of each line of Claude profiles that share an advisor owner, in the
+/// window from `since`, else from the first request: one line per card, then one per group
+/// of T3 instances that read no card's settings file, then one per set of lines that share
+/// requests.
+pub fn advisor_use(scan: &Scan, catalog: &Catalog, since: Option<Millis>) -> Vec<AdvisorUse> {
+    let advised = scan.profiles.iter().filter(|p| p.advisor.is_some());
+    // A T3 instance has no card of its own, but its threads read the same settings file, so
+    // its calls count on the first line of that file.
+    let file = |p: &Profile| crate::rows::canonical(&format!("{}:", p.settings_file));
+    let mut t3: Vec<&Profile> = scan
+        .profiles
+        .iter()
+        .filter(|p| p.harness == Harness::Claude && p.t3.is_some())
+        .collect();
+    // Each line's shown profiles, whose calls it counts, and its kind.
+    let mut lines: Vec<(Vec<String>, Vec<String>, AdvisorLine)> = vec![];
+    let mut owners: Vec<String> = vec![];
+    for line in crate::rows::groups(advised, |p| owner(p).expect("filtered on an advisor")) {
+        let files: Vec<String> = line.members.iter().map(|m| file(m)).collect();
+        let mut ids = line.ids.clone();
+        t3.retain(|p| {
+            let mine = files.contains(&file(p));
+            if mine {
+                ids.push(p.id.clone());
+            }
+            !mine
+        });
+        let control = line.lead.advisor.as_ref().expect("filtered on an advisor");
+        owners.push(control.owner.clone());
+        lines.push((line.ids, ids, AdvisorLine::Settings));
+    }
+    // The rest read a file no card does, as in a scan of only `--t3-dir`.
+    for line in crate::rows::groups(t3, |p| format!("{}:", p.settings_file)) {
+        let owner = format!("{}:{KEY}", line.lead.settings_file);
+        owners.push(owner.clone());
+        lines.push((line.ids.clone(), line.ids, AdvisorLine::T3 { owner }));
+    }
+    let mut tallies: Vec<Tally> = lines.iter().map(|_| Tally::default()).collect();
+    let mut shared: Vec<u64> = vec![0; lines.len()];
+    // Requests on several lines, by the lines they name.
+    let mut overlaps: IndexMap<Vec<usize>, Tally> = IndexMap::default();
+    for r in scan.requests.iter().filter(|r| {
+        r.harness == Harness::Claude
+            && since.is_none_or(|s| r.time >= s)
+            && r.parts.iter().any(|p| p.kind == PartKind::Advisor)
+    }) {
+        let on: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, ids, _))| r.profiles.iter().any(|p| ids.contains(p)))
+            .map(|(i, _)| i)
+            .collect();
+        match on.as_slice() {
+            [] => {}
+            [i] => tallies[*i].add(catalog, r),
+            _ => {
+                for &i in &on {
+                    shared[i] += 1;
+                }
+                overlaps.entry(on).or_default().add(catalog, r);
+            }
+        }
+    }
+    let shown: Vec<Vec<String>> = lines
+        .iter()
+        .map(|(profiles, ..)| profiles.clone())
+        .collect();
+    let mut result: Vec<AdvisorUse> = lines
+        .into_iter()
+        .zip(tallies)
+        .zip(&shared)
+        .filter(|(((_, _, line), tally), shared)| {
+            *line == AdvisorLine::Settings || tally.requests > 0 || **shared > 0
+        })
+        .map(|(((profiles, _, line), tally), &shared)| tally.finish(profiles, line, shared))
+        .collect();
+    for (on, tally) in overlaps {
+        let mut profiles: Vec<String> = vec![];
+        for &i in &on {
+            for id in &shown[i] {
+                if !profiles.contains(id) {
+                    profiles.push(id.clone());
+                }
+            }
+        }
+        let owners = on.iter().map(|&i| owners[i].clone()).collect();
+        result.push(tally.finish(profiles, AdvisorLine::Shared { owners }, 0));
+    }
+    result
+}
+
+/// One line's advisor requests as they are read.
+#[derive(Default)]
+struct Tally {
+    requests: u64,
+    calls: u64,
+    models: IndexMap<String, u64>,
+    sample: Sample,
+    /// What each partly priced request is known to cost, which its extrapolated share never
+    /// falls below.
+    floors: Vec<f64>,
+    total: Vec<Cost>,
+}
+
+impl Tally {
+    /// Count `r`'s advisor iterations and price them alone, at the model each names.
+    fn add(&mut self, catalog: &Catalog, r: &Request) {
+        let parts: Vec<_> = r
+            .parts
+            .iter()
+            .filter(|p| p.kind == PartKind::Advisor)
+            .collect();
+        self.requests += 1;
+        self.calls += parts.len() as u64;
+        for p in &parts {
+            let model = p.model.as_deref().unwrap_or("an unrecorded model");
+            *self.models.entry(model.to_string()).or_default() += 1;
+        }
+        let costs: Vec<_> = parts.iter().map(|p| price_part(catalog, r, p)).collect();
+        let cost = request_evidence(r, add_costs(&costs));
+        if cost.total_usd.is_none() {
+            self.floors.push(cost.known_usd.to_f64());
+        }
+        self.sample.add_cost(&cost);
+        self.total.push(cost);
+    }
+
+    fn finish(self, profiles: Vec<String>, line: AdvisorLine, shared: u64) -> AdvisorUse {
+        let mut models: Vec<Share> = self
+            .models
+            .into_iter()
+            .map(|(name, count)| Share { name, count })
+            .collect();
+        models.sort_by_key(|m| std::cmp::Reverse(m.count));
+        let requests = self.requests;
+        let floors = self.floors;
+        AdvisorUse {
+            profiles,
+            line,
+            requests,
+            calls: self.calls,
+            models,
+            cost: add_costs(&self.total),
+            estimate: self.sample.estimate(requests).map(|e| {
+                let mean = e.usd / requests as f64;
+                let raise: f64 = floors.iter().map(|&k| (k - mean).max(0.0)).sum();
+                Estimate {
+                    usd: e.usd + raise,
+                    ..e
+                }
+            }),
+            shared,
+        }
+    }
+}
+
 /// What `vibes` suggests as the advisor for a main model, by Claude Code's ranking.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Pick {
@@ -249,6 +410,8 @@ pub(crate) fn pick(main: &str) -> Pick {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{BillingPart, EffortControl};
+    use crate::test_support::{make_profile, make_request, prices};
     use serde_json::{Map, json};
 
     fn config(value: Value) -> Map<String, Value> {
@@ -481,5 +644,247 @@ mod tests {
         ] {
             assert_eq!(pick(main), expected, "{main}");
         }
+    }
+
+    #[test]
+    fn only_advisor_iterations_count_and_profiles_with_another_main_default_split() {
+        let advised = |id: &str, main: &str| {
+            let mut p = make_profile(id, "/synthetic/claude");
+            p.settings_file = "/synthetic/claude/settings.json".into();
+            p.advisor = Some(AdvisorControl {
+                model: Some("opus".into()),
+                owner: "/synthetic/claude/settings.json:advisorModel".into(),
+                blocked: None,
+                gateway: None,
+            });
+            p.effort = Some(EffortControl {
+                model: Some(main.into()),
+                model_owner: "/synthetic/claude/settings.json:model".into(),
+                level: None,
+                owner: String::new(),
+                effective: None,
+                lowered: None,
+                caps: vec![],
+                default: None,
+                unresolved: None,
+                picked: None,
+                provider: None,
+            });
+            p
+        };
+        let request = |profile: &str, advisors: usize| {
+            let mut r = make_request();
+            r.profiles = vec![profile.into()].into();
+            for _ in 0..advisors {
+                r.parts.push(BillingPart {
+                    kind: PartKind::Advisor,
+                    model: Some("claude-opus-5-5".into()),
+                    ..r.parts[0].clone()
+                });
+            }
+            r
+        };
+        let mut scan = Scan {
+            snapshot_started_at: String::new(),
+            snapshot_finished_at: String::new(),
+            since: None,
+            roots: vec![],
+            profiles: vec![
+                advised("a", "claude-sonnet-5-5"),
+                advised("b", "claude-haiku-5-5"),
+            ],
+            snapshots: vec![],
+            requests: vec![request("a", 2), request("a", 0), request("b", 1)],
+            events: vec![],
+            exposure: Default::default(),
+            cache_context: Default::default(),
+            coverage: Default::default(),
+            subagents: vec![],
+            t3: vec![],
+            sessions: Default::default(),
+            defaults: false,
+        };
+        let catalog = prices();
+        let lines = advisor_use(&scan, &catalog, None);
+        assert_eq!(lines.len(), 2);
+        let a = &lines[0];
+        assert_eq!((a.requests, a.calls), (1, 2));
+        assert_eq!(
+            a.models,
+            [Share {
+                name: "claude-opus-5-5".into(),
+                count: 2
+            }]
+        );
+        // The two advisor iterations alone, not the executor's.
+        let r = request("a", 2);
+        let advisor = price_part(&catalog, &r, &r.parts[1]).total_usd.unwrap();
+        assert_eq!(a.estimate.unwrap().usd, (advisor + advisor).to_f64());
+        assert_eq!(lines[1].calls, 1);
+        // The same main default shares one line.
+        scan.profiles[1] = advised("b", "claude-sonnet-5-5");
+        let lines = advisor_use(&scan, &catalog, None);
+        assert_eq!(lines.len(), 1);
+        assert_eq!((lines[0].requests, lines[0].calls), (2, 3));
+        // A T3 instance on the same settings file has no line, but its calls count on this one.
+        let mut t3 = crate::test_support::make_t3_profile("t3", "/synthetic/claude");
+        t3.settings_file = "/synthetic/claude/settings.json".into();
+        scan.profiles.push(t3);
+        scan.requests.push(request("t3", 1));
+        let lines = advisor_use(&scan, &catalog, None);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].profiles, ["a", "b"]);
+        assert_eq!((lines[0].requests, lines[0].calls), (3, 4));
+        // Matched against every member's settings file, not only the lead's.
+        scan.profiles[1].settings_file = "/synthetic/other/settings.json".into();
+        scan.profiles[2].settings_file = "/synthetic/other/settings.json".into();
+        let lines = advisor_use(&scan, &catalog, None);
+        assert_eq!(lines.len(), 1);
+        assert_eq!((lines[0].requests, lines[0].calls), (3, 4));
+        // An instance whose settings file no native line reads, as in a scan of only
+        // `--t3-dir`, gets a line of its own rather than losing its calls.
+        scan.profiles.drain(..2);
+        let lines = advisor_use(&scan, &catalog, None);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].profiles, ["t3"]);
+        assert_eq!(
+            lines[0].line,
+            AdvisorLine::T3 {
+                owner: "/synthetic/other/settings.json:advisorModel".into()
+            }
+        );
+        assert_eq!((lines[0].requests, lines[0].calls), (1, 1));
+        // With no calls, it has none.
+        scan.requests.clear();
+        assert!(advisor_use(&scan, &catalog, None).is_empty());
+    }
+
+    #[test]
+    fn a_request_on_two_lines_counts_once_on_a_shared_line() {
+        let advised = |id: &str, root: &str| {
+            let mut p = make_profile(id, root);
+            p.settings_file = format!("{root}/settings.json");
+            p.advisor = Some(AdvisorControl {
+                model: None,
+                owner: format!("{root}/settings.json:advisorModel"),
+                blocked: None,
+                gateway: None,
+            });
+            p
+        };
+        let request = |profiles: &[&str]| {
+            let mut r = make_request();
+            r.profiles = profiles
+                .iter()
+                .map(|&p| p.into())
+                .collect::<Vec<_>>()
+                .into();
+            r.parts.push(BillingPart {
+                kind: PartKind::Advisor,
+                model: Some("claude-opus-5-5".into()),
+                ..r.parts[0].clone()
+            });
+            r
+        };
+        let scan = Scan {
+            snapshot_started_at: String::new(),
+            snapshot_finished_at: String::new(),
+            since: None,
+            roots: vec![],
+            profiles: vec![advised("a", "/synthetic/a"), advised("b", "/synthetic/b")],
+            snapshots: vec![],
+            // Two config roots read one projects directory: both name the second request.
+            requests: vec![request(&["a"]), request(&["a", "b"]), request(&["b"])],
+            events: vec![],
+            exposure: Default::default(),
+            cache_context: Default::default(),
+            coverage: Default::default(),
+            subagents: vec![],
+            t3: vec![],
+            sessions: Default::default(),
+            defaults: false,
+        };
+        let catalog = prices();
+        let lines = advisor_use(&scan, &catalog, None);
+        let counts: Vec<_> = lines
+            .iter()
+            .map(|u| (u.profiles.clone(), u.requests, u.calls, u.shared))
+            .collect();
+        assert_eq!(
+            counts,
+            [
+                (vec!["a".to_string()], 1, 1, 1),
+                (vec!["b".to_string()], 1, 1, 1),
+                (vec!["a".to_string(), "b".to_string()], 1, 1, 0),
+            ]
+        );
+        assert_eq!(
+            lines[2].line,
+            AdvisorLine::Shared {
+                owners: vec![
+                    "/synthetic/a/settings.json:advisorModel".into(),
+                    "/synthetic/b/settings.json:advisorModel".into()
+                ]
+            }
+        );
+        // Priced once in all: the three lines sum to the three requests.
+        let one = lines[0].estimate.unwrap().usd;
+        let total: f64 = lines.iter().map(|u| u.estimate.unwrap().usd).sum();
+        assert!((total - 3.0 * one).abs() < 1e-9, "{total} {one}");
+    }
+
+    #[test]
+    fn a_partly_priced_call_never_extrapolates_below_its_known_charge() {
+        let mut p = make_profile("a", "/synthetic/claude");
+        p.advisor = Some(AdvisorControl {
+            model: None,
+            owner: "/synthetic/claude/settings.json:advisorModel".into(),
+            blocked: None,
+            gateway: None,
+        });
+        let catalog = prices();
+        let advisor = |input: i64, output: Option<i64>| {
+            let mut r = make_request();
+            r.profiles = vec!["a".into()].into();
+            let mut part = r.parts[0].clone();
+            part.kind = PartKind::Advisor;
+            part.usage.input = Some(input);
+            part.usage.output = output;
+            r.parts.push(part);
+            r
+        };
+        // A small call priced in full, and a large one whose output is not recorded.
+        let small = advisor(10, Some(1));
+        let large = advisor(10_000_000, None);
+        let known = price_part(&catalog, &large, &large.parts[1]);
+        assert_eq!(known.total_usd, None);
+        let floor = known.known_usd.to_f64();
+        let priced = price_part(&catalog, &small, &small.parts[1])
+            .total_usd
+            .unwrap()
+            .to_f64();
+        assert!(floor > priced);
+        let scan = Scan {
+            snapshot_started_at: String::new(),
+            snapshot_finished_at: String::new(),
+            since: None,
+            roots: vec![],
+            profiles: vec![p],
+            snapshots: vec![],
+            requests: vec![small, large],
+            events: vec![],
+            exposure: Default::default(),
+            cache_context: Default::default(),
+            coverage: Default::default(),
+            subagents: vec![],
+            t3: vec![],
+            sessions: Default::default(),
+            defaults: false,
+        };
+        let estimate = advisor_use(&scan, &catalog, None)[0].estimate.unwrap();
+        assert!(
+            (estimate.usd - (priced + floor)).abs() < 1e-9,
+            "{estimate:?}"
+        );
     }
 }

@@ -121,6 +121,21 @@ fn service_tier<'a>(r: &'a Request, p: &'a BillingPart) -> Result<&'a str, &'sta
     if let Some(tier) = p.tier.as_deref() {
         return Ok(tier);
     }
+    // An advisor call records no tier of its own, and Priority Tier needs a commitment on
+    // each model, so under an executor at standard the call is too, barring a commitment on
+    // the advisor model alone.
+    if p.kind == PartKind::Advisor {
+        let mut executor = r
+            .parts
+            .iter()
+            .filter(|e| e.kind == PartKind::Message)
+            .map(|e| e.tier.as_deref().map(tier_name));
+        let first = executor.next().flatten();
+        return match first {
+            Some("default") if executor.all(|t| t == first) => Ok("standard"),
+            _ => Err("an advisor call's service tier is not recorded"),
+        };
+    }
     if r.harness != Harness::Codex
         || r.provider.as_deref() != Some("openai")
         || r.api != Api::Responses
@@ -1241,6 +1256,11 @@ fn selected_rates(
     }
     let mut factor = 1.0;
     let tier = service_tier(r, p)?;
+    if p.kind == PartKind::Advisor && p.tier.is_none() {
+        assumptions.push(
+            "an advisor call records no service tier; priced at its executor's standard tier, which a Priority Tier commitment on the advisor model alone would change".into(),
+        );
+    }
     if conditional_tier(r, p) {
         assumptions.push(format!(
             "conditional {tier}-rate OpenAI API equivalent: effective service tier is unrecorded; requested tier/speed is a scenario, not billing evidence; omitted/auto can inherit nonstandard project defaults; current config is not historical evidence; not an invoice"
@@ -1634,6 +1654,45 @@ mod tests {
     use crate::model::{Text, Usage};
     use crate::test_support::{ClaudeUsage, claude_usage, make_request, prices};
     use serde_json::json;
+
+    #[test]
+    fn an_advisor_call_takes_a_standard_executors_tier_and_no_other() {
+        let catalog = prices();
+        let mut r = make_request();
+        let mut advisor = r.parts[0].clone();
+        advisor.kind = PartKind::Advisor;
+        advisor.tier = None;
+        advisor.speed = None;
+        r.parts.push(advisor.clone());
+        let mut recorded = advisor.clone();
+        recorded.tier = Some("standard".into());
+        let unrecorded = price_part(&catalog, &r, &advisor);
+        assert_eq!(
+            unrecorded.total_usd,
+            price_part(&catalog, &r, &recorded).total_usd
+        );
+        assert!(unrecorded.total_usd.is_some());
+        assert!(
+            unrecorded
+                .assumptions
+                .iter()
+                .any(|a| a.starts_with("an advisor call records no service tier"))
+        );
+        // A priority executor, or executors that disagree, leave the advisor's tier unknown.
+        for tiers in [&["priority"][..], &["standard", "priority"]] {
+            let mut r = make_request();
+            r.parts = tiers
+                .iter()
+                .map(|t| BillingPart {
+                    tier: Some((*t).into()),
+                    ..r.parts[0].clone()
+                })
+                .chain([advisor.clone()])
+                .collect();
+            let last = r.parts.last().unwrap();
+            assert_eq!(price_part(&catalog, &r, last).total_usd, None, "{tiers:?}");
+        }
+    }
 
     /// Recorded Codex usage, normalized as the reader does.
     fn codex(raw: Value) -> Usage {

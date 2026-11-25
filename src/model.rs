@@ -934,6 +934,43 @@ pub struct AdvisorControl {
     pub gateway: Option<String>,
 }
 
+/// What a line of Claude profiles' advisor calls cost over the window.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdvisorUse {
+    pub profiles: Vec<String>,
+    /// Whose calls the line counts.
+    pub line: AdvisorLine,
+    /// Requests that called the advisor.
+    pub requests: u64,
+    /// Advisor calls, one per advisor iteration a request recorded.
+    pub calls: u64,
+    /// The advisor models the calls ran on, most calls first.
+    pub models: Vec<Share>,
+    /// What the calls are known to cost, with what could not be priced and what was assumed.
+    pub cost: Cost,
+    /// What the calls cost, extrapolated from the priced requests to every one; None when
+    /// none was priced.
+    pub estimate: Option<Estimate>,
+    /// Requests that called the advisor and also name a profile on another line, counted once
+    /// on a shared line instead of here.
+    pub shared: u64,
+}
+
+/// Whose advisor calls an [`AdvisorUse`] counts.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AdvisorLine {
+    /// Native profiles sharing an advisor card, with the T3 instances that read their
+    /// settings file.
+    Settings,
+    /// T3 instances that read no native line's settings file; `owner` is that file's
+    /// `advisorModel`.
+    T3 { owner: String },
+    /// Requests naming profiles on several lines, as when two config roots read one
+    /// `projects/` directory, so whose they were is unknown; `owners` are those lines'
+    /// `advisorModel` settings.
+    Shared { owners: Vec<String> },
+}
+
 /// A profile's main-session default reasoning effort, the setting that decides it and the
 /// level its session runs at.
 #[derive(Clone, Debug, PartialEq)]
@@ -3310,7 +3347,8 @@ pub struct FableUse {
     pub profiles: Vec<String>,
     /// Fable requests in the window.
     pub requests: u64,
-    /// Requests whose model was not recorded, which may have run on Fable.
+    /// Requests with no Fable part whose model, or an advisor call's, was not recorded, which
+    /// may have run on Fable.
     pub unrecorded: u64,
     /// Fable requests also attributed to another eligible profile, so whose they were is unknown.
     pub shared: u64,
@@ -3381,6 +3419,8 @@ pub struct Report {
     pub checks: Vec<CheckResult>,
     /// Each foreground Bash timeout cap and its long waits, which `vibes` shows as advice.
     pub bash: Vec<BashCap>,
+    /// Each Claude `advisorModel` line's advisor calls, as evidence beside `vibes`' card.
+    pub advisor: Vec<AdvisorUse>,
     /// What the report assumes beyond the measurements.
     pub assumptions: Vec<String>,
 }

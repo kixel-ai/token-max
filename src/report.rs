@@ -5074,24 +5074,30 @@ fn kind_row(members: &[Row], out: &Out<'_>) -> Row {
         .any(|r| r.cost.is_none() && matches!(r.amount, Some(("costs", _))));
     // Lines of one name, such as one setting in two profiles, can price the same shared
     // requests, so only the largest of them counts, as a lower bound; different features add.
-    let mut named: IndexMap<&str, Vec<(f64, Option<Margin>, bool)>> = IndexMap::default();
+    let mut named: IndexMap<&str, Vec<(Estimate, bool)>> = IndexMap::default();
     for r in members {
         let figure = match (r.cost, r.saving) {
-            (Some((e, lower)), _) => (e.usd, e.margin, lower),
-            (None, Some(usd)) => (usd, r.margin, false),
+            (Some(cost), _) => cost,
+            (None, Some(usd)) => (
+                Estimate {
+                    usd,
+                    margin: r.margin,
+                },
+                false,
+            ),
             (None, None) => continue,
         };
         named.entry(r.name.as_str()).or_default().push(figure);
     }
     let (mut usd, mut margin, mut at_least) = (0.0, None, unknown);
     for figures in named.values() {
-        let (most, more, lower) = figures
+        let (most, lower) = figures
             .iter()
             .copied()
-            .max_by(|a, b| a.0.total_cmp(&b.0))
+            .max_by(|a, b| a.0.usd.total_cmp(&b.0.usd))
             .expect("a name has a figure");
-        usd += most;
-        margin = Margin::plus(margin, more);
+        usd += most.usd;
+        margin = Margin::plus(margin, most.margin);
         at_least |= lower || figures.len() > 1;
     }
     let costs = members.iter().any(|r| r.cost.is_some());

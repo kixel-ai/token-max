@@ -1265,8 +1265,9 @@ impl<'a> Out<'a> {
     }
 }
 
-/// The section heading a report of several hosts: what `hosts` hosts spent and what the
-/// changes they offer would save, added as they are.
+/// The section heading a report of several hosts: what `hosts` hosts spent, what the changes
+/// they offer would save, and what their settings save against the defaults, added as they
+/// are.
 pub fn totals_section(
     totals: &crate::totals::Totals,
     hosts: usize,
@@ -1291,9 +1292,14 @@ pub fn totals_section(
     );
     text.push('\n');
     let saving = totals.savings.text("Changes offered", "these hosts'");
-    if !saving.is_empty() {
+    let credit = totals.credit("these hosts'").unwrap_or_default();
+    let note = opening_note(&credit, totals.partial);
+    for (line, style) in [(saving, PLAIN), (credit, PLAIN), (note, DIM)] {
+        if line.is_empty() {
+            continue;
+        }
         text.push_str(&wrap_spans(
-            &[(&saving, PLAIN)],
+            &[(&line, style)],
             WrapOptions {
                 width: options.width,
                 indent: MARGIN,
@@ -1306,6 +1312,23 @@ pub fn totals_section(
     text
 }
 
+/// What a figure marked `~` assumes, said once.
+pub(crate) const TILDE: &str = "A ~ marks a figure extrapolated from the requests that could be priced to those that could not, assuming they resemble each other, followed by its 95% margin of error.";
+
+/// The note under the credit that opens the walk, saying what each host's footer says only
+/// after it: what a `~` in `credit` assumes, and that its percents leave out the profiles that
+/// priced none of their requests, when the spend is `partial`. Empty when neither applies.
+pub(crate) fn opening_note(credit: &str, partial: bool) -> String {
+    let mut notes = vec![];
+    if credit.contains('~') {
+        notes.push(TILDE);
+    }
+    if partial && credit.contains('%') {
+        notes.push("Each percent is of a spend to which a profile that priced none of its requests adds only what could be priced, so a true share may be smaller.");
+    }
+    notes.join(" ")
+}
+
 /// Render every setting and feature on one line, the changes first, with each line's
 /// evidence and the evidence cards under details. `fixes` are `doctor::fixes` of the same
 /// report, so each change names the edit or step `doctor` offers for it.
@@ -1315,7 +1338,7 @@ pub fn format_report<'a>(
     options: ReportOptions<'a>,
 ) -> Listing {
     let mut out = Out::new(report, options);
-    let (title, head, rows, vibes) = summary(report, fixes, &mut out);
+    let (title, head, rows, vibes, credit) = summary(report, fixes, &mut out);
     if options.details {
         details(report, &mut out);
     }
@@ -1331,6 +1354,7 @@ pub fn format_report<'a>(
         },
         home: out.home,
         spend: out.spend,
+        credit,
     }
 }
 
@@ -1371,6 +1395,8 @@ pub struct Listing {
     options: ReportOptions<'static>,
     home: Option<String>,
     spend: Spend,
+    /// What the settings its lines name save against the defaults; None under `--defaults`.
+    credit: Option<crate::defaults::Credit>,
 }
 
 /// What became of a change in `doctor`'s walk, for the list printed after it.
@@ -1393,6 +1419,12 @@ impl Listing {
     /// The one-line header naming what was read, which the walk prints before its questions.
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    /// What the settings its lines name save against the defaults, as its own line says;
+    /// None under `--defaults`.
+    pub fn credit(&self) -> Option<crate::defaults::Credit> {
+        self.credit.clone()
     }
 
     /// The report without its header, with its changes grouped by `choices`: the accepted
@@ -2939,11 +2971,17 @@ fn card(result: &CheckResult, action: Option<Action>, out: &mut Out<'_>) {
         CheckResult::Compaction(c) => {
             out.cost("Current-window baseline", &c.baseline_cost);
             out.cost("Existing summaries", &c.observed_summary_cost);
-            for scenario in &c.scenarios {
+            for scenario in c.scenarios.iter().chain(&c.cap) {
+                // `vibes`' cap is listed for its card's figure, never weighed for the verdict.
+                let cap = if c.cap.as_ref().is_some_and(|k| k.window == scenario.window) {
+                    "; vibes' cap, priced for its card and never recommended"
+                } else {
+                    ""
+                };
                 out.field(
                     "Candidate window",
                     &format!(
-                        "{} tokens; {} affected requests; {} added compactions",
+                        "{} tokens; {} affected requests; {} added compactions{cap}",
                         scenario.window,
                         scenario.affected_requests,
                         scenario.added.len()
@@ -4771,6 +4809,19 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
                 tokens(to)
             ),
         ),
+        // With no request to name a model, the percentage override leaves the trigger unresolved
+        // somewhere at or below the set window, so only a window under the cap is settled.
+        (_, Some(w))
+            if w > cap && c.scenarios.is_empty() && profile.compaction.percent.is_some() =>
+        {
+            item.text = format!(
+                "Set to {}, but {} lowers where each model compacts under it, and with no request in the window to name a model token-max cannot tell whether that is above the {} window the maintainer caps it at.",
+                tokens(w),
+                crate::controls::PERCENT_KEY,
+                tokens(cap)
+            );
+            return item;
+        }
         (_, Some(w)) if c.unset => (
             w,
             format!(
@@ -4814,22 +4865,35 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
     // The line's own replay of the cap, against the window it compared every candidate with.
     // A cap priced at an assumed service tier is unmeasured even when the line's winner is
     // settled, since no tier reversing the winner says nothing of the cap.
-    let priced = c
-        .scenarios
-        .iter()
-        .find(|s| s.window == cap)
-        .filter(|s| {
-            !crate::prices::tier_sensitive(&s.comparison_cost)
-                && !crate::prices::tier_sensitive(&s.baseline_comparison_cost)
-        })
-        .and_then(|s| Some((s.savings_usd?, s.margin)));
+    let replayed = c.scenarios.iter().chain(&c.cap).find(|s| s.window == cap);
+    // An unpriced replay says so first: recording the tier would not price it.
+    let saving = replayed.and_then(|s| s.savings_usd);
+    let assumed = saving.is_some()
+        && replayed.is_some_and(|s| {
+            crate::prices::tier_sensitive(&s.comparison_cost)
+                || crate::prices::tier_sensitive(&s.baseline_comparison_cost)
+        });
+    let priced = replayed.filter(|_| !assumed).and_then(|s| {
+        // Equal only when the replay changed nothing and left nothing unpriced.
+        let same = s.savings_usd == Some(0.0)
+            && s.affected_requests == 0
+            && s.added.is_empty()
+            && s.comparison_cost.unknown.is_empty()
+            && s.baseline_comparison_cost.unknown.is_empty();
+        Some((s.savings_usd?, s.margin, same))
+    });
     let against = match (doctor, c.base.current) {
         (Doctor::Wrote(_), Some(w)) => format!("the {} window before that change", tokens(w)),
         (_, Some(w)) => format!("the {} window", tokens(w)),
         (_, None) => "the recorded requests".into(),
     };
     let cost = match priced {
-        Some((usd, margin)) => {
+        // Every recorded context stayed under the cap, so its replay is the window's own.
+        Some((_, _, true)) => format!(
+            "Against {against}, its replay of a {} window changes no recorded request, so it costs the same at API prices.",
+            tokens(cap)
+        ),
+        Some((usd, margin, false)) => {
             let scale = monthly(1.0, c.base.since, c.base.until);
             let margin = margin.map(|m| m.scale(scale));
             let usd = usd * scale;
@@ -4838,11 +4902,31 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
             } else {
                 format!("saves {}", approx(usd, margin, "/mo"))
             };
+            // Both windows replay the TTL doctor's TTL line recommends, which may not be today's.
+            let ttl = match (c.ttls.main, c.ttls.subagent) {
+                (Some(main), Some(sub)) if sub == main => {
+                    format!(", both at a {} cache TTL,", main.as_str())
+                }
+                (Some(main), Some(sub)) => format!(
+                    ", both at a {} main-session and {} subagent cache TTL,",
+                    main.as_str(),
+                    sub.as_str()
+                ),
+                (Some(main), None) => {
+                    format!(", both at a {} main-session cache TTL,", main.as_str())
+                }
+                (None, Some(sub)) => format!(", both at a {} subagent cache TTL,", sub.as_str()),
+                (None, None) => ",".into(),
+            };
             format!(
-                "Against {against}, its replay of a {} window {amount} at API prices.",
+                "Against {against}{ttl} its replay of a {} window {amount} at API prices.",
                 tokens(cap)
             )
         }
+        None if assumed => format!(
+            "Its replay of a {} window rests on an assumed service tier, so what the cap costs is not measured.",
+            tokens(cap)
+        ),
         None => format!(
             "Its replay did not price a {} window, so what the cap costs is not measured.",
             tokens(cap)
@@ -5387,12 +5471,19 @@ pub(crate) fn sessions(scan: &crate::model::Scan) -> u64 {
 
 /// The report: what was read, then every setting and feature on one line, the changes
 /// first, with each line's evidence under `--details`.
-/// Returns the text before the list and the list's rows; what follows them stays in `out`.
+/// Returns the text before the list, the list's rows, its advice and what the settings save
+/// against the defaults; what follows them stays in `out`.
 fn summary(
     report: &Report,
     fixes: &[crate::doctor::Fix],
     out: &mut Out<'_>,
-) -> (String, String, Vec<Row>, Vec<Item>) {
+) -> (
+    String,
+    String,
+    Vec<Row>,
+    Vec<Item>,
+    Option<crate::defaults::Credit>,
+) {
     let arrow = out.arrow;
     let coverage = &report.scan.coverage;
     let spend = out.spend;
@@ -5725,7 +5816,7 @@ fn summary(
                         )
                     }
                     Mark::Keep => format!(
-                        "No other window was cheaper, replayed assuming the same sessions.{}{} {set_in}",
+                        "No other candidate window was cheaper, replayed assuming the same sessions.{}{} {set_in}",
                         assumed_tier(r),
                         context_rot(report, result)
                     ),
@@ -6781,15 +6872,10 @@ fn summary(
     if !together.is_empty() {
         out.line(&together, 0, PLAIN);
     }
-    if !report.scan.defaults {
-        let compared = crate::defaults::headline(
-            rows.iter().filter_map(|r| r.baseline.as_ref()),
-            |usd| spend.of_month(usd),
-            &host,
-        );
-        if !compared.is_empty() {
-            out.line(&compared, 0, PLAIN);
-        }
+    let credit = (!report.scan.defaults)
+        .then(|| crate::defaults::Credit::of(rows.iter().filter_map(|r| r.baseline.as_ref())));
+    if let Some(credit) = &credit {
+        out.line(&credit.text(spend.monthly(), &host), 0, PLAIN);
     }
     out.blank();
     // With a profile that priced nothing, the base is only what could be priced, so a share can read high.
@@ -6805,10 +6891,16 @@ fn summary(
         )
     };
     // Said once, for every figure extrapolated over requests that could not be priced.
-    let tilde = if spend.margin.is_some() || rows.iter().any(|r| r.margin.is_some()) {
-        " A ~ marks a figure extrapolated from the requests that could be priced to those that could not, assuming they resemble each other, followed by its 95% margin of error."
+    // The details also print every compaction window's estimate, the cap's included.
+    let windows = out.options.details
+        && report.checks.iter().any(|c| {
+            matches!(c, CheckResult::Compaction(c)
+                if c.scenarios.iter().chain(&c.cap).any(|s| s.margin.is_some()))
+        });
+    let tilde = if spend.margin.is_some() || rows.iter().any(|r| r.margin.is_some()) || windows {
+        format!(" {TILDE}")
     } else {
-        ""
+        String::new()
     };
     out.line(
         &format!(
@@ -6875,7 +6967,7 @@ fn summary(
             DIM,
         );
     }
-    (title, head, rows, vibes)
+    (title, head, rows, vibes, credit)
 }
 
 /// What every piece of context cost, including pieces no longer sent.
@@ -7294,6 +7386,7 @@ mod tests {
                     reread_break_even_usd: Some(1.005),
                 },
             }],
+            cap: None,
             usage_estimates: vec![],
             cache_evidence: vec![],
             reowned: None,
@@ -10968,6 +11061,22 @@ mod tests {
                 "kept TTL",
                 "catalog skill"
             ]
+        );
+    }
+
+    #[test]
+    fn the_opening_note_explains_only_what_the_credit_shows() {
+        let partial = "Each percent is of a spend to which a profile that priced none of its requests adds only what could be priced, so a true share may be smaller.";
+        let exact =
+            "Compared with defaults, your settings save about $40/mo, 9% of this host's spend.";
+        let sampled = "Compared with defaults, your settings save ~$40/mo ± $6.";
+        assert_eq!(opening_note(exact, false), "");
+        assert_eq!(opening_note(exact, true), partial);
+        // No percent to qualify.
+        assert_eq!(opening_note(sampled, true), TILDE);
+        assert_eq!(
+            opening_note(&sampled.replace('.', ", 9% of this host's spend."), true),
+            format!("{TILDE} {partial}")
         );
     }
 

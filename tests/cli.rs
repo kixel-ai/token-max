@@ -415,7 +415,7 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     assert_eq!(
         stdout,
         format!(
-            "token-max vibes: 2 pieces of advice the transcripts can't price.\n  None of it is measured, so none of it is a verdict. Each card names whose advice it is.\n\n  [1/4] Bash timeout cap  not measured\n        2h -> 4m\n        What    The longest Claude waits on a foreground Bash command before Claude Code moves it to the background.\n        Advice  A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess. A command past the cap is not killed: it keeps running in the background, where Claude checks on it in later turns. Some commands need longer in the foreground; keep the cap if yours do. Project and local settings, which override it, are not read.\n        Source  The maintainer's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching\n        Change  \"env\": {{\"BASH_MAX_TIMEOUT_MS\": \"240000\"}} in ~{0}.claude{0}settings.json\n\n  [2/4] Auto memory  not measured\n        What    Auto memory lets Claude write notes for itself and loads them into every session.\n        Advice  0 of 1 main session (0%) in the window ran in a repository with a CLAUDE.md or AGENTS.md, counting as without 1 session whose transcript recorded loading none and whose directory is gone or unrecorded. Outside a repository, memory may be the only place a fact is kept, so turning it off is not advised. doctor's line could not price it over the window (never read back or written).\n        Source  The maintainer's pick: a lasting fact about a project belongs in its repository. How memory works: https://code.claude.com/docs/en/memory#auto-memory (2026-11-11)\n\n  [3/4] Auto-compact window (claude-opus-5-5)  not measured\n        967k -> 400k\n        What    How large a conversation grows before it is automatically summarized and continued from the summary.\n        Advice  No setting names it, so Claude Code compacts this model near 967k, its window for the model. The maintainer would cap it at 400k for better output, not a smaller bill: a smaller window compacts sooner, so the model works from a shorter context. Anthropic's docs say accuracy and recall degrade as a context grows. doctor's auto-compact window line keeps it on cost. Its replay did not price a 400k window, so what the cap costs is not measured. The cap is advice beside that line, not its verdict.\n        Source  The maintainer's pick, for output quality rather than cost. Anthropic's docs on context rot: https://platform.claude.com/docs/en/build-with-claude/context-windows\n        Change  \"modelSettings\": {{\"claude-opus-5-5\": {{\"autoCompactWindow\": 400000}}}} in ~{0}.claude{0}settings.json\n\n  [4/4] Main-session default  not measured\n        What    The model and reasoning effort a main session starts with.\n        Advice  Defaults to claude-opus-5-5 at medium, the maintainer's pick. Ran claude-opus-5-5 at an unrecorded effort 2 times, $0.01.\n        Source  The maintainer's pick of a default. Anthropic's guidance: https://claude.dev/blog/which-claude-model-should-you-build-with/ https://code.claude.com/docs/en/model-config#choose-an-effort-level\n",
+            "token-max vibes: 2 pieces of advice the transcripts can't price.\n  None of it is measured, so none of it is a verdict. Each card names whose advice it is.\n\n  [1/4] Bash timeout cap  not measured\n        2h -> 4m\n        What    The longest Claude waits on a foreground Bash command before Claude Code moves it to the background.\n        Advice  A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess. A command past the cap is not killed: it keeps running in the background, where Claude checks on it in later turns. Some commands need longer in the foreground; keep the cap if yours do. Project and local settings, which override it, are not read.\n        Source  The maintainer's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching\n        Change  \"env\": {{\"BASH_MAX_TIMEOUT_MS\": \"240000\"}} in ~{0}.claude{0}settings.json\n\n  [2/4] Auto memory  not measured\n        What    Auto memory lets Claude write notes for itself and loads them into every session.\n        Advice  0 of 1 main session (0%) in the window ran in a repository with a CLAUDE.md or AGENTS.md, counting as without 1 session whose transcript recorded loading none and whose directory is gone or unrecorded. Outside a repository, memory may be the only place a fact is kept, so turning it off is not advised. doctor's line could not price it over the window (never read back or written).\n        Source  The maintainer's pick: a lasting fact about a project belongs in its repository. How memory works: https://code.claude.com/docs/en/memory#auto-memory (2026-11-11)\n\n  [3/4] Auto-compact window (claude-opus-5-5)  not measured\n        967k -> 400k\n        What    How large a conversation grows before it is automatically summarized and continued from the summary.\n        Advice  No setting names it, so Claude Code compacts this model near 967k, its window for the model. The maintainer would cap it at 400k for better output, not a smaller bill: a smaller window compacts sooner, so the model works from a shorter context. Anthropic's docs say accuracy and recall degrade as a context grows. doctor's auto-compact window line keeps it on cost. Against the 967k window, its replay of a 400k window changes no recorded request, so it costs the same at API prices. The cap is advice beside that line, not its verdict.\n        Source  The maintainer's pick, for output quality rather than cost. Anthropic's docs on context rot: https://platform.claude.com/docs/en/build-with-claude/context-windows\n        Change  \"modelSettings\": {{\"claude-opus-5-5\": {{\"autoCompactWindow\": 400000}}}} in ~{0}.claude{0}settings.json\n\n  [4/4] Main-session default  not measured\n        What    The model and reasoning effort a main session starts with.\n        Advice  Defaults to claude-opus-5-5 at medium, the maintainer's pick. Ran claude-opus-5-5 at an unrecorded effort 2 times, $0.01.\n        Source  The maintainer's pick of a default. Anthropic's guidance: https://claude.dev/blog/which-claude-model-should-you-build-with/ https://code.claude.com/docs/en/model-config#choose-an-effort-level\n",
             std::path::MAIN_SEPARATOR
         )
     );
@@ -1352,6 +1352,25 @@ fn without_a_terminal_a_newer_release_or_a_failed_check_is_one_line_on_stderr() 
             )
         )
     );
+    // A binary in crabx's cache is crabx's to move to a new release.
+    let crabx = w
+        .home
+        .join(".cache/crabx/v1/x86_64-unknown-linux-musl/author/token-max/0.1.0/bin");
+    std::fs::create_dir_all(&crabx).unwrap();
+    let bin = crabx.join(format!("token-max{}", std::env::consts::EXE_SUFFIX));
+    std::fs::hard_link(BIN, &bin).unwrap();
+    let mut c = command_at(&bin, &w, &doctor);
+    c.env("TOKEN_MAX_RELEASES", &releases.url);
+    assert_eq!(
+        run(&mut c),
+        (
+            1,
+            report.clone(),
+            format!(
+                "{stale} crabx manages this binary: an unpinned crabx token-max picks up the new release on its own, and a pinned one stays on its version.\n"
+            )
+        )
+    );
     // A run without a terminal never probes the directory, which writes beside the binary, so
     // even one this user cannot write only hears that a terminal run upgrades.
     #[cfg(unix)]
@@ -2048,6 +2067,37 @@ mod unix {
             assert_eq!(releases.downloads(), before);
             assert_eq!(names(&locked), ["token-max"]);
         }
+        // A binary in crabx's cache is crabx's: no question, no probe, the same bytes. Its entry
+        // is moved and symlinked back, so the binary resolves to a path naming no crabx.
+        let moved = w.home.join("moved");
+        std::fs::create_dir_all(moved.join("bin")).unwrap();
+        std::fs::write(
+            moved.join("record.json"),
+            r#"{"version":"0.1.0","bins":["token-max"],"source":"crates.io"}"#,
+        )
+        .unwrap();
+        let versions = w
+            .home
+            .join(".cache/crabx/v1/x86_64-unknown-linux-musl/author/token-max");
+        std::fs::create_dir_all(&versions).unwrap();
+        std::os::unix::fs::symlink(&moved, versions.join("0.1.0")).unwrap();
+        let bin = versions.join("0.1.0/bin/token-max");
+        std::fs::hard_link(BIN, &bin).unwrap();
+        let mut c = command_at(&bin, &w, &doctor);
+        c.env("TOKEN_MAX_RELEASES", &releases.url);
+        // Enough answers to finish even if it asks, which then fails below instead of hanging.
+        let (status, stdout, stderr) = typed(&mut c, b"s\nq\nn\ns\nq\nn\n");
+        assert_eq!(status, code, "{stderr}");
+        let (before_opening, _) = stdout.split_once(&opening).expect(&stdout);
+        assert_eq!(
+            words(before_opening),
+            format!(
+                "token-max v99.0.0 is out; this is v{ours}, and its advice may be out of date. crabx manages this binary: an unpinned crabx token-max picks up the new release on its own, and a pinned one stays on its version."
+            )
+        );
+        assert_eq!(releases.downloads(), before);
+        assert_eq!(std::fs::read(&bin).unwrap(), std::fs::read(BIN).unwrap());
+        assert_eq!(names(bin.parent().unwrap()), ["token-max"]);
     }
 
     fn signal(pid: u32, signal: libc::c_int) {

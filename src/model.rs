@@ -1838,6 +1838,9 @@ pub struct CompactionCheck {
     pub observed_summary_cost: Cost,
     pub ttls: PerBucket<Option<Ttl>>,
     pub scenarios: Vec<WindowScenario>,
+    /// The replay of `vibes`' cap when the window is above it and no candidate is the cap:
+    /// priced for its card and the details, never weighed for the verdict.
+    pub cap: Option<WindowScenario>,
     pub usage_estimates: Vec<UsageEstimate>,
     pub cache_evidence: Vec<CacheReplayEvidence>,
     /// The edits that make one setting own the trigger when `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`

@@ -31,10 +31,14 @@ redirect is live, but the deployed page still demos 0.0.1's flags, and main's
 page demos flags only an unreleased binary has, so the release quest deploys
 the page that matches what the installers serve.
 
+Decided 2026-11-24 (maintainer, /quest-plan): ✅ promotion also waits for
+[the crabx tabs](/quest/m1/crabx.md) (rejected: promoting without them).
+
 ## Waiting
 
-- Maintainer: once 0.1.0 is released and the page deployed, open https://max.kixel.me, try it on a desktop and a phone, and promote it; report anything to change as a new quest. Only the maintainer can judge the page and post as themselves.
+- Maintainer: once 0.1.0 is released and https://max.kixel.me is deployed with the crabx tabs, opening on `node`, open it, try it on a desktop and a phone, and promote it; report anything to change as a new quest. Only the maintainer can judge the page and post as themselves.
 
 ## Required
 
 - [Release 0.1.0](/quest/m1/release-0.1.md) - publishes the binary the page's demo shows and deploys the page
+- [crabx tabs](/quest/m1/crabx.md) - the page's `node` and `crabx` tabs, which the maintainer chose to have in place before promoting

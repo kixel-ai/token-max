@@ -22,7 +22,7 @@ use crate::model::{Billing, Location, Millis, Scan, Verdict};
 use crate::prices::{Catalog, PriceOptions, cancel_downloads, load_prices};
 use crate::reader::{Reading, ScanOptions, scan};
 use crate::replay::{AnalyzeOptions, analyze};
-use crate::report::{Listing, Origin, ReportOptions, format_report, totals_section};
+use crate::report::{Listing, Origin, ReportOptions, format_report, opening_note, totals_section};
 use crate::safe::{ScanError, display};
 use crate::sessions::{Session, export};
 use crate::ssh::{self, Reply, Scope};
@@ -821,7 +821,8 @@ enum Output {
 /// Every host's changes, to walk through on this terminal.
 struct Walk {
     hosts: Vec<WalkHost>,
-    /// The total across hosts, printed first; empty for one host.
+    /// What `doctor`'s walk prints before its questions: the total across hosts, then this
+    /// host's header, and what the settings save against the defaults.
     head: String,
     style: Style,
     /// Which command's changes the hosts offer; `doctor`'s walk goes on to `vibes`'.
@@ -983,7 +984,7 @@ pub fn render(scan: Scan, options: Render<'_>) -> Result<Rendered, ScanError> {
         printed: Printed {
             text: listing.text(),
             change,
-            totals: Box::new(Totals::new(&report, &fixes)),
+            totals: Box::new(Totals::new(&report, &fixes, listing.credit())),
             vibes: vibes::pending(&vibes),
         },
         fixes,
@@ -1740,10 +1741,10 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
         }
     }
     // Several hosts get one total at the head, beside each host's own section.
-    let head = match sum {
+    let head = match &sum {
         Some(sum) if sections > 1 && !advice => {
             let mut head = totals_section(
-                &sum,
+                sum,
                 sections,
                 ReportOptions {
                     width: style.width,
@@ -1758,6 +1759,28 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
         _ => String::new(),
     };
     if walk {
+        // This host's header follows the total, and one host's is followed by what its
+        // settings save against the defaults, as several hosts' total is, so the credit
+        // comes before any question.
+        let title = hosts.iter().find_map(|h| match &h.side {
+            Side::Here { listing, .. } => listing.as_ref().map(|l| l.title().to_string()),
+            Side::There { .. } => None,
+        });
+        let credit = match &sum {
+            Some(sum) if sections == 1 && !advice => {
+                sum.credit("this host's").map_or_else(String::new, |c| {
+                    let note = opening_note(&c, sum.partial);
+                    let note = if note.is_empty() {
+                        note
+                    } else {
+                        style.dim(&note)
+                    };
+                    style.line(&c) + &note
+                })
+            }
+            _ => String::new(),
+        };
+        let head = format!("{head}{}{credit}", title.unwrap_or_default());
         let walk = Walk {
             hosts,
             head,
@@ -1849,8 +1872,8 @@ fn offer_upgrade(
                 return Ok(None);
             }
         },
-        Install::Manager(command) => {
-            let text = format!("\ntoken-max {} Upgrade with {command}.", stale(&latest));
+        Install::Manager(advice) => {
+            let text = format!("\ntoken-max {} {advice}", stale(&latest));
             say(&mut stdout, &text, false)?;
             return Ok(None);
         }
@@ -1960,7 +1983,7 @@ fn warn_upgrade(check: Check) {
         Check::Newer(latest) => {
             let how = match upgrade::install() {
                 Install::Replace { .. } => "Run token-max doctor on a terminal to upgrade.".into(),
-                Install::Manager(command) => format!("Upgrade with {command}."),
+                Install::Manager(advice) => advice.into(),
                 Install::Reinstall(why) => reinstall(&why),
             };
             format!("{} {how}", stale(&latest))
@@ -1984,11 +2007,7 @@ fn walk(walk: Walk) -> Result<(), ScanError> {
     let walked = (|| {
         if command == Command::Doctor {
             let failed = |_| ScanError::new("cannot use the terminal; no settings were changed");
-            let title = hosts.iter().find_map(|h| match &h.side {
-                Side::Here { listing, .. } => listing.as_ref().map(|l| l.title().to_string()),
-                Side::There { .. } => None,
-            });
-            write!(stdout, "{head}{}", title.unwrap_or_default()).map_err(failed)?;
+            write!(stdout, "{head}").map_err(failed)?;
             let walking: Vec<Walking> = hosts
                 .iter()
                 .map(|h| Walking {

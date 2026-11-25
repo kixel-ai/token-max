@@ -637,7 +637,7 @@ impl Connected {
                 Reply::Report(Printed {
                     text,
                     change,
-                    totals: Box::new(totals),
+                    totals,
                     vibes,
                 }),
                 offers,
@@ -1075,7 +1075,7 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
                 since,
                 text,
                 change,
-                totals: *totals,
+                totals,
                 offers: walked.as_ref().map(|w| Box::new(w.owner.offers().clone())),
                 vibes: pending,
             },

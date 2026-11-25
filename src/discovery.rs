@@ -15,9 +15,9 @@ use crate::controls::{
 };
 use crate::effort::{claude_effort, codex_catalog, codex_effort, latest_model};
 use crate::model::{
-    Agent, BackgroundControl, Billing, Control, ControlValue, Harness, IdleControl, InboundControl,
-    Location, MemoryControl, PerBucket, Profile, Request, RootOrigin, RootState, RootStatus,
-    Scalar, Snapshot, SpeedControl, Ttl, TtlControl,
+    Agent, Allowlist, BackgroundControl, Billing, Control, ControlValue, Harness, IdleControl,
+    InboundControl, Location, MemoryControl, PerBucket, Profile, Request, RootOrigin, RootState,
+    RootStatus, Scalar, Snapshot, SpeedControl, Ttl, TtlControl,
 };
 use crate::safe::{ScanError, identity, label};
 
@@ -1274,13 +1274,21 @@ pub fn discover_latest_claude_controls(
         profile.effort = Some(effort);
         // Read where effort is: the advisor card ranks against that main-session default.
         let mut advisor = crate::advisor::control(&scopes, local_env, &profile.settings_file);
+        // Claude Code's own cache, which may be mid-write, decides only these cards, so one
+        // that can't be read leaves the allowlist unknown rather than failing the scan.
         let remote_file = join(&[&profile.root, "remote-settings.json"]);
-        let remote = settings(&remote_file, Harness::Claude)?;
-        let remote = SettingsScope {
-            config: &remote,
-            file: &remote_file,
+        profile.allowlist = match settings(&remote_file, Harness::Claude) {
+            Ok(remote) => {
+                let remote = SettingsScope {
+                    config: &remote,
+                    file: &remote_file,
+                };
+                crate::allowlist::control(&scopes, managed_file, remote)
+            }
+            Err(_) => Some(Allowlist::Unknown(format!(
+                "the admin console's settings, cached in {remote_file}, can't be read"
+            ))),
         };
-        profile.allowlist = crate::allowlist::control(&scopes, managed_file, remote);
         // Claude Code disables an advisor the allowlist blocks for the whole session.
         if advisor.blocked.is_none()
             && let (Some(model), Some(list)) = (&advisor.model, &profile.allowlist)
@@ -5097,6 +5105,14 @@ mod tests {
             profile.allowlist
         );
         assert_eq!(profile.advisor.unwrap().blocked, None);
+        // So does a cache that can't be read, rather than failing the scan.
+        write(&remote, "");
+        let profile = resolve(&mut data);
+        assert!(
+            matches!(&profile.allowlist, Some(Allowlist::Unknown(why)) if why.ends_with("can't be read")),
+            "{:?}",
+            profile.allowlist
+        );
     }
 
     #[test]

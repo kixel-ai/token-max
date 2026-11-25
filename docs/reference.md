@@ -1688,8 +1688,8 @@ the whole change is a step by hand naming each setting; so is a new model on
 a cloud provider, such as Bedrock, which spells model IDs its own way, whether
 the profile's or the project's settings turn it on. A Codex level with no model set or recorded has no card.
 
-A Claude pick that the [`availableModels` allowlist](#model-allowlist) blocks
-is not offered: the card names the setting that excludes it and advises
+A Claude pick that the [`availableModels` allowlist](#model-allowlist) of any
+profile on the card blocks is not offered: the card names the setting that excludes it and advises
 nothing. When token-max can't tell whether the list permits the pick, the
 change is still offered and the card says why it can't tell.
 
@@ -2014,7 +2014,8 @@ some versions of the suggested alias's family, such as `claude-opus-5` for
 `opus`, Claude Code runs the alias on the newest of them on the Anthropic API,
 so the card still offers it and says so, unless the pairing table takes none
 of those versions for the main model. A rebuilt card, after a yes to the
-Main-session default card's edit, follows the same rules.
+Main-session default card's edit, follows the same rules, and a set alias
+narrowed to versions the table doesn't pair is advice with no edit.
 
 ### Model allowlist
 
@@ -2032,9 +2033,10 @@ A list in the admin console's settings, which Claude Code caches in
 `remote-settings.json` in its config directory, outranks the managed file.
 token-max sees only that the cache sets one, and doesn't resolve it, since
 the cache may be stale, so the cards still offer their change and say the
-list is unknown. So do a list that is not a
-list of model names and an entry token-max can't match to a model, such as a
-provider's model ID. MDM profiles, the registry and `managed-settings.d` are
+list is unknown. So do a cache that can't be read, a list that is not a
+list of model names, and an entry token-max can't match to a model, such as a
+provider's model ID, which the card never quotes, since it could be a pasted
+credential. MDM profiles, the registry and `managed-settings.d` are
 not read.
 
 T3 Code picks each thread's main model, so T3 instances get no card; when an

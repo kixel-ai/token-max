@@ -159,7 +159,7 @@ pub(crate) fn normalize(name: &str) -> String {
 /// Whether `name` is, in full, an alias or a Claude model ID of a family that can advise:
 /// `claude-<family>-<major>`, then an optional one- or two-digit minor and an optional
 /// eight-digit date, in any case and with an optional context-window suffix.
-fn recognized(name: &str) -> bool {
+pub(crate) fn recognized(name: &str) -> bool {
     let name = normalize(name);
     let family = |f: &str| ["fable", "opus", "sonnet", "haiku"].contains(&f);
     if family(&name) {

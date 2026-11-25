@@ -102,21 +102,23 @@ enum Entry<'a> {
     /// A version prefix or full model ID in a family, which permits itself and the IDs
     /// that extend it by segments.
     Specific(&'static str, &'a str),
-    /// Anything else, such as a provider's model ID, which token-max can't match.
-    Opaque(&'a str),
+    /// Anything else, such as a provider's model ID, which token-max can't match and never
+    /// shows.
+    Opaque,
 }
 
 fn entry(name: &str) -> Entry<'_> {
     if let Some(family) = FAMILIES.iter().find(|f| **f == name) {
         return Entry::Family(family);
     }
+    // Only a well-formed ID is shown as a version; anything else could be a pasted secret.
     match name
         .strip_prefix("claude-")
         .and_then(|rest| rest.split('-').next())
         .and_then(|f| FAMILIES.iter().find(|family| **family == f))
     {
-        Some(family) => Entry::Specific(family, name),
-        None => Entry::Opaque(name),
+        Some(family) if crate::advisor::recognized(name) => Entry::Specific(family, name),
+        _ => Entry::Opaque,
     }
 }
 
@@ -126,7 +128,7 @@ fn family(model: &str) -> Option<(&'static str, bool)> {
     match entry(model) {
         Entry::Family(f) => Some((f, true)),
         Entry::Specific(f, _) => Some((f, false)),
-        Entry::Opaque(_) => None,
+        Entry::Opaque => None,
     }
 }
 
@@ -162,20 +164,14 @@ impl Allowlist {
                 format!("{setting} excludes it")
             })
         };
-        let opaque = parsed.iter().find_map(|e| match e {
-            Entry::Opaque(name) => Some(*name),
-            _ => None,
-        });
-        let unknown = |name: &str| {
+        let opaque = parsed.iter().any(|e| matches!(e, Entry::Opaque));
+        let unknown = || {
             Verdict::Unknown(format!(
-                "{setting} lists {name}, which token-max can't match to a model"
+                "{setting} lists an entry token-max can't match to a model"
             ))
         };
         let Some((family, alias)) = family(&model) else {
-            return match opaque {
-                Some(name) => unknown(name),
-                None => blocked(),
-            };
+            return if opaque { unknown() } else { blocked() };
         };
         // A specific entry in the family turns off its family entry.
         let specific: Vec<&str> = parsed
@@ -201,8 +197,8 @@ impl Allowlist {
         }
         // An entry token-max can't read may name this family, which would turn its family
         // entry off, or permit the model itself.
-        if let Some(name) = opaque {
-            return unknown(name);
+        if opaque {
+            return unknown();
         }
         if wildcard {
             return Verdict::Permitted;
@@ -383,7 +379,22 @@ mod tests {
         );
         // An entry token-max can't match leaves what it doesn't permit outright unknown.
         let mantle = read(&["opus", "anthropic.claude-opus-5-5-v1"]);
-        assert!(matches!(mantle.verdict("opus"), Unknown(_)));
+        assert_eq!(
+            mantle.verdict("opus"),
+            Unknown(
+                "/u/settings.json:availableModels lists an entry token-max can't match to a model"
+                    .into()
+            )
+        );
+        // An entry shaped like an ID but malformed, which could be a pasted secret, is never
+        // shown as a version.
+        assert_eq!(
+            read(&["claude-opus-sk-ant-secret"]).verdict("opus"),
+            Unknown(
+                "/u/settings.json:availableModels lists an entry token-max can't match to a model"
+                    .into()
+            )
+        );
         assert_eq!(
             read(&["claude-opus-5", "anthropic.x"]).verdict("claude-opus-5-5"),
             Permitted

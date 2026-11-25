@@ -479,11 +479,18 @@ fn default_item(e: &EffortCheck, profile: &str, how: Option<How>, out: &Out<'_>)
         .map(|(m, l)| default_pair(Some(m), Some(l)))
         .collect();
     let current = default_pair(c.model.as_deref(), c.effective.as_deref());
-    let lead = out.profiles.get(e.base.profile.as_str()).copied();
-    // The allowlist keeps the pick from being offered, unless it is the default already.
-    let refused = lead
+    // Every profile the card covers writes the pick, so any allowlist among them that blocks
+    // it keeps it from being offered, unless it is the default already.
+    let members: Vec<&Profile> = e
+        .base
+        .profiles
+        .iter()
+        .filter_map(|id| out.profiles.get(id.as_str()).copied())
+        .collect();
+    let refused = members
+        .iter()
         .filter(|_| c.model.as_deref() != Some(model))
-        .and_then(|p| allowlist_refusal(p, model, None));
+        .find_map(|p| allowlist_refusal(p, model, None));
     let quiet = crate::effort::accepted(c, e.harness) || refused.is_some();
     let how = how.filter(|_| refused.is_none());
     let mut text = if current == pick {
@@ -508,7 +515,7 @@ fn default_item(e: &EffortCheck, profile: &str, how: Option<How>, out: &Out<'_>)
     {
         let _ = write!(text, " {guidance}");
     }
-    if !quiet && let Some(note) = lead.and_then(|p| allowlist_note(p, model, None)) {
+    if !quiet && let Some(note) = members.iter().find_map(|p| allowlist_note(p, model, None)) {
         text += &note;
     }
     let _ = write!(text, " {}", effort_runs(e));
@@ -5205,6 +5212,9 @@ fn advisor_item(p: &Profile, effort: Option<&EffortControl>, profile: &str, out:
                     advise(format!(
                         "{set}, but Claude Code's pairing table doesn't take it as an advisor for {main}, the main-session default ({owner}), so none is attached."
                     ))
+                }
+                Some((main, _)) if let Some(why) = allowlist_refusal(p, m, Some(main)) => {
+                    advise(format!("{set}, but {why} ({owner}), so none is attached."))
                 }
                 _ => quiet(format!(
                     "{set}.{}",
@@ -11983,8 +11993,11 @@ mod tests {
         use crate::model::Allowlist;
         let file = format!("{ROOT}/settings.json");
         let owner = format!("{file}:availableModels");
-        // A Sonnet main with no advisor set, under `entries`: its default and advisor cards.
-        let cards = |allowlist: Option<Allowlist>| {
+        // A Sonnet main with `advisor` set, under `allowlist`, and another profile on its
+        // line under `other`'s: their default and advisor cards.
+        let line = |allowlist: Option<Allowlist>,
+                    advisor: Option<&str>,
+                    other: Option<Option<Allowlist>>| {
             let mut report = synthetic();
             report.checks.clear();
             report.context.clear();
@@ -11992,7 +12005,7 @@ mod tests {
             p.settings_file = file.clone();
             p.allowlist = allowlist;
             p.advisor = Some(crate::model::AdvisorControl {
-                model: None,
+                model: advisor.map(Into::into),
                 owner: format!("{file}:advisorModel"),
                 blocked: None,
                 gateway: None,
@@ -12010,6 +12023,12 @@ mod tests {
                 picked: None,
                 provider: None,
             });
+            if let Some(allowlist) = other {
+                let mut other = report.scan.profiles[0].clone();
+                other.id = "other".into();
+                other.allowlist = allowlist;
+                report.scan.profiles.push(other);
+            }
             let checks = effort_checks(&EffortInput {
                 scan: &report.scan,
                 catalog: &prices(),
@@ -12018,9 +12037,23 @@ mod tests {
             });
             report.checks = checks.into_iter().map(CheckResult::Effort).collect();
             let items = advice(&report, ReportOptions::default());
-            let find = |name: &str| items.iter().find(|i| i.name == name).unwrap().clone();
-            (find("Main-session default"), find("Advisor model"))
+            let find = |name: &str| {
+                items
+                    .iter()
+                    .find(|i| i.name.starts_with(name))
+                    .unwrap()
+                    .clone()
+            };
+            (
+                find("Main-session default"),
+                items
+                    .iter()
+                    .find(|i| i.name.starts_with("Advisor model"))
+                    .unwrap()
+                    .clone(),
+            )
         };
+        let cards = |allowlist: Option<Allowlist>| line(allowlist, None, None);
         let read = |entries: &[&str]| {
             Some(Allowlist::Read {
                 entries: entries.iter().map(|e| e.to_string()).collect(),
@@ -12087,6 +12120,17 @@ mod tests {
             "{}",
             rebuilt.text
         );
+        // A set Opus advisor narrowed to a version Sonnet 5.5 doesn't pair with attaches none.
+        let (_, advisor) = line(read(&["sonnet", "claude-opus-4-6"]), Some("opus"), None);
+        assert_eq!((&advisor.how, advisor.quiet), (&None, false));
+        assert!(
+            advisor.text.contains(&format!("Set to opus in {file}, but availableModels permits only claude-opus-4-6 of the Opus family, and Claude Code's pairing table takes none of those as an advisor for claude-sonnet-5-5 ({file}:model), so none is attached.")),
+            "{}",
+            advisor.text
+        );
+        // A profile on the default's line whose list blocks the pick keeps it unoffered.
+        let (default, _) = line(None, None, Some(read(&["sonnet"])));
+        assert_eq!((&default.how, default.quiet), (&None, true));
         // A list token-max can't read keeps both offers, saying so.
         let why = "the admin console's settings, cached in /r.json, set availableModels, which token-max doesn't resolve";
         let (default, advisor) = cards(Some(Allowlist::Unknown(why.into())));

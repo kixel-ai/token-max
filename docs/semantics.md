@@ -384,7 +384,9 @@ inherit external warming of the replaced transcript.
 Observed boundaries reset modeled reductions. Ambiguous multipart geometry,
 missing affected usage, a missing compaction sample, model/agent/provider changes,
 unexplained context decreases and unsupported cache retention leave the rest of
-that session unpriced under the candidate. Other sessions stay priced and the
+that session unpriced under the candidate, along with any summary either window
+adds there from that request on, so the current window's summary never counts
+as a saving the candidate could not model. Other sessions stay priced and the
 same part-by-part decision rule as the TTL check applies; an unresolved current
 window control still leaves the comparison unpriced. Unchanged unknown costs
 may cancel; affected input/cache prices and context tiers are repriced, including

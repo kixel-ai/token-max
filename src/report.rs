@@ -2971,11 +2971,17 @@ fn card(result: &CheckResult, action: Option<Action>, out: &mut Out<'_>) {
         CheckResult::Compaction(c) => {
             out.cost("Current-window baseline", &c.baseline_cost);
             out.cost("Existing summaries", &c.observed_summary_cost);
-            for scenario in &c.scenarios {
+            for scenario in c.scenarios.iter().chain(&c.cap) {
+                // `vibes`' cap is listed for its card's figure, never weighed for the verdict.
+                let cap = if c.cap.as_ref().is_some_and(|k| k.window == scenario.window) {
+                    "; vibes' cap, priced for its card and never recommended"
+                } else {
+                    ""
+                };
                 out.field(
                     "Candidate window",
                     &format!(
-                        "{} tokens; {} affected requests; {} added compactions",
+                        "{} tokens; {} affected requests; {} added compactions{cap}",
                         scenario.window,
                         scenario.affected_requests,
                         scenario.added.len()
@@ -4859,22 +4865,35 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
     // The line's own replay of the cap, against the window it compared every candidate with.
     // A cap priced at an assumed service tier is unmeasured even when the line's winner is
     // settled, since no tier reversing the winner says nothing of the cap.
-    let priced = c
-        .scenarios
-        .iter()
-        .find(|s| s.window == cap)
-        .filter(|s| {
-            !crate::prices::tier_sensitive(&s.comparison_cost)
-                && !crate::prices::tier_sensitive(&s.baseline_comparison_cost)
-        })
-        .and_then(|s| Some((s.savings_usd?, s.margin)));
+    let replayed = c.scenarios.iter().chain(&c.cap).find(|s| s.window == cap);
+    // An unpriced replay says so first: recording the tier would not price it.
+    let saving = replayed.and_then(|s| s.savings_usd);
+    let assumed = saving.is_some()
+        && replayed.is_some_and(|s| {
+            crate::prices::tier_sensitive(&s.comparison_cost)
+                || crate::prices::tier_sensitive(&s.baseline_comparison_cost)
+        });
+    let priced = replayed.filter(|_| !assumed).and_then(|s| {
+        // Equal only when the replay changed nothing and left nothing unpriced.
+        let same = s.savings_usd == Some(0.0)
+            && s.affected_requests == 0
+            && s.added.is_empty()
+            && s.comparison_cost.unknown.is_empty()
+            && s.baseline_comparison_cost.unknown.is_empty();
+        Some((s.savings_usd?, s.margin, same))
+    });
     let against = match (doctor, c.base.current) {
         (Doctor::Wrote(_), Some(w)) => format!("the {} window before that change", tokens(w)),
         (_, Some(w)) => format!("the {} window", tokens(w)),
         (_, None) => "the recorded requests".into(),
     };
     let cost = match priced {
-        Some((usd, margin)) => {
+        // Every recorded context stayed under the cap, so its replay is the window's own.
+        Some((_, _, true)) => format!(
+            "Against {against}, its replay of a {} window changes no recorded request, so it costs the same at API prices.",
+            tokens(cap)
+        ),
+        Some((usd, margin, false)) => {
             let scale = monthly(1.0, c.base.since, c.base.until);
             let margin = margin.map(|m| m.scale(scale));
             let usd = usd * scale;
@@ -4883,11 +4902,31 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
             } else {
                 format!("saves {}", approx(usd, margin, "/mo"))
             };
+            // Both windows replay the TTL doctor's TTL line recommends, which may not be today's.
+            let ttl = match (c.ttls.main, c.ttls.subagent) {
+                (Some(main), Some(sub)) if sub == main => {
+                    format!(", both at a {} cache TTL,", main.as_str())
+                }
+                (Some(main), Some(sub)) => format!(
+                    ", both at a {} main-session and {} subagent cache TTL,",
+                    main.as_str(),
+                    sub.as_str()
+                ),
+                (Some(main), None) => {
+                    format!(", both at a {} main-session cache TTL,", main.as_str())
+                }
+                (None, Some(sub)) => format!(", both at a {} subagent cache TTL,", sub.as_str()),
+                (None, None) => ",".into(),
+            };
             format!(
-                "Against {against}, its replay of a {} window {amount} at API prices.",
+                "Against {against}{ttl} its replay of a {} window {amount} at API prices.",
                 tokens(cap)
             )
         }
+        None if assumed => format!(
+            "Its replay of a {} window rests on an assumed service tier, so what the cap costs is not measured.",
+            tokens(cap)
+        ),
         None => format!(
             "Its replay did not price a {} window, so what the cap costs is not measured.",
             tokens(cap)
@@ -5777,7 +5816,7 @@ fn summary(
                         )
                     }
                     Mark::Keep => format!(
-                        "No other window was cheaper, replayed assuming the same sessions.{}{} {set_in}",
+                        "No other candidate window was cheaper, replayed assuming the same sessions.{}{} {set_in}",
                         assumed_tier(r),
                         context_rot(report, result)
                     ),
@@ -6852,7 +6891,13 @@ fn summary(
         )
     };
     // Said once, for every figure extrapolated over requests that could not be priced.
-    let tilde = if spend.margin.is_some() || rows.iter().any(|r| r.margin.is_some()) {
+    // The details also print every compaction window's estimate, the cap's included.
+    let windows = out.options.details
+        && report.checks.iter().any(|c| {
+            matches!(c, CheckResult::Compaction(c)
+                if c.scenarios.iter().chain(&c.cap).any(|s| s.margin.is_some()))
+        });
+    let tilde = if spend.margin.is_some() || rows.iter().any(|r| r.margin.is_some()) || windows {
         format!(" {TILDE}")
     } else {
         String::new()
@@ -7341,6 +7386,7 @@ mod tests {
                     reread_break_even_usd: Some(1.005),
                 },
             }],
+            cap: None,
             usage_estimates: vec![],
             cache_evidence: vec![],
             reowned: None,

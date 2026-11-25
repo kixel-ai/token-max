@@ -4285,6 +4285,7 @@ mod tests {
             observed_summary_cost: zero_cost(),
             ttls: PerBucket::default(),
             scenarios: vec![],
+            cap: None,
             usage_estimates: vec![],
             cache_evidence: vec![],
             reowned: None,

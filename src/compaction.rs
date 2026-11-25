@@ -1367,6 +1367,8 @@ pub(crate) struct Stream<'r, 'o, 'b> {
     /// Each simulation error once, in first-seen order.
     errors: IndexSet<&'static str>,
     affected: usize,
+    /// When each finished session's replay became unknown, so its summaries stay unpriced.
+    failed: HashMap<Text, Millis>,
 }
 
 impl<'r, 'o, 'b> Stream<'r, 'o, 'b> {
@@ -1378,6 +1380,7 @@ impl<'r, 'o, 'b> Stream<'r, 'o, 'b> {
             parts: Sum::new(),
             errors: IndexSet::default(),
             affected: 0,
+            failed: HashMap::default(),
         }
     }
 
@@ -1419,15 +1422,20 @@ impl<'r, 'o, 'b> Stream<'r, 'o, 'b> {
 
     /// Whether the simulation could no longer model `r`'s session by `r`.
     fn uncertain(&self, r: &Request) -> bool {
+        let session = &r.session;
         let uncertain = &self.simulator.result.uncertain;
-        uncertain.get(&r.session).is_some_and(|&t| t <= r.time)
+        let failed = uncertain.get(session).or_else(|| self.failed.get(session));
+        failed.is_some_and(|&t| t <= r.time)
     }
 
-    /// Forget a session that has no more requests.
+    /// Forget a session that has no more requests, but when its replay became unknown.
     fn finish(&mut self, session: &str) {
         self.replay.finish(session);
         self.simulator.states.remove(session);
-        self.simulator.result.uncertain.shift_remove(session);
+        let uncertain = &mut self.simulator.result.uncertain;
+        if let Some((session, time)) = uncertain.shift_remove_entry(session) {
+            self.failed.insert(session, time);
+        }
     }
 
     /// The replay's errors and total with the fixed charges and added summaries; `unknown`
@@ -1455,6 +1463,9 @@ impl<'r, 'o, 'b> Stream<'r, 'o, 'b> {
         (errors, sum.cost())
     }
 }
+
+/// Why a pair in a session a window could no longer model is unpriced.
+const UNMODELED: &str = "session replay is unknown after a request it cannot model";
 
 /// One window compared with the current one, totaled as the parts come.
 struct Candidate<'r, 'o, 'b> {
@@ -1493,8 +1504,7 @@ impl Candidate<'_, '_, '_> {
             }
         };
         if uncertain {
-            let reason = "session replay is unknown after a request it cannot model";
-            pair(&unknown_cost(reason), &unknown_cost(reason));
+            pair(&unknown_cost(UNMODELED), &unknown_cost(UNMODELED));
             return;
         }
         // Equal usage still pairs when either cache charge is unknown, or its uncertainty is lost.
@@ -1611,9 +1621,8 @@ impl<'r> Lockstep<'_, 'r> {
             skipped,
         } = *self;
         let mut baseline_cost = None;
-        // The session of each request a summary can be added to.
-        let sessions: HashMap<&str, &Text> =
-            requests.iter().map(|r| (&*r.id, &r.session)).collect();
+        // Each request a summary can be added to.
+        let by_id: HashMap<&str, &Request> = requests.iter().map(|r| (&*r.id, *r)).collect();
         let mut runs: [Vec<Run>; 3] = Default::default();
         for (scenario, runs) in runs.iter_mut().enumerate() {
             let detail = scenario == 0;
@@ -1732,15 +1741,26 @@ impl<'r> Lockstep<'_, 'r> {
                 let mut baseline_sum = Sum::new();
                 let mut alternative_sum = Sum::new();
                 for (request, (before, after)) in summaries {
+                    let request = by_id[request];
+                    // A summary in a session either window could no longer model by then
+                    // pairs unknown, like that session's parts.
+                    let uncertain = current
+                        .iter()
+                        .chain(&c.stream)
+                        .any(|s| s.uncertain(request));
                     let total = |added: &[&AddedCompaction]| {
-                        add_costs(added.iter().map(|a| &a.summary_cost))
+                        if uncertain {
+                            unknown_cost(UNMODELED)
+                        } else {
+                            add_costs(added.iter().map(|a| &a.summary_cost))
+                        }
                     };
                     let (b, a) = (total(&before), total(&after));
                     baseline_sum.add(&b);
                     alternative_sum.add(&a);
                     pairs.add(&b, &a);
                     if b.total_usd.is_some() && a.total_usd.is_some() {
-                        let session = sessions[request];
+                        let session = &request.session;
                         for (added, baseline) in [(&before, true), (&after, false)] {
                             for s in added.iter() {
                                 let usd = s.summary_cost.total_usd.unwrap_or(Usd::ZERO);
@@ -2086,6 +2106,15 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                     n >= minimum && n <= ceiling && (!claude || n <= CLAUDE_WINDOW_MAXIMUM)
                 })
                 .collect();
+            // `vibes`' cap is priced for its card where the window is above it, but it is no
+            // candidate here: the line's verdict stays the best of the evidence's windows.
+            let cap = crate::vibes::window_cap(profile.harness);
+            let priced_cap = !windows.contains(&cap) && control.value.is_some_and(|v| v > cap);
+            let values: Vec<i64> = windows
+                .iter()
+                .copied()
+                .chain(priced_cap.then_some(cap))
+                .collect();
             let skipped = skipped_lines(scan, &group.ids);
             let lockstep = Lockstep {
                 requests: &requests,
@@ -2097,7 +2126,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             };
             let (runs, current_cost) = lockstep.runs(
                 control.value,
-                &windows,
+                &values,
                 |window, scenario| {
                     Stream::new(
                         Simulator::new(
@@ -2116,8 +2145,10 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 || PartReplay::new([&index.cache], &replayer.options(options.estimates)),
             );
             let baseline_cost = current_cost.unwrap_or_else(|| recorded_cost.clone());
-            let signs: Vec<Signs> = runs[0].iter().map(|r| r.signs).collect();
-            let scenarios = scenarios(&windows, runs);
+            let mut signs: Vec<Signs> = runs[0].iter().map(|r| r.signs).collect();
+            let mut scenarios = scenarios(&values, runs);
+            signs.truncate(windows.len());
+            let capped_scenario = scenarios.split_off(windows.len()).pop();
             let priced: Vec<&WindowScenario> = scenarios
                 .iter()
                 .filter(|s| s.savings_usd.is_some())
@@ -2194,7 +2225,6 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 ))
             };
             let reowned = plan(recommended);
-            let cap = crate::vibes::window_cap(profile.harness);
             let capped = plan(control.value.is_none_or(|v| v > cap).then_some(cap));
             let unpinned = reowned.as_ref().filter(|r| !r.unkept.is_empty()).map(|r| {
                 format!(
@@ -2336,6 +2366,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 observed_summary_cost: observed_summary_cost.clone(),
                 ttls: ttls.clone(),
                 scenarios,
+                cap: capped_scenario,
                 usage_estimates: requests
                     .iter()
                     .filter(|r| r.time >= since || predecessors.contains(&*r.id))
@@ -2421,6 +2452,7 @@ fn unmeasured(group: &crate::rows::Group<'_>, since: Option<Millis>) -> Vec<Comp
                     subagent: None,
                 },
                 scenarios: vec![],
+                cap: None,
                 usage_estimates: vec![],
                 cache_evidence: vec![],
                 reowned: None,
@@ -5537,6 +5569,61 @@ mod tests {
         }
 
         #[test]
+        fn the_cap_is_priced_but_never_wins_even_where_it_saves_most() {
+            // Compacting the cached 150-180k requests at 100k costs more than the cap, which
+            // compacts only the uncached 450k ones.
+            let mut scan = data(6);
+            let sizes = [150_000, 160_000, 170_000, 180_000, 450_000, 460_000];
+            for (r, size) in scan.requests.iter_mut().skip(1).zip(sizes) {
+                r.parts[0].usage = if size < 400_000 {
+                    usage(1000, size - 1000, 10, Ttl::FiveMinutes, 0)
+                } else {
+                    writes(size)
+                };
+            }
+            scan.profiles[0].compaction = controls(
+                Harness::Claude,
+                json!({"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 600000}}}),
+                &Env::default(),
+                "synthetic/settings.json",
+            );
+            let c = check(&scan);
+            let cap = c.cap.as_ref().unwrap();
+            let best = window(&c, 100_000);
+            assert!(cap.savings_usd.unwrap() > best.savings_usd.unwrap());
+            assert_eq!(c.base.recommended, Some(100_000));
+            assert_eq!(c.base.savings_usd, best.savings_usd);
+        }
+
+        #[test]
+        fn a_failed_replay_prices_none_of_its_sessions_summaries() {
+            // 650k with only 200k cached compacts to 470k: the 600k window resumes there, and
+            // every smaller candidate fails the session at that request.
+            let mut scan = data(1);
+            scan.requests[1].parts[0].usage = usage(200_000, 0, 10, Ttl::FiveMinutes, 450_000);
+            scan.profiles[0].compaction = controls(
+                Harness::Claude,
+                json!({"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 600000}}}),
+                &Env::default(),
+                "synthetic/settings.json",
+            );
+            let c = check(&scan);
+            let failed: Vec<_> = c
+                .scenarios
+                .iter()
+                .chain(&c.cap)
+                .filter(|s| s.window < 470_000)
+                .collect();
+            assert!(failed.len() > 1 && c.cap.is_some());
+            for s in failed {
+                // Its parts and the 600k window's summary are the session's only pairs.
+                assert_eq!(s.coverage.priced, 0, "{} {:?}", s.window, s.coverage);
+                assert_eq!(s.savings_usd, None, "{}", s.window);
+            }
+            assert_ne!(c.base.action, Action::Change);
+        }
+
+        #[test]
         fn vibes_caps_a_window_past_the_maintainers_pick_apart_from_the_lines_verdict() {
             use crate::doctor::{Edit, How, Op, Patch};
             use crate::report::Origin;
@@ -5562,6 +5649,14 @@ mod tests {
                 ),
                 (Some(600_000), Some(100_000), Action::Change)
             );
+            // The replay prices the cap apart from the candidates, which it never joins.
+            assert_eq!(check.cap.as_ref().map(|s| s.window), Some(400_000));
+            assert!(check.scenarios.iter().all(|s| s.window != 400_000));
+            assert!(
+                text(&report, None, true).contains(
+                    "400000 tokens; 0 affected requests; 0 added compactions; vibes' cap, priced for its card and never recommended"
+                )
+            );
             let card = |report: &Report| {
                 crate::report::advice(report, ReportOptions::default())
                     .into_iter()
@@ -5573,7 +5668,7 @@ mod tests {
             assert_eq!(item.value, "600k -> 400k");
             assert_eq!(
                 item.text,
-                "Set to 600k. The maintainer would cap it at 400k for better output, not a smaller bill: a smaller window compacts sooner, so the model works from a shorter context. Anthropic's docs say accuracy and recall degrade as a context grows. doctor's auto-compact window line recommends 100k on cost. Its replay did not price a 400k window, so what the cap costs is not measured. The cap is advice beside that line, not its verdict."
+                "Set to 600k. The maintainer would cap it at 400k for better output, not a smaller bill: a smaller window compacts sooner, so the model works from a shorter context. Anthropic's docs say accuracy and recall degrade as a context grows. doctor's auto-compact window line recommends 100k on cost. Against the 600k window, its replay of a 400k window changes no recorded request, so it costs the same at API prices. The cap is advice beside that line, not its verdict."
             );
             assert_eq!(
                 item.sources,
@@ -5616,20 +5711,38 @@ mod tests {
             let declined = crate::vibes::settled(vec![item.clone()], &[Origin::Check(index + 1)]);
             assert_eq!(declined[0].after, []);
             assert_eq!(declined[0].text, item.text);
+            // A replay that changed nothing but left a part unpriced does not claim equal costs.
+            let CheckResult::Compaction(c) = &mut report.checks[index] else {
+                unreachable!()
+            };
+            let cap = c.cap.as_mut().unwrap();
+            cap.comparison_cost
+                .unknown
+                .push("synthetic unpriced part".into());
+            assert!(!card(&report).text.contains("costs the same"));
             // A cap the replay priced says what it costs against the current window.
             let CheckResult::Compaction(c) = &mut report.checks[index] else {
                 unreachable!()
             };
-            let mut priced = c.scenarios[0].clone();
-            priced.window = 400_000;
+            let priced = c.cap.as_mut().unwrap();
             priced.savings_usd = Some(-0.5);
-            priced.margin = None;
-            c.scenarios.push(priced);
+            priced.margin = Some(crate::model::Margin::Unmeasured);
+            priced.affected_requests = 1;
+            // The details print the cap's extrapolated estimate, so they explain the `~`.
+            assert!(text(&report, None, true).contains("A ~ marks a figure extrapolated"));
+            let CheckResult::Compaction(c) = &mut report.checks[index] else {
+                unreachable!()
+            };
+            c.cap.as_mut().unwrap().margin = None;
+            assert!(!text(&report, None, true).contains("A ~ marks a figure extrapolated"));
+            let CheckResult::Compaction(c) = &mut report.checks[index] else {
+                unreachable!()
+            };
             let scale = crate::report::monthly(1.0, c.base.since, c.base.until);
             let text = card(&report).text;
             assert!(
                 text.contains(&format!(
-                    " Against the 600k window, its replay of a 400k window costs {} more at API prices. ",
+                    " Against the 600k window, both at a 5m cache TTL, its replay of a 400k window costs {} more at API prices. ",
                     crate::report::approx(0.5 * scale, None, "/mo")
                 )),
                 "{text}"
@@ -5639,7 +5752,7 @@ mod tests {
             let CheckResult::Compaction(c) = &mut report.checks[index] else {
                 unreachable!()
             };
-            let cap = c.scenarios.last_mut().unwrap();
+            let cap = c.cap.as_mut().unwrap();
             cap.comparison_cost
                 .assumptions
                 .push(crate::prices::TIER_SENSITIVITY.into());
@@ -5649,6 +5762,19 @@ mod tests {
                     .iter()
                     .any(|u| u == crate::prices::TIER_SENSITIVITY)
             );
+            let text = card(&report).text;
+            assert!(
+                text.contains(
+                    " Its replay of a 400k window rests on an assumed service tier, so what the cap costs is not measured. "
+                ),
+                "{text}"
+            );
+            // An unpriced cap says so, even at an assumed tier: recording it would not price it.
+            let CheckResult::Compaction(c) = &mut report.checks[index] else {
+                unreachable!()
+            };
+            let cap = c.cap.as_mut().unwrap();
+            cap.savings_usd = None;
             let text = card(&report).text;
             assert!(
                 text.contains(

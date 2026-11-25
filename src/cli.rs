@@ -345,7 +345,7 @@ impl Shown {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone()
-                .map(|checked| (checked.savings, checked.credit)),
+                .map(|checked| (checked.savings(), checked.credit)),
         };
         let there = hosts
             .iter()
@@ -604,19 +604,22 @@ fn figures(counts: &Counts) -> Vec<Piece> {
 
 /// The tallies as the line shows them, each kind apart as the report keeps it: what the
 /// settings save against the defaults, `credit`, then what the changes found so far save on
-/// top, `savings`; those that depend on how usage is paid after the rest, and dropped first.
+/// top, `savings`; those that depend on how usage is paid after them, then how many were not
+/// measured, dropped in the reverse order.
 fn tallies(savings: &Total, credit: Option<&Credit>) -> Vec<Piece> {
     let piece = |text, keep| Piece {
         text,
         keep,
         count: true,
     };
-    let (saving, saving_up_to) = credit.map(Credit::tally).unwrap_or_default();
-    let (found, found_up_to) = savings.tally(credit.is_some());
-    let mut pieces: Vec<Piece> = saving.map(|t| piece(t, 8)).into_iter().collect();
-    pieces.extend(found.map(|t| piece(t, 7)));
-    pieces.extend(saving_up_to.into_iter().map(|t| piece(t, 4)));
-    pieces.extend(found_up_to.map(|t| piece(t, 4)));
+    let saving = credit.map(Credit::tally).unwrap_or_default();
+    let found = savings.tally(credit.is_some());
+    let mut pieces: Vec<Piece> = saving.measured.map(|t| piece(t, 8)).into_iter().collect();
+    pieces.extend(found.measured.map(|t| piece(t, 7)));
+    pieces.extend(saving.up_to.into_iter().map(|t| piece(t, 4)));
+    pieces.extend(found.up_to.into_iter().map(|t| piece(t, 4)));
+    pieces.extend(saving.unmeasured.map(|t| piece(t, 1)));
+    pieces.extend(found.unmeasured.map(|t| piece(t, 1)));
     pieces
 }
 
@@ -2926,6 +2929,14 @@ mod tests {
             });
             total
         };
+        let finding = |usd| {
+            let saved = Saved {
+                saving: Some(usd),
+                margin: None,
+                verb: "saves",
+            };
+            crate::totals::Finding { saved, edit: None }
+        };
         let host = |requests, saving, credited| Totals {
             requests,
             savings: found(saving),
@@ -2943,7 +2954,7 @@ mod tests {
         *shown.reading.checked.lock().unwrap() = Some(Checked {
             done: 7,
             of: 11,
-            savings: found(300.0),
+            found: vec![finding(300.0)],
             credit: Some(credit(900.0)),
         });
         shown.settle(1, &there);
@@ -2985,19 +2996,22 @@ mod tests {
             baseline(Saving::UpTo(-12.0), None),
             baseline(Saving::NotMeasured, None),
         ]);
-        let mut savings = Total::default();
-        for (saving, verb) in [
+        let found: Vec<crate::totals::Finding> = [
             (Some(300.0), "saves"),
             (Some(10.0), crate::report::AT_LEAST),
             (Some(40.0), crate::report::UP_TO),
             (None, "saves"),
-        ] {
-            savings.count(&Saved {
+        ]
+        .into_iter()
+        .map(|(saving, verb)| crate::totals::Finding {
+            saved: Saved {
                 saving,
                 margin: None,
                 verb,
-            });
-        }
+            },
+            edit: None,
+        })
+        .collect();
         let look = Look {
             color: false,
             unicode: true,
@@ -3008,19 +3022,19 @@ mod tests {
             *shown.reading.checked.lock().unwrap() = Some(Checked {
                 done: 7,
                 of: 11,
-                savings,
+                found: found.clone(),
                 credit: credit.cloned(),
             });
             with(checking.clone(), shown.figures(), None, room)
         };
         assert_eq!(
             line(true, Some(&credit), 400),
-            "token-max: Checking settings... ⠸ 12s  7/11 checks  saving ~$945/mo ± $12 vs defaults, 1 estimated  found $310/mo more, 1 priced in part  costing up to $12/mo more vs defaults, depending on billing  found up to $40/mo more, depending on billing"
+            "token-max: Checking settings... ⠸ 12s  7/11 checks  saving ~$945/mo ± $12 vs defaults, 1 estimated, 1 more not measured  found $310/mo more, 1 priced in part, 1 more not measured  costing up to $12/mo more vs defaults, depending on billing  found up to $40/mo more, depending on billing"
         );
         let narrowed = [
             (
                 110,
-                "token-max: Checking settings... ⠸ 12s  7/11 checks  saving ~$945/mo ± $12 vs defaults, 1 estimated",
+                "token-max: Checking settings... ⠸ 12s  7/11 checks  found $310/mo more, 1 priced in part, 1 more not measured",
             ),
             (79, "token-max: Checking settings... ⠸ 12s  7/11 checks"),
         ];
@@ -3032,7 +3046,7 @@ mod tests {
         // Under `--defaults` every setting is its default, so the changes are all there is.
         assert_eq!(
             line(true, None, 200),
-            "token-max: Checking settings... ⠸ 12s  7/11 checks  found $310/mo, 1 priced in part  found up to $40/mo, depending on billing"
+            "token-max: Checking settings... ⠸ 12s  7/11 checks  found $310/mo, 1 priced in part, 1 more not measured  found up to $40/mo, depending on billing"
         );
         // `vibes` counts its checks but tallies nothing, since its advice is unmeasured.
         assert_eq!(

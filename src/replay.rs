@@ -874,12 +874,12 @@ impl Checking<'_> {
         }
     }
 
-    /// One check done, its `results` among `profiles` tallied.
-    fn land(&mut self, results: &[CheckResult], profiles: &[crate::model::Profile]) {
+    /// One check done, its `results` in `scan` tallied.
+    fn land(&mut self, results: &[CheckResult], scan: &Scan) {
         self.checked.done += 1;
         if self.reading.is_some() {
             for result in results {
-                self.checked.check(result, profiles);
+                self.checked.check(result, scan);
             }
         }
         self.show();
@@ -890,9 +890,8 @@ impl Checking<'_> {
     fn land_context(&mut self, context: &[crate::model::ContextCost], scan: &Scan, now: Millis) {
         self.checked.done += 1;
         if self.reading.is_some() {
-            for found in crate::report::context_tally(context, scan, now) {
-                self.checked.savings.count(&found);
-            }
+            let found = crate::report::context_tally(context, scan, now);
+            self.checked.found.extend(found);
         }
         self.show();
     }
@@ -1037,7 +1036,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         crate::t3::constrain(&mut check.base, &scan.profiles);
     }
     let ttls: Vec<CheckResult> = ttls.into_iter().map(CheckResult::Ttl).collect();
-    checking.land(&ttls, &scan.profiles);
+    checking.land(&ttls, &scan);
     let ttl_refs: Vec<&TtlCheck> = ttls
         .iter()
         .filter_map(|c| match c {
@@ -1058,7 +1057,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         crate::t3::constrain(&mut check.base, &scan.profiles);
     }
     let windows: Vec<CheckResult> = windows.into_iter().map(CheckResult::Compaction).collect();
-    checking.land(&windows, &scan.profiles);
+    checking.land(&windows, &scan);
     let window_refs: Vec<_> = windows
         .iter()
         .filter_map(|c| match c {
@@ -1079,7 +1078,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         crate::t3::constrain(&mut check.base, &scan.profiles);
     }
     let turn_ends: Vec<CheckResult> = turn_ends.into_iter().map(CheckResult::TurnEnd).collect();
-    checking.land(&turn_ends, &scan.profiles);
+    checking.land(&turn_ends, &scan);
     let idle: Vec<CheckResult> = idle_checks(&IdleOptions {
         scan: &scan,
         catalog,
@@ -1093,7 +1092,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     .into_iter()
     .map(CheckResult::Idle)
     .collect();
-    checking.land(&idle, &scan.profiles);
+    checking.land(&idle, &scan);
     let idle_refs: Vec<_> = idle
         .iter()
         .filter_map(|c| match c {
@@ -1115,7 +1114,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     .into_iter()
     .map(CheckResult::Keepalive)
     .collect();
-    checking.land(&keepalive, &scan.profiles);
+    checking.land(&keepalive, &scan);
     let speed: Vec<CheckResult> = speed_checks(&SpeedInput {
         scan: &scan,
         catalog,
@@ -1125,7 +1124,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     .into_iter()
     .map(CheckResult::Speed)
     .collect();
-    checking.land(&speed, &scan.profiles);
+    checking.land(&speed, &scan);
     let background: Vec<CheckResult> = background_checks(&BackgroundInput {
         scan: &scan,
         catalog,
@@ -1136,7 +1135,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     .into_iter()
     .map(CheckResult::Background)
     .collect();
-    checking.land(&background, &scan.profiles);
+    checking.land(&background, &scan);
     // The Bash timeout cap is advice `vibes` gives, not a check.
     let bash = bash_caps(&BashInput {
         scan: &scan,
@@ -1156,7 +1155,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     .into_iter()
     .map(CheckResult::T3Idle)
     .collect();
-    checking.land(&t3_idle, &scan.profiles);
+    checking.land(&t3_idle, &scan);
     let context = context_costs(&ContextInput {
         scan: &scan.exposure,
         requests: &scan.requests,
@@ -1177,7 +1176,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     .into_iter()
     .map(CheckResult::Memory)
     .collect();
-    checking.land(&memory, &scan.profiles);
+    checking.land(&memory, &scan);
     let effort: Vec<CheckResult> = crate::effort::effort_checks(&crate::effort::EffortInput {
         scan: &scan,
         catalog,
@@ -1187,7 +1186,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     .into_iter()
     .map(CheckResult::Effort)
     .collect();
-    checking.land(&effort, &scan.profiles);
+    checking.land(&effort, &scan);
     debug_assert_eq!(checking.checked.done, CHECKS, "every check counted once");
     drop((ttl_refs, window_refs, idle_refs));
     let checks = [

@@ -523,9 +523,10 @@ impl Credit {
     }
 
     /// What the settings save as a progress line tallies them: those measured, estimates
-    /// included and counted, then those whose default depends on how usage is paid, saving
-    /// and costing apart, as the credit line keeps them.
-    pub fn tally(&self) -> (Option<String>, Vec<String>) {
+    /// included and counted, those whose default depends on how usage is paid, saving and
+    /// costing apart, and how many differ by amounts not measured, as the credit line keeps
+    /// them; the count not measured joins the measured figure when there is one.
+    pub fn tally(&self) -> crate::totals::Tallied {
         let amount = |sum: &Sum, up_to: &str| {
             let (verb, more) = if sum.usd < 0.0 {
                 ("costing", " more")
@@ -542,14 +543,29 @@ impl Credit {
                 0 => String::new(),
                 n => format!(", {n} estimated"),
             };
-            amount(&self.measured, "") + &estimated
+            // Said with the measured figure, so a row too narrow for it drops both.
+            let unmeasured = match self.unmeasured {
+                0 => String::new(),
+                n => format!(", {n} more not measured"),
+            };
+            amount(&self.measured, "") + &estimated + &unmeasured
         });
         let up_to = [&self.up_to, &self.up_to_more]
             .into_iter()
             .filter(|sum| sum.settings > 0)
             .map(|sum| amount(sum, "up to ") + ", depending on billing")
             .collect();
-        (measured, up_to)
+        let unmeasured = match self.unmeasured {
+            _ if measured.is_some() => None,
+            0 => None,
+            1 => Some("1 setting differs by an amount not measured".into()),
+            n => Some(format!("{n} settings differ by amounts not measured")),
+        };
+        crate::totals::Tallied {
+            measured,
+            up_to,
+            unmeasured,
+        }
     }
 
     /// How many settings have a saving priced, in full or "up to".

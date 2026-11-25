@@ -8,8 +8,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::defaults::Credit;
-use crate::doctor::{Fix, Total};
-use crate::model::{CheckResult, Estimate, HistoricalCost, Margin, Profile, Report, Request, Scan};
+use crate::doctor::{Fix, How, Saved, Total};
+use crate::model::{CheckResult, Estimate, HistoricalCost, Margin, Report, Request, Scan};
 use crate::report::{Spend, spend_text};
 
 /// One host's figures, or the sum of several.
@@ -107,14 +107,30 @@ impl Totals {
     }
 }
 
+/// A change a check found, and the edit the walk would make for it, if any.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Finding {
+    pub saved: Saved,
+    /// The walk lists an edit two lines make once, so it is counted once.
+    pub edit: Option<How>,
+}
+
+impl Finding {
+    /// The change saving `saved`, carried out as `how`.
+    pub fn new(saved: Saved, how: How) -> Self {
+        let edit = matches!(how, How::Edit(_)).then_some(how);
+        Finding { saved, edit }
+    }
+}
+
 /// What a host's checks have found so far, for a progress line while its settings are checked.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Checked {
     /// How many checks are done, of `of`.
     pub done: usize,
     pub of: usize,
-    /// What the changes found so far save, their shares unknown until the spend is summed.
-    pub savings: Total,
+    /// The changes found so far.
+    pub found: Vec<Finding>,
     /// What the settings checked so far save against the defaults; None under `--defaults`.
     /// The tools, skills and MCP servers already off join once the report is formatted.
     pub credit: Option<Credit>,
@@ -130,16 +146,45 @@ impl Checked {
         }
     }
 
-    /// One check's result, among `profiles`, counted as its report line and the walk count it.
-    pub fn check(&mut self, result: &CheckResult, profiles: &[Profile]) {
-        let (baseline, found) = crate::report::check_tally(result, profiles);
+    /// One check's result in `scan`, counted as its report line and the walk count it.
+    pub fn check(&mut self, result: &CheckResult, scan: &Scan) {
+        let (baseline, found) = crate::report::check_tally(result, scan);
         if let (Some(credit), Some(baseline)) = (&mut self.credit, &baseline) {
             credit.add(baseline);
         }
-        if let Some(found) = &found {
-            self.savings.count(found);
-        }
+        self.found.extend(found);
     }
+
+    /// What the changes found so far save together, their shares unknown until the spend is
+    /// summed. As the walk lists them, biggest saving first, an edit two lines make keeps the
+    /// first line's saving only.
+    pub fn savings(&self) -> Total {
+        let mut found: Vec<&Finding> = self.found.iter().collect();
+        found.sort_by(|a, b| crate::report::by_saving(a.saved.saving, b.saved.saving));
+        let mut edits: Vec<&How> = vec![];
+        let mut total = Total::default();
+        for offered in found {
+            if let Some(edit) = &offered.edit {
+                if edits.contains(&edit) {
+                    continue;
+                }
+                edits.push(edit);
+            }
+            total.count(&offered.saved);
+        }
+        total
+    }
+}
+
+/// One kind of figure after another as a progress line tallies them, each with its qualifier.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Tallied {
+    /// What was measured, estimates included.
+    pub measured: Option<String>,
+    /// What holds only while a default is the other value, saving and costing apart.
+    pub up_to: Vec<String>,
+    /// How many differ, or change, by amounts not measured, when none was measured.
+    pub unmeasured: Option<String>,
 }
 
 /// What a progress line counts: requests, their tokens and sessions as a report's header
@@ -274,6 +319,47 @@ pub fn tokens(r: &Request) -> u64 {
 mod tests {
     use super::*;
     use crate::report::spend_text;
+
+    /// Two lines that make one edit, such as a compaction window for two profiles sharing a
+    /// settings file, count once as the walk lists them: the bigger saving's line keeps it.
+    #[test]
+    fn an_edit_two_checks_find_counts_once() {
+        use crate::doctor::{Edit, Op, Patch};
+        let edit = |value: i64| {
+            How::Edit(Patch {
+                file: "/home/u/.claude/settings.json".into(),
+                harness: crate::model::Harness::Claude,
+                edits: vec![Edit {
+                    path: vec!["autoCompactWindow".into()],
+                    value: value.into(),
+                    op: Op::Set,
+                }],
+            })
+        };
+        let finding = |usd, how| {
+            let saved = Saved {
+                saving: Some(usd),
+                margin: None,
+                verb: "saves",
+            };
+            Finding::new(saved, how)
+        };
+        let manual = || How::Manual {
+            step: "by hand".into(),
+            reason: "synthetic".into(),
+        };
+        let mut checked = Checked::new(2, false);
+        checked.found = vec![
+            finding(20.0, edit(400_000)),
+            finding(50.0, edit(400_000)),
+            finding(7.0, edit(300_000)),
+            // Steps by hand are never the same edit.
+            finding(3.0, manual()),
+            finding(3.0, manual()),
+        ];
+        let tallied = checked.savings().tally(true);
+        assert_eq!(tallied.measured.as_deref(), Some("found $63/mo more"));
+    }
 
     fn host(requests: u64, spend: f64, margin: Option<Margin>, monthly: f64) -> Totals {
         Totals {

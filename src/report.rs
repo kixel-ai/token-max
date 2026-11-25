@@ -23,6 +23,7 @@ use crate::model::{
 use crate::prices::{TIER_SENSITIVITY, TIER_SIGNS, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
 use crate::terminal::{BOLD, DIM, GREEN, RED, WrapOptions, YELLOW, cells, wrap_spans};
+use crate::totals::Finding;
 use crate::vibes::Item;
 
 /// How to lay out the text report; presentation never changes the analysis.
@@ -5580,13 +5581,18 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
         });
     }
     // A stable sort keeps the report's order among equal savings.
-    lines.sort_by(|a, b| match (a.saving, b.saving) {
+    lines.sort_by(|a, b| by_saving(a.saving, b.saving));
+    lines
+}
+
+/// Biggest monthly saving first, and those not measured after the rest.
+pub(crate) fn by_saving(a: Option<f64>, b: Option<f64>) -> std::cmp::Ordering {
+    match (a, b) {
         (Some(a), Some(b)) => b.total_cmp(&a),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => std::cmp::Ordering::Equal,
-    });
-    lines
+    }
 }
 
 /// The headline: how many changes the report recommends and how many are worth considering,
@@ -5717,18 +5723,22 @@ fn piece_found(c: &ContextCost, spend: &Spend) -> Saved {
 /// and what the change it recommends or suggests saves, None when it offers none.
 pub(crate) fn check_tally(
     result: &CheckResult,
-    profiles: &[Profile],
-) -> (Option<crate::defaults::Baseline>, Option<Saved>) {
+    scan: &Scan,
+) -> (Option<crate::defaults::Baseline>, Option<Finding>) {
     let r = common(result);
-    let lead = profiles.iter().find(|p| p.id == r.profile);
-    let found = matches!(check_mark(result, &r), Mark::Change | Mark::Consider)
-        .then(|| check_found(result, &r, lead));
+    let lead = scan.profiles.iter().find(|p| p.id == r.profile);
+    let found = matches!(check_mark(result, &r), Mark::Change | Mark::Consider).then(|| {
+        Finding::new(
+            check_found(result, &r, lead),
+            crate::doctor::how(&scan.profiles, &Source::Check(result), scan.defaults),
+        )
+    });
     (crate::defaults::check(result, lead), found)
 }
 
 /// What turning each piece of `context` off saves, for each line that offers it, as the walk
 /// counts it while the settings are checked: `scan`'s, in a report generated at `now`.
-pub(crate) fn context_tally(context: &[ContextCost], scan: &Scan, now: Millis) -> Vec<Saved> {
+pub(crate) fn context_tally(context: &[ContextCost], scan: &Scan, now: Millis) -> Vec<Finding> {
     // Only the spend's window reads here, and the spend is not yet summed.
     let spend = Spend {
         usd: 0.0,
@@ -5740,7 +5750,10 @@ pub(crate) fn context_tally(context: &[ContextCost], scan: &Scan, now: Millis) -
     };
     setting_rows(context)
         .filter(|c| piece_mark(c, &scan.profiles).is_some())
-        .map(|c| piece_found(c, &spend))
+        .map(|c| {
+            let how = crate::doctor::how(&scan.profiles, &Source::Piece(c), scan.defaults);
+            Finding::new(piece_found(c, &spend), how)
+        })
         .collect()
 }
 
@@ -8391,21 +8404,23 @@ mod tests {
         let totals = crate::totals::Totals::new(&report, &fixes, listing.credit());
         let mut checked = crate::totals::Checked::new(1, report.scan.defaults);
         for result in &report.checks {
-            checked.check(result, &report.scan.profiles);
+            checked.check(result, &report.scan);
         }
-        for found in context_tally(&report.context, &report.scan, generated_at(&report)) {
-            checked.savings.count(&found);
-        }
+        checked.found.extend(context_tally(
+            &report.context,
+            &report.scan,
+            generated_at(&report),
+        ));
         assert_eq!(checked.credit, totals.credit);
-        assert_eq!(checked.savings.changes(), totals.savings.changes());
-        assert_eq!(checked.savings.tally(true), totals.savings.tally(true));
+        let savings = checked.savings();
+        assert_eq!(savings.changes(), totals.savings.changes());
+        assert_eq!(savings.tally(true), totals.savings.tally(true));
         // A measured change, and a setting whose default depends on how usage is paid.
         assert_eq!(
-            checked.savings.tally(true).0.as_deref(),
+            savings.tally(true).measured.as_deref(),
             Some("found ~$314/mo ± $1.25 more")
         );
-        let (_, saving_up_to) = checked.credit.as_ref().unwrap().tally();
-        assert_eq!(saving_up_to.len(), 1);
+        assert_eq!(checked.credit.as_ref().unwrap().tally().up_to.len(), 1);
     }
 
     #[test]

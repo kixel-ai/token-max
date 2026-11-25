@@ -1376,7 +1376,7 @@ an exit code.
 | Explore subagent | Claude's built-in Explore ran off Haiku: what it cost, the same tokens on the cheapest model, the model guide's tip, and the agent file that follows it as a step by hand. |
 | Fable weekly use | Any Fable request in the window: what they cost, and Anthropic's [plan rule](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan). |
 | [Auto memory](#auto-memory-in-vibes) | Every auto memory or Codex memories line: off is advised when most main sessions ran in a repository with a CLAUDE.md or AGENTS.md. |
-| [Code intelligence](#code-intelligence) | Claude sessions read or edited files of a typed language whose official language server plugin a new session wouldn't load, or whose server isn't on `PATH`: Anthropic's [costs page](https://code.claude.com/docs/en/costs#install-code-intelligence-plugins-for-typed-languages). |
+| [Code intelligence](#code-intelligence) | Claude sessions read or edited files of a typed language whose official language server plugin a new session wouldn't load: Anthropic's [costs page](https://code.claude.com/docs/en/costs#install-code-intelligence-plugins-for-typed-languages). |
 
 The effort, instruction-file, subagent and Fable lines stay in `doctor`, where
 their costs are measured; only the advice about them is here.
@@ -1622,26 +1622,17 @@ are not read. The advice is always for the official copy:
 | State for a new session | Change |
 | --- | --- |
 | Not installed for every project | By hand: `claude plugin install <plugin>@claude-plugins-official`, since `enabledPlugins` turns a plugin on but doesn't download it. A bare install goes to whichever directories the shell selects, so the step sets `CLAUDE_CONFIG_DIR` to the profile, unsetting it only for the default `~/.claude` that the shell doesn't name, and sets or unsets `CLAUDE_CODE_PLUGIN_CACHE_DIR` as the profile has it. |
-| Installed, and turned off in the user settings | `enabledPlugins` set to `true` there, offered as an edit when the server is on `PATH`. Otherwise by hand. For a T3 instance whose launch arguments, secret environment values or machine policy can replace the settings it reads, the card says the user settings turn it off only if the instance reads them, and the step names no file. |
+| Installed, and turned off in the user settings | `enabledPlugins` set to `true` there, offered as an edit. For a T3 instance whose launch arguments, secret environment values or machine policy can replace the settings it reads, the card says the user settings turn it off only if the instance reads them, and the step, by hand, names no file. |
 | Turned off by managed settings | None. |
-| Installed and on | None, unless its server is missing or is rustup's proxy. |
+| Installed and on | None. |
 
-The server is looked for on the `PATH` claude starts with: the one managed or
-user settings' `env` sets, else for a T3 instance the one its environment sets,
-else the shell's. Profiles that share a card find it only if each does. A
-server that isn't there gets a step by hand to install it, unless managed
-settings turn the plugin off. Whether it is installed is unknown, and turning
-the plugin on is by hand, for a server it doesn't find:
-
-- over `--ssh`, on the shell's `PATH`, which often leaves out what a login
-  shell adds, though not on one a setting or a T3 instance gives claude;
-- for a T3 instance, which starts claude from its own process, unless its
-  environment or settings set `PATH`;
-- when `PATH` holds a relative directory, which depends on where claude starts.
-
-rustup's `rust-analyzer` proxy, a link to `rustup` itself, starts the server
-only for a toolchain that has its component, so it gets a step by hand to add
-the component to each toolchain that lacks it.
+The plugin doesn't include its language server, such as `rust-analyzer`, so
+each card names it and each step starts by installing it on the `PATH` claude
+starts with, as the plugin's README says. token-max doesn't check that `PATH`:
+it can't know the one claude starts with, which settings' `env`, a T3
+instance's environment, a login shell or rustup's proxies change. Claude Code
+checks it from the real one, and `/plugin`'s **Errors** tab shows
+`Executable not found in $PATH` for a server it can't find.
 
 When `permissions.deny` in managed or user settings turns off the `LSP` tool,
 which Claude looks symbols up with, the card says the plugin would give only

@@ -2603,7 +2603,6 @@ pub(crate) fn profile(
             .and_then(Value::as_str)
             .filter(|d| !d.is_empty())
             .map(|d| crate::lsp::expand(&options.home, d));
-        let (path, shell) = crate::lsp::claude_path(&[&managed, &user], &options.env);
         crate::lsp::Plugins {
             dir: Some(match &cache_dir {
                 Some(dir) => dir.clone(),
@@ -2613,9 +2612,6 @@ pub(crate) fn profile(
             // Without the variable, a shell reaches only the default home.
             named: explicit
                 || !realpath(&join(&[&options.home, ".claude"])).is_ok_and(|d| d == canonical),
-            path,
-            shell,
-            complete: true,
             denied: crate::lsp::denies_lsp(&[(&managed, managed_file), (&user, &settings_file)]),
             home: options.home.clone(),
             user: crate::lsp::enabled_entries(&user, &settings_file),

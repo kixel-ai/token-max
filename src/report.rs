@@ -10246,7 +10246,6 @@ mod tests {
                 installed: false,
                 installed_for: vec![],
                 off: None,
-                server: crate::lsp::Found::Yes,
             }],
             settings_file: format!("{ROOT}/settings.json"),
             root: ROOT.into(),

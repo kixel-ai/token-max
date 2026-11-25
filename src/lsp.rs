@@ -1,20 +1,20 @@
 //! Code intelligence plugins: the language of each file Claude read or edited, and `vibes`'
-//! card for each typed language whose official plugin a new session wouldn't load, or whose
-//! server isn't on `PATH`.
+//! card for each typed language whose official plugin a new session wouldn't load.
 //!
 //! A session's language comes from the files its tool calls named, not marker files at its
 //! directory: most recorded directories are worktrees deleted since, and a `build.gradle` can't
 //! tell Java from Kotlin.
 //!
 //! The card judges only what a new session gets now from the user and managed settings: whether
-//! the official plugin is installed and turned on, and whether its server is on `PATH`. It
-//! doesn't replay which plugins past sessions loaded, which would mean copying Claude Code's
+//! the official plugin is installed and turned on. It doesn't check that the plugin's server
+//! is on the `PATH` claude starts with, which token-max can only guess at and Claude Code's
+//! `/plugin` Errors tab reports from the real one. It doesn't replay which plugins past sessions loaded, which would mean copying Claude Code's
 //! rules for project installs and project settings. The plugins are read only when the report
 //! is built, never during the scan, and what can't be read stays with the card.
 
 use std::fs;
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::{Map, Value};
 
@@ -166,12 +166,6 @@ impl File {
     }
 }
 
-/// Whether an environment variable's name is `PATH`, which Windows spells `Path` and reads in
-/// any case.
-pub(crate) fn is_path(name: &str) -> bool {
-    name == "PATH" || (cfg!(windows) && name.eq_ignore_ascii_case("PATH"))
-}
-
 /// A path with a leading `~` read as `home`, as Claude Code reads its plugins directory.
 pub(crate) fn expand(home: &str, path: &str) -> String {
     match path.strip_prefix('~') {
@@ -179,35 +173,6 @@ pub(crate) fn expand(home: &str, path: &str) -> String {
         Some(rest) if rest.starts_with(['/', '\\']) => join(&[home, &rest[1..]]),
         _ => path.to_string(),
     }
-}
-
-/// Why the `PATH` claude starts with is unknown when token-max has none.
-pub const NO_PATH: &str = "token-max ran without a PATH";
-/// Why a T3 instance's `PATH` is unknown: T3 starts claude from its own process, not a shell.
-pub const T3_PATH: &str =
-    "the T3 instance starts claude with a PATH it doesn't set, which token-max can't read";
-/// Why a server missing over `--ssh` may still be installed.
-const SSH_PATH: &str = "over --ssh, token-max runs without the directories a login shell adds to PATH, such as ~/.cargo/bin";
-/// Why a server missing from a `PATH` with relative directories may still be found.
-const RELATIVE_PATH: &str =
-    "the PATH claude starts with holds a relative directory, which depends on where it starts";
-
-/// The `PATH` claude starts its servers with: `env.PATH` in the first of `settings` that sets
-/// one, else the shell's; and whether it is the shell's.
-pub(crate) fn claude_path(
-    settings: &[&Map<String, Value>],
-    env: &crate::controls::Env,
-) -> (Result<String, &'static str>, bool) {
-    let set = settings.iter().find_map(|s| {
-        crate::controls::members(s.get("env"))
-            .iter()
-            .find_map(|(k, v)| v.as_str().filter(|_| is_path(k)))
-    });
-    if let Some(path) = set {
-        return (Ok(path.into()), false);
-    }
-    let shell = env.iter().find_map(|(k, v)| is_path(k).then(|| v.clone()));
-    (shell.ok_or(NO_PATH), true)
 }
 
 /// The first of `settings` whose `permissions.deny` turns off the `LSP` tool, by its file.
@@ -233,13 +198,6 @@ pub struct Plugins {
     /// Whether a step must set `CLAUDE_CONFIG_DIR` to reach the profile: it isn't the default
     /// `~/.claude`, or the shell's variable names it, which keeps Claude Code's state inside.
     pub named: bool,
-    /// The `PATH` claude starts with, where servers are looked for, or why it is unknown.
-    pub path: Result<String, &'static str>,
-    /// Whether `path` is the shell token-max runs in's, rather than one a setting gives claude.
-    pub shell: bool,
-    /// Whether a server missing from the shell's `path` is missing for claude too; false over
-    /// `--ssh`, whose `PATH` often lacks what a login shell adds.
-    pub complete: bool,
     /// The settings file whose `permissions.deny` turns off the `LSP` tool, if one does.
     pub denied: Option<String>,
     /// The home directory, which no project's repository may claim.
@@ -362,109 +320,6 @@ fn installs(file: &str) -> Result<IndexMap<String, Install>, Unread> {
         found.insert(id.clone(), install);
     }
     Ok(found)
-}
-
-/// Whether a language's server is installed where claude finds it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Found {
-    Yes,
-    No,
-    /// rustup's proxy, which runs a toolchain's copy and fails where the toolchain lacks it.
-    Proxy,
-    /// Unknown, for this reason.
-    Unknown(&'static str),
-}
-
-impl Found {
-    /// What every profile on a line finds, where each has its own `PATH`: missing for any
-    /// is missing, and found only when found for all.
-    fn and(self, other: Found) -> Found {
-        match (self, other) {
-            (Found::No, _) | (_, Found::No) => Found::No,
-            (Found::Proxy, _) | (_, Found::Proxy) => Found::Proxy,
-            (Found::Unknown(why), _) | (_, Found::Unknown(why)) => Found::Unknown(why),
-            (Found::Yes, Found::Yes) => Found::Yes,
-        }
-    }
-}
-
-/// Whether `binary` is on the `PATH` claude starts with.
-fn found(binary: &str, plugins: &Plugins) -> Found {
-    let path = match &plugins.path {
-        Ok(path) => path,
-        Err(why) => return Found::Unknown(why),
-    };
-    // A relative directory is relative to wherever claude starts, not to token-max.
-    let (absolute, relative): (Vec<PathBuf>, Vec<PathBuf>) =
-        std::env::split_paths(path).partition(|d| d.is_absolute());
-    match on_path(binary, &absolute) {
-        Some(file) if rustup_proxy(&file) => Found::Proxy,
-        Some(_) => Found::Yes,
-        None if !relative.is_empty() => Found::Unknown(RELATIVE_PATH),
-        None if plugins.complete || !plugins.shell => Found::No,
-        None => Found::Unknown(SSH_PATH),
-    }
-}
-
-/// The program `binary` in the first of `dirs` that holds it, trying each of Windows' program
-/// extensions there.
-fn on_path(binary: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
-    let names: Vec<String> = if cfg!(windows) {
-        [".exe", ".cmd", ".bat", ".com"]
-            .iter()
-            .map(|e| format!("{binary}{e}"))
-            .collect()
-    } else {
-        vec![binary.to_string()]
-    };
-    dirs.iter().find_map(|dir| {
-        names
-            .iter()
-            .map(|n| dir.join(n))
-            .find(|file| fs::metadata(file).is_ok_and(|m| m.is_file() && executable(&m)))
-    })
-}
-
-#[cfg(unix)]
-fn executable(meta: &fs::Metadata) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    meta.permissions().mode() & 0o111 != 0
-}
-
-#[cfg(not(unix))]
-fn executable(_: &fs::Metadata) -> bool {
-    true
-}
-
-/// Whether the program at `file` is rustup's proxy, which runs a toolchain's copy of it and
-/// fails when that toolchain lacks the component. Rustup makes each proxy a symbolic link to
-/// itself, or a hard link beside it.
-fn rustup_proxy(file: &Path) -> bool {
-    let rustup = |p: &Path| p.file_stem().is_some_and(|s| s == "rustup");
-    if fs::canonicalize(file).is_ok_and(|real| rustup(&real)) {
-        return true;
-    }
-    let beside = file.with_file_name(if cfg!(windows) {
-        "rustup.exe"
-    } else {
-        "rustup"
-    });
-    match (fs::metadata(file), fs::metadata(beside)) {
-        (Ok(a), Ok(b)) => linked(&a, &b),
-        _ => false,
-    }
-}
-
-#[cfg(unix)]
-fn linked(a: &fs::Metadata, b: &fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    a.dev() == b.dev() && a.ino() == b.ino()
-}
-
-/// Without a stable file identity, a hard link shows as a file of the same length.
-#[cfg(not(unix))]
-fn linked(a: &fs::Metadata, b: &fs::Metadata) -> bool {
-    a.len() == b.len()
 }
 
 /// The main checkout of the Git repository holding the existing directory `dir`, as Claude
@@ -630,7 +485,6 @@ pub struct LanguageUse {
     pub installed_for: Vec<String>,
     /// The settings that turn it off for a new session, if any do.
     pub off: Option<Off>,
-    pub server: Found,
 }
 
 /// One line per Claude settings file and plugins directory: its sessions from `since`, else
@@ -714,14 +568,7 @@ pub fn lsp_use(scan: &Scan, since: Option<Millis>, now: Millis) -> Vec<LspUse> {
                                     .or_insert_with(|| project(dir, Some(&plugins.home)));
                                 *counts.entry(name.clone()).or_default() += 1;
                             }
-                            language(
-                                lsp,
-                                &line.members,
-                                installs,
-                                by_session.len(),
-                                shared,
-                                counts,
-                            )
+                            language(lsp, plugins, installs, by_session.len(), shared, counts)
                         })
                         .collect();
                     languages.sort_by(|a, b| b.sessions.cmp(&a.sessions).then(a.lsp.cmp(&b.lsp)));
@@ -760,16 +607,12 @@ fn read(plugins: &Plugins) -> Result<IndexMap<String, Install>, Unread> {
 /// One language's plugin as a new session gets it, with the sessions that worked in it.
 fn language(
     lsp: Lsp,
-    members: &[&Profile],
+    plugins: &Plugins,
     installs: &IndexMap<String, Install>,
     sessions: usize,
     shared: usize,
     counts: IndexMap<String, u64>,
 ) -> LanguageUse {
-    let plugins = members[0]
-        .plugins
-        .as_ref()
-        .expect("filtered on its plugins");
     let id = lsp.official();
     let install = installs.get(&id).cloned().unwrap_or_default();
     let entry = |settings: &Result<Map<String, Value>, Unread>| {
@@ -795,12 +638,6 @@ fn language(
         installed: install.everywhere,
         installed_for,
         off,
-        server: members
-            .iter()
-            .filter_map(|m| m.plugins.as_ref())
-            .map(|p| found(lsp.server().binary, p))
-            .reduce(Found::and)
-            .expect("a line has a member"),
     }
 }
 
@@ -819,7 +656,7 @@ const UNRESOLVED: &str = "its launch arguments, a secret environment value or ma
 const WHAT: &str = "A plugin that runs a language server for Claude: code navigation by symbol, and diagnostics after each edit.";
 
 /// `vibes`' cards for one line: one for each language whose official plugin a new session
-/// wouldn't load, or whose server isn't on `PATH`, or one saying why the plugins can't be read.
+/// wouldn't load, or one saying why the plugins can't be read.
 pub fn items(u: &LspUse, view: &View<'_>) -> Vec<Item> {
     let home = |path: &str| crate::report::home_path(view.home, path);
     if let Some(unread) = &u.unread {
@@ -871,9 +708,7 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
     let install = !blocked && !l.installed && !covered;
     // The user settings decide only a user or managed install.
     let enable = !blocked && l.installed && l.off == Some(Off::User);
-    let missing = !blocked && l.server == Found::No;
-    let proxy = !blocked && l.server == Found::Proxy;
-    if !blocked && !install && !enable && !missing && !proxy {
+    if !blocked && !install && !enable {
         return None;
     }
     if l.sessions == 0 {
@@ -921,26 +756,18 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
             s.plugin,
             listed(&l.installed_for, &home)
         )
-    } else if covered {
-        format!(
-            " The {} plugin is installed for {}, every project these sessions ran in.",
-            s.plugin,
-            listed(&l.installed_for, &home)
-        )
-    } else if enable && u.unresolved {
+    } else if u.unresolved {
         format!(
             " The {} plugin is installed, and enabledPlugins in {} turns it off, if the T3 instance reads that file: {UNRESOLVED}.",
             s.plugin,
             home(&u.settings_file)
         )
-    } else if enable {
+    } else {
         format!(
             " The {} plugin is installed, and enabledPlugins in {} turns it off.",
             s.plugin,
             home(&u.settings_file)
         )
-    } else {
-        format!(" The {} plugin is installed and on.", s.plugin)
     };
     if let Some(file) = u.denied.as_deref().filter(|_| !blocked) {
         text += &format!(
@@ -948,92 +775,51 @@ fn item(u: &LspUse, l: &LanguageUse, view: &View<'_>) -> Option<Item> {
             home(file)
         );
     }
-    text += &match l.server {
-        Found::Yes => format!(" Its language server, {}, is on PATH.", s.binary),
-        Found::No if !blocked => format!(
-            " Its language server, {}, is not on PATH, and the plugin can't start without it.",
+    // token-max can't know the PATH claude starts with, so it names the server without
+    // checking it; Claude Code's /plugin Errors tab reports one it can't find.
+    if !blocked {
+        text += &format!(
+            " The plugin starts {}, which it doesn't include; /plugin's Errors tab says when it isn't on the PATH claude starts with.",
             s.binary
-        ),
-        Found::No => format!(" Its language server, {}, is not on PATH either.", s.binary),
-        Found::Proxy => format!(
-            " Its language server, {0}, is on PATH as rustup's proxy, which starts it only for a toolchain that has the {0} component.",
-            s.binary
-        ),
-        Found::Unknown(why) => format!(
-            " Whether its language server, {}, is installed is unknown: {why}.",
-            s.binary
-        ),
-    };
+        );
+    }
     text += " With the plugin, Claude looks up a symbol's definition and references instead of searching text and reading each candidate file, and sees the errors an edit introduced. Anthropic recommends it for typed languages; what it saves is not measured.";
     let on = Edit {
         path: vec!["enabledPlugins".into(), id.clone()],
         value: Value::Bool(true),
         op: Op::Set,
     };
+    let server = format!(
+        "install {} on the PATH claude starts with if it isn't, as the plugin's README says",
+        s.binary
+    );
     // The one change the walk writes: turning the installed plugin on in the profile's own
-    // file, when that alone is known to load it and start its server.
-    let edit = enable && l.server == Found::Yes && !u.unresolved;
-    let unknown = matches!(l.server, Found::Unknown(_));
+    // file, when that alone is known to load it.
+    let edit = enable && !u.unresolved;
     let how = if edit {
         Some(How::Edit(Patch {
             file: u.settings_file.clone(),
             harness: Harness::Claude,
             edits: vec![on],
         }))
-    } else {
-        let mut steps = vec![];
-        if missing {
-            steps.push(format!("install {}, as the plugin's README says", s.binary));
-        } else if proxy {
-            steps.push(format!(
-                "run `rustup component add {}` for each toolchain your projects use that lacks it",
-                s.binary
-            ));
-        } else if unknown && (install || enable) {
-            steps.push(format!(
-                "install {} if claude can't start it, as the plugin's README says",
-                s.binary
-            ));
-        }
-        if install {
-            steps.push(format!(
-                "{} run `claude plugin install {id}`",
+    } else if install {
+        Some(How::Manual {
+            step: format!(
+                "{server}, then {} run `claude plugin install {id}`, then start a new session",
                 shell(u, &home)
-            ));
-        }
-        if enable {
-            steps.push(if u.unresolved {
-                format!(
-                    "set {} in the settings the T3 instance reads, if they turn it off",
-                    on.text(Harness::Claude)
-                )
-            } else {
-                format!(
-                    "set {} in {}",
-                    on.text(Harness::Claude),
-                    home(&u.settings_file)
-                )
-            });
-        }
-        let reason = if enable && u.unresolved {
-            UNRESOLVED
-        } else if install {
-            "no setting installs a plugin"
-        } else if unknown {
-            "token-max couldn't check that its server is installed, and the plugin can't start without it"
-        } else if proxy {
-            "token-max can't tell which toolchains your projects use"
-        } else {
-            "token-max installs no programs"
-        };
-        (!steps.is_empty()).then(|| How::Manual {
-            step: if install || enable {
-                format!("{}, then start a new session", steps.join(", then "))
-            } else {
-                steps.join(", then ")
-            },
-            reason: reason.into(),
+            ),
+            reason: "no setting installs a plugin".into(),
         })
+    } else if enable {
+        Some(How::Manual {
+            step: format!(
+                "{server}, then set {} in the settings the T3 instance reads, if they turn it off, then start a new session",
+                on.text(Harness::Claude)
+            ),
+            reason: UNRESOLVED.into(),
+        })
+    } else {
+        None
     };
     Some(Item {
         name: format!("{} code intelligence", s.language),
@@ -1123,6 +909,7 @@ mod tests {
     use crate::reader::scan;
     use crate::test_support::{Workspace, native_path};
     use serde_json::json;
+    use std::path::PathBuf;
 
     const START: Millis = 1_793_491_200_000; // 2026-11-01T00:00:00Z
 
@@ -1176,23 +963,6 @@ mod tests {
             "cwd": cwd,
             "message": {"role": "user", "content": content},
         })
-    }
-
-    /// A program named `binary` in `dir`, returning its path.
-    fn program(dir: &Path, binary: &str) -> PathBuf {
-        fs::create_dir_all(dir).unwrap();
-        let file = dir.join(if cfg!(windows) {
-            format!("{binary}.exe")
-        } else {
-            binary.to_string()
-        });
-        fs::write(&file, binary).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        file
     }
 
     fn json_file(path: PathBuf, value: Value) {
@@ -1305,101 +1075,6 @@ mod tests {
                 problem: "it is not a file".into()
             })
         );
-    }
-
-    #[test]
-    fn a_server_is_found_only_on_a_path_claude_starts_with_and_never_as_rustups_proxy() {
-        let w = Workspace::new();
-        let bin = w.home.join("bin");
-        program(&bin, "gopls");
-        let plugins = |path: Result<String, &'static str>, shell: bool, complete: bool| Plugins {
-            dir: None,
-            cache_dir: None,
-            named: false,
-            path,
-            shell,
-            complete,
-            denied: None,
-            home: native_path(&w.home),
-            user: Ok(Map::new()),
-            managed: Ok(Map::new()),
-        };
-        let path = Ok(native_path(&bin));
-        assert_eq!(
-            found("gopls", &plugins(path.clone(), true, true)),
-            Found::Yes
-        );
-        assert_eq!(
-            found("clangd", &plugins(path.clone(), true, true)),
-            Found::No
-        );
-        // Over --ssh a miss on the shell's PATH may be a directory only a login shell adds,
-        // but not on one a setting gives claude.
-        assert_eq!(
-            found("gopls", &plugins(path.clone(), true, false)),
-            Found::Yes
-        );
-        assert_eq!(
-            found("clangd", &plugins(path.clone(), true, false)),
-            Found::Unknown(SSH_PATH)
-        );
-        assert_eq!(
-            found("clangd", &plugins(path.clone(), false, false)),
-            Found::No
-        );
-        assert_eq!(
-            found("gopls", &plugins(Err(T3_PATH), false, true)),
-            Found::Unknown(T3_PATH)
-        );
-        // A relative directory depends on where claude starts, so a miss is unknown.
-        let relative = Ok(std::env::join_paths([PathBuf::from("bin"), bin.clone()])
-            .unwrap()
-            .into_string()
-            .unwrap());
-        assert_eq!(
-            found("gopls", &plugins(relative.clone(), true, true)),
-            Found::Yes
-        );
-        assert_eq!(
-            found("clangd", &plugins(relative, true, true)),
-            Found::Unknown(RELATIVE_PATH)
-        );
-        // rustup links its proxies to itself; the proxy fails without the component.
-        let rustup = program(&bin, "rustup");
-        let proxy = bin.join(if cfg!(windows) {
-            "rust-analyzer.exe"
-        } else {
-            "rust-analyzer"
-        });
-        fs::hard_link(&rustup, &proxy).unwrap();
-        assert_eq!(
-            found("rust-analyzer", &plugins(path.clone(), true, true)),
-            Found::Proxy
-        );
-        #[cfg(unix)]
-        {
-            fs::remove_file(&proxy).unwrap();
-            std::os::unix::fs::symlink("rustup", &proxy).unwrap();
-            assert_eq!(
-                found("rust-analyzer", &plugins(path.clone(), true, true)),
-                Found::Proxy
-            );
-        }
-        // A toolchain's own copy, as Nix installs it, is the server.
-        fs::remove_file(&proxy).unwrap();
-        program(&bin, "rust-analyzer");
-        assert_eq!(
-            found("rust-analyzer", &plugins(path, true, true)),
-            Found::Yes
-        );
-        // Profiles sharing a card with PATHs of their own find it only if each does.
-        assert_eq!(Found::Yes.and(Found::No), Found::No);
-        assert_eq!(Found::Yes.and(Found::Proxy), Found::Proxy);
-        assert_eq!(
-            Found::Unknown(T3_PATH).and(Found::Yes),
-            Found::Unknown(T3_PATH)
-        );
-        assert_eq!(Found::Yes.and(Found::Yes), Found::Yes);
     }
 
     #[test]
@@ -1539,7 +1214,7 @@ mod tests {
             registry.clone(),
             json!({"version": 2, "plugins": {
                 rust: [{"scope": "user"}],
-                typescript: [{"scope": "local", "projectPath": repo_s}],
+                typescript: [{"scope": "local", "projectPath": other_s}],
                 // Another marketplace's copy is never the plugin.
                 "typescript-lsp@corp": [{"scope": "user"}],
             }}),
@@ -1554,13 +1229,7 @@ mod tests {
             other.join(".claude/settings.local.json"),
             json!({"enabledPlugins": {rust: true}}),
         );
-        let mut options = w.scan_options();
-        let bin = w.home.join("bin");
-        program(&bin, "rust-analyzer");
-        options
-            .discovery
-            .env
-            .insert("PATH".into(), native_path(&bin));
+        let options = w.scan_options();
         let data = scan(&options).unwrap();
         assert!(!format!("{data:?}").contains("main.rs"), "no path is kept");
         let lines = lsp_use(&data, None, START + 3_600_000);
@@ -1573,24 +1242,16 @@ mod tests {
         let got: Vec<_> = u
             .languages
             .iter()
-            .map(|l| {
-                (
-                    l.lsp.server().language,
-                    l.sessions,
-                    l.installed,
-                    l.off,
-                    l.server,
-                )
-            })
+            .map(|l| (l.lsp.server().language, l.sessions, l.installed, l.off))
             .collect();
         assert_eq!(
             got,
             [
-                ("Rust", 3, true, Some(Off::User), Found::Yes),
-                ("TypeScript and JavaScript", 3, false, None, Found::No),
+                ("Rust", 3, true, Some(Off::User)),
+                ("TypeScript and JavaScript", 3, false, None),
             ]
         );
-        assert_eq!(u.languages[1].installed_for, std::slice::from_ref(&repo_s));
+        assert_eq!(u.languages[1].installed_for, std::slice::from_ref(&other_s));
         // The worktree and the removed one are the repository's.
         assert_eq!(u.languages[1].projects, [(repo_s.clone(), 3)]);
         assert_eq!(
@@ -1613,28 +1274,25 @@ mod tests {
         assert_eq!(
             cards[0].text,
             format!(
-                "Rust files were read or edited in 3 of 5 sessions (60%), most in {} (2 sessions) and {} (1). The rust-analyzer-lsp plugin is installed, and enabledPlugins in {} turns it off. Its language server, rust-analyzer, is on PATH. With the plugin, Claude looks up a symbol's definition and references instead of searching text and reading each candidate file, and sees the errors an edit introduced. Anthropic recommends it for typed languages; what it saves is not measured.",
+                "Rust files were read or edited in 3 of 5 sessions (60%), most in {} (2 sessions) and {} (1). The rust-analyzer-lsp plugin is installed, and enabledPlugins in {} turns it off. The plugin starts rust-analyzer, which it doesn't include; /plugin's Errors tab says when it isn't on the PATH claude starts with. With the plugin, Claude looks up a symbol's definition and references instead of searching text and reading each candidate file, and sees the errors an edit introduced. Anthropic recommends it for typed languages; what it saves is not measured.",
                 home(&repo_s),
                 home(&other_s),
                 home(&native_path(&settings)),
             )
         );
-        // The project install covers every project these sessions ran in, so only the
-        // server is missing.
+        // A project install for a project these sessions didn't run in leaves them out.
         assert!(
             cards[1].text.contains(&format!(
-                " The typescript-lsp plugin is installed for {}, every project these sessions ran in. Its language server, typescript-language-server, is not on PATH",
-                home(&repo_s)
+                " The typescript-lsp plugin is installed only for {}, which leaves out every other project.",
+                home(&other_s)
             )),
             "{}",
             cards[1].text
         );
-        assert_eq!(
-            cards[1].how,
-            Some(How::Manual {
-                step: "install typescript-language-server, as the plugin's README says".into(),
-                reason: "token-max installs no programs".into(),
-            })
+        assert!(
+            matches!(&cards[1].how, Some(How::Manual { step, .. }) if step.starts_with("install typescript-language-server on the PATH claude starts with if it isn't, as the plugin's README says, then with CLAUDE_CONFIG_DIR")),
+            "{:?}",
+            cards[1].how
         );
         assert_eq!(cards[0].value, "off -> on");
         assert!(!cards[0].quiet);
@@ -1696,16 +1354,6 @@ mod tests {
             &lsp_use(&data, None, START + 3_600_000)[0].unread,
             Some(Unread::Invalid { file, .. }) if *file == native_path(&settings)
         ));
-        // A PATH the user settings give claude is the one its servers are found on.
-        json_file(
-            settings.clone(),
-            json!({"env": {"PATH": native_path(w.home.join("elsewhere"))}}),
-        );
-        let data = scan(&options).unwrap();
-        assert_eq!(
-            lsp_use(&data, None, START + 3_600_000)[0].languages[0].server,
-            Found::No
-        );
         fs::remove_file(&settings).unwrap();
         // `--defaults`, whose report has no cards, reads no plugins.
         let mut defaults = w.scan_options();
@@ -1756,7 +1404,7 @@ mod tests {
             denied: None,
             unread: None,
         };
-        let usage = |installed: bool, off: Option<Off>, server: Found| LanguageUse {
+        let usage = |installed: bool, off: Option<Off>| LanguageUse {
             lsp: rust,
             sessions: 10,
             shared: 0,
@@ -1764,44 +1412,24 @@ mod tests {
             installed,
             installed_for: vec![],
             off,
-            server,
         };
-        let unknown = Found::Unknown(SSH_PATH);
         let view = View {
             home: None,
             arrow: "->",
         };
         let card = |l: LanguageUse| items(&u(l), &view);
         let how = |l: LanguageUse| card(l).remove(0).how;
-        let step = |l: LanguageUse| match how(l) {
-            Some(How::Manual { step, .. }) => step,
-            other => panic!("{other:?}"),
-        };
-        // Installed and on with its server on PATH, or unchecked: nothing to advise.
-        assert!(card(usage(true, None, Found::Yes)).is_empty());
-        assert!(card(usage(true, None, unknown)).is_empty());
-        // Installed and on, but its server is missing.
-        let missing = card(usage(true, None, Found::No)).remove(0);
-        assert!(
-            missing
-                .text
-                .contains(" The rust-analyzer-lsp plugin is installed and on.")
-        );
-        assert_eq!(
-            missing.how,
-            Some(How::Manual {
-                step: "install rust-analyzer, as the plugin's README says".into(),
-                reason: "token-max installs no programs".into(),
-            })
-        );
+        // Installed and on: nothing to advise, since Claude Code reports a missing server.
+        assert!(card(usage(true, None)).is_empty());
+        let server = "install rust-analyzer on the PATH claude starts with if it isn't, as the plugin's README says";
         // A bare install goes to whichever home and plugins directory the shell selects, and
         // turns the plugin on in the user settings too.
         for off in [None, Some(Off::User)] {
             assert_eq!(
-                how(usage(false, off, Found::Yes)),
+                how(usage(false, off)),
                 Some(How::Manual {
                     step: format!(
-                        "with CLAUDE_CONFIG_DIR and CLAUDE_CODE_PLUGIN_CACHE_DIR unset, run `claude plugin install {id}`, then start a new session"
+                        "{server}, then with CLAUDE_CONFIG_DIR and CLAUDE_CODE_PLUGIN_CACHE_DIR unset, run `claude plugin install {id}`, then start a new session"
                     ),
                     reason: "no setting installs a plugin".into(),
                 })
@@ -1811,7 +1439,7 @@ mod tests {
             &LspUse {
                 named: true,
                 cache_dir: Some(native_path("/synthetic/cache")),
-                ..u(usage(false, None, Found::Yes))
+                ..u(usage(false, None))
             },
             &view,
         );
@@ -1820,29 +1448,18 @@ mod tests {
         };
         assert!(
             named.starts_with(&format!(
-                "with CLAUDE_CONFIG_DIR set to {} and CLAUDE_CODE_PLUGIN_CACHE_DIR set to {}, run",
+                "{server}, then with CLAUDE_CONFIG_DIR set to {} and CLAUDE_CODE_PLUGIN_CACHE_DIR set to {}, run",
                 native_path("/synthetic/claude-work"),
                 native_path("/synthetic/cache")
             )),
             "{named}"
-        );
-        assert!(step(usage(false, None, Found::No)).starts_with(
-            "install rust-analyzer, as the plugin's README says, then with CLAUDE_CONFIG_DIR"
-        ));
-        // A server it can't check is named with why, and the step says when it is needed.
-        let unchecked = card(usage(false, None, unknown)).remove(0);
-        assert!(unchecked.text.contains(&format!(
-            " Whether its language server, rust-analyzer, is installed is unknown: {SSH_PATH}."
-        )));
-        assert!(
-            matches!(&unchecked.how, Some(How::Manual { step, .. }) if step.starts_with("install rust-analyzer if claude can't start it, as the plugin's README says, then with"))
         );
         // Five projects hold a project install: three are named.
         let partly = card(LanguageUse {
             installed_for: ["a", "b", "c", "d", "e"]
                 .map(|p| format!("/synthetic/{p}"))
                 .into(),
-            ..usage(false, None, Found::Yes)
+            ..usage(false, None)
         })
         .remove(0);
         assert!(
@@ -1856,7 +1473,7 @@ mod tests {
         let covered = |off| LanguageUse {
             projects: vec![("/synthetic/a".into(), 10)],
             installed_for: vec!["/synthetic/a".into()],
-            ..usage(false, off, Found::Yes)
+            ..usage(false, off)
         };
         // The user settings decide only a user or managed install, so they don't turn these off.
         assert!(card(covered(None)).is_empty());
@@ -1874,47 +1491,18 @@ mod tests {
             "{}",
             uncovered.text
         );
-        let covered_missing = card(LanguageUse {
-            server: Found::No,
-            ..covered(None)
-        })
-        .remove(0);
-        assert!(covered_missing.text.contains(
-            " The rust-analyzer-lsp plugin is installed for /synthetic/a, every project these sessions ran in."
-        ));
         // Installed and turned off in the user settings: the one edit the walk writes.
-        let off = card(usage(true, Some(Off::User), Found::Yes)).remove(0);
+        let off = card(usage(true, Some(Off::User))).remove(0);
         assert_eq!(off.value, "off -> on");
         assert!(
             matches!(&off.how, Some(How::Edit(p)) if p.file == settings && p.edits[0].path == ["enabledPlugins", id])
-        );
-        // The edit alone wouldn't start a missing or unchecked server, so both steps are by
-        // hand.
-        let set = format!(
-            r#"set "enabledPlugins": {{"{id}": true}} in {settings}, then start a new session"#
-        );
-        assert_eq!(
-            how(usage(true, Some(Off::User), Found::No)),
-            Some(How::Manual {
-                step: format!("install rust-analyzer, as the plugin's README says, then {set}"),
-                reason: "token-max installs no programs".into(),
-            })
-        );
-        assert_eq!(
-            how(usage(true, Some(Off::User), unknown)),
-            Some(How::Manual {
-                step: format!(
-                    "install rust-analyzer if claude can't start it, as the plugin's README says, then {set}"
-                ),
-                reason: "token-max couldn't check that its server is installed, and the plugin can't start without it".into(),
-            })
         );
         // A T3 instance's launch arguments may name other settings, so the change is by hand
         // and says so.
         let unresolved = items(
             &LspUse {
                 unresolved: true,
-                ..u(usage(true, Some(Off::User), Found::Yes))
+                ..u(usage(true, Some(Off::User)))
             },
             &view,
         )
@@ -1923,7 +1511,7 @@ mod tests {
             unresolved.how,
             Some(How::Manual {
                 step: format!(
-                    r#"set "enabledPlugins": {{"{id}": true}} in the settings the T3 instance reads, if they turn it off, then start a new session"#
+                    r#"{server}, then set "enabledPlugins": {{"{id}": true}} in the settings the T3 instance reads, if they turn it off, then start a new session"#
                 ),
                 reason: UNRESOLVED.into(),
             })
@@ -1932,21 +1520,11 @@ mod tests {
             "if the T3 instance reads that file: {UNRESOLVED}."
         )));
         assert_eq!(unresolved.value, "");
-        // rustup's proxy is on PATH, but whether it starts the server depends on the toolchain.
-        let proxy = card(usage(true, None, Found::Proxy)).remove(0);
-        assert!(proxy.text.contains(" is on PATH as rustup's proxy,"));
-        assert_eq!(
-            proxy.how,
-            Some(How::Manual {
-                step: "run `rustup component add rust-analyzer` for each toolchain your projects use that lacks it".into(),
-                reason: "token-max can't tell which toolchains your projects use".into(),
-            })
-        );
         // A denied LSP tool is named beside an install.
         let denied = items(
             &LspUse {
                 denied: Some(native_path("/synthetic/managed.json")),
-                ..u(usage(false, None, Found::Yes))
+                ..u(usage(false, None))
             },
             &view,
         )
@@ -1957,16 +1535,16 @@ mod tests {
         )));
         // Turned off by managed settings: shown, with nothing to act on, installed or not.
         for installed in [true, false] {
-            let blocked = card(usage(installed, Some(Off::Managed), Found::No)).remove(0);
+            let blocked = card(usage(installed, Some(Off::Managed))).remove(0);
             assert!(blocked.quiet && blocked.how.is_none());
             assert!(blocked.text.contains(&format!(
-                " Managed settings turn {id} off, and nothing overrides them. Its language server, rust-analyzer, is not on PATH either."
+                " Managed settings turn {id} off, and nothing overrides them. With the plugin,"
             )));
         }
         // Sessions another profile may have run are named but not counted.
         let shared = card(LanguageUse {
             shared: 2,
-            ..usage(false, None, Found::Yes)
+            ..usage(false, None)
         })
         .remove(0);
         assert!(
@@ -1979,7 +1557,7 @@ mod tests {
         // A partial share never reads as all of them.
         let most = card(LanguageUse {
             sessions: 299,
-            ..usage(false, None, Found::Yes)
+            ..usage(false, None)
         })
         .remove(0);
         assert!(most.text.contains("(99.6%)"), "{}", most.text);
@@ -1988,7 +1566,7 @@ mod tests {
             card(LanguageUse {
                 sessions: 0,
                 shared: 2,
-                ..usage(installed, None, Found::Yes)
+                ..usage(installed, None)
             })
         };
         assert!(unowned(true).is_empty());
@@ -2003,7 +1581,7 @@ mod tests {
                 &LspUse {
                     unread: Some(unread),
                     languages: vec![],
-                    ..u(usage(false, None, Found::Yes))
+                    ..u(usage(false, None))
                 },
                 &view,
             )

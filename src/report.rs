@@ -6329,8 +6329,12 @@ fn left_out(report: &Report, conditional: u64) -> String {
     let coverage = &report.scan.coverage;
     let t3 = report.scan.t3.iter().filter(|s| s.status == "selected");
     let unsupported: u64 = t3.clone().map(|s| s.unsupported).sum();
-    let missing: u64 = t3.map(|s| s.missing).sum();
+    let missing: u64 = t3.clone().map(|s| s.missing).sum();
+    let policy = t3
+        .filter(|s| s.exclusions.iter().any(|e| e == crate::t3::POLICY_GAP))
+        .count() as u64;
     let counts = [
+        (policy, "T3 state", " with unread machine policy"),
         (unsupported, "unsupported T3 instance", ""),
         (missing, "T3 instance", " with a missing history home"),
         (coverage.t3_unattributed, "unattributed T3 request", ""),
@@ -9266,6 +9270,7 @@ mod tests {
             exclusions: vec![
                 "T3 instance x (grok) is unsupported; its spend is excluded".into(),
                 "T3 instance y: native history home /gone is missing".into(),
+                crate::t3::POLICY_GAP.into(),
             ],
             metadata: String::new(),
             snapshot_started_at: None,
@@ -9286,7 +9291,7 @@ mod tests {
         report.scan.coverage.skipped_files = 1;
         let text = short(&report);
         assert!(
-            text.contains("\n  Left out or assumed: 1 unsupported T3 instance, 1 T3 instance with a missing history home, 1 unattributed T3 request, 3 removed T3 requests, 4 requests with no usage, 1 unreadable line. --details says why.\n"),
+            text.contains("\n  Left out or assumed: 1 T3 state with unread machine policy, 1 unsupported T3 instance, 1 T3 instance with a missing history home, 1 unattributed T3 request, 3 removed T3 requests, 4 requests with no usage, 1 unreadable line. --details says why.\n"),
             "{text}"
         );
         for note in ["T3 coverage:", "T3 removed:", "Profiles:", PRICES_MEAN] {
@@ -9297,6 +9302,7 @@ mod tests {
         for note in [
             "T3 coverage: T3 instance x (grok) is unsupported",
             "T3 coverage: T3 instance y: native history home /gone is missing",
+            "T3 coverage: T3 machine managed policy is present",
             "T3 unresolved: 1 request: a",
             "T3 removed: 3 requests",
             "4 requests have no recorded usage",

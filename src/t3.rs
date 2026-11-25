@@ -280,6 +280,9 @@ impl<'de> Deserialize<'de> for Instance {
     }
 }
 
+/// The exclusion a T3 state carries when unread machine policy may move its history homes.
+pub(crate) const POLICY_GAP: &str = "T3 machine managed policy is present, inaccessible or unsupported on this platform; it may override homes and settings, so discovery coverage and current control ownership are unresolved";
+
 /// Platform policy can replace homes and controls. Do not claim user-file ownership
 /// when that uninspected layer exists (or cannot be checked).
 fn managed_policy_unresolved() -> bool {
@@ -848,10 +851,9 @@ pub(crate) fn discover(
                 limitations.push("a relevant T3 environment override uses a secret or redacted value; it was not read and effective ownership is unresolved".into());
             }
             if policy_unresolved {
-                let gap = "T3 machine managed policy is present, inaccessible or unsupported on this platform; it may override homes and settings, so discovery coverage and current control ownership are unresolved";
-                limitations.push(gap.into());
-                if !state.exclusions.iter().any(|s| s == gap) {
-                    state.exclusions.push(gap.into());
+                limitations.push(POLICY_GAP.into());
+                if !state.exclusions.iter().any(|s| s == POLICY_GAP) {
+                    state.exclusions.push(POLICY_GAP.into());
                 }
                 profile.ttl.main.value = None;
                 profile.ttl.subagent.value = None;

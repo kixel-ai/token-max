@@ -7,9 +7,9 @@ use crate::collections::{HashMap, HashSet, IndexMap, IndexSet};
 use std::fs::File;
 use std::hash::BuildHasher;
 use std::io::{ErrorKind, Read};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -61,6 +61,16 @@ pub struct Reading {
     pub total: AtomicU64,
     /// Bytes in the transcripts read so far.
     pub read: AtomicU64,
+    /// A step the scan takes after reading, and when it began, while it runs.
+    pub step: Mutex<Option<(&'static str, Instant)>>,
+}
+
+impl Reading {
+    /// Show `step` on the progress line from now, or clear it.
+    fn step(&self, step: Option<&'static str>) {
+        *self.step.lock().unwrap_or_else(PoisonError::into_inner) =
+            step.map(|step| (step, Instant::now()));
+    }
 }
 
 /// Bytes read per system call; lines longer than this are assembled across chunks.
@@ -792,6 +802,7 @@ fn event(
         settings: Settings::default(),
         idle_attribution: IdleAttribution::Unknown,
         shell: None,
+        file: None,
         meta: EventMeta {
             harness: snapshot.harness,
             session: context.session.clone(),
@@ -1369,8 +1380,11 @@ impl Reader {
                         e.tool = text(member(b, "name"));
                         e.tool_id = opaque(b, "id")?.map(Id::from);
                         e.request = Some(request_id.clone());
+                        let input = nested(b, "input");
+                        // Only the language is kept, never the path.
+                        e.file =
+                            crate::lsp::File::call(string(b, "name"), string(input, "file_path"));
                         if is(b, "name", "Bash") {
-                            let input = nested(b, "input");
                             e.shell = Some(ShellCall {
                                 background: is_true(input, "run_in_background"),
                                 polls: string(input, "command").is_some_and(polling_loop),
@@ -1457,6 +1471,7 @@ impl Reader {
                             string(b, "tool_use_id"),
                         );
                         e.tool_id = opaque(b, "tool_use_id")?.map(Id::from);
+                        e.file = (!is_true(b, "is_error")).then_some(crate::lsp::File::Done);
                         if timed_out {
                             e.shell = Some(ShellCall {
                                 timed_out,
@@ -2216,6 +2231,12 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     discover_claude_controls(&options.discovery, &mut profiles, &requests)?;
     discover_codex_controls(&options.discovery, &mut profiles, &requests)?;
     crate::subagents::discover(&options.discovery, &mut profiles, &requests, &earlier)?;
+    // T3's database is read by the sessions the transcripts name, so only after them.
+    if let Some(reading) = &options.reading
+        && crate::t3::reads_database(&t3)
+    {
+        reading.step(Some("Reading T3 Code's database"));
+    }
     crate::t3::enrich(
         &mut t3,
         &mut profiles,
@@ -2225,6 +2246,9 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         &snapshot_finished_at,
         since,
     );
+    if let Some(reading) = &options.reading {
+        reading.step(None);
+    }
     // After T3 attribution, so each instance reads its own sessions' directory.
     crate::discovery::discover_inbound(&options.discovery, &mut profiles, &requests)?;
     crate::discovery::discover_instructions(&mut profiles, &requests, since)?;

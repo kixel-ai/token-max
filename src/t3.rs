@@ -385,9 +385,20 @@ impl<'de> Deserialize<'de> for Environment {
             secret: Option<&'a RawValue>,
         }
         let entry = Entry::deserialize(d)?;
-        let allowed = ENVIRONMENT.contains(&entry.name.as_str())
-            && !entry.sensitive
-            && entry.secret.is_none();
+        let readable = !entry.sensitive && entry.secret.is_none();
+        // Only the code intelligence card reads it, so a value that isn't a string leaves it
+        // alone unread rather than failing the scan.
+        if entry.name == crate::lsp::CACHE_DIR {
+            let value = entry
+                .value
+                .filter(|_| readable)
+                .and_then(|v| serde_json::from_str(v.get()).ok());
+            return Ok(Self {
+                name: entry.name,
+                value,
+            });
+        }
+        let allowed = ENVIRONMENT.contains(&entry.name.as_str()) && readable;
         let value = if allowed {
             entry
                 .value
@@ -675,13 +686,29 @@ pub(crate) fn discover(
             let mut env: Env = options
                 .env
                 .iter()
-                .filter(|(k, _)| ENVIRONMENT.contains(&k.as_str()))
+                // Where plugins are, which only the code intelligence card reads.
+                .filter(|(k, _)| {
+                    ENVIRONMENT.contains(&k.as_str()) || k.as_str() == crate::lsp::CACHE_DIR
+                })
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
             let mut unresolved_env = false;
+            // A plugins directory token-max can't read leaves only the card's plugins unread,
+            // not the settings every other line reads.
+            let mut secret_plugins = false;
             let mut own_environment = vec![];
             for entry in instance.environment {
-                if ENVIRONMENT.contains(&entry.name.as_str()) {
+                if entry.name == crate::lsp::CACHE_DIR {
+                    match entry.value {
+                        Some(value) => {
+                            env.insert(entry.name, value);
+                        }
+                        None => {
+                            secret_plugins = true;
+                            env.remove(&entry.name);
+                        }
+                    }
+                } else if ENVIRONMENT.contains(&entry.name.as_str()) {
                     match entry.value {
                         Some(value) => {
                             if !own_environment.contains(&entry.name) {
@@ -762,6 +789,10 @@ pub(crate) fn discover(
             };
             let key = profile_key(&state.path, &id);
             let mut profile = crate::discovery::profile(&local, harness, root.clone(), root, &key)?;
+            if let Some(plugins) = profile.plugins.as_mut().filter(|_| secret_plugins) {
+                plugins.dir = None;
+                plugins.cache_dir = None;
+            }
             let owner = format!("{}:providerInstances.{id}", file.display());
             let (idle_mode, idle_owner) = match config.idle_compaction.as_deref() {
                 None | Some("default") => (
@@ -1206,17 +1237,40 @@ const OWNER_EVENT: &str = "SELECT EXISTS (SELECT 1 FROM orchestration_v2_project
    AND json_extract(e.payload_json,'$.providerInstanceId')=pt.provider_instance_id
    AND json_extract(e.payload_json,'$.nativeThreadRef.driver')=pt.driver
    AND json_extract(e.payload_json,'$.nativeThreadRef.nativeId')=json_extract(pt.payload_json,'$.nativeThreadRef.nativeId'))";
-// Native turn and item references of one provider thread: a native turn id, or for Claude a
-// turn item id that `item_key` decodes. Codex joins by turn id alone, so only Claude reads
-// items. Item ids avoid reading item payloads, which hold tool outputs.
-const NATIVE_REFS: &str = "SELECT provider_turn_id, json_extract(payload_json,'$.nativeTurnRef.driver'),
- json_extract(payload_json,'$.nativeTurnRef.nativeId'), 0
- FROM orchestration_v2_projection_provider_turns WHERE provider_thread_id=?1
- UNION ALL
- SELECT t.provider_turn_id, json_extract(t.payload_json,'$.nativeTurnRef.driver'), i.turn_item_id, 1
- FROM orchestration_v2_projection_provider_turns t
- JOIN orchestration_v2_projection_turn_items i ON i.provider_turn_id=t.provider_turn_id AND i.thread_id=t.thread_id
- WHERE ?2='claudeAgent' AND t.provider_thread_id=?1";
+// A provider turn's native turn reference: its driver, and its id when that is a string.
+macro_rules! native_turn_ref {
+    () => {
+        "json_extract(payload_json,'$.nativeTurnRef.driver'),
+ CASE WHEN json_type(payload_json,'$.nativeTurnRef.nativeId')='text'
+ THEN json_extract(payload_json,'$.nativeTurnRef.nativeId') END"
+    };
+}
+// One Codex provider thread's turns, which join by native turn id alone.
+const PROVIDER_TURNS: &str = concat!(
+    "SELECT provider_turn_id, ",
+    native_turn_ref!(),
+    " FROM orchestration_v2_projection_provider_turns WHERE provider_thread_id=?1"
+);
+// The T3 threads holding one Claude provider thread's turns, whose items the join reads.
+const TURN_THREADS: &str = "SELECT DISTINCT thread_id
+ FROM orchestration_v2_projection_provider_turns WHERE provider_thread_id=?1";
+// One T3 thread's provider turns, of every provider thread. No payload is read, so an
+// unselected provider's turn past the value bound cannot fail the join.
+const THREAD_TURNS: &str = "SELECT provider_turn_id, provider_thread_id
+ FROM orchestration_v2_projection_provider_turns WHERE thread_id=?1";
+// A selected provider turn's native turn reference.
+const TURN_REF: &str = concat!(
+    "SELECT ",
+    native_turn_ref!(),
+    " FROM orchestration_v2_projection_provider_turns WHERE provider_turn_id=?1"
+);
+// A Claude turn's items join it by turn item id, which `item_key` decodes. Item rows hold
+// tool outputs, so the join reads two of T3's indexes instead: a provider turn's item rows,
+// and each item's id by row within its thread.
+const TURN_ITEM_ROWS: &str =
+    "SELECT rowid FROM orchestration_v2_projection_turn_items WHERE provider_turn_id=?1";
+const THREAD_ITEM_IDS: &str =
+    "SELECT rowid, turn_item_id FROM orchestration_v2_projection_turn_items WHERE thread_id=?1";
 // The provider thread holding a Claude turn item, by primary-key range from `item_range`.
 // After `/clear` the native session gets a new id while T3's provider thread keeps the old
 // one, yet T3 still records the new transcript's items under that thread.
@@ -1233,20 +1287,38 @@ const ITEM_THREAD: &str = "SELECT t.provider_thread_id, pt.driver, pt.provider_i
 const FIRST_ITEM: &str = "SELECT updated_at FROM orchestration_v2_projection_turn_items
  WHERE rowid=(SELECT min(rowid) FROM orchestration_v2_projection_turn_items
   WHERE turn_item_id>=?1 AND turn_item_id<?2)";
-// Native identities and the earliest running selection are the join.
-const TURN: &str = "WITH matched AS (
- SELECT t.*, a.attempt_id, a.run_id, a.provider_instance_id,
- json_extract(a.payload_json,'$.nativeThreadId') AS native_session,
- (SELECT e.sequence FROM orchestration_events e
-  WHERE e.aggregate_kind='thread' AND e.application_event_version=2 AND e.stream_id=a.thread_id
-    AND e.event_type='run.updated' AND json_extract(e.payload_json,'$.id')=a.run_id
-    AND json_extract(e.payload_json,'$.activeAttemptId')=a.attempt_id
-    AND json_extract(e.payload_json,'$.status')='running'
-  ORDER BY e.sequence LIMIT 1) AS selection_sequence
- FROM orchestration_v2_projection_provider_turns t
+// A provider turn and its run attempt, which `ATTEMPT` and `TURN` both join.
+macro_rules! turn_attempt {
+    () => {
+        " FROM orchestration_v2_projection_provider_turns t
  LEFT JOIN orchestration_v2_projection_run_attempts a ON a.attempt_id=t.run_attempt_id
    AND a.thread_id=t.thread_id AND a.provider_thread_id=t.provider_thread_id
- WHERE t.provider_turn_id=?1)
+ WHERE t.provider_turn_id=?1"
+    };
+}
+// A provider turn's attempt, whose earliest running selection `Selections` finds.
+const ATTEMPT: &str = concat!(
+    "SELECT a.thread_id, a.run_id, a.attempt_id",
+    turn_attempt!()
+);
+// Each run selection one thread recorded, in order. Ids that are not JSON strings never
+// match a run or attempt, so no nested value leaves SQLite.
+const SELECTIONS: &str = "SELECT sequence,
+ CASE WHEN json_type(payload_json,'$.id')='text' THEN json_extract(payload_json,'$.id') END,
+ CASE WHEN json_type(payload_json,'$.activeAttemptId')='text'
+   THEN json_extract(payload_json,'$.activeAttemptId') END,
+ json_extract(payload_json,'$.status')='running'
+ FROM orchestration_events
+ WHERE aggregate_kind='thread' AND application_event_version=2 AND stream_id=?1
+   AND event_type='run.updated'
+ ORDER BY sequence";
+// Native identities and the earliest running selection, `?2`, are the join.
+const TURN: &str = concat!(
+    "WITH matched AS (
+ SELECT t.*, a.attempt_id, a.run_id, a.provider_instance_id,
+ json_extract(a.payload_json,'$.nativeThreadId') AS native_session",
+    turn_attempt!(),
+    ")
  SELECT m.native_session, m.provider_instance_id, m.thread_id, m.run_id, m.attempt_id,
  m.provider_turn_id, m.status, m.started_at, m.completed_at,
  json_extract(m.payload_json,'$.tokenUsage.updatedAt'),
@@ -1268,15 +1340,16 @@ const TURN: &str = "WITH matched AS (
        AND json_extract(msg.payload_json,'$.creationSource')='server' THEN 'beforeCacheExpires' END) END,
  msg.message_id IS NOT NULL AND COALESCE(lower(trim(json_extract(msg.payload_json,'$.text'))),'') != '/compact'
  FROM matched m
- LEFT JOIN orchestration_events e ON e.sequence=m.selection_sequence
+ LEFT JOIN orchestration_events e ON e.sequence=?2
  LEFT JOIN orchestration_v2_projection_runs r ON r.run_id=m.run_id AND r.thread_id=m.thread_id
- LEFT JOIN orchestration_v2_projection_messages msg ON msg.message_id=json_extract(r.payload_json,'$.userMessageId') AND msg.thread_id=m.thread_id";
+ LEFT JOIN orchestration_v2_projection_messages msg ON msg.message_id=json_extract(r.payload_json,'$.userMessageId') AND msg.thread_id=m.thread_id",
+);
 
 /// The longest SQLite value the adapter reads, bounding what a T3 database can make it hold.
 const VALUE_BOUND: i32 = 1_048_576;
 
 /// Why optional T3 metadata could not be read.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum Unavailable {
     Schema(String),
     Budget(String),
@@ -1476,6 +1549,23 @@ impl TurnRow {
     }
 }
 
+/// Records a provider turn under each of its native ids a selected request names.
+fn add_turn(
+    found: &mut HashMap<String, Vec<String>>,
+    wanted: &HashSet<&str>,
+    turn: String,
+    natives: Vec<String>,
+) {
+    for native in natives {
+        if wanted.contains(native.as_str()) {
+            let turns = found.entry(native).or_default();
+            if !turns.contains(&turn) {
+                turns.push(turn.clone());
+            }
+        }
+    }
+}
+
 fn text_column(row: &rusqlite::Row<'_>, index: usize) -> Option<String> {
     row.get::<_, Option<String>>(index).ok().flatten()
 }
@@ -1648,34 +1738,91 @@ fn metadata(
         })?;
     // Provider turns per native turn/item id, within each selected session's threads.
     let mut refs: HashMap<&(&str, String), HashMap<String, Vec<String>>> = HashMap::default();
-    let mut native_refs = tx.prepare(NATIVE_REFS)?;
-    for (key, list) in &threads {
+    // Codex joins by native turn id alone, reading its provider threads' turns.
+    let mut provider_turns = tx.prepare(PROVIDER_TURNS)?;
+    for (key, list) in threads.iter().filter(|(key, _)| key.0 == "codex") {
         let found = refs.entry(key).or_default();
         let wanted = &wanted[&(key.0, key.1.as_str())];
         for thread in list {
-            let mut rows = native_refs.query(rusqlite::params![thread.id, key.0])?;
+            let mut rows = provider_turns.query([&thread.id])?;
             while let Some(row) = rows.next()? {
-                let (Some(turn), Some(native)) = (text_column(row, 0), text_column(row, 2)) else {
-                    continue;
-                };
-                let native = if bool_column(row, 3) == Some(true) {
-                    let Some(native) = item_key(&native) else {
-                        continue;
-                    };
-                    native
-                } else {
-                    native
-                };
-                if text_column(row, 1).as_deref() == Some(key.0) && wanted.contains(native.as_str())
+                if let Some(turn) = text_column(row, 0)
+                    && text_column(row, 1).as_deref() == Some(key.0)
                 {
-                    let turns = found.entry(native).or_default();
-                    if !turns.contains(&turn) {
-                        turns.push(turn);
-                    }
+                    add_turn(
+                        found,
+                        wanted,
+                        turn,
+                        text_column(row, 2).into_iter().collect(),
+                    );
                 }
             }
         }
     }
+    // Claude turns also join by item id, and T3 numbers item rows per T3 thread, so the join
+    // walks the T3 threads holding the selected Claude provider threads' turns: each one's
+    // item ids are read once and dropped before the next.
+    let mut claude_threads: HashMap<&str, &(&str, String)> = HashMap::default();
+    let mut t3_threads: HashSet<String> = HashSet::default();
+    let mut turn_threads = tx.prepare(TURN_THREADS)?;
+    for (key, list) in threads.iter().filter(|(key, _)| key.0 == "claudeAgent") {
+        for thread in list {
+            claude_threads.insert(&thread.id, key);
+            let mut rows = turn_threads.query([&thread.id])?;
+            while let Some(row) = rows.next()? {
+                t3_threads.extend(text_column(row, 0));
+            }
+        }
+    }
+    let mut thread_turns = tx.prepare(THREAD_TURNS)?;
+    let mut turn_ref = tx.prepare(TURN_REF)?;
+    let mut turn_item_rows = tx.prepare(TURN_ITEM_ROWS)?;
+    let mut thread_item_ids = tx.prepare(THREAD_ITEM_IDS)?;
+    // Only item keys a selected request names are kept.
+    let claude: HashSet<&str> = wanted
+        .iter()
+        .filter(|((driver, _), _)| *driver == "claudeAgent")
+        .flat_map(|(_, natives)| natives.iter().copied())
+        .collect();
+    for t3 in &t3_threads {
+        let mut keys: HashMap<i64, String> = HashMap::default();
+        let mut items = thread_item_ids.query([t3])?;
+        while let Some(item) = items.next()? {
+            if let Some(native) = text_column(item, 1).and_then(|i| item_key(&i))
+                && claude.contains(native.as_str())
+            {
+                keys.insert(item.get(0)?, native);
+            }
+        }
+        let mut rows = thread_turns.query([t3])?;
+        while let Some(row) = rows.next()? {
+            let (Some(turn), Some(key)) = (
+                text_column(row, 0),
+                text_column(row, 1).and_then(|p| claude_threads.get(p.as_str()).copied()),
+            ) else {
+                continue;
+            };
+            let (driver, native) =
+                turn_ref.query_row([&turn], |r| Ok((text_column(r, 0), text_column(r, 1))))?;
+            if driver.as_deref() != Some(key.0) {
+                continue;
+            }
+            let mut natives: Vec<String> = native.into_iter().collect();
+            let mut items = turn_item_rows.query([&turn])?;
+            while let Some(item) = items.next()? {
+                natives.extend(keys.get(&item.get::<_, i64>(0)?).cloned());
+            }
+            add_turn(
+                refs.entry(key).or_default(),
+                &wanted[&(key.0, key.1.as_str())],
+                turn,
+                natives,
+            );
+        }
+    }
+    let mut attempt_query = tx.prepare(ATTEMPT)?;
+    let mut selections_query = tx.prepare(SELECTIONS)?;
+    let mut selections: HashMap<String, Selections> = HashMap::default();
     let mut turn_query = tx.prepare(TURN)?;
     let mut turn_rows: HashMap<String, Option<TurnRow>> = HashMap::default();
     let mut result = Projection {
@@ -1735,13 +1882,43 @@ fn metadata(
             [turn] => {
                 matched = Some(turn.clone());
                 if !turn_rows.contains_key(turn) {
-                    let row = turn_query
-                        .query_row([turn], |row| Ok(TurnRow::read(row, bound_ms)))
+                    let attempt = attempt_query
+                        .query_row([turn], |row| {
+                            Ok((
+                                text_column(row, 0),
+                                text_column(row, 1),
+                                text_column(row, 2),
+                            ))
+                        })
                         .map(Some)
                         .or_else(|e| match e {
                             rusqlite::Error::QueryReturnedNoRows => Ok(None),
                             e => Err(e),
                         })?;
+                    let row = match attempt {
+                        None => None,
+                        Some(attempt) => {
+                            let selection = match attempt {
+                                (Some(thread), Some(run), Some(attempt)) => {
+                                    if !selections.contains_key(&thread) {
+                                        let read = Selections::read(&mut selections_query, &thread);
+                                        selections.insert(thread.clone(), read);
+                                    }
+                                    selections[&thread].first(&run, &attempt)?
+                                }
+                                _ => None,
+                            };
+                            turn_query
+                                .query_row(rusqlite::params![turn, selection], |row| {
+                                    Ok(TurnRow::read(row, bound_ms))
+                                })
+                                .map(Some)
+                                .or_else(|e| match e {
+                                    rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                                    e => Err(e),
+                                })?
+                        }
+                    };
                     turn_rows.insert(turn.clone(), row);
                 }
                 turn_rows[turn].as_ref().and_then(|t| t.join(r, bound_ms))
@@ -1794,6 +1971,51 @@ fn metadata(
     Ok(result)
 }
 
+/// One thread's run selections, read once for every turn that joins a run of it: a lookup
+/// per turn would reread the thread's whole event log each time.
+struct Selections {
+    /// The earliest running selection of each run and attempt.
+    first: HashMap<(String, String), i64>,
+    /// Why SQLite failed to read the event after the last one read, if it did.
+    failed: Option<Unavailable>,
+}
+
+impl Selections {
+    /// Read `thread`'s selections in order, up to the first event SQLite cannot read.
+    fn read(query: &mut rusqlite::Statement<'_>, thread: &str) -> Self {
+        let mut first = HashMap::default();
+        let failed = (|| {
+            let mut rows = query.query([thread])?;
+            while let Some(row) = rows.next()? {
+                if let (Some(run), Some(attempt), Some(true)) = (
+                    text_column(row, 1),
+                    text_column(row, 2),
+                    bool_column(row, 3),
+                ) {
+                    first.entry((run, attempt)).or_insert(row.get(0)?);
+                }
+            }
+            Ok::<_, rusqlite::Error>(())
+        })()
+        .err()
+        .map(Unavailable::from);
+        Self { first, failed }
+    }
+
+    /// The sequence of `run`'s earliest running selection of `attempt`. A lookup that has to
+    /// pass an unreadable event fails as reading it does.
+    fn first(&self, run: &str, attempt: &str) -> Result<Option<i64>, Unavailable> {
+        match (
+            self.first.get(&(run.to_string(), attempt.to_string())),
+            &self.failed,
+        ) {
+            (Some(sequence), _) => Ok(Some(*sequence)),
+            (None, Some(failed)) => Err(failed.clone()),
+            (None, None) => Ok(None),
+        }
+    }
+}
+
 /// The one-owner profile set for `owner`, shared by every record it owns.
 fn shared(owned: &mut HashMap<String, Profiles>, owner: &str) -> Profiles {
     if let Some(profiles) = owned.get(owner) {
@@ -1802,6 +2024,13 @@ fn shared(owned: &mut HashMap<String, Profiles>, owner: &str) -> Profiles {
     let profiles = Profiles::from([owner.to_string()]);
     owned.insert(owner.to_string(), profiles.clone());
     profiles
+}
+
+/// Whether `enrich` reads a database: only a selected state's existing `statev2.sqlite`.
+pub(crate) fn reads_database(states: &[T3State]) -> bool {
+    states
+        .iter()
+        .any(|s| s.status == "selected" && Path::new(&s.path).join("statev2.sqlite").is_file())
 }
 
 /// Freeze optional projection metadata in one read-only WAL transaction, then close it before analysis.
@@ -2551,7 +2780,15 @@ mod tests {
         let db = db(&root);
         seed(&db, "codex", "codex");
         let before = fs::read(root.join("statev2.sqlite")).unwrap();
-        let scan = scan(&w.scan_options()).unwrap();
+        let reading = std::sync::Arc::new(crate::reader::Reading::default());
+        let scan = scan(&crate::reader::ScanOptions {
+            reading: Some(reading.clone()),
+            ..w.scan_options()
+        })
+        .unwrap();
+        // The database step leaves the progress line once the read is done.
+        assert!(reads_database(&scan.t3));
+        assert!(reading.step.lock().unwrap().is_none());
         assert_eq!(scan.requests.len(), 1);
         let r = &scan.requests[0];
         assert_eq!(r.parts[0].tier, None);
@@ -2706,7 +2943,7 @@ mod tests {
             let database = db(&root);
             seed(&database, "claudeAgent", "claudeAgent");
             // Dates when T3 began recording turn items, after the session below.
-            database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES(?1,'thread','turn','assistant_message','completed','{}','2026-01-01T00:00:00Z',NULL)",[format!("{ITEM_PREFIX}other-uuid")]).unwrap();
+            database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES(?1,'thread','turn','assistant_message','completed','{}','2026-01-01T00:00:00Z',NULL,0)",[format!("{ITEM_PREFIX}other-uuid")]).unwrap();
             let row = json!({"type":"assistant","uuid":"early-uuid","sessionId":"early","timestamp":"2025-12-31T00:00:00Z","entrypoint":"sdk-ts","message":{"id":"early-message","model":"claude-opus-5-5","content":[],"usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}});
             write(w.claude.join("projects/p/early.jsonl"), format!("{row}\n"));
             let data = scan(&w.scan_options()).unwrap();
@@ -3079,7 +3316,10 @@ mod tests {
             .iter()
             .find(|p| p.t3.as_ref().is_some_and(|t| t.instance == "claudeAgent"))
             .expect("the instance's profile");
-        assert!(!p.t3.as_ref().unwrap().settings_unresolved);
+        assert_eq!(
+            p.t3.as_ref().unwrap().settings_unresolved,
+            managed_policy_unresolved()
+        );
         let effort = p.agents.effort.as_ref().expect("the instance's effort");
         assert_eq!(effort.value, "max");
         assert!(
@@ -3099,6 +3339,43 @@ mod tests {
             p.agents.unresolved
         );
         assert!(!format!("{scan:?}").contains("PRIVATE_MODEL"));
+    }
+    #[test]
+    fn a_secret_plugins_directory_leaves_only_the_plugins_unread() {
+        let w = Workspace::new();
+        native(&w);
+        let instance = |entry: Value| {
+            state(
+                &w,
+                json!({"providerInstances":{"claudeAgent":{"driver":"claudeAgent","environment":[entry]}}}),
+            );
+            let scan = scan(&w.scan_options()).unwrap();
+            assert!(!format!("{scan:?}").contains("PRIVATE_DIR"));
+            scan.profiles
+                .into_iter()
+                .find(|p| p.t3.is_some() && p.harness == Harness::Claude)
+                .unwrap()
+        };
+        let secret = instance(
+            json!({"name":"CLAUDE_CODE_PLUGIN_CACHE_DIR","value":"PRIVATE_DIR","sensitive":true}),
+        );
+        // Every other line still reads the instance's settings.
+        assert_eq!(
+            secret.t3.as_ref().unwrap().settings_unresolved,
+            managed_policy_unresolved()
+        );
+        assert_eq!(secret.plugins.unwrap().dir, None);
+        // So does a value that isn't a string, without failing the scan.
+        let invalid = instance(json!({"name":"CLAUDE_CODE_PLUGIN_CACHE_DIR","value":false}));
+        assert_eq!(invalid.plugins.unwrap().dir, None);
+        let plain =
+            instance(json!({"name":"CLAUDE_CODE_PLUGIN_CACHE_DIR","value":"~/plugin-cache"}));
+        assert_eq!(
+            plain.plugins.unwrap().dir,
+            Some(crate::test_support::native_path(
+                w.home.join("plugin-cache")
+            ))
+        );
     }
     #[test]
     fn claude_exact_sdk_items_link_idle_runs_without_exporting_text() {
@@ -3416,7 +3693,7 @@ mod tests {
         database.execute("INSERT INTO orchestration_v2_projection_provider_threads SELECT 'legacy',thread_id,driver,NULL,updated_at,payload_json FROM orchestration_v2_projection_provider_threads",[]).unwrap();
         database.execute("UPDATE orchestration_v2_projection_provider_turns SET payload_json=json_set(payload_json,'$.tokenUsage.usedTokens',300000.0)",[]).unwrap();
         // Codex joins never read item payloads, so an oversized one cannot sink the snapshot.
-        database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES('item','thread','turn','assistant_message','completed',?1,'2026-01-01T00:00:00Z',NULL)",[json!({"nativeItemRef":{"driver":"codex","nativeId":"item"},"text":"x".repeat(2_000_000)}).to_string()]).unwrap();
+        database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES('item','thread','turn','assistant_message','completed',?1,'2026-01-01T00:00:00Z',NULL,0)",[json!({"nativeItemRef":{"driver":"codex","nativeId":"item"},"text":"x".repeat(2_000_000)}).to_string()]).unwrap();
         database
             .set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, 1_048_576)
             .unwrap();
@@ -3717,7 +3994,7 @@ mod tests {
         let w = Workspace::new();
         let root = state(&w, json!({}));
         // Any driver's item dates T3's records, so the session without one is native.
-        db(&root).execute("INSERT INTO orchestration_v2_projection_turn_items VALUES('turn-item:provider:codex:native-item:x','thread','turn','assistant_message','completed','{}','2025-01-01T00:00:00Z',NULL)",[]).unwrap();
+        db(&root).execute("INSERT INTO orchestration_v2_projection_turn_items VALUES('turn-item:provider:codex:native-item:x','thread','turn','assistant_message','completed','{}','2025-01-01T00:00:00Z',NULL,0)",[]).unwrap();
         let usage = json!({"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0});
         write(
             w.claude.join("projects/p/native.jsonl"),
@@ -3762,7 +4039,7 @@ mod tests {
         let w = Workspace::new();
         let root = state(&w, json!({}));
         // Any driver's item dates T3's records, so the session without one is native.
-        db(&root).execute("INSERT INTO orchestration_v2_projection_turn_items VALUES('turn-item:provider:codex:native-item:x','thread','turn','assistant_message','completed','{}','2025-01-01T00:00:00Z',NULL)",[]).unwrap();
+        db(&root).execute("INSERT INTO orchestration_v2_projection_turn_items VALUES('turn-item:provider:codex:native-item:x','thread','turn','assistant_message','completed','{}','2025-01-01T00:00:00Z',NULL,0)",[]).unwrap();
         let usage = json!({"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0});
         write(
             w.claude.join("projects/p/native.jsonl"),
@@ -3819,7 +4096,7 @@ mod tests {
                 "turn3" => "thread3",
                 _ => "thread",
             };
-            database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES(?1,?2,?3,'assistant_message','completed','{}','2026-01-01T00:00:00Z',NULL)",params![id,thread,turn]).unwrap();
+            database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES(?1,?2,?3,'assistant_message','completed','{}','2026-01-01T00:00:00Z',NULL,0)",params![id,thread,turn]).unwrap();
         }
         // Linked after the native snapshot, with no earlier event to prove the link.
         database.execute("INSERT INTO orchestration_v2_projection_provider_threads VALUES('pt3','thread3','claudeAgent','claudeAgent','2999-01-01T00:00:00Z',?1)",[json!({"nativeThreadRef":{"nativeId":"third-session"}}).to_string()]).unwrap();
@@ -4154,7 +4431,7 @@ mod tests {
         let mut database = db(&root);
         seed(&database, "claudeAgent", "claude");
         let item = |database: &Connection, kind: &str, native: &str, extra: &str| {
-            database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES(?1,'thread','turn',?2,'completed',?3,'2026-01-01T00:00:00Z',NULL)",params![format!("turn-item:provider:claudeAgent:native-item:{native}"),kind,json!({"output":extra}).to_string()]).unwrap();
+            database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES(?1,'thread','turn',?2,'completed',?3,'2026-01-01T00:00:00Z',NULL,0)",params![format!("turn-item:provider:claudeAgent:native-item:{native}"),kind,json!({"output":extra}).to_string()]).unwrap();
         };
         item(&database, "assistant_message", "assistant-uuid", "");
         // Tool outputs can exceed the length bound; the join never reads them.
@@ -4165,6 +4442,24 @@ mod tests {
             &"x".repeat(2_000_000),
         );
         item(&database, "reasoning", "msg_1%3Athinking%3A1", "");
+        // An item naming the turn from another thread is not the turn's.
+        database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES(?1,'elsewhere','turn','assistant_message','completed','{}','2026-01-01T00:00:00Z',NULL,0)",[format!("{ITEM_PREFIX}stray-uuid")]).unwrap();
+        // The selected provider thread's turns can sit in more than one T3 thread, and a
+        // walked T3 thread can hold an unselected provider thread's turns, whose payload
+        // past the length bound the join never reads.
+        for (turn, thread, provider, native, large) in [
+            ("moved-turn", "moved", "pt", "moved-uuid", ""),
+            (
+                "unselected-turn",
+                "thread",
+                "pt-unselected",
+                "unselected-uuid",
+                &*"x".repeat(2_000_000),
+            ),
+        ] {
+            database.execute("INSERT INTO orchestration_v2_projection_provider_turns VALUES(?1,?2,?3,NULL,'completed',NULL,NULL,?4,2)",params![turn,thread,provider,json!({"nativeTurnRef":{"driver":"claudeAgent"},"large":large}).to_string()]).unwrap();
+            database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES(?1,?2,?3,'assistant_message','completed','{}','2026-01-01T00:00:00Z',NULL,1)",params![format!("{ITEM_PREFIX}{native}"),thread,turn]).unwrap();
+        }
         let request = NativeRequest {
             id: "assistant",
             root: "opaque-session",
@@ -4191,13 +4486,36 @@ mod tests {
             native_turns: vec!["assistant-uuid"],
             ..request
         };
+        let stray = NativeRequest {
+            id: "stray",
+            native_turns: vec!["stray-uuid"],
+            ..request
+        };
+        let moved = NativeRequest {
+            id: "moved",
+            native_turns: vec!["moved-uuid"],
+            ..request
+        };
+        let unselected = NativeRequest {
+            id: "unselected",
+            native_turns: vec!["unselected-uuid"],
+            ..request
+        };
         database
             .set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, 1_048_576)
             .unwrap();
         let tx = database.transaction().unwrap();
         let data = metadata(
             &tx,
-            &[&request, &tool, &thinking, &other],
+            &[
+                &request,
+                &tool,
+                &thinking,
+                &other,
+                &stray,
+                &moved,
+                &unselected,
+            ],
             "2026-01-01T00:00:20Z",
             None,
         )
@@ -4206,7 +4524,10 @@ mod tests {
             assert_eq!(data.turns[id].count, 1, "{id}");
             assert!(data.turns[id].joined.is_some(), "{id}");
         }
-        assert_eq!(data.turns["other"].count, 0);
+        assert_eq!(data.turns["moved"].turn.as_deref(), Some("moved-turn"));
+        for id in ["other", "stray", "unselected"] {
+            assert_eq!(data.turns[id].count, 0, "{id}");
+        }
         tx.rollback().unwrap();
         let writer = Connection::open(root.join("statev2.sqlite")).unwrap();
         writer
@@ -4223,21 +4544,69 @@ mod tests {
     }
 
     #[test]
+    fn a_selection_is_a_runs_earliest_running_attempt_before_any_unreadable_event() {
+        let w = Workspace::new();
+        let database = db(&state(&w, json!({})));
+        let event = |sequence: i64, thread: &str, payload: Value| {
+            database.execute("INSERT INTO orchestration_events VALUES(?1,'thread',2,?2,'run.updated','2026-01-01T00:00:00Z',?3)",params![sequence,thread,payload.to_string()]).unwrap();
+        };
+        let run = |id: &str, attempt: &str, status: &str| json!({"id":id,"activeAttemptId":attempt,"status":status});
+        event(1, "thread", run("a", "a1", "queued"));
+        event(2, "thread", run("a", "a1", "running"));
+        event(3, "thread", run("a", "a1", "running"));
+        event(4, "thread", run("b", "b1", "running"));
+        event(5, "other", run("c", "c1", "running"));
+        event(6, "thread", json!({"large":"x".repeat(2_000_000)}));
+        event(7, "thread", run("c", "c1", "running"));
+        // A nested id never leaves SQLite, so it cannot match its JSON text.
+        event(
+            8,
+            "other",
+            json!({"id":{"text":"a"},"activeAttemptId":"a1","status":"running"}),
+        );
+        database
+            .set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, VALUE_BOUND)
+            .unwrap();
+        let mut query = database.prepare(SELECTIONS).unwrap();
+        let selections = Selections::read(&mut query, "thread");
+        assert_eq!(selections.first("a", "a1").unwrap(), Some(2));
+        assert_eq!(selections.first("b", "b1").unwrap(), Some(4));
+        // Every later selection lies past the oversized event, which reading fails on.
+        for (run, attempt) in [("a", "a2"), ("c", "c1")] {
+            let error = selections.first(run, attempt).unwrap_err();
+            assert!(error.to_string().contains("1 MiB resource bound"));
+        }
+        let selections = Selections::read(&mut query, "other");
+        assert_eq!(selections.first("c", "c1").unwrap(), Some(5));
+        assert_eq!(selections.first("a", "a1").unwrap(), None);
+        assert_eq!(selections.first(r#"{"text":"a"}"#, "a1").unwrap(), None);
+        assert_eq!(selections.first.len(), 1);
+    }
+
+    #[test]
     fn projection_queries_follow_t3_indexes() {
         let w = Workspace::new();
         let root = state(&w, json!({}));
         let database = db(&root);
-        for (query, scans) in [
-            (PROVIDER_THREADS.to_string(), 1),
-            (OWNER_EVENT.to_string(), 0),
-            (NATIVE_REFS.to_string(), 0),
-            (TURN.to_string(), 0),
-            (ITEM_THREAD.to_string(), 0),
-            (FIRST_ITEM.to_string(), 0),
-            (guards::BOUNDARY.to_string(), 0),
-            (guards::IDLE_RUNS.to_string(), 0),
-            (guards::events_query(), 0),
-            (guards::projection_query(), 0),
+        // The item queries read indexes alone, since an item row holds its tool output.
+        for (query, scans, covering) in [
+            (PROVIDER_THREADS.to_string(), 1, false),
+            (OWNER_EVENT.to_string(), 0, false),
+            (PROVIDER_TURNS.to_string(), 0, false),
+            (TURN_THREADS.to_string(), 0, false),
+            (THREAD_TURNS.to_string(), 0, false),
+            (TURN_REF.to_string(), 0, false),
+            (TURN_ITEM_ROWS.to_string(), 0, true),
+            (THREAD_ITEM_IDS.to_string(), 0, true),
+            (ATTEMPT.to_string(), 0, false),
+            (SELECTIONS.to_string(), 0, false),
+            (TURN.to_string(), 0, false),
+            (ITEM_THREAD.to_string(), 0, false),
+            (FIRST_ITEM.to_string(), 0, false),
+            (guards::BOUNDARY.to_string(), 0, false),
+            (guards::IDLE_RUNS.to_string(), 0, false),
+            (guards::events_query(), 0, false),
+            (guards::projection_query(), 0, false),
         ] {
             let mut plan = database
                 .prepare(&format!("EXPLAIN QUERY PLAN {query}"))
@@ -4257,6 +4626,12 @@ mod tests {
                 })
                 .count();
             assert_eq!(full, scans, "{details:#?}");
+            if covering {
+                assert!(
+                    details.iter().all(|d| d.contains("COVERING INDEX")),
+                    "{details:#?}"
+                );
+            }
         }
     }
 

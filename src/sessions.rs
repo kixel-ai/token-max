@@ -82,6 +82,11 @@ fn branch(value: Option<&Value>) -> Option<&str> {
 }
 
 impl Sessions {
+    /// The directory a session's first record names, where it started.
+    pub(crate) fn cwd(&self, session: &str) -> Option<&Text> {
+        self.facts.get(session)?.cwd.as_ref()
+    }
+
     pub(crate) fn observe(&mut self, record: Record) {
         let index = match self.facts.get_index(self.last) {
             Some((key, _)) if key == record.session => self.last,

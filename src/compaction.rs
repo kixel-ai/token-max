@@ -2406,12 +2406,7 @@ fn unmeasured(group: &crate::rows::Group<'_>, since: Option<Millis>) -> Vec<Comp
             if !control.applicable {
                 base.uncertainty.push(control.reason.clone());
             }
-            // A change under the percentage override needs the plan only a replay builds.
-            let unsettable = if !control.applicable {
-                Some(control.reason.clone())
-            } else {
-                percent.clone()
-            };
+            let unsettable = (!control.applicable).then(|| control.reason.clone());
             CompactionCheck {
                 base,
                 bucket: "all",
@@ -6596,17 +6591,26 @@ mod tests {
             assert!(line.base.uncertainty.iter().any(|u| u
                 == "CLAUDE_CODE_AUTO_COMPACT_WINDOW outranks settings.json:autoCompactWindow, settings.json:modelSettings.claude-opus-5-5.autoCompactWindow, so none of them applies"));
 
-            // The percentage override lowers each set window's trigger, so no edit is offered.
-            let (_, lines) = unmeasured(user, &[("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "50")]);
+            // The percentage override lowers each set window's trigger by model, so the 500k
+            // row may already compact under the cap and vibes advises no cap.
+            let (report, lines) = unmeasured(user, &[("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "50")]);
             assert_eq!(lines.len(), 2);
             for c in &lines {
-                let reason = c.unsettable.as_deref().unwrap();
                 assert!(
-                    reason.contains("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50"),
-                    "{reason}"
+                    c.base
+                        .uncertainty
+                        .iter()
+                        .any(|u| u.contains("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=50")),
+                    "{:?}",
+                    c.base.uncertainty
                 );
-                assert!(c.base.uncertainty.iter().any(|u| u == reason));
             }
+            let row = crate::report::advice(&report, ReportOptions::default())
+                .into_iter()
+                .find(|i| i.name == "Auto-compact window (claude-opus-5-5)")
+                .unwrap();
+            assert!((row.how.is_none() && row.quiet), "{row:?}");
+            assert!(row.text.contains("cannot tell"), "{}", row.text);
         }
 
         #[test]

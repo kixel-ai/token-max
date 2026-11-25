@@ -945,8 +945,8 @@ line per setting in force: the top-level `autoCompactWindow` and each
 `modelSettings` row that names a window, or the single override above them,
 such as `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, whose evidence names the settings it
 outranks. Under `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` each line still shows the
-window, its evidence says the trigger falls below it, and any change goes by
-hand.
+window and its evidence says the trigger falls below it; with no model to
+resolve that trigger against, `vibes` gives no cap for it.
 
 `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` resolves into the replayed trigger from every
 environment the window reads, a T3 instance's included. An explicit window

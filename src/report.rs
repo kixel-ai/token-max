@@ -4771,6 +4771,19 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
                 tokens(to)
             ),
         ),
+        // With no request to name a model, the percentage override leaves the trigger unresolved
+        // somewhere at or below the set window, so only a window under the cap is settled.
+        (_, Some(w))
+            if w > cap && c.scenarios.is_empty() && profile.compaction.percent.is_some() =>
+        {
+            item.text = format!(
+                "Set to {}, but {} lowers where each model compacts under it, and with no request in the window to name a model token-max cannot tell whether that is above the {} window the maintainer caps it at.",
+                tokens(w),
+                crate::controls::PERCENT_KEY,
+                tokens(cap)
+            );
+            return item;
+        }
         (_, Some(w)) if c.unset => (
             w,
             format!(

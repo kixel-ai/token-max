@@ -1688,8 +1688,9 @@ the whole change is a step by hand naming each setting; so is a new model on
 a cloud provider, such as Bedrock, which spells model IDs its own way, whether
 the profile's or the project's settings turn it on. A Codex level with no model set or recorded has no card.
 
-A Claude pick that the [`availableModels` allowlist](#model-allowlist) of any
-profile on the card blocks is not offered: the card names the setting that excludes it and advises
+A Claude pick that the [`availableModels` allowlist](#model-allowlist) blocks,
+for any profile on the card or any other whose model the same setting names,
+is not offered: the card names the setting that excludes it and advises
 nothing. When token-max can't tell whether the list permits the pick, the
 change is still offered and the card says why it can't tell.
 

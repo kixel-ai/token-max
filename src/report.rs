@@ -479,13 +479,20 @@ fn default_item(e: &EffortCheck, profile: &str, how: Option<How>, out: &Out<'_>)
         .map(|(m, l)| default_pair(Some(m), Some(l)))
         .collect();
     let current = default_pair(c.model.as_deref(), c.effective.as_deref());
-    // Every profile the card covers writes the pick, so any allowlist among them that blocks
-    // it keeps it from being offered, unless it is the default already.
-    let members: Vec<&Profile> = e
-        .base
+    // The pick reaches every profile the card covers, and every other whose model the same
+    // setting names, such as a project's, so an allowlist among them that blocks it keeps it
+    // from being offered, unless it is the default already.
+    let shared = |p: &Profile| {
+        !crate::effort::recorded(&c.model_owner)
+            && p.effort
+                .as_ref()
+                .is_some_and(|o| o.model_owner == c.model_owner)
+    };
+    let members: Vec<&Profile> = out
         .profiles
-        .iter()
-        .filter_map(|id| out.profiles.get(id.as_str()).copied())
+        .values()
+        .copied()
+        .filter(|p| e.base.profiles.contains(&p.id) || shared(p))
         .collect();
     let refused = members
         .iter()
@@ -11993,11 +12000,12 @@ mod tests {
         use crate::model::Allowlist;
         let file = format!("{ROOT}/settings.json");
         let owner = format!("{file}:availableModels");
-        // A Sonnet main with `advisor` set, under `allowlist`, and another profile on its
-        // line under `other`'s: their default and advisor cards.
+        // A Sonnet main with `advisor` set, under `allowlist`, and another profile with the
+        // same model setting under `other`'s, its effort set where `other` names: the first
+        // default card and the advisor card.
         let line = |allowlist: Option<Allowlist>,
                     advisor: Option<&str>,
-                    other: Option<Option<Allowlist>>| {
+                    other: Option<(Option<Allowlist>, &str)>| {
             let mut report = synthetic();
             report.checks.clear();
             report.context.clear();
@@ -12023,10 +12031,11 @@ mod tests {
                 picked: None,
                 provider: None,
             });
-            if let Some(allowlist) = other {
+            if let Some((allowlist, effort)) = other {
                 let mut other = report.scan.profiles[0].clone();
                 other.id = "other".into();
                 other.allowlist = allowlist;
+                other.effort.as_mut().unwrap().owner = effort.into();
                 report.scan.profiles.push(other);
             }
             let checks = effort_checks(&EffortInput {
@@ -12128,9 +12137,13 @@ mod tests {
             "{}",
             advisor.text
         );
-        // A profile on the default's line whose list blocks the pick keeps it unoffered.
-        let (default, _) = line(None, None, Some(read(&["sonnet"])));
-        assert_eq!((&default.how, default.quiet), (&None, true));
+        // A profile on the default's line whose list blocks the pick keeps it unoffered, as
+        // does one on another line whose model the same setting names.
+        let level = format!("{file}:env.CLAUDE_CODE_EFFORT_LEVEL");
+        for effort in [level.as_str(), "/elsewhere/settings.json:effortLevel"] {
+            let (default, _) = line(None, None, Some((read(&["sonnet"]), effort)));
+            assert_eq!((&default.how, default.quiet), (&None, true), "{effort}");
+        }
         // A list token-max can't read keeps both offers, saying so.
         let why = "the admin console's settings, cached in /r.json, set availableModels, which token-max doesn't resolve";
         let (default, advisor) = cards(Some(Allowlist::Unknown(why.into())));

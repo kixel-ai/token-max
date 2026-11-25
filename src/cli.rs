@@ -1046,6 +1046,8 @@ struct Walk {
     style: Style,
     /// Which command's changes the hosts offer; `doctor`'s walk goes on to `vibes`'.
     command: Command,
+    /// Show the exact JSON or TOML of the edits left to make.
+    details: bool,
 }
 
 /// The command a run's hosts are read for.
@@ -2042,6 +2044,7 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
             head,
             style,
             command,
+            details: values.details,
         };
         return Ok((Output::Walk(walk), 0));
     }
@@ -2257,6 +2260,7 @@ fn walk(walk: Walk) -> Result<(), ScanError> {
         head,
         style,
         command,
+        details,
     } = walk;
     let mut stdout = io::stdout().lock();
     let mut stdin = io::stdin().lock();
@@ -2275,6 +2279,24 @@ fn walk(walk: Walk) -> Result<(), ScanError> {
             let selections = ask(&walking, &style, &mut stdin, &mut stdout).map_err(failed)?;
             drop(walking);
             settle(&mut hosts, &selections, &style, &mut stdin, &mut stdout)?;
+            // Every edit not written, declined at its card or at the confirm, so it can still
+            // be made by hand.
+            let options = ReportOptions {
+                width: style.width,
+                color: style.color,
+                unicode: style.unicode,
+                details,
+                host: None,
+            };
+            let unwritten: String = hosts
+                .iter()
+                .zip(&selections)
+                .map(|(h, s)| {
+                    let left = s.unwritten(h.offers(), h.wrote, &h.style);
+                    crate::report::closing(&left, "NOT WRITTEN", options)
+                })
+                .collect();
+            write!(stdout, "{unwritten}").map_err(|_| unusable(hosts.iter().any(|h| h.wrote)))?;
             let wrote = hosts.iter().any(|h| h.wrote);
             // What a host wrote can change its advice, so its count is read again below.
             if !wrote && hosts.iter().all(|h| h.pending == 0) {

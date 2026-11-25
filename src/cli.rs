@@ -1767,22 +1767,19 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
             Side::There { .. } => None,
         });
         let credit = match &sum {
-            Some(sum) if sections == 1 && !advice => sum.credit("this host's").map(|c| {
-                (
-                    opening_note(c.contains('~'), sum.partial && c.contains('%')),
-                    c,
-                )
-            }),
-            _ => None,
+            Some(sum) if sections == 1 && !advice => {
+                sum.credit("this host's").map_or_else(String::new, |c| {
+                    let note = opening_note(&c, sum.partial);
+                    let note = if note.is_empty() {
+                        note
+                    } else {
+                        style.dim(&note)
+                    };
+                    style.line(&c) + &note
+                })
+            }
+            _ => String::new(),
         };
-        let credit = credit.map_or_else(String::new, |(note, credit)| {
-            let note = if note.is_empty() {
-                note
-            } else {
-                style.dim(&note)
-            };
-            style.line(&credit) + &note
-        });
         let head = format!("{head}{}{credit}", title.unwrap_or_default());
         let walk = Walk {
             hosts,

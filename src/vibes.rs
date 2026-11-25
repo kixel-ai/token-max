@@ -152,9 +152,7 @@ fn title(hosts: &[Host<'_>], style: &Style) -> String {
         .flat_map(|h| h.items)
         .any(|i| crate::report::sampled(&i.text));
     if extrapolated {
-        text += &style.dim(
-            "A ~ marks a figure extrapolated from the requests that could be priced to those that could not, assuming they resemble each other, followed by its 95% margin of error.",
-        );
+        text += &style.dim(crate::report::TILDE);
     }
     text
 }

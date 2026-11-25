@@ -1293,9 +1293,7 @@ pub fn totals_section(
     text.push('\n');
     let saving = totals.savings.text("Changes offered", "these hosts'");
     let credit = totals.credit("these hosts'").unwrap_or_default();
-    let tilde = [&spent, &saving, &credit].iter().any(|t| t.contains('~'));
-    let shares = [&saving, &credit].iter().any(|t| t.contains('%'));
-    let note = opening_note(tilde, totals.partial && shares);
+    let note = opening_note(&credit, totals.partial);
     for (line, style) in [(saving, PLAIN), (credit, PLAIN), (note, DIM)] {
         if line.is_empty() {
             continue;
@@ -1315,17 +1313,17 @@ pub fn totals_section(
 }
 
 /// What a figure marked `~` assumes, said once.
-const TILDE: &str = "A ~ marks a figure extrapolated from the requests that could be priced to those that could not, assuming they resemble each other, followed by its 95% margin of error.";
+pub(crate) const TILDE: &str = "A ~ marks a figure extrapolated from the requests that could be priced to those that could not, assuming they resemble each other, followed by its 95% margin of error.";
 
-/// The note under the figures that open the walk, which its reports' footers say only after
-/// it: what a `~` assumes, when `tilde`, and that a percent leaves out the profiles that priced
-/// none of their requests, when `partial`. Empty when neither applies.
-pub(crate) fn opening_note(tilde: bool, partial: bool) -> String {
+/// The note under the credit that opens the walk, saying what each host's footer says only
+/// after it: what a `~` in `credit` assumes, and that its percents leave out the profiles that
+/// priced none of their requests, when the spend is `partial`. Empty when neither applies.
+pub(crate) fn opening_note(credit: &str, partial: bool) -> String {
     let mut notes = vec![];
-    if tilde {
+    if credit.contains('~') {
         notes.push(TILDE);
     }
-    if partial {
+    if partial && credit.contains('%') {
         notes.push("Each percent is of only the spend that could be priced, since a profile priced none of its requests, so a true share may be smaller.");
     }
     notes.join(" ")
@@ -11004,6 +11002,22 @@ mod tests {
                 "kept TTL",
                 "catalog skill"
             ]
+        );
+    }
+
+    #[test]
+    fn the_opening_note_explains_only_what_the_credit_shows() {
+        let partial = "Each percent is of only the spend that could be priced, since a profile priced none of its requests, so a true share may be smaller.";
+        let exact =
+            "Compared with defaults, your settings save about $40/mo, 9% of this host's spend.";
+        let sampled = "Compared with defaults, your settings save ~$40/mo ± $6.";
+        assert_eq!(opening_note(exact, false), "");
+        assert_eq!(opening_note(exact, true), partial);
+        // No percent to qualify.
+        assert_eq!(opening_note(sampled, true), TILDE);
+        assert_eq!(
+            opening_note(&sampled.replace('.', ", 9% of this host's spend."), true),
+            format!("{TILDE} {partial}")
         );
     }
 

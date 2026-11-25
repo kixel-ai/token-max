@@ -62,7 +62,10 @@ Recommendations:
   work. Check the upgrade guard against a real crabx cache: with
   `TOKEN_MAX_RELEASES` pointed at a local server whose `/latest` redirects to
   a higher tag, `crabx token-max@0.1.0 doctor` names crabx instead of
-  offering the upgrade, and the cache entry's SHA-256 is unchanged; run the
+  offering the upgrade, and the cache entry's SHA-256 is unchanged. Check too
+  that the entry still holds `record.json` beside `bin/` and that its `bins`
+  list names `token-max` (`token-max.exe` on Windows), the layout the guard
+  reads, so a crabx change to it shows up here; run the
   installed `token-max doctor` the same way. If `crabx install` links into
   crabx's cache, that installed binary gets the same crabx line, which suits a
   `crabx token-max` run but not a plain `token-max` one, so word the line for

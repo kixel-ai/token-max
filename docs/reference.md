@@ -63,7 +63,8 @@ upgrades it instead of asking; so does one in the run scripts' cache, which
 names each binary for its release. One in the cache of
 [crabx](https://github.com/kixel-ai/crabx), which runs a crate's prebuilt
 binaries, is crabx's: a binary in a `bin` directory beside crabx's
-`record.json`, wherever symlinks put it, or under any `crabx/v<n>` directory.
+`record.json` whose `bins` list names it, wherever symlinks put it, or under
+any `crabx/v<n>` directory.
 Doctor says an unpinned `crabx token-max` picks up the release on its own and
 a pinned one stays on its version, and never replaces the file crabx
 verified. A binary in a directory this user cannot write, such as a root-owned `/usr/local/bin`, or on a platform with no

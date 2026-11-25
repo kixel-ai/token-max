@@ -158,17 +158,10 @@ impl Paths {
         // crabx keeps each version it verified under `<cache dir>/crabx/v1/`, and an unpinned
         // `crabx token-max` moves to a new release on its own schedule, so saying when would
         // be a guess. Each entry is `<version>/bin/<binary>` beside `<version>/record.json`,
-        // which crabx writes itself, so it marks the entry wherever a symlink above it points.
-        // Any `crabx/v<n>` on the path also matches, so a later cache format keeps its binary
-        // too. A false match only withholds the offer.
-        let entry = self
-            .exe
-            .parent()
-            .filter(|bin| bin.file_name() == Some("bin".as_ref()))
-            .and_then(Path::parent);
-        if entry.is_some_and(|entry| entry.join("record.json").is_file())
-            || self.exe.ancestors().any(crabx_cache_format)
-        {
+        // whose `bins` crabx writes to name each binary, so it marks the entry wherever a
+        // symlink above it points. Any `crabx/v<n>` on the path also matches, so a later cache
+        // format keeps its binary too. A false match only withholds the offer.
+        if crabx_record_names(&self.exe) || self.exe.ancestors().any(crabx_cache_format) {
             return Install::Manager(
                 "crabx manages this binary: an unpinned crabx token-max picks up the new release \
                  on its own, and a pinned one stays on its version.",
@@ -193,6 +186,35 @@ impl Paths {
             target,
         }
     }
+}
+
+/// Whether `exe` is in a `bin` directory beside a crabx `record.json` whose `bins` names it.
+fn crabx_record_names(exe: &Path) -> bool {
+    /// The part of crabx's record that lists the entry's binaries, extension included.
+    #[derive(serde::Deserialize)]
+    struct Record {
+        bins: Vec<String>,
+    }
+    let Some(entry) = exe
+        .parent()
+        .filter(|bin| bin.file_name() == Some("bin".as_ref()))
+        .and_then(Path::parent)
+    else {
+        return false;
+    };
+    let Some(name) = exe.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Ok(file) = fs::File::open(entry.join("record.json")) else {
+        return false;
+    };
+    // A record is a few hundred bytes, so a file this size is not crabx's.
+    let mut text = String::new();
+    if file.take(64 << 10).read_to_string(&mut text).is_err() {
+        return false;
+    }
+    serde_json::from_str::<Record>(&text)
+        .is_ok_and(|record| record.bins.iter().any(|bin| bin == name))
 }
 
 /// Whether `dir` is a crabx cache format's directory, `crabx/v<n>`.
@@ -498,7 +520,20 @@ mod tests {
             paths(path, None).install(),
             Install::Replace { .. }
         ));
-        fs::write(entry.join("record.json"), "{}").unwrap();
+        // A record that doesn't name the binary, such as another tool's file beside a Cargo
+        // `bin`, leaves it replaceable.
+        for other in ["{}", r#"{"bins":["other"]}"#, "not json"] {
+            fs::write(entry.join("record.json"), other).unwrap();
+            assert!(
+                matches!(paths(path, None).install(), Install::Replace { .. }),
+                "{other}"
+            );
+        }
+        fs::write(
+            entry.join("record.json"),
+            r#"{"version":"0.1.0","bins":["token-max"],"source":"crates.io"}"#,
+        )
+        .unwrap();
         assert!(matches!(
             paths(path, None).install(),
             Install::Manager(advice) if advice.starts_with("crabx manages this binary")

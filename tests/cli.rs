@@ -2071,7 +2071,11 @@ mod unix {
         // is moved and symlinked back, so the binary resolves to a path naming no crabx.
         let moved = w.home.join("moved");
         std::fs::create_dir_all(moved.join("bin")).unwrap();
-        std::fs::write(moved.join("record.json"), "{}").unwrap();
+        std::fs::write(
+            moved.join("record.json"),
+            r#"{"version":"0.1.0","bins":["token-max"],"source":"crates.io"}"#,
+        )
+        .unwrap();
         let versions = w
             .home
             .join(".cache/crabx/v1/x86_64-unknown-linux-musl/author/token-max");

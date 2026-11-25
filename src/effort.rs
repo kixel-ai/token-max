@@ -182,6 +182,14 @@ pub(crate) const MODEL_DEFAULT: &str = " (the model's default)";
 /// The model owner when no setting names the model.
 pub(crate) const RECORDED: &str = "the latest recorded main-session model";
 
+/// Follows a `model` owner whose value is null, which falls back to the recorded model.
+pub(crate) const NULL_MODEL: &str = " (null, so the latest recorded main-session model)";
+
+/// Whether `model_owner` takes the model from the latest session rather than a setting.
+pub(crate) fn recorded(model_owner: &str) -> bool {
+    model_owner == RECORDED || model_owner.ends_with(NULL_MODEL)
+}
+
 /// Why the main-session default is unknown when nothing names or recorded a model.
 pub(crate) const NO_MODEL: &str =
     "no setting names the model and no main-session request recorded one";
@@ -240,7 +248,7 @@ pub fn claude_effort(
         _ => match highest(scopes, "model") {
             Some((Value::String(m), file)) => (Some(m.as_str()), format!("{file}:model")),
             // A null outranks the files below it, so it owns the model the session falls back to.
-            Some((Value::Null, file)) => (recorded, format!("{file}:model")),
+            Some((Value::Null, file)) => (recorded, format!("{file}:model{NULL_MODEL}")),
             None => (recorded, RECORDED.to_string()),
             Some((_, file)) => return Err(invalid("invalid model", file)),
         },

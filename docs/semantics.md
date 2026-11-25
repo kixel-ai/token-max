@@ -1318,7 +1318,8 @@ from today's settings, read where auto memory's are: at the latest main-session
 request's working directory, or from the user and managed files when none is
 recorded. The model is `ANTHROPIC_MODEL` or the highest settings file's
 `model` for Claude, or the highest config layer's `model` for Codex, else the
-model the latest main session ran most. A Claude alias such as `opus` resolves
+model the latest main session ran most, which a null Claude `model` also falls
+back to, its owner marked as such. A Claude alias such as `opus` resolves
 to that session's model when it is in the alias's family, else the line is
 unknown.
 
@@ -1494,7 +1495,8 @@ settings, plus the project and local files of the profile's latest
 main-session request's directory once T3 has attributed requests, with the active profile's shell environment, settings
 `env` overriding it. `advisorModel` comes from the highest scope that sets it;
 a null there sets no advisor, as a settings merge does, a non-string is set
-but blocked as no model name (only the card reads it, so it fails no scan),
+but blocked as no model name, kept as its type alone (only the card reads it,
+so it fails no scan),
 and an empty name sets no advisor. What stops an advisor loading is checked in Claude Code's order: the
 tool turned off, then an unsupported provider, then a variable that turns off
 feature-flag fetching, which Claude Platform on AWS and Claude Models on

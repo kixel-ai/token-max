@@ -1130,7 +1130,7 @@ pub fn discover_inbound(
 }
 
 /// Every T3 instance's profile ID.
-pub(crate) fn t3_instances(profiles: &[Profile]) -> HashSet<String> {
+fn t3_instances(profiles: &[Profile]) -> HashSet<String> {
     profiles
         .iter()
         .filter(|p| p.t3.is_some())
@@ -1142,7 +1142,7 @@ pub(crate) fn t3_instances(profiles: &[Profile]) -> HashSet<String> {
 /// every candidate, so a native profile counts only requests that name no T3 instance, and
 /// an instance only those that name it alone. One T3 marked unsettled decides for no one,
 /// even when it names a single candidate.
-pub(crate) fn owned_by(r: &Request, profile: &Profile, t3: &HashSet<String>) -> bool {
+fn owned_by(r: &Request, profile: &Profile, t3: &HashSet<String>) -> bool {
     if !r.profiles.iter().any(|p| **p == *profile.id)
         || r.issues.iter().any(|i| i.starts_with(crate::t3::UNSETTLED))
     {

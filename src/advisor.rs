@@ -48,7 +48,16 @@ pub fn control(scopes: &[SettingsScope], env: &Env, user_file: &str) -> AdvisorC
             format!("{file}:{KEY}"),
             false,
         ),
-        Some((value, file)) => (Some(value.to_string()), format!("{file}:{KEY}"), true),
+        // Only its type is shown, since the value could be anything, a credential included.
+        Some((value, file)) => {
+            let kind = match value {
+                Value::Bool(_) => "a boolean",
+                Value::Number(_) => "a number",
+                Value::Array(_) => "a list",
+                _ => "an object",
+            };
+            (Some(kind.into()), format!("{file}:{KEY}"), true)
+        }
         None => (None, format!("{user_file}:{KEY}"), false),
     };
     let environment = scoped_environment(scopes, env);
@@ -121,20 +130,47 @@ fn parse(id: &str) -> Option<(&str, (u32, u32))> {
     let mut parts = id.strip_prefix("claude-")?.split('-');
     let family = parts.next()?;
     let major = parts.next()?.parse().ok()?;
-    let minor = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+    // A dated snapshot, such as `claude-sonnet-5-20260101`, has no minor version.
+    let minor = parts
+        .next()
+        .filter(|n| n.len() <= 2)
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0);
     Some((family, (major, minor)))
 }
 
-/// Whether Claude Code pairs `main`, a Fable model, with `advisor`: only a Fable advisor of
-/// its version or later. The `fable` alias resolves to Claude Code's own default, so passes.
-pub(crate) fn fable_accepts(main: &str, advisor: &str) -> bool {
-    if advisor.eq_ignore_ascii_case("fable") {
-        return true;
+/// Whether Claude Code pairs `main`, a canonical model ID, with `advisor`, by its pairing
+/// table (https://code.claude.com/docs/en/advisor#choose-an-advisor-model); None when the
+/// table can't say. An alias resolves to a version that changes with Claude Code releases,
+/// so only Fable's rule, which takes no other family, judges one.
+pub(crate) fn accepts(main: &str, advisor: &str) -> Option<bool> {
+    let (family, version) = parse(main)?;
+    if family == "fable" {
+        if advisor.eq_ignore_ascii_case("fable") {
+            return Some(true);
+        }
+        return Some(matches!(parse(advisor), Some(("fable", a)) if a >= version));
     }
-    match (parse(main), parse(advisor)) {
-        (Some((_, main)), Some(("fable", advisor))) => advisor >= main,
-        _ => false,
-    }
+    let (advisor, at) = parse(advisor)?;
+    // The oldest version of each family the main model takes as its advisor, by row.
+    let minimum = |opus, sonnet, haiku| match advisor {
+        "fable" => Some((0, 0)),
+        "opus" => opus,
+        "sonnet" => sonnet,
+        "haiku" => haiku,
+        _ => None,
+    };
+    let any = Some((0, 0));
+    let min = match (family, version) {
+        ("haiku", (4, 5)) | ("sonnet", (4, 6)) => minimum(any, any, Some((5, 5))),
+        ("opus", (4, 6)) => minimum(any, Some((5, 0)), Some((5, 5))),
+        ("sonnet", (5, 0)) | ("haiku", (5, 5)) => minimum(Some((4, 7)), Some((5, 0)), Some((5, 5))),
+        ("opus", (4, 7) | (4, 8)) => minimum(Some((4, 7)), Some((5, 5)), None),
+        ("sonnet", (5, 5)) => minimum(Some((5, 0)), Some((5, 5)), None),
+        ("opus", (5, 0) | (5, 5)) => minimum(Some((5, 0)), None, None),
+        _ => return None,
+    };
+    Some(min.is_some_and(|min| at >= min))
 }
 
 /// What `vibes` suggests as the advisor for a main model, by Claude Code's ranking.
@@ -227,8 +263,14 @@ mod tests {
         let a = resolve(json!({"advisorModel": false}), json!({}), &[]);
         assert_eq!(
             (a.model.as_deref(), a.blocked.as_deref()),
-            (Some("false"), Some("advisorModel is not a model name"))
+            (Some("a boolean"), Some("advisorModel is not a model name"))
         );
+        let a = resolve(
+            json!({"advisorModel": {"key": "sk-secret"}}),
+            json!({}),
+            &[],
+        );
+        assert_eq!(a.model.as_deref(), Some("an object"));
     }
 
     #[test]
@@ -302,17 +344,39 @@ mod tests {
     }
 
     #[test]
-    fn a_fable_main_takes_only_a_fable_advisor_of_its_version_or_later() {
+    fn pairings_follow_claude_codes_table_and_leave_aliases_unjudged() {
         for (main, advisor, accepted) in [
-            ("claude-fable-5-2", "fable", true),
-            ("claude-fable-5-2", "claude-fable-5-2", true),
-            ("claude-fable-5-2", "claude-fable-5-1", false),
-            ("claude-fable-5-1", "claude-fable-5-2", true),
-            ("claude-fable-5", "claude-fable-5-1", true),
-            ("claude-fable-5-2", "opus", false),
-            ("claude-fable-5-2", "claude-opus-5-5", false),
+            // A Fable main takes only a Fable advisor of its version or later.
+            ("claude-fable-5-2", "fable", Some(true)),
+            ("claude-fable-5-2", "claude-fable-5-2", Some(true)),
+            ("claude-fable-5-2", "claude-fable-5-1", Some(false)),
+            ("claude-fable-5-1", "claude-fable-5-2", Some(true)),
+            ("claude-fable-5", "claude-fable-5-1", Some(true)),
+            ("claude-fable-5-2", "opus", Some(false)),
+            ("claude-fable-5-2", "claude-opus-5-5", Some(false)),
+            // Each other row's oldest accepted version per family, and Haiku 4.5 advising none.
+            ("claude-haiku-4-5", "claude-sonnet-4-6", Some(true)),
+            ("claude-haiku-4-5", "claude-haiku-4-5", Some(false)),
+            ("claude-sonnet-4-6", "claude-haiku-5-5", Some(true)),
+            ("claude-opus-4-6", "claude-sonnet-4-6", Some(false)),
+            ("claude-opus-4-6", "claude-sonnet-5", Some(true)),
+            ("claude-sonnet-5", "claude-opus-4-6", Some(false)),
+            ("claude-haiku-5-5", "claude-opus-4-7", Some(true)),
+            ("claude-opus-4-8", "claude-sonnet-5", Some(false)),
+            ("claude-opus-4-7", "claude-sonnet-5-5", Some(true)),
+            ("claude-opus-4-7", "claude-haiku-5-5", Some(false)),
+            ("claude-sonnet-5-5", "claude-opus-4-8", Some(false)),
+            ("claude-sonnet-5-5", "claude-opus-5", Some(true)),
+            ("claude-opus-5-5", "claude-opus-5", Some(true)),
+            ("claude-opus-5-5", "claude-sonnet-5-5", Some(false)),
+            ("claude-opus-5-5", "claude-fable-5", Some(true)),
+            ("claude-opus-5-5", "claude-sonnet-5-20260101", Some(false)),
+            // An alias's version moves with Claude Code, and a row the table lacks is unknown.
+            ("claude-opus-5-5", "sonnet", None),
+            ("claude-opus-5-6", "claude-sonnet-5-5", None),
+            ("claude-mystery-9", "claude-opus-5-5", None),
         ] {
-            assert_eq!(fable_accepts(main, advisor), accepted, "{main} {advisor}");
+            assert_eq!(accepts(main, advisor), accepted, "{main} {advisor}");
         }
     }
 

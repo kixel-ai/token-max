@@ -918,7 +918,8 @@ pub struct SpeedControl {
 /// from loading.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AdvisorControl {
-    /// The advisor model as set, such as `opus`; None when no settings file sets one.
+    /// The advisor model as set, such as `opus`, or the type of a value that is no model
+    /// name, such as `a boolean`; None when no settings file sets one.
     pub model: Option<String>,
     /// The `advisorModel` setting that sets it, or the user file's to set it in.
     pub owner: String,

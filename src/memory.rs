@@ -134,11 +134,7 @@ fn check(
             }
         }
     }
-    let places = places(
-        line,
-        &settled(line, &mine, &scan.profiles),
-        &scan.exposure.project_files,
-    );
+    let places = places(line, &mine, &scan.exposure.project_files);
     let on = control.value;
     // Unknown when a setting the scan cannot resolve, such as a Codex --profile
     // selection, could change it.
@@ -441,28 +437,6 @@ fn check(
 /// repository with a project instruction file when its transcript recorded loading one at or
 /// above that directory, of the files `loaded` holds for it, or its directory holds one now;
 /// unknown when neither settles it.
-/// The requests of `mine` whose sessions count toward where a line's sessions ran: for
-/// Claude, only those T3 settled to one of its profiles, as for the directory its setting
-/// is read at. Codex reads that directory before T3 attributes requests, so keeps them all.
-fn settled<'a>(
-    line: &crate::rows::Group<'_>,
-    mine: &[&'a Request],
-    profiles: &[Profile],
-) -> Vec<&'a Request> {
-    if line.lead.harness != Harness::Claude {
-        return mine.to_vec();
-    }
-    let t3 = crate::discovery::t3_instances(profiles);
-    mine.iter()
-        .copied()
-        .filter(|r| {
-            line.members
-                .iter()
-                .any(|p| crate::discovery::owned_by(r, p, &t3))
-        })
-        .collect()
-}
-
 fn places(
     line: &crate::rows::Group<'_>,
     mine: &[&Request],
@@ -652,47 +626,6 @@ mod tests {
         assert!(project_file(&path("repo/CLAUDE.md"), &path("alias/src")));
         assert!(project_file(&path("alias/AGENTS.md"), &path("repo")));
         assert!(!project_file(&path("repo/src/CLAUDE.md"), &path("alias")));
-    }
-
-    #[test]
-    fn only_sessions_t3_settled_to_a_claude_line_count_where_they_ran() {
-        let native = crate::test_support::make_profile("native", "/home/.claude");
-        let t3 = crate::test_support::make_t3_profile("t3", "/home/.claude");
-        let profiles = [native.clone(), t3];
-        let request = |id: &str, names: &[&str], unsettled: bool| {
-            let mut r = crate::test_support::make_request();
-            r.id = id.into();
-            r.profiles = names
-                .iter()
-                .map(|n| n.to_string())
-                .collect::<Vec<_>>()
-                .into();
-            if unsettled {
-                r.issues = vec![format!("{}: synthetic", crate::t3::UNSETTLED).into()];
-            }
-            r
-        };
-        let requests = [
-            request("mine", &["native"], false),
-            // Shared with the instance, or marked unsettled: no evidence for the native line.
-            request("shared", &["native", "t3"], false),
-            request("marked", &["native"], true),
-        ];
-        let mine: Vec<&Request> = requests.iter().collect();
-        let ids = |line: &crate::rows::Group<'_>| {
-            settled(line, &mine, &profiles)
-                .iter()
-                .map(|r| r.id.to_string())
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(ids(&crate::rows::Group::one(&native)), ["mine"]);
-        // Codex keeps every request, as its setting is read before attribution.
-        let mut codex = native.clone();
-        codex.harness = Harness::Codex;
-        assert_eq!(
-            ids(&crate::rows::Group::one(&codex)),
-            ["mine", "shared", "marked"]
-        );
     }
 
     #[test]

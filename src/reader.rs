@@ -84,9 +84,11 @@ impl Reading {
 
 /// When the scan next brings a [`Reading`]'s counts up to date: as often as the line redraws,
 /// but never so often that counting, whose cost grows with what was read, takes more than a
-/// small share of the scan.
+/// small share of the scan; and at once when prices load, so the spend shows without waiting.
 struct Pace {
     next: Instant,
+    /// Whether the last count had prices.
+    priced: bool,
 }
 
 impl Pace {
@@ -98,16 +100,19 @@ impl Pace {
     fn new(now: Instant) -> Self {
         Self {
             next: now + Self::EVERY,
+            priced: false,
         }
     }
 
-    fn due(&self, now: Instant) -> bool {
-        now >= self.next
+    /// Whether to count at `now`, with prices loaded or not.
+    fn due(&self, now: Instant, prices: bool) -> bool {
+        now >= self.next || prices && !self.priced
     }
 
-    /// Schedule the next count after one that ran from `started` to `now`.
-    fn counted(&mut self, started: Instant, now: Instant) {
+    /// Schedule the next count after one that ran from `started` to `now`, with prices or not.
+    fn counted(&mut self, started: Instant, now: Instant, prices: bool) {
         self.next = now + Self::EVERY.max((now - started) * Self::READ_PER_COUNT);
+        self.priced = prices;
     }
 }
 
@@ -2152,9 +2157,10 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
                 let read = finished + records.position;
                 reading.read.store(read, Ordering::Relaxed);
                 let now = Instant::now();
-                if pace.due(now) {
+                let prices = reading.catalog.get().is_some();
+                if pace.due(now, prices) {
                     reader.count(reading, &profiles);
-                    pace.counted(now, Instant::now());
+                    pace.counted(now, Instant::now(), prices);
                 }
             }
         }
@@ -2643,16 +2649,19 @@ mod tests {
         let start = Instant::now();
         let at = |ms| start + Duration::from_millis(ms);
         let mut pace = Pace::new(start);
-        assert!(!pace.due(at(99)));
-        assert!(pace.due(at(100)));
+        assert!(!pace.due(at(99), false));
+        assert!(pace.due(at(100), false));
         // A quick count waits only for the next redraw.
-        pace.counted(at(100), at(101));
-        assert!(!pace.due(at(200)));
-        assert!(pace.due(at(201)));
-        // A slow one waits nine times as long as it took.
-        pace.counted(at(201), at(251));
-        assert!(!pace.due(at(700)));
-        assert!(pace.due(at(701)));
+        pace.counted(at(100), at(101), false);
+        assert!(!pace.due(at(200), false));
+        assert!(pace.due(at(201), false));
+        // A slow one waits nine times as long as it took, unless prices load meanwhile.
+        pace.counted(at(201), at(251), false);
+        assert!(!pace.due(at(700), false));
+        assert!(pace.due(at(252), true));
+        pace.counted(at(252), at(302), true);
+        assert!(!pace.due(at(751), true));
+        assert!(pace.due(at(752), true));
     }
 
     /// What a scan counts as it reads, against what the header counts once the scan is

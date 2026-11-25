@@ -826,9 +826,9 @@ response's streamed chunks, only those in the window, and each subagent in the
 session that spawned it. The spend appears once public prices load, at first
 pricing everything already read, and is extrapolated per profile and marked
 `~` as the header's is. Some figures only settle after reading, such as a
-request record no response answers, a request T3 moves to another profile, or
-an unpriced request known to cost more than the rest, so once the analysis has
-priced the scan the counts become the header's own, and each SSH host's totals
+request record no response answers or a request T3 moves to another profile,
+so the scan counts again once those are known, and once the analysis has
+priced the scan the counts become the header's own. Each SSH host's totals
 join them as its report arrives. The line `doctor` clears shows the header's
 figures, or the total across hosts. Under `vibes --ssh` the destinations send
 no usage, so the line counts this host alone and says so. On a narrow

@@ -332,12 +332,19 @@ impl Shown {
             }
             hosts[index] = Some(counts);
         }
-        let head = self.head.lock().unwrap_or_else(PoisonError::into_inner);
+        let phase = self.phase.lock().unwrap_or_else(PoisonError::into_inner);
+        let (name, _) = *phase;
         // The reading bar's ticker shows them within its next tick.
-        if !head.is_empty() && !self.reading() {
-            let line = with(head.clone(), self.figures(), self.whose, progress_room());
-            show_progress(&line, &line);
+        if name.is_empty() || self.reading() {
+            return;
         }
+        let mut head = self.head.lock().unwrap_or_else(PoisonError::into_inner);
+        // The bar may have held the line since the phase began, so no phase line shows yet.
+        if head.is_empty() {
+            *head = busy(name, Duration::ZERO, 0, self.look.unicode);
+        }
+        let line = with(head.clone(), self.figures(), self.whose, progress_room());
+        show_progress(&line, &line);
     }
 
     /// Show the phase line `head` with the figures after it.

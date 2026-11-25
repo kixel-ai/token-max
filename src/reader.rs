@@ -2193,9 +2193,9 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     let Requests {
         list: mut requests,
         ids,
-        ..
+        tally,
     } = requests;
-    drop(ids);
+    drop((ids, tally));
     let mut ref_to_request: HashMap<Text, Text> = HashMap::default();
     for r in &mut requests {
         if let Some(reference) = &r.reference {
@@ -2305,6 +2305,30 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         &snapshot_finished_at,
         since,
     );
+    // T3 can move a shared request to another profile, which changes the group its spend is
+    // extrapolated in, so count once more as the header will, with prices that may have
+    // loaded since the last count.
+    if let Some(reading) = &options.reading {
+        let mut tally = Tally::default();
+        for index in 0..requests.len() {
+            tally.touch(index);
+        }
+        let counts = tally.count(
+            &mut requests,
+            &mut [],
+            &Basis {
+                since,
+                modern: &HashSet::default(),
+                subagents: &subagents,
+                profiles: &profiles,
+                catalog: reading.catalog.get(),
+            },
+        );
+        *reading
+            .counts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(counts);
+    }
     // After T3 attribution, so each instance reads its own sessions' directory.
     crate::discovery::discover_inbound(&options.discovery, &mut profiles, &requests)?;
     crate::discovery::discover_instructions(&mut profiles, &requests, since)?;

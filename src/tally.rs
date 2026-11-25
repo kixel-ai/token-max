@@ -5,7 +5,7 @@
 //! The counts follow the report header's rules on what the read loop knows, so they near the
 //! header's as reading ends; the analysis then replaces them with the header's own.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use crate::collections::{HashMap, HashSet, IndexMap};
 use crate::model::{Estimate, Harness, Millis, Profile, Profiles, Request, Subagent, Text, Usd};
@@ -73,9 +73,10 @@ pub(crate) struct Tally {
     /// What each legacy record adds, by its position in the scan's list of them; None for
     /// one not counted.
     legacy: Vec<Option<Counted>>,
-    /// The legacy records in the window by request id, in the order read. Copies of one id
-    /// become one request, so only one is counted: the first no modern record supersedes.
-    copies: HashMap<Text, Vec<usize>>,
+    /// The legacy records in the window by request id, in the order read, less those found
+    /// superseded, which stay so. Copies of one id become one request, so only one is
+    /// counted: the first no modern record supersedes.
+    copies: HashMap<Text, VecDeque<usize>>,
     /// The copy counted for each id.
     claimed: HashMap<Text, usize>,
     /// The counted legacy records by the total a modern record would supersede them with.
@@ -210,7 +211,10 @@ impl Tally {
             if basis.since.is_some_and(|since| r.time < since) {
                 continue;
             }
-            self.copies.entry(r.id.clone()).or_default().push(index);
+            self.copies
+                .entry(r.id.clone())
+                .or_default()
+                .push_back(index);
             if !self.claimed.contains_key(&r.id) {
                 ids.push(r.id.clone());
             }
@@ -229,11 +233,16 @@ impl Tally {
             if self.claimed.contains_key(&id) {
                 continue;
             }
-            let Some(index) = self.copies[&id]
-                .iter()
-                .copied()
-                .find(|&index| !basis.modern.contains(&legacy[index].1))
-            else {
+            let Some(copies) = self.copies.get_mut(&id) else {
+                continue;
+            };
+            while copies
+                .front()
+                .is_some_and(|&index| basis.modern.contains(&legacy[index].1))
+            {
+                copies.pop_front();
+            }
+            let Some(&index) = copies.front() else {
                 continue;
             };
             let counted = self.measure(&mut legacy[index].0, basis);
@@ -475,9 +484,10 @@ mod tests {
         };
         let mut requests = vec![session("root"), session("grandchild")];
         let mut tally = Tally::default();
+        tally.touch(0);
+        tally.touch(1);
+        // Later counts change no request, only the lineage.
         let mut count = |tally: &mut Tally, subagents: &IndexMap<Text, Subagent>| {
-            tally.touch(0);
-            tally.touch(1);
             let basis = Basis {
                 since: None,
                 modern: &modern,

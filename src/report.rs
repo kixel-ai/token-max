@@ -15,11 +15,11 @@ use crate::keepalive::duration as keepalive_duration;
 use crate::model::{
     Action, AdvisorControl, AdvisorLine, AdvisorUse, BackgroundCheck, BackgroundFeature, BashCap,
     Billing, CacheReplayEvidence, CheckBase, CheckResult, CompactionCheck, ContextCost,
-    ContextKind, ControlValue, Cost, Coverage, EffortCheck, EffortRun, Estimate, EstimateEvidence,
-    Evidence, FableUse, FableWeek, Harness, InboundControl, InboundUse, KeepaliveCheck, Margin,
-    MemoryCheck, Millis, ModelSource, PeriodStatus, Profile, Report, RequestEvidence,
-    RetentionControl, ReturnTiming, Scalar, Scan, Share, SubagentCost, T3IdleCheck,
-    T3TextGeneration, Ttl, UsageEstimate, Verdict,
+    ContextKind, ControlValue, Cost, Coverage, EffortCheck, EffortControl, EffortRun, Estimate,
+    EstimateEvidence, Evidence, FableUse, FableWeek, Harness, InboundControl, InboundUse,
+    KeepaliveCheck, Margin, MemoryCheck, Millis, ModelSource, PeriodStatus, Profile, Report,
+    RequestEvidence, RetentionControl, ReturnTiming, Scalar, Scan, Share, SubagentCost,
+    T3IdleCheck, T3TextGeneration, Ttl, UsageEstimate, Verdict,
 };
 use crate::prices::{TIER_SENSITIVITY, TIER_SIGNS, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
@@ -5274,10 +5274,15 @@ fn advisor_row(u: &AdvisorUse, control: Option<&AdvisorControl>, out: &Out<'_>) 
 
 /// The advisor `vibes` suggests for a line of Claude profiles with no `advisorModel`, one
 /// rank above its main-session default, or what stops one loading or keeps it unsuggested.
-fn advisor_item(u: Option<&AdvisorUse>, p: &Profile, profile: &str, out: &Out<'_>) -> Item {
+fn advisor_item(
+    u: Option<&AdvisorUse>,
+    p: &Profile,
+    effort: Option<&EffortControl>,
+    profile: &str,
+    out: &Out<'_>,
+) -> Item {
     use crate::advisor::Pick;
     let control = p.advisor.as_ref().expect("an advisor card has its control");
-    let effort = p.effort.as_ref();
     let main = effort.and_then(|e| e.model.as_deref());
     // The window's calls, after a space, which show a blocked advisor still loaded somewhere.
     let calls = u.map_or_else(String::new, |u| format!(" {}", advisor_calls(u)));
@@ -5410,9 +5415,55 @@ fn advisor_item(u: Option<&AdvisorUse>, p: &Profile, profile: &str, out: &Out<'_
         sources: vec![ADVISOR_PICK.into(), crate::advisor::DOCS.into()],
         how,
         quiet,
-        // No `doctor` line writes the main model, `advisorModel` or what blocks the advisor.
+        // No `doctor` line writes the main model, `advisorModel` or what blocks the advisor;
+        // the Main-session default card's change, accepted in `vibes`' walk, adds one.
         after: vec![],
     }
+}
+
+/// The main-session default once the Main-session default card's edit is written: the
+/// maintainer's pick, named by the setting the edit writes. None when the edit leaves the
+/// model as it is.
+fn written_default(control: &EffortControl, p: &Profile) -> Option<EffortControl> {
+    let ((model, _), _) = crate::effort::pick(p.harness);
+    if control.model.as_deref() == Some(model) {
+        return None;
+    }
+    let owner = control.model_owner.as_str();
+    // A recorded model is replaced by `model` in the profile's file, as the edit writes it.
+    let model_owner = if owner == crate::effort::RECORDED {
+        format!("{}:model", p.settings_file)
+    } else {
+        owner
+            .strip_suffix(crate::effort::NULL_MODEL)
+            .unwrap_or(owner)
+            .to_string()
+    };
+    Some(EffortControl {
+        model: Some(model.into()),
+        model_owner,
+        unresolved: None,
+        ..control.clone()
+    })
+}
+
+/// What the advisor card `item` says of `rebuilt`, the card it becomes once the walk accepts
+/// the change of the card `name`, which sets the main model to `model`; None when the
+/// change leaves the advice as it is.
+fn default_note(item: &Item, rebuilt: &Item, name: &str, model: &str) -> Option<String> {
+    use crate::advisor::Pick;
+    if (&item.how, item.quiet) == (&rebuilt.how, rebuilt.quiet) {
+        return None;
+    }
+    let change = format!("Accepting the {name} card's change to {model}");
+    Some(match (crate::advisor::pick(model), &rebuilt.how) {
+        (Pick::Advisor(pick), Some(_)) => {
+            format!(" {change} suggests a {} advisor instead.", capitalize(pick))
+        }
+        _ if item.how.is_some() => format!(" {change} leaves no advisor to suggest."),
+        _ if rebuilt.quiet => format!(" {change} leaves nothing here to act on."),
+        _ => format!(" {change} leaves it unpaired, so no advisor is attached."),
+    })
 }
 
 /// The project settings file in `owner`, a setting's owner such as `<file>:model` or
@@ -6031,6 +6082,9 @@ pub enum Origin {
     Context(usize),
     /// One of `vibes`' items, by its index among them; never a line of this report.
     Vibe(usize),
+    /// One of `vibes`' items as its walk rebuilds it once an earlier card's change is
+    /// accepted: the item's index, and the rebuilt card's among its `after`.
+    Walked(usize, usize),
 }
 
 /// Every change the report recommends or suggests, in its order: biggest monthly saving
@@ -7093,6 +7147,10 @@ fn summary(
     let mut rows: Vec<Row> = checks.iter().map(|c| check_row(c, out)).collect();
     // Advice the transcripts cannot price, which `vibes` shows instead of this report.
     let mut vibes: Vec<Item> = vec![];
+    // Each Main-session default card that offers an edit: its index among `vibes`, its name,
+    // its profiles and the edit, so an advisor card after it can rank against the default it
+    // offers.
+    let mut defaults: Vec<(usize, String, &[String], crate::doctor::Patch)> = vec![];
     for cap in &report.bash {
         let how = report
             .scan
@@ -7233,7 +7291,12 @@ fn summary(
                 .find(|p| p.id == e.base.profile)
                 .and_then(|profile| crate::doctor::default_how(&e.control, profile));
             let profile = tag(r.profiles, &|_| r.owner.to_string(), out);
-            vibes.extend(default_item(e, &profile, how, out));
+            if let Some(item) = default_item(e, &profile, how, out) {
+                if let Some(How::Edit(patch)) = &item.how {
+                    defaults.push((vibes.len(), item.name.clone(), r.profiles, patch.clone()));
+                }
+                vibes.push(item);
+            }
         }
     }
     let subagent_owner = |p: &Profile| {
@@ -7860,7 +7923,47 @@ fn summary(
             .advisor
             .iter()
             .find(|u| u.line == AdvisorLine::Settings && u.profiles == card.ids);
-        vibes.push(advisor_item(calls, card.lead, &profile, out));
+        let lead = card.lead;
+        let mut item = advisor_item(calls, lead, lead.effort.as_ref(), &profile, out);
+        let offered = defaults
+            .iter()
+            .find(|(_, _, ids, _)| ids.contains(&lead.id))
+            .zip(lead.effort.as_ref().and_then(|e| written_default(e, lead)));
+        if let Some(((_, name, _, patch), written)) = offered {
+            let rebuilt = advisor_item(calls, lead, Some(&written), &profile, out);
+            let model = written
+                .model
+                .as_deref()
+                .expect("a written default names its model");
+            if let Some(note) = default_note(&item, &rebuilt, name, model) {
+                item.text += &note;
+            }
+            // Another profile's card may write the same model to the same file, under a name a
+            // symlink makes one, beside a different effort, and accepting either writes this
+            // main model.
+            let model_edit = |p: &crate::doctor::Patch| {
+                p.edits
+                    .iter()
+                    .find(|e| e.path == ["model"] || e.path == ["env", "ANTHROPIC_MODEL"])
+                    .cloned()
+            };
+            let mine = model_edit(patch);
+            let origins = defaults
+                .iter()
+                .filter(|(_, _, _, p)| {
+                    std::ptr::eq(p, patch)
+                        || (mine.is_some()
+                            && model_edit(p) == mine
+                            && crate::discovery::same_file(&p.file, &patch.file))
+                })
+                .map(|(index, ..)| Origin::Vibe(*index))
+                .collect();
+            item.after.push(crate::vibes::After {
+                origins,
+                item: Box::new(rebuilt),
+            });
+        }
+        vibes.push(item);
     }
     // Context with no switch: worth seeing, but not a setting to change.
     let fixed: Vec<&ContextCost> = report

@@ -321,11 +321,34 @@ fn fill(usage: &mut Usage, old: &Usage) {
     }
     // A lifetime split belongs to its write total: one copied beside a different total
     // would price only part of the writes, so it stays unknown instead.
+    // Even then, a pair completed from both snapshots must still sum to that total.
     if usage.write == old.write {
-        keep(&mut usage.write5m, old.write5m);
-        keep(&mut usage.write1h, old.write1h);
-        keep(&mut usage.write30m, old.write30m);
-        keep(&mut usage.write12h, old.write12h);
+        for (a, b, old_a, old_b) in [
+            (
+                &mut usage.write5m,
+                &mut usage.write1h,
+                old.write5m,
+                old.write1h,
+            ),
+            (
+                &mut usage.write30m,
+                &mut usage.write12h,
+                old.write30m,
+                old.write12h,
+            ),
+        ] {
+            let filled = (keep(a, old_a), keep(b, old_b));
+            if let (Some(x), Some(y), Some(write)) = (*a, *b, usage.write)
+                && x + y != write
+            {
+                if filled.0 {
+                    *a = None;
+                }
+                if filled.1 {
+                    *b = None;
+                }
+            }
+        }
     }
 }
 
@@ -2925,6 +2948,26 @@ mod tests {
         let mut unset = Usage::default();
         fill(&mut unset, &old);
         assert_eq!((unset.write, unset.write5m), (Some(100), Some(100)));
+        // A pair completed from two snapshots that no longer sums to the total gives way.
+        let mut half = Usage {
+            write: Some(100),
+            write5m: Some(100),
+            ..Usage::default()
+        };
+        let other_split = Usage {
+            write: Some(100),
+            write5m: Some(0),
+            write1h: Some(100),
+            ..Usage::default()
+        };
+        fill(&mut half, &other_split);
+        assert_eq!((half.write5m, half.write1h), (Some(100), None));
+        let mut empty = Usage {
+            write: Some(100),
+            ..Usage::default()
+        };
+        fill(&mut empty, &other_split);
+        assert_eq!((empty.write5m, empty.write1h), (Some(0), Some(100)));
     }
 
     #[test]

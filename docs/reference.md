@@ -1973,6 +1973,12 @@ pairing saves or costs is not measured. A main model Claude Code attaches no
 advisor to (Sonnet or Opus before 4.6, Haiku before 4.5), or one token-max
 can't resolve, gets a card that advises nothing.
 
+The [Main-session default](#main-session-default) card comes first. When its
+edit would move the main model, the advisor card says what accepting it would
+change, such as a Fable advisor instead of Opus for a Sonnet user taking the
+Opus default. On a terminal, a yes to that edit rebuilds the advisor card
+against the accepted model before it is asked; a no leaves the card as built.
+
 The card says no advisor would load, and offers no edit, when the settings or
 environment read set `CLAUDE_CODE_DISABLE_ADVISOR_TOOL`, send requests to
 Amazon Bedrock (or its Mantle endpoint), Google Cloud's Agent Platform or

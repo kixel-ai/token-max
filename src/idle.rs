@@ -29,7 +29,12 @@ use crate::prices::{
     unknown_cost, zero_cost,
 };
 use crate::scenarios::{ReplayOptions, ReplayTtls, replay_parts};
-use crate::version::claude_at_least;
+use crate::version::Needs;
+
+/// The first Claude Code with the idle compaction toggle.
+const TOGGLE: Needs = Needs::claude(1, 290);
+/// The first Claude Code whose idle compaction needs no server flag.
+const FLAG_FREE: Needs = Needs::claude(1, 314);
 
 /// The one-hour cache lifetime.
 const HOUR: Millis = 60 * 60_000;
@@ -1568,7 +1573,7 @@ impl<'a> Profiled<'a> {
                     old.extend(e.settings.iter().map(|(k, v)| (k.as_str(), v)));
                 }
             }
-            let flag_state = if claude_at_least(r.version.as_deref(), 1, 314) {
+            let flag_state = if FLAG_FREE.met(r.version.as_deref()) {
                 Some("not-required")
             } else {
                 match old.get("idleCompactionAvailable") {
@@ -1582,11 +1587,9 @@ impl<'a> Profiled<'a> {
                 _ => None,
             };
             let native = self.scopes.window(scope, p.model.as_deref());
-            let window = if claude_at_least(
-                r.version.as_deref(),
-                1,
-                native.minimum_claude_patch.unwrap_or(288),
-            ) {
+            let window = if Needs::claude(1, native.minimum_claude_patch.unwrap_or(288))
+                .met(r.version.as_deref())
+            {
                 lookup
                     .get(&(native.owner.as_str(), p.model.as_deref()))
                     .copied()
@@ -1666,7 +1669,7 @@ impl<'a> Profiled<'a> {
                 || window.is_none()
                 || (boundary.is_none()
                     && (client != Client::Supported
-                        || !claude_at_least(r.version.as_deref(), 1, 290)
+                        || !TOGGLE.met(r.version.as_deref())
                         || flag_off))
             {
                 (
@@ -2242,13 +2245,20 @@ fn profile_checks<'a>(
             .rev()
             .find(|r| scopes.control(scopes.scope(r)).owner == owner)
             .expect("every owner comes from a main request");
-        let applicable = c.resolved
+        // The toggle needs 2.1.290, and the server's flag until 2.1.314 drops it.
+        let needs = if historically_available(&events, recent) {
+            TOGGLE
+        } else {
+            FLAG_FREE
+        };
+        let upgrade =
+            needs.upgrade([(group.recorder(&recent.profiles), recent.version.as_deref())]);
+        let unlocked = c.resolved
             && c.value.is_some()
             && client(recent) == Client::Supported
-            && claude_at_least(recent.version.as_deref(), 1, 290)
-            && after.applicable
-            && (claude_at_least(recent.version.as_deref(), 1, 314)
-                || historically_available(&events, recent));
+            && after.applicable;
+        let applicable = unlocked && upgrade.is_none();
+        let upgrade = upgrade.filter(|_| unlocked);
         let savings = match (delta, c.value) {
             (Some(delta), Some(_)) => Some(if winner == c.value { 0.0 } else { delta.abs() }),
             _ => None,
@@ -2346,6 +2356,7 @@ fn profile_checks<'a>(
                     .chain(PRICE_SOURCES.iter())
                     .map(|s| s.to_string())
                     .collect(),
+                upgrade,
             },
             bucket: "main",
             threshold: c.threshold,
@@ -2538,6 +2549,7 @@ pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleChec
                 savings_usd: savings.filter(|_|applicable), margin, monthly_savings_usd: savings.filter(|_|applicable).zip(since).filter(|(_,s)| options.now>*s).map(|(v,s)|v*30.0*86_400_000.0/(options.now-s) as f64), break_even: None,
                 assumptions: vec!["T3 beforeCacheExpires uses observed promptCacheExpiresAt minus two minutes, at least 200000 tokens, a completed listed main thread, no pending/background work, and the active Claude session, rebuilt from T3's event log at each completed-run event and when the timer fires; 5m and 1h caches both apply".into(), "T3 keeps about one day of its event log, so the window starts where it becomes complete; gaps that open earlier stay as recorded in every mode".into(), "onReturn is conditional on the SDK offering its resume dialog when a new run resumes a cold session of at least 200000 tokens, and on user acceptance; off also suppresses that dialog".into(), "Proactive timers live in memory and disappear on restart; configured mode alone does not prove summary generation. Final eligible periods pay for a summary with no resumed-prefix benefit".into(), "Summary output and the full resumed prefix use the existing compatible native compaction calibration; absent calibration and lifecycle evidence leave a session unpriced, and each mode is extrapolated over such sessions from the priced ones some mode could act on, assuming they resemble each other; sessions no mode acts on count exactly".into()],
                 uncertainty: instance.limitations.iter().chain(&unresolved_windows).cloned().collect(), sources: vec![crate::t3::SOURCE.into()],
+                upgrade: None,
             }, current_settings: current, after_recommendations: after,
         };
         checks.push(check);
@@ -3541,6 +3553,7 @@ mod tests {
             outranking_files: vec![],
             ttl_directories: IndexMap::default(),
             claude_config: None,
+            updater: None,
             codex_system_config: None,
             switched_off: vec![],
             pretended_on: vec![],
@@ -3745,6 +3758,7 @@ mod tests {
             assumptions: vec![],
             uncertainty: vec![],
             sources: vec![],
+            upgrade: None,
         }
     }
 
@@ -4261,6 +4275,14 @@ mod tests {
             assert_ne!(c.base.action, Action::Change, "{mode}");
             if mode != "old" {
                 near(c.after_recommendations.delta.map(|d| d.usd), 0.0);
+            }
+            // Only the version holds the old client back; with no flag recorded, the toggle
+            // needs the release that dropped it.
+            let upgrade = c.base.upgrade.as_ref().map(|u| (u.needs, u.ran.as_deref()));
+            if mode == "old" {
+                assert_eq!(upgrade, Some((FLAG_FREE, Some("2.1.289"))));
+            } else {
+                assert_eq!(upgrade, None, "{mode}");
             }
         }
     }

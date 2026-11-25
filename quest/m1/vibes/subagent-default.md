@@ -35,8 +35,8 @@ Decision prompts, chosen options marked ✅:
   pick of both subagent model and effort like the main-session card, which
   reaches into model choice).
 - Version: ✅ recommend upgrading when the latest session's Claude Code
-  ignores the variable (the maintainer's addition), alongside
-  [the general upgrade quest](/quest/m1/harness-upgrades.md).
+  ignores the variable (the maintainer's addition), as every version-gated
+  line and card does (`docs/reference.md`'s Harness upgrades).
 
 Recommendations:
 
@@ -44,9 +44,9 @@ Recommendations:
   rather than writing the guidance twice.
 - Confirm the first version that reads `CLAUDE_CODE_SUBAGENT_EFFORT` in
   Claude Code's changelog; the tip says 2.1.315. Gate it with
-  `claude_at_least` on the profile's latest request, as `doctor`'s
-  `deniedMcpServers` gate does. If the general upgrade quest has landed,
-  use its wording.
+  `Needs::upgrade` (`src/version.rs`) on the profile's latest request, as
+  `doctor`'s `deniedMcpServers` gate does, and word the card with its
+  `Upgrade::why` and `Upgrade::step`.
 - Before writing a value the model can't take, check it: `xhigh` falls back
   to `high` on models without it (`src/effort.rs`), and `high` is accepted
   everywhere effort applies.

@@ -337,6 +337,7 @@ fn check(
             .into(),
             uncertainty,
             sources: SOURCES.map(String::from).into(),
+            upgrade: None,
         },
         bucket: "all",
         replacement: control.replacement.clone(),

@@ -22,10 +22,10 @@ use crate::model::{
 use crate::prices::{Catalog, Sample, Sum, price_part, price_request, server_cost};
 use crate::reader::UNRECORDED;
 use crate::safe::{ScanError, label};
-use crate::version::{claude_at_least, plain};
+use crate::version::{Needs, plain};
 
 /// Claude Code 2.1.198 made the built-in Explore inherit the main model; it ran on Haiku before.
-const EXPLORE_INHERITS_PATCH: u64 = 198;
+const EXPLORE_INHERITS: Needs = Needs::claude(1, 198);
 
 /// Model families that rank above Opus, whose Explore runs are capped at Opus.
 const ABOVE_OPUS: [&str; 2] = ["fable", "mythos"];
@@ -775,7 +775,7 @@ fn claude_source(run: &Run<'_>, controls: &AgentControls, kind: &str) -> (ModelS
     if builtin.name == "Explore" {
         return match run.version.filter(|v| plain(v).is_some()) {
             None => unknown("the Claude Code version is not recorded as plain digits".into()),
-            Some(v) if !claude_at_least(Some(v), 1, EXPLORE_INHERITS_PATCH) => decided((
+            Some(v) if !EXPLORE_INHERITS.met(Some(v)) => decided((
                 ModelSource::Definition,
                 "built-in Explore ran on Haiku before Claude Code 2.1.198".into(),
                 Expect::Model("haiku"),

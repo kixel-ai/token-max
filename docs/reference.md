@@ -258,7 +258,8 @@ name holds another `__` after the server's, the Claude Code is older, or
 `deniedMcpServers` is not a list, the walk names
 the step to take by hand instead: remove it from `.mcp.json`, uninstall the
 plugin, disconnect the connector at claude.ai, or remove it where it is
-configured. `disableClaudeAiConnectors` is never offered, since it turns off
+configured. Where only the Claude Code is older, the step also offers
+[upgrading it](#harness-upgrades). `disableClaudeAiConnectors` is never offered, since it turns off
 every connector, including ones added later.
 
 A server whose name holds `__` or ends in `_`, known from its MCP
@@ -586,6 +587,28 @@ including those no longer sent.
 
 A run with no histories or no requests in the selected window gives a next step;
 no applicable changes does not imply complete visibility or optimal settings.
+
+### Harness upgrades
+
+Some settings need a newer Claude Code or Codex than the profile's latest
+session ran: the cache TTLs Claude Code 2.1.242, the idle compaction toggle
+2.1.290 (2.1.314 without the server flag that earlier versions needed), a
+per-model compaction window 2.1.288 (2.1.304 for a `k` or `m` suffix), a
+`deniedMcpServers` entry 2.1.0 to 2.1.330 by the server's kind, and Codex's
+turn-end compaction threshold 0.156.0. When the version is the only thing
+holding a verdict back, its line keeps its unknown mark and exit code, and the
+line under it says which version the setting needs, which version the latest
+session ran ("an unrecorded version" when none was), and to upgrade. `vibes`' window cap and a
+step by hand to block an MCP server say so too. token-max never upgrades a
+harness itself.
+
+It names an upgrade command only when it knows how the harness was installed:
+`claude update` when Claude Code's state file records a native install
+(`"installMethod": "native"`). An npm, Nix or Homebrew install, Codex, and a
+T3 instance, which runs the binary its settings name or `claude` or `codex`
+on its own PATH, get the version alone. A version gate that explains a past
+request, such as which model a built-in Explore ran on, uses that request's
+own version and advises nothing.
 
 ## Savings against the defaults
 

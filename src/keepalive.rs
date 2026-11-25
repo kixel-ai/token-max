@@ -1085,6 +1085,7 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
                 "pinging competes with idle compaction rather than adding its savings; compaction after the cap is not combined with pings".into(),
                 "caps include one ping and the counts needed to rescue recorded returns, up to the seven-day scheduled-task lifetime".into(),
             ].into_iter().chain(tier_signs.then(|| TIER_SIGNS.into())).collect(), uncertainty, sources: SOURCES.into_iter().map(String::from).chain(PRICE_SOURCES.into_iter().map(String::from)).collect(),
+            upgrade: None,
         }, bucket: "main", lifetime_ms: lifetime.as_ref().map(|l| l.ms), interval_ms: interval,
         ping_input_tokens: new_tokens, ping_output_tokens: output_tokens,
         returns, finals, unpriced, idle_compaction_savings: idle_savings.map(|(usd, margin)| Estimate { usd, margin }), margin_usd: margin, scenarios,

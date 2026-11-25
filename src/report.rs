@@ -297,6 +297,7 @@ struct Common<'a> {
     uncertainty: &'a [String],
     sources: &'a [String],
     usage_estimates: &'a [UsageEstimate],
+    upgrade: Option<&'a crate::version::Upgrade>,
 }
 
 fn base<'a, V>(
@@ -331,6 +332,7 @@ fn base<'a, V>(
         uncertainty: &b.uncertainty,
         sources: &b.sources,
         usage_estimates,
+        upgrade: b.upgrade.as_ref(),
     }
 }
 
@@ -3345,6 +3347,27 @@ fn keepalive_unresolved(k: &KeepaliveCheck, r: &Common<'_>) -> String {
     }
 }
 
+/// A verdict only an older harness holds back: the upgrade that would let it apply, then
+/// what the replay favors.
+fn held_back(r: &Common<'_>) -> Option<(String, String)> {
+    let upgrade = r.upgrade?;
+    let favors = match r.recommended? {
+        recommended if Some(recommended) == r.current => "the current value".to_string(),
+        recommended => setting_value(Some(recommended)),
+    };
+    Some((
+        format!(
+            "{}: {}.",
+            capitalize(&upgrade.why("this setting")),
+            upgrade.step()
+        ),
+        format!(
+            "The replay favors {favors}, which applies once {} is upgraded.",
+            upgrade.needs.harness.product()
+        ),
+    ))
+}
+
 /// One plain sentence on why a check could not reach a verdict.
 fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
     if r.uncertainty.iter().any(|s| s == TIER_SENSITIVITY) {
@@ -4212,6 +4235,8 @@ struct Row {
     stats: String,
     /// What the current value saves against its default, when the two differ.
     baseline: Option<crate::defaults::Baseline>,
+    /// The harness upgrade that alone would let its verdict apply.
+    upgrade: Option<String>,
 }
 
 impl Row {
@@ -4234,6 +4259,7 @@ impl Row {
             margin: None,
             stats: String::new(),
             baseline: None,
+            upgrade: None,
         }
     }
 
@@ -4511,6 +4537,9 @@ fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
             out.spans(&spans, 0, Some(indent));
             if let Some(baseline) = &row.baseline {
                 out.line(&baseline.text(), indent, DIM);
+            }
+            if let Some(upgrade) = &row.upgrade {
+                out.line(upgrade, indent, PLAIN);
             }
             if out.options.details {
                 out.line(&format!("What: {}", row.what), indent, PLAIN);
@@ -4946,8 +4975,18 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
     item.value = format!("{} {} {}", tokens(window), out.arrow, tokens(cap));
     item.quiet = false;
     item.how = Some(match &c.unsettable {
-        // As the line would, the change goes by hand where no edit is known to hold.
-        Some(reason) => crate::doctor::window_by_hand(c, c.capped.as_ref(), cap, profile, reason),
+        // As the line would, the change goes by hand where no edit is known to hold, after
+        // any upgrade the window control needs.
+        Some(reason) => match (
+            crate::doctor::window_by_hand(c, c.capped.as_ref(), cap, profile, reason),
+            &c.base.upgrade,
+        ) {
+            (How::Manual { step, reason }, Some(upgrade)) => How::Manual {
+                step: format!("{}, then {step}", upgrade.step()),
+                reason,
+            },
+            (how, _) => how,
+        },
         None => crate::doctor::window_change(c, c.capped.as_ref(), cap, profile),
     });
     item
@@ -5729,10 +5768,15 @@ fn summary(
             None => String::new(),
         };
         let set_in = format!("{official}Set in {}.", out.home(r.owner));
+        let held = held_back(r);
+        row.upgrade = held.as_ref().map(|(upgrade, _)| upgrade.clone());
         let unknown = || {
             format!(
                 "{}{}{} {set_in}",
-                not_enough(&unresolved(result, r)),
+                held.as_ref().map_or_else(
+                    || not_enough(&unresolved(result, r)),
+                    |(_, favors)| favors.clone()
+                ),
                 context_sizes(report, result, r.profile),
                 context_rot(report, result)
             )
@@ -7268,6 +7312,7 @@ mod tests {
             assumptions: vec!["synthetic assumption".into()],
             uncertainty: vec!["synthetic uncertainty".into()],
             sources: vec!["https://example.invalid/source".into()],
+            upgrade: None,
         }
     }
 

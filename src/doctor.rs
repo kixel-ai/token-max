@@ -26,6 +26,7 @@ use crate::report::{
 };
 use crate::safe::{ScanError, terminal_text};
 use crate::terminal::{BOLD, DIM, GREEN, RED, WrapOptions, YELLOW, wrap_spans};
+use crate::version::{Needs, Upgrade};
 
 /// Whose spend a share is of, for a host's own changes.
 const THIS_HOST: &str = "this host's";
@@ -322,7 +323,7 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
                     g.kind == ContextKind::McpServer && g.reason == Reason::Unused
                 });
                 if unused && matches!(how, How::Edit(_)) {
-                    let versions = claude_versions(report, &ids);
+                    let versions = claude_versions(report, &members);
                     let whole = ends_at(&c.name, c.details.iter().map(|d| d.name.as_str()));
                     let own = holds_its_tools(&c.name);
                     removal = crate::mcp::definitions(&c.name, control, &members)
@@ -388,43 +389,48 @@ fn holds_its_tools(server: &str) -> bool {
     !server.contains("__") && !server.ends_with('_')
 }
 
-/// The Claude Code each profile in `ids` last recorded a request from, for those with any.
-fn claude_versions<'r>(report: &'r Report, ids: &[&str]) -> Vec<Option<&'r str>> {
-    ids.iter()
-        .filter_map(|id| {
+/// The Claude Code each of `members` last recorded a request from, for those with any.
+fn claude_versions<'r>(
+    report: &'r Report,
+    members: &[&'r Profile],
+) -> Vec<(&'r Profile, Option<&'r str>)> {
+    members
+        .iter()
+        .filter_map(|&p| {
             let mut requests = report.scan.requests.iter().rev();
-            let last = requests.find(|r| r.profiles.iter().any(|p| p == id))?;
-            Some(last.version.as_deref())
+            let last = requests.find(|r| r.profiles.contains(&p.id))?;
+            Some((p, last.version.as_deref()))
         })
         .collect()
 }
 
 /// A `deniedMcpServers` entry where every profile's latest Claude Code matches it by name,
-/// else its step by hand.
-fn gate(definition: Definition, versions: &[Option<&str>]) -> Definition {
+/// else its step by hand, or an upgrade.
+fn gate(definition: Definition, versions: &[(&Profile, Option<&str>)]) -> Definition {
     let Definition::Deny(deny) = definition else {
         return definition;
     };
     let (minor, patch) = deny.since;
-    if !versions.is_empty()
-        && versions
-            .iter()
-            .all(|v| crate::version::claude_at_least(*v, minor, patch))
-    {
+    let needs = Needs::claude(minor, patch);
+    // With no recorded session, the version is unrecorded.
+    let upgrade = match versions.first() {
+        Some(_) => needs.upgrade(versions.iter().copied()),
+        None => Some(Upgrade {
+            needs,
+            ran: None,
+            command: None,
+        }),
+    };
+    let Some(upgrade) = upgrade else {
         return Definition::Deny(deny);
-    }
-    // The first version that fails the check, which may be unrecorded.
-    let ran = versions
-        .iter()
-        .find(|v| !crate::version::claude_at_least(**v, minor, patch))
-        .copied()
-        .flatten()
-        .map_or("an unrecorded Claude Code".to_string(), |v| {
-            format!("Claude Code {v}")
-        });
-    deny.by_hand(&format!(
-        "its latest sessions ran {ran}, before 2.{minor}.{patch}, where a deniedMcpServers entry blocks just this server by name"
-    ))
+    };
+    let step = format!(
+        "{}, or {} and run token-max doctor again",
+        deny.step,
+        upgrade.step()
+    );
+    let why = upgrade.why("blocking just this server by name with a deniedMcpServers entry");
+    crate::mcp::Deny { step, ..deny }.by_hand(&why)
 }
 
 /// The group a feature's change joins: its kind and why it is offered, as its verdict says.
@@ -2255,10 +2261,6 @@ pub fn opening(found: &[Found], destinations: &[String], style: &Style) -> Strin
     if found.is_empty() {
         out.push_str(&style.dim("No transcripts found on this host."));
     }
-    let name = |harness| match harness {
-        Harness::Claude => "Claude Code",
-        Harness::Codex => "Codex",
-    };
     let roots: Vec<String> = found
         .iter()
         .map(|f| home_in(&f.root, style.home.as_deref()))
@@ -2271,7 +2273,7 @@ pub fn opening(found: &[Found], destinations: &[String], style: &Style) -> Strin
     let widest = |column: &[String]| column.iter().map(|c| crate::terminal::cells(c)).max();
     let name_cells = found
         .iter()
-        .map(|f| name(f.harness).len())
+        .map(|f| f.harness.product().len())
         .max()
         .unwrap_or(0);
     let root_cells = widest(&roots).unwrap_or(0);
@@ -2284,7 +2286,7 @@ pub fn opening(found: &[Found], destinations: &[String], style: &Style) -> Strin
     // A table wider than the terminal puts each root's figures on the line below it.
     let stacked = style.width.is_some_and(|w| table > w);
     for (((f, root), files), bytes) in found.iter().zip(&roots).zip(&counts).zip(&sizes) {
-        let lead = format!("{:<name_cells$}  {}", name(f.harness), root);
+        let lead = format!("{:<name_cells$}  {}", f.harness.product(), root);
         let noun = if f.files == 1 {
             "transcript "
         } else {
@@ -5642,33 +5644,42 @@ mod tests {
                 reason: "a plugin adds it".into(),
             })
         };
+        let mut native = crate::test_support::make_profile("native", "/n");
+        native.updater = Some("claude update");
+        let other = crate::test_support::make_profile("other", "/o");
         // Every profile's latest Claude Code must match it by name.
-        let new = [Some("2.1.182"), Some("2.1.331")];
+        let new = [(&native, Some("2.1.182")), (&other, Some("2.1.331"))];
         assert_eq!(gate(blocked("p"), &new), blocked("p"));
-        let Definition::Manual { step, reason } =
-            gate(blocked("p"), &[Some("2.1.331"), Some("2.1.90"), None])
-        else {
+        let Definition::Manual { step, reason } = gate(
+            blocked("p"),
+            &[
+                (&other, Some("2.1.331")),
+                (&native, Some("2.1.90")),
+                (&other, None),
+            ],
+        ) else {
             panic!("an older Claude Code is a step by hand")
         };
-        assert_eq!(step, "uninstall the plugin");
-        assert!(
-            reason.starts_with(
-                "a plugin adds it, and its latest sessions ran Claude Code 2.1.90, before 2.1.182"
-            ),
-            "{reason}"
+        assert_eq!(
+            step,
+            "uninstall the plugin, or upgrade Claude Code with `claude update` and run token-max doctor again"
         );
-        // The reason names the version that failed, even when another was recorded.
-        let Definition::Manual { reason, .. } = gate(blocked("p"), &[Some("2.1.331"), None]) else {
+        assert_eq!(
+            reason,
+            "a plugin adds it, and blocking just this server by name with a deniedMcpServers entry needs Claude Code 2.1.182 or later, but its latest session ran 2.1.90"
+        );
+        // The reason names the version that failed, even when another was recorded, and
+        // names no command for an install it doesn't know.
+        let Definition::Manual { step, reason } =
+            gate(blocked("p"), &[(&native, Some("2.1.331")), (&other, None)])
+        else {
             panic!("an unrecorded Claude Code is a step by hand")
         };
+        assert!(step.ends_with(", or upgrade Claude Code and run token-max doctor again"));
         assert!(
-            reason.contains("ran an unrecorded Claude Code, before"),
+            reason.ends_with("but its latest session ran an unrecorded version"),
             "{reason}"
         );
-        assert!(matches!(
-            gate(blocked("p"), &[None]),
-            Definition::Manual { .. }
-        ));
         assert!(matches!(gate(blocked("p"), &[]), Definition::Manual { .. }));
 
         // A tool family whose tools may belong to a longer name is not denied by its own.

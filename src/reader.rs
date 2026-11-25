@@ -1461,11 +1461,7 @@ impl Reader {
                             string(b, "tool_use_id"),
                         );
                         e.tool_id = opaque(b, "tool_use_id")?.map(Id::from);
-                        e.file = Some(if is_true(b, "is_error") {
-                            crate::lsp::File::Failed
-                        } else {
-                            crate::lsp::File::Done
-                        });
+                        e.file = (!is_true(b, "is_error")).then_some(crate::lsp::File::Done);
                         if timed_out {
                             e.shell = Some(ShellCall {
                                 timed_out,

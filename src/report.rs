@@ -220,7 +220,7 @@ fn days(since: Option<Millis>, until: Option<Millis>) -> String {
 }
 
 /// Share to one decimal, rounded down so a partial share never reads as 100%.
-fn percent(part: u64, whole: u64) -> String {
+pub(crate) fn percent(part: u64, whole: u64) -> String {
     js_number(((part as f64 / whole as f64) * 1000.0).floor() / 10.0)
 }
 
@@ -10246,7 +10246,7 @@ mod tests {
                 installed: false,
                 installed_for: vec![],
                 off: None,
-                server: Some(true),
+                server: crate::lsp::Found::Yes,
             }],
             settings_file: format!("{ROOT}/settings.json"),
             root: ROOT.into(),
@@ -10254,6 +10254,7 @@ mod tests {
             cache_dir: None,
             named: false,
             unresolved: false,
+            denied: false,
             unread: None,
         };
         report.lsp = vec![card(&format!("{ROOT}/plugins"))];

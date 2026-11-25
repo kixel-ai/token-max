@@ -30,6 +30,13 @@ Each run:
   transcripts goes to `doctor`, not measurable to `vibes`, and anything an
   existing check reads gets checked against that check. Skips what an earlier
   run rejected, listed below, unless the release changed it.
+- Diffs the Code intelligence card's `SERVERS` table (`src/lsp.rs`) against
+  the language server entries of
+  [anthropics/claude-plugins-official](https://github.com/anthropics/claude-plugins-official)'s
+  `.claude-plugin/marketplace.json`: each entry's `lspServers` command and
+  `extensionToLanguage`, and any `defaultEnabled` it sets, since the card
+  assumes none does. A renamed binary, a new typed language or a changed
+  extension is a fix quest.
 - Plans through `/quest-plan` rules, so the maintainer picks which new
   quests to keep when the PR lands.
 - Finishes by updating this file in its own PR: the baseline below, the

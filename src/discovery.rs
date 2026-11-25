@@ -981,7 +981,7 @@ pub(crate) fn git_dir(root: &str) -> Result<Option<GitDir>, ScanError> {
 
 /// The main checkout of a linked worktree, reading only Git's path metadata.
 #[cfg(unix)]
-fn main_checkout(root: &str) -> Result<String, ScanError> {
+pub(crate) fn main_checkout(root: &str) -> Result<String, ScanError> {
     let Some(GitDir {
         common,
         linked: true,
@@ -2613,11 +2613,21 @@ pub(crate) fn profile(
             // Without the variable, a shell reaches only the default home.
             named: explicit
                 || !realpath(&join(&[&options.home, ".claude"])).is_ok_and(|d| d == canonical),
-            path: options
-                .env
+            // Claude Code starts its servers with the PATH its settings' `env` gives it, else
+            // the shell's.
+            path: environment
+                .values
                 .iter()
-                .find(|(k, _)| crate::lsp::is_path(k))
-                .map(|(_, v)| v.clone()),
+                .find_map(|(k, v)| v.as_str().filter(|_| crate::lsp::is_path(k)))
+                .or_else(|| {
+                    options
+                        .env
+                        .iter()
+                        .find_map(|(k, v)| crate::lsp::is_path(k).then_some(v.as_str()))
+                })
+                .map(str::to_string)
+                .ok_or(crate::lsp::NO_PATH),
+            complete: true,
             home: options.home.clone(),
             user: crate::lsp::enabled_entries(&user, &settings_file),
             managed: crate::lsp::enabled_entries(&managed, managed_file),

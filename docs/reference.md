@@ -1376,7 +1376,7 @@ an exit code.
 | Explore subagent | Claude's built-in Explore ran off Haiku: what it cost, the same tokens on the cheapest model, the model guide's tip, and the agent file that follows it as a step by hand. |
 | Fable weekly use | Any Fable request in the window: what they cost, and Anthropic's [plan rule](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan). |
 | [Auto memory](#auto-memory-in-vibes) | Every auto memory or Codex memories line: off is advised when most main sessions ran in a repository with a CLAUDE.md or AGENTS.md. |
-| [Code intelligence](#code-intelligence) | Claude sessions read or edited files of a language whose official language server plugin a new session wouldn't load, or whose server isn't on `PATH`: Anthropic's [costs page](https://code.claude.com/docs/en/costs#install-code-intelligence-plugins-for-typed-languages). |
+| [Code intelligence](#code-intelligence) | Claude sessions read or edited files of a typed language whose official language server plugin a new session wouldn't load, or whose server isn't on `PATH`: Anthropic's [costs page](https://code.claude.com/docs/en/costs#install-code-intelligence-plugins-for-typed-languages). |
 
 The effort, instruction-file, subagent and Fable lines stay in `doctor`, where
 their costs are measured; only the advice about them is here.
@@ -1580,19 +1580,20 @@ A [code intelligence plugin](https://code.claude.com/docs/en/plugins/code-intell
 runs a language server for Claude Code, so Claude looks up symbols instead of
 searching text and sees the errors its edits introduce. Anthropic's
 [costs page](https://code.claude.com/docs/en/costs#install-code-intelligence-plugins-for-typed-languages)
-recommends one for typed languages; what it saves is not measured. A card for
-Lua, PHP, Python, Ruby or Liquid says the language is dynamically typed.
+recommends one for typed languages; what it saves is not measured. Only the
+page's statically typed languages get a card: its Lua, PHP, Python, Ruby and
+Liquid plugins are left out, since that advice doesn't name them.
 
-Each Claude settings file gets one card per language of that page's table
-whose files its sessions read or edited (`Read`, `Edit`, `MultiEdit` or
-`Write`), by the extensions each plugin's marketplace entry maps: the share of
-the window's sessions that touched one, a subagent's counted as its parent's,
-and the projects they ran in. A call whose result was an error, such as a read
-of a file that doesn't exist, or that has no result, such as one interrupted,
-counts for nothing. Only the language is kept,
-never the path. A project is the main checkout of the Git repository holding
-the session's directory, or for a directory removed since, such as a worktree,
-the nearest one that remains. A repository at or above home, such as one of
+Each Claude settings file gets one card per such language whose files its
+sessions read or edited (`Read`, `Edit`, `MultiEdit` or `Write`), by the
+extensions each plugin's marketplace entry maps: the share of the window's
+sessions that touched one, a subagent's counted as its parent's, and the
+projects they ran in. A call whose result was an error, such as a read of a
+file that doesn't exist, or that has no result, such as one interrupted,
+counts for nothing. Only the language is kept, never the path. A project is
+the main checkout of the Git repository holding the session's directory, past
+any symbolic link, or for a directory removed since, such as a worktree, the
+nearest one that remains. A repository at or above home, such as one of
 dotfiles, holds no project. Marker files such as `Cargo.toml` are not read:
 most recorded directories are gone by the time the report runs.
 
@@ -1603,42 +1604,52 @@ directory and its user and managed settings, read when the report is built:
   directory (`CLAUDE_CODE_PLUGIN_CACHE_DIR`, `~` read as home, else `plugins`
   in the profile) holds a user or managed record of
   `<plugin>@claude-plugins-official`. A project or local record installs it
-  only for that project, which the card names.
+  only for the project it names, which the card names too; one for every
+  project the sessions ran in serves them as well as a user install.
 - **On** by the `enabledPlugins` entry that wins: managed settings, then the
   user's. An entry may be `true`, `false` or a list of version constraints,
-  which keeps it on. With no entry, a plugin is on, as each official plugin's
-  `defaultEnabled` leaves it.
+  which keeps it on. With no entry, a plugin is on: its
+  [`defaultEnabled`](https://code.claude.com/docs/en/plugins-reference#defaultenabled)
+  defaults to `true`, and no official language server plugin sets it.
 
 It doesn't replay which plugin each past session loaded, so a project's local
-or project settings, project installs that covered some sessions, another
-marketplace's copy of a plugin, and managed marketplace policy are not read.
-The advice is always for the official copy:
+or project settings, another marketplace's copy of a plugin, plugins synced
+from claude.ai or loaded with `--plugin-dir`, and managed marketplace policy
+are not read. The advice is always for the official copy:
 
 | State for a new session | Change |
 | --- | --- |
 | Not installed for every project | By hand: `claude plugin install <plugin>@claude-plugins-official`, since `enabledPlugins` turns a plugin on but doesn't download it. A bare install goes to whichever directories the shell selects, so the step sets `CLAUDE_CONFIG_DIR` to the profile, unsetting it only for the default `~/.claude` that the shell doesn't name, and sets or unsets `CLAUDE_CODE_PLUGIN_CACHE_DIR` as the profile has it. |
-| Installed, and turned off in the user settings | `enabledPlugins` set to `true` there, offered as an edit when the server is on `PATH`. Otherwise by hand, as for a T3 instance whose launch arguments, secret environment values or machine policy can replace the settings it reads. |
+| Installed, and turned off in the user settings | `enabledPlugins` set to `true` there, offered as an edit when the server is on `PATH`. Otherwise by hand. For a T3 instance whose launch arguments, secret environment values or machine policy can replace the settings it reads, the step names the user settings unless the launch arguments name others. |
 | Turned off by managed settings | None. |
 | Installed and on | None, unless its server is missing. |
 
-A server whose program isn't on the `PATH` token-max runs with gets a step
-by hand to install it, unless managed settings turn the plugin off. Over
-`--ssh`, whose `PATH` often leaves out what a login shell adds, the server is
-not checked: the step says to install it if it is missing, and turning the
-plugin on is by hand.
+The server is looked for on the `PATH` claude starts with: the one the user
+settings' `env` sets, else the shell's. A server that isn't there gets a step
+by hand to install it, unless managed settings turn the plugin off. Whether it
+is installed is unknown, and turning the plugin on is by hand, in three cases:
+
+- over `--ssh`, whose `PATH` often leaves out what a login shell adds, for a
+  server it doesn't find;
+- for a T3 instance, which starts claude from its own process, unless its
+  environment or settings set `PATH`;
+- for rustup's `rust-analyzer` proxy, which starts the server only for a
+  toolchain that has its component.
+
+When `permissions.deny` turns off the `LSP` tool, which Claude looks symbols up
+with, the card says the plugin would give only diagnostics after edits.
 
 Profiles share a card only when they share a settings file and a plugins
 directory; cards that share only the settings file name their plugins
 directory. A session that may have been another profile's, such as T3 history
 two homes could hold, is left out and counted apart; a language only such
-sessions touched gets a quiet card saying so. A disabled T3 instance gets no
-card. When `installed_plugins.json` or an `enabledPlugins` entry holds what
-Claude Code would not write, or the registry isn't a file, the card says so in
-place of its advice, and nothing else fails; a secret T3 value for the plugins
-directory leaves a quiet card saying it can't be read. The `sessions`
-export never reads plugins. Plugins synced from claude.ai, those
-loaded with `--plugin-dir` and Claude Code's own recommendation dialog
-settings are not read.
+sessions touched gets a quiet card saying so, when anything is missing. A
+disabled T3 instance gets no card. When `installed_plugins.json` or an
+`enabledPlugins` entry holds what Claude Code would not write, or the registry
+isn't a file, the card says so in place of its advice, and nothing else fails;
+a T3 value for the plugins directory that token-max can't read, such as a
+secret, leaves a quiet card saying so. The `sessions` export never reads
+plugins. Claude Code's own recommendation dialog settings are not read.
 
 ## Main-session effort
 

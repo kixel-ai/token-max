@@ -372,10 +372,20 @@ impl<'de> Deserialize<'de> for Environment {
             secret: Option<&'a RawValue>,
         }
         let entry = Entry::deserialize(d)?;
-        let allowed = (ENVIRONMENT.contains(&entry.name.as_str())
-            || entry.name == crate::lsp::CACHE_DIR)
-            && !entry.sensitive
-            && entry.secret.is_none();
+        let readable = !entry.sensitive && entry.secret.is_none();
+        // Only the code intelligence card reads these, so a value that isn't a string leaves
+        // it alone unread rather than failing the scan.
+        if entry.name == crate::lsp::CACHE_DIR || crate::lsp::is_path(&entry.name) {
+            let value = entry
+                .value
+                .filter(|_| readable)
+                .and_then(|v| serde_json::from_str(v.get()).ok());
+            return Ok(Self {
+                name: entry.name,
+                value,
+            });
+        }
+        let allowed = ENVIRONMENT.contains(&entry.name.as_str()) && readable;
         let value = if allowed {
             entry
                 .value
@@ -663,22 +673,24 @@ pub(crate) fn discover(
             let mut env: Env = options
                 .env
                 .iter()
-                // Where plugins are and the PATH their servers are found on, which only the
-                // code intelligence card reads.
+                // Where plugins are, which only the code intelligence card reads. T3 starts
+                // claude from its own process, so the shell's PATH is not claude's.
                 .filter(|(k, _)| {
-                    ENVIRONMENT.contains(&k.as_str())
-                        || k.as_str() == crate::lsp::CACHE_DIR
-                        || crate::lsp::is_path(k)
+                    ENVIRONMENT.contains(&k.as_str()) || k.as_str() == crate::lsp::CACHE_DIR
                 })
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
             let mut unresolved_env = false;
-            // A secret plugins directory leaves only the card's plugins unread, not the
-            // settings every other line reads.
+            // A plugins directory token-max can't read leaves only the card's plugins unread,
+            // not the settings every other line reads.
             let mut secret_plugins = false;
             let mut own_environment = vec![];
             for entry in instance.environment {
-                if entry.name == crate::lsp::CACHE_DIR {
+                if crate::lsp::is_path(&entry.name) {
+                    if let Some(value) = entry.value {
+                        env.insert(entry.name, value);
+                    }
+                } else if entry.name == crate::lsp::CACHE_DIR {
                     match entry.value {
                         Some(value) => {
                             env.insert(entry.name, value);
@@ -761,9 +773,14 @@ pub(crate) fn discover(
             };
             let key = profile_key(&state.path, &id);
             let mut profile = crate::discovery::profile(&local, harness, root.clone(), root, &key)?;
-            if secret_plugins && let Some(plugins) = &mut profile.plugins {
-                plugins.dir = None;
-                plugins.cache_dir = None;
+            if let Some(plugins) = &mut profile.plugins {
+                if secret_plugins {
+                    plugins.dir = None;
+                    plugins.cache_dir = None;
+                }
+                if plugins.path == Err(crate::lsp::NO_PATH) {
+                    plugins.path = Err(crate::lsp::T3_PATH);
+                }
             }
             let owner = format!("{}:providerInstances.{id}", file.display());
             let (idle_mode, idle_owner) = match config.idle_compaction.as_deref() {
@@ -3090,14 +3107,22 @@ mod tests {
             managed_policy_unresolved()
         );
         assert_eq!(secret.plugins.unwrap().dir, None);
+        // So does a value that isn't a string, without failing the scan.
+        let invalid = instance(json!({"name":"CLAUDE_CODE_PLUGIN_CACHE_DIR","value":false}));
+        assert_eq!(invalid.plugins.unwrap().dir, None);
         let plain =
             instance(json!({"name":"CLAUDE_CODE_PLUGIN_CACHE_DIR","value":"~/plugin-cache"}));
+        let plugins = plain.plugins.unwrap();
         assert_eq!(
-            plain.plugins.unwrap().dir,
+            plugins.dir,
             Some(crate::test_support::native_path(
                 w.home.join("plugin-cache")
             ))
         );
+        // T3 starts claude with its own PATH, never the shell's.
+        assert_eq!(plugins.path, Err(crate::lsp::T3_PATH));
+        let path = instance(json!({"name":"PATH","value":"/synthetic/bin"}));
+        assert_eq!(path.plugins.unwrap().path, Ok("/synthetic/bin".into()));
     }
     #[test]
     fn claude_exact_sdk_items_link_idle_runs_without_exporting_text() {

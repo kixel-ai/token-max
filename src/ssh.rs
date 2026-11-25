@@ -974,9 +974,6 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
     }
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
         let mut discovery = DiscoveryOptions::host()?;
-        // A command over SSH often runs without the directories a login shell adds to PATH,
-        // such as ~/.cargo/bin, so its PATH can't say which language servers claude finds.
-        discovery.env.retain(|k, _| !crate::lsp::is_path(k));
         if scope == (Scope::Report { defaults: true }) {
             discovery.pretend_defaults();
         }
@@ -1001,12 +998,17 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
             discovery.billing = paid.profiles;
         }
         let reach = scope.reach();
-        let scan = scan(&ScanOptions {
+        let mut scan = scan(&ScanOptions {
             discovery,
             since,
             reach,
             reading: None,
         })?;
+        // A command over SSH often runs without the directories a login shell adds to PATH,
+        // such as ~/.cargo/bin: a server found on it is there, but one missing may not be.
+        for plugins in scan.profiles.iter_mut().filter_map(|p| p.plugins.as_mut()) {
+            plugins.complete = false;
+        }
         // The stdin thread sends the request before anything ends it.
         let Ok(Incoming::Request(request)) = incoming.recv() else {
             unreachable!("the request comes next")

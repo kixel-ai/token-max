@@ -686,8 +686,8 @@ pub struct StructuralEvent {
     pub idle_attribution: IdleAttribution,
     /// Claude Bash call details on its tool start and end, without the command.
     pub shell: Option<ShellCall>,
-    /// The language a Claude file tool's start named, or that a tool's result failed; never
-    /// the path.
+    /// The language a Claude file tool's start named, or that a tool's result wasn't an
+    /// error; never the path.
     pub file: Option<crate::lsp::File>,
     pub meta: std::sync::Arc<EventMeta>,
 }

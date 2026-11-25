@@ -162,17 +162,26 @@ pub fn definitions(server: &str, control: &Control, profiles: &[&Profile]) -> Ve
     // A plugin's server and a claude.ai connector live in no file token-max reads, but a
     // declared key may spell the same prefix.
     let source = if let Some(rest) = server.strip_prefix("plugin_") {
-        // Each profile installs its own plugins, and another may share this one, so the step
-        // names the profiles whose settings turn the server off.
-        let roots: Vec<&str> = profiles.iter().map(|p| p.root.as_str()).collect();
+        // Each profile, or launcher with its own plugins directory, installs its own plugins,
+        // and another may share this one, so the step names how to start the Claude Code whose
+        // settings turn the server off.
+        let places: IndexSet<String> = profiles
+            .iter()
+            .map(|p| match &p.plugins {
+                Some(plugins) if plugins.dir.is_some() => format!(
+                    "in Claude Code started with {}",
+                    crate::lsp::variables(plugins.named, &p.root, plugins.cache_dir.as_deref())
+                ),
+                // A plugins directory token-max could not read, or a report that read none.
+                _ => format!(
+                    "in Claude Code for {}, started the way it usually is",
+                    p.root
+                ),
+            })
+            .collect();
         let step = format!(
-            "uninstall or disable the plugin that provides it, with /plugin in Claude Code's {} at {}",
-            if roots.len() > 1 {
-                "profiles"
-            } else {
-                "profile"
-            },
-            roots.join(" and "),
+            "uninstall or disable the plugin that provides it with /plugin {}",
+            places.into_iter().collect::<Vec<_>>().join(", and again ")
         );
         let reason = "a plugin adds it";
         // Claude Code names it `plugin:<plugin>:<server>`, whose colons its tools carry as
@@ -789,8 +798,8 @@ mod tests {
             denied("plugin_my-tools_my-docs"),
             ("plugin:my-tools:my-docs".into(), PLUGIN)
         );
-        // Each profile installs its own plugins, so the step names the ones the change covers.
-        let root = |p: &Profile| p.root.clone();
+        // Each profile, or launcher with its own plugins directory, installs its own plugins,
+        // so the step says how to start each Claude Code the change covers.
         let step = |profiles: &[&Profile]| match definitions(
             "plugin_github_github",
             &deny("plugin_github_github"),
@@ -801,23 +810,34 @@ mod tests {
             [Definition::Deny(d)] => d.step.clone(),
             all => panic!("{all:?}"),
         };
+        // A report that read no plugins names the profile alone.
         assert_eq!(
             step(&[&p]),
             format!(
-                "uninstall or disable the plugin that provides it, with /plugin in Claude Code's profile at {}",
-                root(&p)
+                "uninstall or disable the plugin that provides it with /plugin in Claude Code for {}, started the way it usually is",
+                p.root
             )
         );
-        let mut work = p.clone();
-        work.root = format!("{}-work", p.root);
-        assert!(
-            step(&[&p, &work]).ends_with(&format!(
-                "Claude Code's profiles at {} and {}",
-                root(&p),
-                root(&work)
-            )),
-            "{}",
-            step(&[&p, &work])
+        let plugins = |named: bool, cache_dir: Option<&str>| crate::lsp::Plugins {
+            dir: Some("/synthetic/plugins".into()),
+            cache_dir: cache_dir.map(String::from),
+            named,
+            denied: None,
+            home: w.home.to_string_lossy().into_owned(),
+            user: Ok(Map::new()),
+            managed: Ok(Map::new()),
+        };
+        let mut native = p.clone();
+        native.plugins = Some(plugins(false, None));
+        // A launcher sharing the root with a plugins directory of its own.
+        let mut t3 = p.clone();
+        t3.plugins = Some(plugins(true, Some("/synthetic/t3-plugins")));
+        assert_eq!(
+            step(&[&native, &t3, &native]),
+            format!(
+                "uninstall or disable the plugin that provides it with /plugin in Claude Code started with CLAUDE_CONFIG_DIR and CLAUDE_CODE_PLUGIN_CACHE_DIR unset, and again in Claude Code started with CLAUDE_CONFIG_DIR set to {} and CLAUDE_CODE_PLUGIN_CACHE_DIR set to /synthetic/t3-plugins",
+                p.root
+            )
         );
         for server in ["plugin_a_b_c", "plugin_github", "plugin__x"] {
             assert!(

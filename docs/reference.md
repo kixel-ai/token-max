@@ -134,8 +134,9 @@ total says so. A `q`, or end of input, ends the walk and leaves the rest
 unaccepted.
 
 The report follows, its list grouped: the accepted changes first with the
-total, then the ones not accepted, then the steps to take by hand, such as a
-change something else would override, each saying why, then every other line,
+total, then the ones not accepted, then the changes to make by hand, such as a
+change something else would override, whose steps and reasons the closing
+`STEPS BY HAND` section gives, then every other line,
 each group ranked as the report ranks it. Then the confirm shows how each settings file would change, as
 a diff with a line of context around each change, removed lines in red and
 added ones in green. Values that may be secrets show as `••••` (`****`

@@ -334,6 +334,7 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
         turn_end: None,
         effort: None,
         advisor: None,
+        allowlist: None,
         speed_directories: None,
         idle_directories: None,
         background: vec![],

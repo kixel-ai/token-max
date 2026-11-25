@@ -1504,9 +1504,24 @@ tool turned off, then an unsupported provider, then a variable that turns off
 feature-flag fetching, which Claude Platform on AWS and Claude Models on
 Google Cloud (Anthropic managed) don't need. T3 instances have none.
 
+`Profile.allowlist` is Claude Code's `availableModels`, read from the same
+scopes: the managed file's list alone when it sets one, else the user,
+project and local lists concatenated without duplicates, each file once. A
+null sets no list. `Allowlist::Unknown` holds why the list can't be judged:
+the admin console's cached settings (`remote-settings.json` in the profile's
+directory) set one, or a value is not a list of strings. An `advisorModel`
+the list blocks is blocked, last in Claude Code's order. `allowlist::Verdict`
+matches a model by Claude Code's rules, lowercased and without a
+context-window suffix: a family entry permits its family unless a version
+prefix or full ID in that family is listed; a version prefix permits itself
+and the IDs that extend it by `-` segments. An alias the list narrows to
+specific entries is `Narrowed`, since it runs on the newest permitted
+version; an entry that is neither a family nor a `claude-<family>-` ID leaves
+any model it may permit `Unknown`.
+
 `vibes` gives one card to each group of profiles that share the
 `advisorModel` owner, the resolved main-session default and the setting that
-names it, and what stops the advisor. `doctor` has no advisor line. The
+names it, what stops the advisor, and the allowlist. `doctor` has no advisor line. The
 suggested advisor is `advisor::pick`: Opus above Haiku 4.5 or later and
 Sonnet 4.6 or later, Fable above Opus 4.6 or later, none above Fable, by the
 main model's canonical ID.

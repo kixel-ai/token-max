@@ -2,6 +2,7 @@
 #![warn(missing_docs)]
 
 mod advisor;
+mod allowlist;
 mod background;
 mod bash;
 mod cache;

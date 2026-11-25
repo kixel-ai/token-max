@@ -1688,6 +1688,11 @@ the whole change is a step by hand naming each setting; so is a new model on
 a cloud provider, such as Bedrock, which spells model IDs its own way, whether
 the profile's or the project's settings turn it on. A Codex level with no model set or recorded has no card.
 
+A Claude pick that the [`availableModels` allowlist](#model-allowlist) blocks
+is not offered: the card names the setting that excludes it and advises
+nothing. When token-max can't tell whether the list permits the pick, the
+change is still offered and the card says why it can't tell.
+
 ### Subagent default
 
 A profile that sets a default subagent effort, Claude Code's
@@ -1999,9 +2004,38 @@ rejects the pair; then it says so and offers no edit. The table is checked for
 a full model ID such as `claude-sonnet-5-5`, in any case and with or without a
 `[1m]` or `[2m]` suffix, as Claude Code reads it. An alias such as `opus` resolves
 to a version that changes with Claude Code releases, so only a Fable main
-model, which takes no other family, judges one. The card doesn't yet read an
-`availableModels` allowlist, which can disable a set advisor or block the one
-it suggests.
+model, which takes no other family, judges one.
+
+Claude Code disables a set `advisorModel` that the
+[`availableModels` allowlist](#model-allowlist) blocks, so the card says no
+advisor would load and names the setting that excludes it. A suggestion the
+list blocks is not offered, and the card says so. When the list permits only
+some versions of the suggested alias's family, such as `claude-opus-5` for
+`opus`, Claude Code runs the alias on the newest of them on the Anthropic API,
+so the card still offers it and says so, unless the pairing table takes none
+of those versions for the main model. A rebuilt card, after a yes to the
+Main-session default card's edit, follows the same rules.
+
+### Model allowlist
+
+Claude Code's [`availableModels`](https://code.claude.com/docs/en/model-config#restrict-model-selection)
+restricts the models a setting can name. The model cards read it where the
+advisor is read. A list in the managed settings file applies on its own;
+otherwise the user, project and local lists are concatenated. An empty list
+blocks every model a setting names. An entry is a family such as `sonnet`, a
+version prefix such as `claude-opus-5`, which also permits the IDs that
+extend it, such as `claude-opus-5-5`, or a full model ID; a version prefix or
+full ID in a family turns off that family's own entry. A family alias whose
+family the list narrows that way runs on the newest version the list permits.
+
+A list in the admin console's settings, which Claude Code caches in
+`remote-settings.json` in its config directory, outranks the managed file.
+token-max sees only that the cache sets one, and doesn't resolve it, since
+the cache may be stale, so the cards still offer their change and say the
+list is unknown. So do a list that is not a
+list of model names and an entry token-max can't match to a model, such as a
+provider's model ID. MDM profiles, the registry and `managed-settings.d` are
+not read.
 
 T3 Code picks each thread's main model, so T3 instances get no card; when an
 enabled one reads the same settings file, the card says each of its threads whose model

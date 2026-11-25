@@ -942,6 +942,20 @@ pub struct AdvisorControl {
     pub gateway: Option<String>,
 }
 
+/// Claude Code's `availableModels` allowlist as the settings read now give it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Allowlist {
+    /// The list Claude Code applies, read from settings files.
+    Read {
+        /// Its entries, as written, duplicates dropped.
+        entries: Vec<String>,
+        /// Each `{file}:availableModels` that contributes them, lowest precedence first.
+        owners: Vec<String>,
+    },
+    /// Why token-max can't tell what the list permits, such as one the admin console sets.
+    Unknown(String),
+}
+
 /// A profile's main-session default reasoning effort, the setting that decides it and the
 /// level its session runs at.
 #[derive(Clone, Debug, PartialEq)]
@@ -1043,6 +1057,9 @@ pub struct Profile {
     pub effort: Option<EffortControl>,
     /// Claude Code's advisor model; None for Codex and T3, whose threads pick their own model.
     pub advisor: Option<AdvisorControl>,
+    /// Claude Code's `availableModels` allowlist, read where the advisor is; None when no
+    /// settings file sets one.
+    pub allowlist: Option<Allowlist>,
     pub speed_directories: Option<IndexMap<String, SpeedControl>>,
     /// Current project controls observed at recorded working directories.
     pub idle_directories: Option<IndexMap<String, IdleControl>>,

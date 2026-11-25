@@ -115,7 +115,7 @@ pub fn control(scopes: &[SettingsScope], env: &Env, user_file: &str) -> AdvisorC
 }
 
 /// What puts profiles on one advisor card: the `advisorModel` owner, and the main-session
-/// default and control the card reads. None without an advisor control.
+/// default, control and model allowlist the card reads. None without an advisor control.
 pub(crate) fn owner(p: &Profile) -> Option<String> {
     let a = p.advisor.as_ref()?;
     let main = p
@@ -123,8 +123,8 @@ pub(crate) fn owner(p: &Profile) -> Option<String> {
         .as_ref()
         .map(|e| (&e.model, &e.model_owner, &e.unresolved));
     Some(format!(
-        "{}\nmain {main:?}\n{:?} {:?} {:?}",
-        a.owner, a.model, a.blocked, a.gateway
+        "{}\nmain {main:?}\n{:?} {:?} {:?}\n{:?}",
+        a.owner, a.model, a.blocked, a.gateway, p.allowlist
     ))
 }
 
@@ -145,7 +145,7 @@ fn parse(id: &str) -> Option<(&str, (u32, u32))> {
 
 /// An advisor name as Claude Code resolves it: lowercased, without a `[1m]` or `[2m]`
 /// context-window suffix, which it drops before checking the advisor.
-fn normalize(name: &str) -> String {
+pub(crate) fn normalize(name: &str) -> String {
     let name = name.trim().to_ascii_lowercase();
     match name
         .strip_suffix("[1m]")

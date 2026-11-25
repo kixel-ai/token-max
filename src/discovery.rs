@@ -1216,9 +1216,9 @@ fn claude_project_configs(
     Ok(configs)
 }
 
-/// Resolve each native Claude profile's auto memory, main-session effort and advisor at its
-/// latest main-session request's directory; without an existing one, the user and managed
-/// files decide. It runs once T3 has attributed requests, so a T3 thread that shares the
+/// Resolve each native Claude profile's auto memory, main-session effort, advisor and model
+/// allowlist at its latest main-session request's directory; without an existing one, the
+/// user and managed files decide. It runs once T3 has attributed requests, so a T3 thread that shares the
 /// profile's history never decides them, nor does a request whose owner T3 can't settle.
 pub fn discover_latest_claude_controls(
     options: &DiscoveryOptions,
@@ -1273,11 +1273,22 @@ pub fn discover_latest_claude_controls(
         note_unsettled_model(&mut effort, profile, requests);
         profile.effort = Some(effort);
         // Read where effort is: the advisor card ranks against that main-session default.
-        profile.advisor = Some(crate::advisor::control(
-            &scopes,
-            local_env,
-            &profile.settings_file,
-        ));
+        let mut advisor = crate::advisor::control(&scopes, local_env, &profile.settings_file);
+        let remote_file = join(&[&profile.root, "remote-settings.json"]);
+        let remote = settings(&remote_file, Harness::Claude)?;
+        let remote = SettingsScope {
+            config: &remote,
+            file: &remote_file,
+        };
+        profile.allowlist = crate::allowlist::control(&scopes, managed_file, remote);
+        // Claude Code disables an advisor the allowlist blocks for the whole session.
+        if advisor.blocked.is_none()
+            && let (Some(model), Some(list)) = (&advisor.model, &profile.allowlist)
+            && let crate::allowlist::Verdict::Blocked(why) = list.verdict(model)
+        {
+            advisor.blocked = Some(why);
+        }
+        profile.advisor = Some(advisor);
     }
     Ok(())
 }
@@ -2841,6 +2852,7 @@ pub(crate) fn profile(
         turn_end,
         effort: None,
         advisor: None,
+        allowlist: None,
         speed_directories: None,
         idle_directories: None,
         background,
@@ -5025,6 +5037,66 @@ mod tests {
             profile.effort.as_ref().unwrap().model_owner,
             format!("{}:model", profile.settings_file)
         );
+    }
+
+    #[test]
+    fn the_allowlist_joins_user_and_project_lists_and_disables_an_advisor_it_blocks() {
+        use crate::model::Allowlist;
+        let w = Workspace::new();
+        write(
+            w.claude.join("settings.json"),
+            r#"{"availableModels":["sonnet"],"advisorModel":"opus"}"#,
+        );
+        let repo = w.home.join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        let local = join(&[&native_path(&repo), ".claude", "settings.local.json"]);
+        write(&local, r#"{"availableModels":["haiku","sonnet"]}"#);
+        let mut data = discover(&options(&w)).unwrap();
+        let requests = [request(claude(&data), Some(&repo))];
+        let resolve = |data: &mut Discovery| {
+            discover_latest_claude_controls(&options(&w), &mut data.profiles, &requests).unwrap();
+            claude(data).clone()
+        };
+        let profile = resolve(&mut data);
+        let user = profile.settings_file.clone();
+        assert_eq!(
+            profile.allowlist,
+            Some(Allowlist::Read {
+                entries: vec!["sonnet".into(), "haiku".into()],
+                owners: vec![
+                    format!("{user}:availableModels"),
+                    format!("{local}:availableModels")
+                ],
+            })
+        );
+        assert_eq!(
+            profile.advisor.unwrap().blocked,
+            Some(format!(
+                "availableModels, set in {user} and {local}, excludes it"
+            ))
+        );
+        // A managed list alone applies.
+        let managed = native_path(w.managed_settings_file());
+        write(&managed, r#"{"availableModels":["opus"]}"#);
+        let profile = resolve(&mut data);
+        assert_eq!(
+            profile.allowlist,
+            Some(Allowlist::Read {
+                entries: vec!["opus".into()],
+                owners: vec![format!("{managed}:availableModels")],
+            })
+        );
+        assert_eq!(profile.advisor.unwrap().blocked, None);
+        // The admin console's list, cached beside the user's settings, outranks it unread.
+        let remote = join(&[&profile.root, "remote-settings.json"]);
+        write(&remote, r#"{"availableModels":["haiku"]}"#);
+        let profile = resolve(&mut data);
+        assert!(
+            matches!(&profile.allowlist, Some(Allowlist::Unknown(why)) if why.contains(&remote)),
+            "{:?}",
+            profile.allowlist
+        );
+        assert_eq!(profile.advisor.unwrap().blocked, None);
     }
 
     #[test]

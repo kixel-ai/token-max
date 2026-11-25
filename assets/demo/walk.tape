@@ -29,7 +29,8 @@ Type "token-max doctor"
 Sleep 500ms
 Enter
 Sleep 2s
-# How the profile pays: usage credits, so its main agent's default cache is 5m.
+# How the profile pays: usage credits, so its main agent's default cache is 5m. The walk
+# then opens with what the settings already save: the subagents' 1h cache, net of fast mode.
 Type "a"
 Sleep 300ms
 Enter

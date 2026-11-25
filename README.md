@@ -42,7 +42,7 @@ cache on usage credits, auto memory and unused or costly skills and tools.
 have each machine, the margins and how this compares with T3 Code's own
 count. Your sessions differ: run it to see yours.
 
-![token-max doctor walking through two measured changes, then vibes' advice, on synthetic transcripts](https://raw.githubusercontent.com/kixel-ai/token-max/main/assets/demo/walk.gif)
+![token-max doctor opening with what the settings already save, walking through two measured changes, then vibes' advice, on synthetic transcripts](https://raw.githubusercontent.com/kixel-ai/token-max/main/assets/demo/walk.gif)
 
 <sub>The recording runs on [synthetic transcripts](https://github.com/kixel-ai/token-max/blob/main/assets/demo/home.py), not a real host.</sub>
 

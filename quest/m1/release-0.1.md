@@ -31,5 +31,4 @@ release, where the upgrade offer reaches 0.1.0's users.
 
 ## Required
 
-- [Opening credit](/quest/m1/live/credit.md) - `doctor` shows the savings credit up front, decided in the live epic
 - [crabx upgrade guard](/quest/m1/crabx-upgrade.md) - 0.1.0 is the first release with the upgrade offer, so it must leave crabx's cache alone

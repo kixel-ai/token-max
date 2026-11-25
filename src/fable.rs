@@ -1,8 +1,9 @@
 //! Each Claude profile's Fable spend per week, for comparing with a plan's documented Fable cap.
 
-use crate::model::{FableUse, FableWeek, Harness, Millis, Request, Scan, Usd};
+use crate::model::{FableUse, FableWeek, Harness, Millis, PartKind, Request, Scan, Usd};
 use crate::prices::{
-    Catalog, Sample, Sum, add_costs, price_part, request_evidence, server_cost, unknown_cost,
+    Catalog, Sample, Sum, add_costs, floored, price_part, request_evidence, server_cost,
+    unknown_cost,
 };
 
 const WEEK: Millis = 7 * 24 * 60 * 60 * 1000;
@@ -12,6 +13,13 @@ fn is_fable(model: &str) -> bool {
     model.contains("fable")
 }
 
+/// Whether a request made an advisor call that recorded no model, which may have run on Fable.
+fn unrecorded_advisor(r: &Request) -> bool {
+    r.parts
+        .iter()
+        .any(|p| p.kind == PartKind::Advisor && p.model.is_none())
+}
+
 /// What a request's Fable parts cost, or `None` when no part ran on Fable.
 ///
 /// An advisor iteration records its own model, so a request can mix Fable with another model;
@@ -19,7 +27,7 @@ fn is_fable(model: &str) -> bool {
 /// and are unknown when it recorded none.
 fn fable_cost(catalog: &Catalog, r: &Request) -> Option<crate::model::Cost> {
     let fable = |m: Option<&str>| m.is_some_and(is_fable);
-    let parts: Vec<_> = r
+    let mut parts: Vec<_> = r
         .parts
         .iter()
         .filter(|p| fable(p.model.as_deref()))
@@ -27,6 +35,13 @@ fn fable_cost(catalog: &Catalog, r: &Request) -> Option<crate::model::Cost> {
         .collect();
     if parts.is_empty() {
         return None;
+    }
+    // Claude Code pairs a Fable main model only with a Fable advisor, so beside Fable parts a
+    // call that recorded no model likely ran on Fable too, at rates not recorded.
+    if unrecorded_advisor(r) {
+        parts.push(unknown_cost(
+            "an advisor call recorded no model, and may have run on Fable",
+        ));
     }
     let server = match r.model.as_deref() {
         Some(m) if is_fable(m) => Some(server_cost(r)),
@@ -79,9 +94,11 @@ pub fn fable_use(
         .iter()
         .map(|line| {
             let mine = |p: &String| line.ids.contains(p);
-            let mut sums: Vec<(u64, Sum, Sample)> = spans
+            // Each span's requests, cost, priced sample, and the known charge of each partly
+            // priced request, which its extrapolated share never falls below.
+            let mut sums: Vec<(u64, Sum, Sample, Vec<f64>)> = spans
                 .iter()
-                .map(|_| (0, Sum::new(), Sample::default()))
+                .map(|_| (0, Sum::new(), Sample::default(), vec![]))
                 .collect();
             let mut unrecorded = 0;
             let mut shared = 0;
@@ -92,7 +109,7 @@ pub fn fable_use(
                     && r.profiles.iter().any(mine)
             }) {
                 let Some(cost) = fable_cost(catalog, r) else {
-                    if r.model.is_none() {
+                    if r.model.is_none() || unrecorded_advisor(r) {
                         unrecorded += 1;
                     }
                     continue;
@@ -105,6 +122,9 @@ pub fn fable_use(
                     sums[i].0 += 1;
                     sums[i].1.add(&cost);
                     sums[i].2.add_cost(&cost);
+                    if cost.total_usd.is_none() {
+                        sums[i].3.push(cost.known_usd.to_f64());
+                    }
                 }
                 if r.profiles
                     .iter()
@@ -114,19 +134,23 @@ pub fn fable_use(
                 }
             }
             let mut all = Sample::default();
-            for (_, _, sample) in &sums {
+            let mut floors = vec![];
+            for (_, _, sample, known) in &sums {
                 all += *sample;
+                floors.extend(known);
             }
             let mut weeks: Vec<FableWeek> = spans
                 .iter()
                 .zip(sums)
-                .map(|(&(start, end), (requests, sum, sample))| FableWeek {
-                    start,
-                    end,
-                    requests,
-                    cost: sum.cost(),
-                    estimate: sample.estimate(requests),
-                })
+                .map(
+                    |(&(start, end), (requests, sum, sample, known))| FableWeek {
+                        start,
+                        end,
+                        requests,
+                        cost: sum.cost(),
+                        estimate: floored(sample.estimate(requests), requests, &known),
+                    },
+                )
                 .collect();
             // Weeks before the first Fable request say nothing, and a long history has many.
             while weeks.last().is_some_and(|w| w.requests == 0) {
@@ -139,7 +163,7 @@ pub fn fable_use(
                 unrecorded,
                 shared,
                 weeks,
-                estimate: all.estimate(requests),
+                estimate: floored(all.estimate(requests), requests, &floors),
             }
         })
         .collect()
@@ -316,7 +340,12 @@ mod tests {
         let mut part = opus.parts[0].clone();
         part.kind = crate::model::PartKind::Advisor;
         reverse.parts.push(part);
-        let uses = fable_use(&scan(vec![advised, reverse], None), &catalog, None, now);
+        let uses = fable_use(
+            &scan(vec![advised.clone(), reverse.clone()], None),
+            &catalog,
+            None,
+            now,
+        );
         assert_eq!((uses[0].requests, uses[0].unrecorded), (2, 0));
         let fable_part = price_part(&catalog, &fable, &fable.parts[0])
             .total_usd
@@ -325,6 +354,47 @@ mod tests {
         let total = uses[0].weeks.last().unwrap().cost.total_usd.unwrap();
         // Two Fable parts and one request's fees; neither Opus part.
         assert_eq!(total, fable_part + fable_part + fees);
+        // An advisor call that recorded no model may be Fable's under an Opus main model, and
+        // is Fable's, unpriced, under a Fable one.
+        let unrecorded = |mut r: crate::model::Request| {
+            r.parts.last_mut().unwrap().model = None;
+            r
+        };
+        let uses = fable_use(
+            &scan(vec![unrecorded(advised), unrecorded(reverse)], None),
+            &catalog,
+            None,
+            now,
+        );
+        assert_eq!((uses[0].requests, uses[0].unrecorded), (1, 1));
+        let week = uses[0].weeks.last().unwrap();
+        assert_eq!(week.cost.total_usd, None);
+        assert_eq!(week.cost.known_usd, fable_part + fees);
+        // Beside small requests priced in full, its estimate never falls below its known
+        // charge.
+        let mut large = fable.clone();
+        large.parts[0].usage.input = Some(10_000_000);
+        let mut advisor = large.parts[0].clone();
+        advisor.kind = crate::model::PartKind::Advisor;
+        advisor.model = None;
+        large.parts.push(advisor);
+        let known = fable_cost(&catalog, &large).unwrap().known_usd;
+        let mut small = fable.clone();
+        small.parts[0].usage.input = Some(1);
+        let small_cost = fable_cost(&catalog, &small).unwrap().total_usd.unwrap();
+        let uses = fable_use(
+            &scan(vec![small.clone(), small, large], None),
+            &catalog,
+            None,
+            now,
+        );
+        let floor = (known + small_cost + small_cost).to_f64();
+        for estimate in [uses[0].estimate, uses[0].weeks.last().unwrap().estimate] {
+            assert!(
+                estimate.unwrap().usd >= floor - 1e-9,
+                "{estimate:?} {floor}"
+            );
+        }
     }
 
     #[test]

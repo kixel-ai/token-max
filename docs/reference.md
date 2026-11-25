@@ -1561,7 +1561,7 @@ an exit code.
 | [Auto memory](#auto-memory-in-vibes) | Every auto memory or Codex memories line: off is advised when most main sessions ran in a repository with a CLAUDE.md or AGENTS.md. |
 | [Code intelligence](#code-intelligence) | Claude sessions read or edited files of a typed language whose official language server plugin a new session wouldn't load: Anthropic's [costs page](https://code.claude.com/docs/en/costs#install-code-intelligence-plugins-for-typed-languages). |
 
-The effort, instruction-file, subagent and Fable lines stay in `doctor`, where
+The effort, instruction-file, subagent, Fable and advisor lines stay in `doctor`, where
 their costs are measured; only the advice about them is here.
 
 On a terminal, a card that names the settings to change ends with `Change`,
@@ -2041,18 +2041,32 @@ a full model ID such as `claude-sonnet-5-5`, in any case and with or without a
 to a version that changes with Claude Code releases, so only a Fable main
 model, which takes no other family, judges one. The card doesn't yet read an
 `availableModels` allowlist, which can disable a set advisor or block the one
-it suggests.
+it suggests. A blocker in the settings read doesn't stop a session that set
+the advisor elsewhere, so the card names any advisor calls the window recorded
+beside it.
 
 T3 Code picks each thread's main model, so T3 instances get no card; when an
 enabled one reads the same settings file, the card says each of its threads whose model
 and provider take the advisor would use it, unless the instance's launch arguments, secret
 environment or machine policy, which token-max can't resolve, override that
-file. `doctor` has no advisor line. An advisor call
-whose iteration records no service tier leaves its request with no price of its
-own: that request is extrapolated from its profile's priced requests like any
-other unpriced one, or, when none of them priced, adds only its known part as a
-lower bound ([spend](#reading-the-report)). No line says how many calls ran or
-what they cost.
+file.
+
+When an advisor is set or a request recorded an advisor call, `doctor` shows
+an `Advisor model` line: how many calls ran on how many requests, on which
+models, and what the advisor iterations alone cost at API prices over the
+window, which `--details` breaks out with what could not be priced and what
+was assumed. Like the subagent lines it is evidence with no verdict, since the
+advisor's alternative is a stronger main model, which a replay can't price
+the work of. A T3 instance's threads' calls count on the line whose
+`advisorModel` its settings file owns; an instance with no such line, as in a
+scan of only `--t3-dir`, or whose launch settings token-max can't resolve,
+gets a line of its own with no card, as does one
+removed from T3's settings whose history the window still holds. A request that names
+profiles on two lines, as when two config roots read one `projects/`
+directory, counts once, on a shared line that says whose it was is unknown,
+and each line it touches says how many of its requests moved there. So does a
+request on a T3 instance's own line whose owner T3 could not settle, such as a
+native session in a scan of only `--t3-dir`.
 
 ## Messages from other sessions
 

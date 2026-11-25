@@ -121,6 +121,27 @@ fn service_tier<'a>(r: &'a Request, p: &'a BillingPart) -> Result<&'a str, &'sta
     if let Some(tier) = p.tier.as_deref() {
         return Ok(tier);
     }
+    // An advisor call records no tier of its own, and Priority Tier needs a commitment on
+    // each model, so under an executor at standard the call is too, barring a commitment on
+    // the advisor model alone. A summary request's executor iterations are compaction, so
+    // those count only when the request has no message iteration.
+    if p.kind == PartKind::Advisor {
+        let kind = if r.parts.iter().any(|e| e.kind == PartKind::Message) {
+            PartKind::Message
+        } else {
+            PartKind::Compaction
+        };
+        let mut executor = r
+            .parts
+            .iter()
+            .filter(|e| e.kind == kind)
+            .map(|e| e.tier.as_deref().map(tier_name));
+        let first = executor.next().flatten();
+        return match first {
+            Some("default") if executor.all(|t| t == first) => Ok("standard"),
+            _ => Err("an advisor call's service tier is not recorded"),
+        };
+    }
     if r.harness != Harness::Codex
         || r.provider.as_deref() != Some("openai")
         || r.api != Api::Responses
@@ -747,6 +768,19 @@ fn critical95(df: u64) -> f64 {
     T.get(df as usize - 1).copied().unwrap_or(Z95)
 }
 
+/// `estimate` over `total` items, raised so no partly priced item's share falls below what it
+/// is known to cost: `floors` holds each such item's known charge.
+pub fn floored(estimate: Option<Estimate>, total: u64, floors: &[f64]) -> Option<Estimate> {
+    estimate.map(|e| {
+        let mean = e.usd / total as f64;
+        let raise: f64 = floors.iter().map(|&k| (k - mean).max(0.0)).sum();
+        Estimate {
+            usd: e.usd + raise,
+            ..e
+        }
+    })
+}
+
 /// Per-item dollar figures summed over the items that could be priced, so their total over
 /// every item can be extrapolated with a margin of error.
 ///
@@ -1241,6 +1275,11 @@ fn selected_rates(
     }
     let mut factor = 1.0;
     let tier = service_tier(r, p)?;
+    if p.kind == PartKind::Advisor && p.tier.is_none() {
+        assumptions.push(
+            "an advisor call records no service tier; priced at its executor's standard tier, which a Priority Tier commitment on the advisor model alone would change".into(),
+        );
+    }
     if conditional_tier(r, p) {
         assumptions.push(format!(
             "conditional {tier}-rate OpenAI API equivalent: effective service tier is unrecorded; requested tier/speed is a scenario, not billing evidence; omitted/auto can inherit nonstandard project defaults; current config is not historical evidence; not an invoice"
@@ -1634,6 +1673,66 @@ mod tests {
     use crate::model::{Text, Usage};
     use crate::test_support::{ClaudeUsage, claude_usage, make_request, prices};
     use serde_json::json;
+
+    #[test]
+    fn an_advisor_call_takes_a_standard_executors_tier_and_no_other() {
+        let catalog = prices();
+        let mut r = make_request();
+        let mut advisor = r.parts[0].clone();
+        advisor.kind = PartKind::Advisor;
+        advisor.tier = None;
+        advisor.speed = None;
+        r.parts.push(advisor.clone());
+        let mut recorded = advisor.clone();
+        recorded.tier = Some("standard".into());
+        let unrecorded = price_part(&catalog, &r, &advisor);
+        assert_eq!(
+            unrecorded.total_usd,
+            price_part(&catalog, &r, &recorded).total_usd
+        );
+        assert!(unrecorded.total_usd.is_some());
+        assert!(
+            unrecorded
+                .assumptions
+                .iter()
+                .any(|a| a.starts_with("an advisor call records no service tier"))
+        );
+        // A priority executor, or executors that disagree, leave the advisor's tier unknown.
+        for tiers in [&["priority"][..], &["standard", "priority"]] {
+            let mut r = make_request();
+            r.parts = tiers
+                .iter()
+                .map(|t| BillingPart {
+                    tier: Some((*t).into()),
+                    ..r.parts[0].clone()
+                })
+                .chain([advisor.clone()])
+                .collect();
+            let last = r.parts.last().unwrap();
+            assert_eq!(price_part(&catalog, &r, last).total_usd, None, "{tiers:?}");
+        }
+        // A standard message iteration decides the tier over a tierless compaction one, and a
+        // summary request's standard compaction iteration decides it when no message exists.
+        let compaction = BillingPart {
+            kind: PartKind::Compaction,
+            tier: None,
+            ..r.parts[0].clone()
+        };
+        let mut mixed = r.clone();
+        mixed.parts = vec![r.parts[0].clone(), compaction.clone(), advisor.clone()];
+        let last = mixed.parts.last().unwrap();
+        assert!(price_part(&catalog, &mixed, last).total_usd.is_some());
+        let mut summary = r.clone();
+        summary.parts = vec![
+            BillingPart {
+                tier: r.parts[0].tier.clone(),
+                ..compaction
+            },
+            advisor.clone(),
+        ];
+        let last = summary.parts.last().unwrap();
+        assert!(price_part(&catalog, &summary, last).total_usd.is_some());
+    }
 
     /// Recorded Codex usage, normalized as the reader does.
     fn codex(raw: Value) -> Usage {

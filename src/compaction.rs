@@ -1867,6 +1867,8 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             .chain(&scan.events)
             .filter(|e| in_profile(&e.profiles))
             .collect();
+        // What each profile's next session runs, whichever model it last used.
+        let versions = crate::version::latest(&group.members, requests.iter().copied());
         let selected: Vec<&Request> = requests
             .iter()
             .copied()
@@ -2050,14 +2052,9 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 .iter()
                 .filter(|(m, _)| m.is_none() || models.contains(m))
                 .collect();
-            let Some(recent) = relevant
-                .iter()
-                .filter_map(|(_, facts)| facts.last)
-                .max_by_key(|&(at, _)| at)
-                .map(|(_, r)| r)
-            else {
+            if relevant.iter().all(|(_, facts)| facts.last.is_none()) {
                 continue;
-            };
+            }
             let claude = profile.harness == Harness::Claude;
             let minimum = if claude { CLAUDE_WINDOW_MINIMUM } else { 1 };
             let ceiling = control
@@ -2190,7 +2187,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 .filter(|_| settled);
             let needs = Needs::claude(1, control.minimum_claude_patch.unwrap_or(288));
             let upgrade = if claude {
-                needs.upgrade([(group.recorder(&recent.profiles), recent.version.as_deref())])
+                needs.upgrade(versions.iter().copied())
             } else {
                 None
             };

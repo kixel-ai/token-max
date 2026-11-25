@@ -322,8 +322,8 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
                 let unused = group.as_ref().is_some_and(|g| {
                     g.kind == ContextKind::McpServer && g.reason == Reason::Unused
                 });
-                if unused && matches!(how, How::Edit(_)) {
-                    let versions = claude_versions(report, &members);
+                if let (true, How::Edit(patch)) = (unused, &how) {
+                    let versions = crate::version::latest(&members, &report.scan.requests);
                     let whole = ends_at(&c.name, c.details.iter().map(|d| d.name.as_str()));
                     let own = holds_its_tools(&c.name);
                     removal = crate::mcp::definitions(&c.name, control, &members)
@@ -337,7 +337,7 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
                             Definition::Deny(deny) if !whole => {
                                 deny.by_hand("its tools' names do not show where its name ends")
                             }
-                            d => gate(d, &versions),
+                            d => gate(d, &versions, &patch.file),
                         })
                         .collect();
                 }
@@ -389,24 +389,9 @@ fn holds_its_tools(server: &str) -> bool {
     !server.contains("__") && !server.ends_with('_')
 }
 
-/// The Claude Code each of `members` last recorded a request from, for those with any.
-fn claude_versions<'r>(
-    report: &'r Report,
-    members: &[&'r Profile],
-) -> Vec<(&'r Profile, Option<&'r str>)> {
-    members
-        .iter()
-        .filter_map(|&p| {
-            let mut requests = report.scan.requests.iter().rev();
-            let last = requests.find(|r| r.profiles.contains(&p.id))?;
-            Some((p, last.version.as_deref()))
-        })
-        .collect()
-}
-
 /// A `deniedMcpServers` entry where every profile's latest Claude Code matches it by name,
-/// else its step by hand, or an upgrade.
-fn gate(definition: Definition, versions: &[(&Profile, Option<&str>)]) -> Definition {
+/// else its step by hand, or an upgrade and the entry to add to `file` after it.
+fn gate(definition: Definition, versions: &[(&Profile, Option<&str>)], file: &str) -> Definition {
     let Definition::Deny(deny) = definition else {
         return definition;
     };
@@ -424,10 +409,12 @@ fn gate(definition: Definition, versions: &[(&Profile, Option<&str>)]) -> Defini
     let Some(upgrade) = upgrade else {
         return Definition::Deny(deny);
     };
+    // A rerun would not offer the entry, since the walk's switch already turned it off.
     let step = format!(
-        "{}, or {} and run token-max doctor again",
+        "{}, or {} and add {} to deniedMcpServers in {file}",
         deny.step,
-        upgrade.step()
+        upgrade.step(),
+        serde_json::json!({ "serverName": deny.name })
     );
     let why = upgrade.why("blocking just this server by name with a deniedMcpServers entry");
     crate::mcp::Deny { step, ..deny }.by_hand(&why)
@@ -5649,7 +5636,7 @@ mod tests {
         let other = crate::test_support::make_profile("other", "/o");
         // Every profile's latest Claude Code must match it by name.
         let new = [(&native, Some("2.1.182")), (&other, Some("2.1.331"))];
-        assert_eq!(gate(blocked("p"), &new), blocked("p"));
+        assert_eq!(gate(blocked("p"), &new, "s.json"), blocked("p"));
         let Definition::Manual { step, reason } = gate(
             blocked("p"),
             &[
@@ -5657,12 +5644,13 @@ mod tests {
                 (&native, Some("2.1.90")),
                 (&other, None),
             ],
+            "s.json",
         ) else {
             panic!("an older Claude Code is a step by hand")
         };
         assert_eq!(
             step,
-            "uninstall the plugin, or upgrade Claude Code with `claude update` and run token-max doctor again"
+            r#"uninstall the plugin, or upgrade Claude Code with `claude update` and add {"serverName":"p"} to deniedMcpServers in s.json"#
         );
         assert_eq!(
             reason,
@@ -5670,17 +5658,22 @@ mod tests {
         );
         // The reason names the version that failed, even when another was recorded, and
         // names no command for an install it doesn't know.
-        let Definition::Manual { step, reason } =
-            gate(blocked("p"), &[(&native, Some("2.1.331")), (&other, None)])
-        else {
+        let Definition::Manual { step, reason } = gate(
+            blocked("p"),
+            &[(&native, Some("2.1.331")), (&other, None)],
+            "s.json",
+        ) else {
             panic!("an unrecorded Claude Code is a step by hand")
         };
-        assert!(step.ends_with(", or upgrade Claude Code and run token-max doctor again"));
+        assert!(step.contains(", or upgrade Claude Code and add "), "{step}");
         assert!(
             reason.ends_with("but its latest session ran an unrecorded version"),
             "{reason}"
         );
-        assert!(matches!(gate(blocked("p"), &[]), Definition::Manual { .. }));
+        assert!(matches!(
+            gate(blocked("p"), &[], "s.json"),
+            Definition::Manual { .. }
+        ));
 
         // A tool family whose tools may belong to a longer name is not denied by its own.
         assert!(ends_at(

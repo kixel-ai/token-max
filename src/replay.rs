@@ -17,9 +17,9 @@ use crate::memory::{MemoryInput, memory_checks};
 use crate::model::{
     Action, Agent, Api, BillingPart, Bucket, CacheReplayEvidence, CheckBase, CheckResult,
     CompactionCharge, Cost, Coverage, EventKind, Evidence, ExposureSummary, Harness,
-    HistoricalCost, Id, Millis, PartKind, PerTtl, PriceSource, Profile, Report, Request,
-    RequestEvidence, RequestMeta, Scan, StructuralEvent, Text, Ttl, TtlCheck, TtlSensitivity,
-    UnlinkedSensitivity, Usage, UsageEstimate, Usd, WindowBasisKind,
+    HistoricalCost, Id, Millis, PartKind, PerTtl, PriceSource, Report, Request, RequestEvidence,
+    RequestMeta, Scan, StructuralEvent, Text, Ttl, TtlCheck, TtlSensitivity, UnlinkedSensitivity,
+    Usage, UsageEstimate, Usd, WindowBasisKind,
 };
 use crate::prices::{
     Catalog, PRICE_SOURCES, PairedSavings, Pairs, Sample, Sum, add_costs, conditional_tier,
@@ -682,23 +682,7 @@ fn ttl_check(
         Some(_) => current.value,
     };
     // Each source's current client must honor the setting, since one file sets it for all.
-    fn latest<'r>(list: &[&'r Request], id: &String) -> Option<&'r str> {
-        list.iter()
-            .rev()
-            .find(|r| r.profiles.contains(id))
-            .and_then(|r| r.version.as_deref())
-    }
-    let versions: Vec<(&Profile, Option<&str>)> = group
-        .members
-        .iter()
-        .filter(|p| requests.iter().any(|r| r.profiles.contains(&p.id)))
-        .map(|&p| {
-            (
-                p,
-                latest(&relevant, &p.id).or_else(|| latest(requests, &p.id)),
-            )
-        })
-        .collect();
+    let versions = crate::version::latest(&group.members, requests.iter().copied());
     let upgrade = TTL_CONTROLS.upgrade(versions.iter().copied());
     let supported = !versions.is_empty() && upgrade.is_none();
     // An unset main TTL varies with billing, so pinning the replay's winner is a change either way.

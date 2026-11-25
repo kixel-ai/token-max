@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use crate::model::{Harness, Profile};
+use crate::model::{Harness, Profile, Request};
 
 /// A version's numbers, when it is plain `major.minor.patch` digits.
 pub(crate) fn plain(version: &str) -> Option<(u64, u64, u64)> {
@@ -18,6 +18,27 @@ pub(crate) fn plain(version: &str) -> Option<(u64, u64, u64)> {
         return None;
     };
     Some((major, minor, patch))
+}
+
+/// The version each of `members` ran on its latest request in `requests`, for those with
+/// any: what its next session most likely runs, whatever the request was for.
+pub(crate) fn latest<'a>(
+    members: &[&'a Profile],
+    requests: impl IntoIterator<Item = &'a Request>,
+) -> Vec<(&'a Profile, Option<&'a str>)> {
+    let mut last: Vec<Option<&Request>> = vec![None; members.len()];
+    for r in requests {
+        for (i, p) in members.iter().enumerate() {
+            if r.profiles.contains(&p.id) && last[i].is_none_or(|l| r.time >= l.time) {
+                last[i] = Some(r);
+            }
+        }
+    }
+    members
+        .iter()
+        .zip(last)
+        .filter_map(|(&p, r)| Some((p, r?.version.as_deref())))
+        .collect()
 }
 
 /// The first version of a harness that a check needs, such as Claude Code 2.1.242.
@@ -159,6 +180,44 @@ mod tests {
             assert!(!Needs::claude(0, 0).met(Some(malformed)), "{malformed:?}");
         }
         assert!(!Needs::claude(0, 0).met(None));
+    }
+
+    #[test]
+    fn each_profile_is_judged_by_its_latest_request_of_any_kind() {
+        use crate::test_support::{make_profile, make_request};
+        let a = make_profile("a", "/a");
+        let b = make_profile("b", "/b");
+        let quiet = make_profile("quiet", "/q");
+        let request = |profile: &str, time, version: &str| {
+            let mut r = make_request();
+            r.time = time;
+            r.profiles = vec![profile.into()].into();
+            r.version = Some(version.into());
+            r
+        };
+        // Out of order, as a subagent's older request may follow a newer main one.
+        let requests = [
+            request("a", 20, "2.1.300"),
+            request("a", 10, "2.1.100"),
+            request("b", 5, "2.1.200"),
+        ];
+        let versions = super::latest(&[&a, &b, &quiet], &requests);
+        let versions: Vec<(&str, Option<&str>)> =
+            versions.iter().map(|(p, v)| (p.id.as_str(), *v)).collect();
+        assert_eq!(versions, [("a", Some("2.1.300")), ("b", Some("2.1.200"))]);
+    }
+
+    #[test]
+    fn an_unowned_t3_line_advises_no_upgrade() {
+        use crate::model::{Action, Bucket, Ttl};
+        use crate::test_support::{make_t3_profile, make_ttl_check};
+        let mut t3 = make_t3_profile("t3", "/c");
+        t3.t3.as_mut().unwrap().enabled = false;
+        let mut check = make_ttl_check("t3", Bucket::Main, Action::Advisory, Ttl::OneHour);
+        check.base.upgrade = Needs::claude(1, 242).upgrade([(&t3, None)]);
+        assert!(check.base.upgrade.is_some());
+        crate::t3::constrain(&mut check.base, &[t3]);
+        assert_eq!(check.base.upgrade, None);
     }
 
     #[test]

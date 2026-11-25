@@ -290,15 +290,26 @@ fn fill(usage: &mut Usage, old: &Usage) {
         (&mut usage.output, old.output),
         (&mut usage.read, old.read),
         (&mut usage.write, old.write),
-        (&mut usage.write5m, old.write5m),
-        (&mut usage.write1h, old.write1h),
-        (&mut usage.write30m, old.write30m),
-        (&mut usage.write12h, old.write12h),
         (&mut usage.reasoning, old.reasoning),
     ];
     for (value, old) in fields {
         if value.is_none() {
             *value = old;
+        }
+    }
+    // A lifetime split belongs to its write total: one copied beside a different total
+    // would price only part of the writes, so it stays unknown instead.
+    if usage.write == old.write {
+        let splits = [
+            (&mut usage.write5m, old.write5m),
+            (&mut usage.write1h, old.write1h),
+            (&mut usage.write30m, old.write30m),
+            (&mut usage.write12h, old.write12h),
+        ];
+        for (value, old) in splits {
+            if value.is_none() {
+                *value = old;
+            }
         }
     }
 }
@@ -2871,6 +2882,30 @@ mod tests {
         let data = scan(&options(&w)).unwrap();
         assert_eq!(data.requests.len(), 1);
         assert_eq!(data.requests[0].effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn a_lifetime_split_fills_in_only_beside_its_own_write_total() {
+        let old = Usage {
+            write: Some(100),
+            write5m: Some(100),
+            ..Usage::default()
+        };
+        let mut same = Usage {
+            write: Some(100),
+            ..Usage::default()
+        };
+        fill(&mut same, &old);
+        assert_eq!(same.write5m, Some(100));
+        let mut other = Usage {
+            write: Some(200),
+            ..Usage::default()
+        };
+        fill(&mut other, &old);
+        assert_eq!((other.write, other.write5m), (Some(200), None));
+        let mut unset = Usage::default();
+        fill(&mut unset, &old);
+        assert_eq!((unset.write, unset.write5m), (Some(100), Some(100)));
     }
 
     #[test]

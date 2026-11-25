@@ -1524,7 +1524,8 @@ settings file owns, since its threads read that file; a line whose owner is
 another file, such as a project's, takes none, nor does any line take an
 instance whose launch settings, unresolved, may replace that file. The rest get a line per
 settings file of their own, with no card, naming that file's `advisorModel`
-(a thread's project may override it, the per-profile approximation native
+labeled as a home setting a project may override (a thread's project may set
+its own, which the line doesn't resolve, the per-profile approximation native
 lines make too) or, for unresolved launch settings, no setting, and a T3 instance removed from T3's
 settings a line of its own for the requests its history still names. A
 request naming profiles on several lines counts on none of them but once on a

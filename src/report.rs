@@ -4871,7 +4871,8 @@ fn advisor_row(u: &AdvisorUse, control: Option<&AdvisorControl>, out: &Out<'_>) 
             "T3 Code threads made these calls, and no native advisor line is confirmed to name the advisorModel they read, which is not read here: T3 picks each thread's main model, so its instances get no advisor card.".into(),
             owner.as_ref().map_or_else(
                 || "unresolved: T3 launch settings may replace its settings file".into(),
-                |o| out.home(o),
+                // Project or local settings may set their own, which no T3 line resolves.
+                |o| format!("{} (home setting; a project may override it)", out.home(o)),
             ),
         ),
         AdvisorLine::Removed => (
@@ -4901,6 +4902,12 @@ fn advisor_item(u: Option<&AdvisorUse>, p: &Profile, profile: &str, out: &Out<'_
     let main = effort.and_then(|e| e.model.as_deref());
     // The window's calls, after a space, which show a blocked advisor still loaded somewhere.
     let calls = u.map_or_else(String::new, |u| format!(" {}", advisor_calls(u)));
+    // Only recorded calls, for a card that suggests nothing and needs no "none recorded".
+    let recorded = if u.is_some_and(|u| u.calls > 0 || u.shared > 0) {
+        calls.as_str()
+    } else {
+        ""
+    };
     let file = control
         .owner
         .strip_suffix(":advisorModel")
@@ -4943,18 +4950,20 @@ fn advisor_item(u: Option<&AdvisorUse>, p: &Profile, profile: &str, out: &Out<'_
         (None, Some(b), _) => quiet(format!(
             "No advisor is suggested, since none would load: {b}."
         )),
-        (None, None, None) => quiet(format!(
-            "No advisor is suggested: the main-session default is unknown, since {}.",
-            effort
-                .and_then(|e| e.unresolved.as_deref())
-                .unwrap_or("no effort control was read")
-        )),
+        (None, None, None) => quiet(
+            format!(
+                "No advisor is suggested: the main-session default is unknown, since {}.",
+                effort
+                    .and_then(|e| e.unresolved.as_deref())
+                    .unwrap_or("no effort control was read")
+            ) + recorded,
+        ),
         (None, None, Some(main)) => match crate::advisor::pick(main) {
             Pick::Top => quiet(format!(
-                "No advisor is suggested: nothing ranks above {main}, the main-session default, and Claude Code pairs a Fable main model only with a Fable advisor."
+                "No advisor is suggested: nothing ranks above {main}, the main-session default, and Claude Code pairs a Fable main model only with a Fable advisor.{recorded}"
             )),
             Pick::Unsupported => quiet(format!(
-                "No advisor is suggested: Claude Code attaches none to {main}, the main-session default. It takes one on Fable, on Opus and Sonnet 4.6 or later, and on Haiku 4.5 or later."
+                "No advisor is suggested: Claude Code attaches none to {main}, the main-session default. It takes one on Fable, on Opus and Sonnet 4.6 or later, and on Haiku 4.5 or later.{recorded}"
             )),
             Pick::Advisor(pick) => {
                 let mut text = format!(
@@ -11121,7 +11130,9 @@ mod tests {
         );
         assert!(details.contains("shared, profile attribution unknown"));
         assert!(
-            lines[0].setting.contains("advisorModel"),
+            lines[0]
+                .setting
+                .contains("advisorModel (home setting; a project may override it)"),
             "{}",
             lines[0].setting
         );
@@ -11335,6 +11346,16 @@ mod tests {
                 "Set to opus in /synthetic/home/.claude/settings.json. 4 advisor calls"
             )
         );
+        // With no advisor set, a card that suggests none still shows the recorded calls.
+        set(&mut report, None, None, Some("claude-fable-5-2"));
+        let c = card(&report);
+        assert!(
+            c.text
+                .ends_with("Fable advisor. 4 advisor calls on 3 requests ran on claude-opus-5-5, costing $2.50 at API prices over the window."),
+            "{}",
+            c.text
+        );
+        set(&mut report, Some("opus"), None, Some("claude-sonnet-5-5"));
         // A set advisor the main model can't take is advice with no edit, naming where the
         // main model comes from.
         for (advisor, main, says) in [

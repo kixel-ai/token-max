@@ -272,7 +272,11 @@ pub fn compaction_charges(scan: &mut Scan, catalog: &Catalog) -> Vec<CompactionC
                     .filter(|p| p.kind == PartKind::Compaction)
                     .map(|p| price_part(catalog, r, p))
                     .collect();
-                add_costs(&costs)
+                if costs.is_empty() {
+                    unknown_cost("the linked request recorded no summary iteration")
+                } else {
+                    add_costs(&costs)
+                }
             };
             claimed[i] = true;
             result.push(CompactionCharge {
@@ -1818,6 +1822,19 @@ mod tests {
         assert_eq!(kinds, [PartKind::Compaction, PartKind::Advisor]);
         // Still priced at its executor's standard tier, which is now the summary's.
         assert!(price_part(&prices(), r, &r.parts[1]).total_usd.is_some());
+    }
+
+    #[test]
+    fn a_linked_request_of_only_advisor_calls_leaves_the_summary_cost_unknown() {
+        let mut summary = make_request();
+        summary.id = "summary".into();
+        summary.parts[0].kind = PartKind::Advisor;
+        let mut event = boundary("boundary", &summary.session, summary.time + 1);
+        event.request = Some(summary.id.clone());
+        let mut scan = data(vec![summary], vec![event]);
+        let charges = compaction_charges(&mut scan, &prices());
+        assert_eq!(scan.requests[0].parts[0].kind, PartKind::Advisor);
+        assert_eq!(charges[0].cost.total_usd, None);
     }
 
     #[test]

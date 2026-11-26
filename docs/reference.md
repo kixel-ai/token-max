@@ -1155,6 +1155,52 @@ pointer's host. Any failed host fails the whole run. Errors go to
 stderr as JSON. Exit 0: printed. Exit 2: scan, pricing, argument or
 cancellation failure.
 
+## Token audit skill
+
+The `token-audit` skill has an agent run `token-max audit`, read the transcript
+lines it points at, and report what wasted tokens, ranked by dollars: cache
+busts, bloated or repeated tool calls, always-loaded context the sessions never
+needed, and context they kept rediscovering. It offers each fix that edits a
+file, such as an `AGENTS.md` line, and applies it only after a yes. Settings are
+left to `doctor`.
+
+```sh
+token-max skill install          # this host's Claude Code and Codex homes
+npx skills add kixel-ai/token-max -g
+```
+
+Then ask for `/token-audit` in Claude Code, `$token-audit` in Codex, or a
+transcript audit in any harness that reads Agent Skills.
+
+The installed `SKILL.md` only runs `token-max skill audit`, which prints the
+instructions from the installed `token-max`, so updating `token-max` updates
+the skill. When `token-max` is not on `PATH`, the skill runs it through
+`npx @kixel/crabx`. The agent needs `jq`.
+
+The agent reads every transcript line through the `jq` program
+`token-max skill filter` prints, locally or piped from `ssh` for a remote
+pointer, as `sed -n '120,140p' FILE | jq -c "$(token-max skill filter)"`; the
+command substitution makes Claude Code ask before each read, so the person sees
+what is read. It keeps record
+types, times, models, effort, tool names, file paths, statuses, exit codes,
+numbers and each command's program, subcommand and flags without their values,
+and replaces every other string with its length, so prompts, replies, tool
+input and tool output never reach the agent's context. A finding that needs the
+raw text is left to the person, with its file and line.
+
+`token-max skill install` writes `token-audit/SKILL.md` into the `skills`
+directory of Claude Code's home (`CLAUDE_CONFIG_DIR` or `~/.claude`) when it
+exists, and of `~/.agents` when it or a Codex home (`CODEX_HOME` or `~/.codex`)
+exists. Codex reads user skills from `~/.agents/skills` whatever its home, and
+still reads its deprecated `$CODEX_HOME/skills`, so a copy there too would list
+the skill twice. `--claude-dir` names the Claude Code homes instead and installs
+nowhere else. `--project` writes the current directory's `.agents`, and
+its `.claude` when that exists. A directory two of them reach through a
+symlink is written once. A `SKILL.md` that already matches is left alone; one
+that differs, such as an edited copy, stops the install before anything is
+written, unless `--force` replaces it. Exit 0: printed or installed. Exit 2:
+argument, read or write failure.
+
 ## Cache TTL
 
 A profile's TTL resolves to one value only when every request in it, across all

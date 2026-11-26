@@ -44,6 +44,7 @@ Commands:
   vibes     Advice the transcripts can't price, with no verdict
   sessions  Each session's priced usage as JSON lines
   audit     A repository's priced transcript hotspots as JSON, for the token-audit skill
+  skill     The token-audit skill: its instructions, its transcript filter, or installing it
 
   -v, --version  Show the package version
   -h, --help     Show this help
@@ -243,6 +244,38 @@ remote URL, and only its ranked findings cross SSH. Any failed host fails the wh
 
 Never prints or keeps prompt, reply, tool input or tool output text. Errors go to stderr as
 JSON. Exit 0: printed. Exit 2: scan, pricing, argument or cancellation failure.
+";
+
+const SKILL_HELP: &str = "token-max skill: the token-audit agent skill
+
+Usage: token-max skill audit
+       token-max skill filter
+       token-max skill install [options]
+
+  --claude-dir DIR  Install into this Claude Code home only (repeatable)
+  --project         Install into the current directory's .agents, and .claude if it exists
+  --force           Replace a token-audit SKILL.md that differs from this build's
+  -h, --help        Show this help
+
+The token-audit skill has an agent such as Claude Code or Codex run token-max audit, read
+the transcript lines it points at through a jq filter that drops their text, and report what
+wasted tokens, ranked by dollars, offering each fix as an edit to approve. Its SKILL.md
+only runs token-max skill audit, which prints the instructions from this build, so an
+installed skill never goes stale. npx skills add kixel-ai/token-max installs it too.
+
+skill audit prints those instructions. skill filter prints the jq program the agent reads
+transcript lines through, which keeps record types, times, models, tool names, file paths,
+statuses, sizes and each command's program, subcommand and flags without their values,
+and replaces every other string with its length.
+
+skill install writes token-audit/SKILL.md into the skills directory of this host's Claude
+Code home (CLAUDE_CONFIG_DIR or ~/.claude) when it exists, and of ~/.agents, where Codex
+and other harnesses look, when it or a Codex home (CODEX_HOME or ~/.codex) exists; a
+directory two of them share through a symlink is written once. --claude-dir installs into
+the named Claude Code homes only. A SKILL.md that already matches is left as it is; one
+that differs is replaced only with --force, and without it nothing is written.
+
+Exit 0: printed or installed. Exit 2: argument, read or write failure.
 ";
 
 /// What a cancelling signal interrupts.
@@ -818,6 +851,8 @@ struct Values {
     defaults: bool,
     version: bool,
     help: bool,
+    project: bool,
+    force: bool,
     claude_dirs: Vec<String>,
     codex_dirs: Vec<String>,
     t3_dirs: Vec<String>,
@@ -856,6 +891,8 @@ impl Values {
             "defaults" => &mut self.defaults,
             "version" => &mut self.version,
             "help" => &mut self.help,
+            "project" => &mut self.project,
+            "force" => &mut self.force,
             "ssh-scan" => &mut self.ssh_scan,
             _ => return None,
         })
@@ -1472,9 +1509,64 @@ fn sessions(args: &[String]) -> Result<(Output, u8), ScanError> {
     Ok((Output::Text(lines), 0))
 }
 
-/// Whether any option only `token-max audit` takes is set.
+/// Whether any option only `token-max audit` or `token-max skill install` takes is set.
 fn audit_only(values: &Values) -> bool {
-    values.all || values.repo.is_some() || values.limit.is_some()
+    values.all || values.repo.is_some() || values.limit.is_some() || install_only(values)
+}
+
+/// Whether any option only `token-max skill install` takes is set.
+fn install_only(values: &Values) -> bool {
+    values.project || values.force
+}
+
+/// `token-max skill`: print the token-audit skill's instructions, or install its stub.
+fn skill(args: &[String]) -> Result<(Output, u8), ScanError> {
+    let invalid = || ScanError::new("invalid arguments; use token-max skill --help");
+    let (command, rest) = match args.first().map(String::as_str) {
+        Some(command @ ("audit" | "filter" | "install")) => (Some(command), &args[1..]),
+        _ => (None, args),
+    };
+    let values = parse(rest).ok_or_else(invalid)?;
+    let allowed = Values {
+        help: values.help,
+        project: values.project,
+        force: values.force,
+        claude_dirs: values.claude_dirs.clone(),
+        ..Values::default()
+    };
+    if values != allowed {
+        return Err(invalid());
+    }
+    if values.help {
+        return Ok((Output::Text(help(SKILL_HELP)), 0));
+    }
+    match command {
+        Some("audit") if values == Values::default() => {
+            Ok((Output::Text(crate::skill::PROMPT.into()), 0))
+        }
+        Some("filter") if values == Values::default() => {
+            Ok((Output::Text(crate::skill::FILTER.into()), 0))
+        }
+        Some("install") => {
+            let project = values.project.then(std::env::current_dir).transpose();
+            let options = crate::skill::Install {
+                project: project
+                    .map_err(|_| ScanError::new("cannot read the current directory"))?,
+                force: values.force,
+                home: std::env::home_dir(),
+                claude_env: env_nonempty("CLAUDE_CONFIG_DIR").map(PathBuf::from),
+                codex_env: env_nonempty("CODEX_HOME").map(PathBuf::from),
+                claude_dirs: values.claude_dirs.into_iter().map(PathBuf::from).collect(),
+            };
+            if options.project.is_some() && !options.claude_dirs.is_empty() {
+                return Err(ScanError::new(
+                    "--project installs into the current directory, so it takes no --claude-dir",
+                ));
+            }
+            Ok((Output::Text(crate::skill::install(&options)?), 0))
+        }
+        _ => Err(invalid()),
+    }
 }
 
 /// `token-max audit`: rank the selected sessions' hotspots on every host.
@@ -1489,6 +1581,7 @@ fn forensics(args: &[String]) -> Result<(Output, u8), ScanError> {
         || values.defaults
         || values.version
         || values.max_cost_per_use.is_some()
+        || install_only(&values)
         || (values.all && values.repo.is_some())
     {
         return Err(invalid());
@@ -1633,6 +1726,7 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
         Some("vibes") => return audit(&args[1..], Command::Vibes),
         Some("sessions") => return sessions(&args[1..]),
         Some("audit") => return forensics(&args[1..]),
+        Some("skill") => return skill(&args[1..]),
         Some(_) => {}
     }
     let invalid = || ScanError::new("invalid arguments; use --help");

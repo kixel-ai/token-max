@@ -2,6 +2,7 @@
 
 mod support;
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -2712,4 +2713,179 @@ fn audit_covers_the_current_repository_and_prints_no_transcript_text() {
     assert!(status == 0 && help.starts_with("token-max audit:"));
     let (_, help, _) = run(&mut command(&w, &["--help"]));
     assert!(help.contains("\n  audit "), "{help}");
+}
+
+#[test]
+fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text() {
+    let w = Workspace::new();
+    let (status, prompt, stderr) = run(&mut command(&w, &["skill", "audit"]));
+    assert_eq!((status, &*stderr), (0, ""));
+    assert!(prompt.starts_with("# Token audit\n"));
+    assert!(prompt.contains("jq -c \"$(token-max skill filter)\""));
+    let (status, filter, stderr) = run(&mut command(&w, &["skill", "filter"]));
+    assert_eq!((status, &*stderr), (0, ""));
+    for args in [
+        &["skill", "audit", "--all"][..],
+        &["skill", "filter", "--force"],
+        &["skill", "audit", "extra"],
+        &["skill"],
+        &["skill", "install", "--codex-dir", "."],
+    ] {
+        let (status, stdout, _) = run(&mut command(&w, args));
+        assert_eq!((status, &*stdout), (2, ""), "{args:?}");
+    }
+    let (_, help, _) = run(&mut command(&w, &["--help"]));
+    assert!(help.contains("\n  skill "), "{help}");
+
+    let codex = json!({"timestamp": "2026-11-02T00:00:00Z", "type": "response_item", "payload": {"type": "function_call", "name": "shell", "arguments": json!({"command": ["bash", "-lc", "SECRET=SYNTHETIC_PRIVATE_TOKEN cargo test --release --features=SYNTHETIC_PRIVATE_ARGS SYNTHETIC_PRIVATE_ARGS && git commit -m \"synthetic_private; prose words\" && cat <<EOF\nsynthetic_private prose\nEOF"], "workdir": "/w"}).to_string()}});
+    let codex_output = json!({"type": "response_item", "payload": {"type": "function_call_output", "output": "SYNTHETIC_PRIVATE_OUTPUT"}});
+    let lines = format!("{}{codex}\n{codex_output}\n", audited_session("s", &w.home));
+    let mut jq = Command::new("jq")
+        .args(["-c", &filter])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("the filter test needs jq on PATH");
+    jq.stdin
+        .take()
+        .unwrap()
+        .write_all(lines.as_bytes())
+        .unwrap();
+    let out = jq.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let out = String::from_utf8(out.stdout).unwrap();
+    assert!(!out.to_lowercase().contains("synthetic_private"), "{out}");
+    let records: Vec<Value> = out
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(records.len(), 6);
+    // What the audit needs survives: models, tool names, commands' shape, sizes.
+    assert_eq!(records[1]["message"]["model"], "claude-opus-5-5");
+    assert_eq!(records[1]["message"]["content"][1]["name"], "Bash");
+    assert_eq!(
+        records[1]["message"]["content"][1]["input"]["command"],
+        json!([["?"]])
+    );
+    assert_eq!(records[0]["message"]["content"], "<24 chars>");
+    assert_eq!(
+        records[4]["payload"]["arguments"],
+        json!({"command": [["SECRET=", "cargo", "test", "--release", "--features="], ["git", "commit", "-m"], ["cat"]], "workdir": "/w"})
+    );
+    assert_eq!(records[5]["payload"]["output"], "<24 chars>");
+}
+
+#[test]
+fn skill_install_writes_the_stub_once_per_directory_and_keeps_edits() {
+    let w = Workspace::new();
+    let stub = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/token-audit/SKILL.md"),
+    )
+    .unwrap();
+    let skill = |root: &Path| root.join("skills/token-audit/SKILL.md");
+    let install = |extra: &[&str]| {
+        let mut args = vec!["skill", "install"];
+        args.extend(extra);
+        run(&mut command(&w, &args))
+    };
+    let shown = |root: &Path| format!("{:?}", native_path(skill(root)));
+    let agents = w.home.join(".agents");
+
+    // Claude Code's home, and ~/.agents for Codex, never Codex's deprecated home skills.
+    let (status, stdout, stderr) = install(&[]);
+    assert_eq!((status, &*stderr), (0, ""));
+    assert_eq!(
+        stdout,
+        format!(
+            "installed: {}\ninstalled: {}\n",
+            shown(&w.claude),
+            shown(&agents)
+        )
+    );
+    assert_eq!(std::fs::read_to_string(skill(&w.claude)).unwrap(), stub);
+    assert_eq!(std::fs::read_to_string(skill(&agents)).unwrap(), stub);
+    assert!(!skill(&w.codex).exists());
+    let (status, stdout, _) = install(&[]);
+    assert_eq!(status, 0);
+    assert_eq!(stdout.matches("up to date: ").count(), 2, "{stdout}");
+
+    // An edited copy is kept, and so is every other file, until --force.
+    std::fs::write(skill(&agents), "edited").unwrap();
+    std::fs::remove_file(skill(&w.claude)).unwrap();
+    let (status, stdout, stderr) = install(&[]);
+    assert_eq!((status, &*stdout), (2, ""));
+    assert!(
+        stderr.contains(&shown(&agents)) && stderr.contains("--force"),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(skill(&agents)).unwrap(), "edited");
+    assert!(!skill(&w.claude).exists());
+    let (status, _, stderr) = install(&["--force"]);
+    assert_eq!((status, &*stderr), (0, ""));
+    assert_eq!(std::fs::read_to_string(skill(&agents)).unwrap(), stub);
+    assert_eq!(std::fs::read_to_string(skill(&w.claude)).unwrap(), stub);
+
+    // A directory flag installs into the named homes only, which must exist.
+    let other = w.home.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let (status, stdout, _) = install(&["--claude-dir", &native_path(&other)]);
+    assert_eq!(
+        (status, stdout),
+        (0, format!("installed: {}\n", shown(&other)))
+    );
+    let (status, _, stderr) = install(&["--claude-dir", &native_path(w.home.join("gone"))]);
+    assert_eq!(status, 2, "{stderr}");
+    assert!(stderr.contains("is not a directory"), "{stderr}");
+
+    // CLAUDE_CONFIG_DIR moves Claude Code's home.
+    let moved = w.home.join("moved");
+    std::fs::create_dir_all(&moved).unwrap();
+    let (status, stdout, _) =
+        run(command(&w, &["skill", "install"]).env("CLAUDE_CONFIG_DIR", &moved));
+    assert_eq!(status, 0);
+    assert!(
+        stdout.starts_with(&format!("installed: {}\n", shown(&moved))),
+        "{stdout}"
+    );
+
+    // --project writes the current directory's .agents, and .claude when it exists.
+    let project = w.home.join("project");
+    std::fs::create_dir_all(project.join(".claude")).unwrap();
+    let (status, stdout, stderr) =
+        run(command(&w, &["skill", "install", "--project"]).current_dir(&project));
+    assert_eq!((status, &*stderr), (0, ""));
+    assert_eq!(
+        stdout,
+        format!(
+            "installed: {}\ninstalled: {}\n",
+            shown(&project.join(".agents")),
+            shown(&project.join(".claude"))
+        )
+    );
+    let (status, _, _) = install(&["--project", "--claude-dir", &native_path(&other)]);
+    assert_eq!(status, 2);
+    let (status, _, _) = install(&["--all"]);
+    assert_eq!(status, 2);
+}
+
+/// A symlinked skills directory, as dotfiles share one, gets the stub once.
+#[cfg(unix)]
+#[test]
+fn skill_install_writes_a_shared_skills_directory_once() {
+    let w = Workspace::new();
+    let shared = w.home.join("dotfiles/skills");
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::create_dir_all(w.home.join(".agents")).unwrap();
+    std::os::unix::fs::symlink(&shared, w.claude.join("skills")).unwrap();
+    std::os::unix::fs::symlink(&shared, w.home.join(".agents/skills")).unwrap();
+    let (status, stdout, stderr) = run(&mut command(&w, &["skill", "install"]));
+    assert_eq!((status, &*stderr), (0, ""));
+    assert_eq!(
+        stdout,
+        format!(
+            "installed: {:?}\n",
+            native_path(w.claude.join("skills/token-audit/SKILL.md"))
+        )
+    );
+    assert!(shared.join("token-audit/SKILL.md").is_file());
 }

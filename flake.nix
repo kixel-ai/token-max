@@ -61,6 +61,7 @@
             pkgs.rustfmt
             pkgs.rust-analyzer
             pkgs.just
+            pkgs.jq
             quest.packages.${system}.default
           ];
         };

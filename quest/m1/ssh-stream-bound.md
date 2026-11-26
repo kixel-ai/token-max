@@ -23,8 +23,9 @@ from the child's stdout with no limit, and #263 made the report one structured
 
 Recommendation, not settled: split what a value carries into pieces whose
 size its fields bound (a path at most `PATH_MAX`, a name, numbers), so a
-frame limit falls out of the schema. Write session lines through as they
-arrive instead of holding them. Bound a report by what the checks can produce
+frame limit falls out of the schema. Session lines from several hosts merge
+in order of first request, so each host's stream needs a bound too, not only
+each line. Bound a report by what the checks can produce
 for the profiles the destination found. If a piece has no natural bound, say
 so in the PR and choose its limit there.
 

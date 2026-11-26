@@ -16,8 +16,10 @@ synthetic fixture showed a 149% share: the header read "at least $0.18" while
 a shared advisor line extrapolated to ~$0.27. No real host has shown it yet.
 m2, because only a synthetic fixture has shown it.
 
-`Spend::share` in `src/report.rs` divides by `usd`, which includes the floor.
-Since the true total is at least that, `usd / total` is an upper bound on the
-true share. Recommendation: write such a share as "at most N%", and leave it
-out when it passes 100%. This is not a regression from #258 (the floor
+`Spend::share` in `src/report.rs` divides a line's cost by the host's `usd`,
+which includes the floor. Only a measured line over a measured floor gives a
+true upper bound. An extrapolated line, or a total that includes
+extrapolations, gives only an estimate. Recommendation: write "at most N%"
+only where both sides prove it, mark the rest as estimates, and leave out any
+share that passes 100%. This is not a regression from #258 (the floor
 predates it), so no `## Caused by` entry.

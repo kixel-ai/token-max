@@ -111,8 +111,8 @@ pub enum Job {
     /// `token-max sessions`' lines.
     Sessions,
     /// `token-max audit`'s findings since `since` for the sessions `filter` selects, each
-    /// ranking cut to `limit`. The scan starts earlier, at [`crate::audit::scanned`], so the
-    /// first request in the window has its predecessor.
+    /// ranking cut to `limit`. The destination scans with [`crate::reader::Reach::Replay`], so
+    /// the first request in the window has its predecessor however old.
     #[serde(rename_all = "camelCase")]
     Audit {
         filter: Filter,

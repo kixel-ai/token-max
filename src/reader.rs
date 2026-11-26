@@ -1286,12 +1286,15 @@ impl Reader {
             Harness::Codex => self.codex(snapshot, file, raw, location, time, kept),
         };
         if let Err(error) = read {
-            if selected {
+            // Only a replay keeps records before the window; any other scan fails on one as
+            // it always has.
+            if selected || !self.replay {
                 return Err(error);
             }
-            // Only a replay reads a record before the window as selected, and a record with
-            // no time is selected, so this one has a time.
+            // A record with no time is selected, so this one has a time.
             let time = time.expect("a record before the window has a time");
+            // A Codex delta across this record would bill usage from before the window.
+            file.previous_total = None;
             let mut r = request(
                 snapshot,
                 location,
@@ -2496,7 +2499,9 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         refs,
         ref_to_request,
     ));
-    // A replay keeps every record it read, so nothing after reading splits at the window.
+    // A replay keeps every record it read, so nothing after reading splits at the window,
+    // except instruction discovery, which reads only the window's directories.
+    let window = since;
     let since = since.filter(|_| options.reach != Reach::Replay);
     // Every request and event stays in memory, so sort in place: a stable slice sort would
     // buffer half of them, and splitting at the window keeps the selected part where it is.
@@ -2538,7 +2543,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         &requests,
     )?;
     crate::discovery::discover_latest_codex_controls(&options.discovery, &mut profiles, &requests)?;
-    crate::discovery::discover_instructions(&mut profiles, &requests, since)?;
+    crate::discovery::discover_instructions(&mut profiles, &requests, window)?;
     // What T3 changed holds its own copy of the shared fields; share them again.
     for r in &mut requests {
         if Arc::strong_count(&r.meta) == 1 {
@@ -3503,11 +3508,20 @@ mod tests {
                 }));
             }
             write(w.codex.join("sessions/legacy.jsonl"), jsonl(&records));
-            let data = scan(&since(options(&w), "2026-11-01T00:02:00Z")).unwrap();
-            data.requests
-                .iter()
-                .map(|r| r.parts[0].usage.input)
-                .collect::<Vec<_>>()
+            let window = since(options(&w), "2026-11-01T00:02:00Z");
+            let start = window.since.unwrap();
+            [Reach::History, Reach::Replay].map(|reach| {
+                let data = scan(&ScanOptions {
+                    reach,
+                    ..window.clone()
+                })
+                .unwrap();
+                data.requests
+                    .iter()
+                    .filter(|r| r.time >= start)
+                    .map(|r| r.parts[0].usage.input)
+                    .collect::<Vec<_>>()
+            })
         };
         let before = ("2026-11-01T00:01:00Z", json!(100));
         let inside = [
@@ -3515,15 +3529,82 @@ mod tests {
             ("2026-11-01T00:04:00Z", json!(400)),
         ];
         // The first request in the window bills only what it added to the earlier total.
+        let both = |inputs: [Option<i64>; 2]| [inputs.to_vec(), inputs.to_vec()];
         assert_eq!(
             inputs(&[before.clone(), inside[0].clone(), inside[1].clone()]),
-            [Some(150), Some(150)]
+            both([Some(150), Some(150)])
         );
-        // A malformed total before the window leaves the next delta unknown, not the whole total.
+        // A malformed total before the window leaves the next delta unknown, not the whole
+        // total, and a replay bills nothing across it either.
         let malformed = ("2026-11-01T00:01:30Z", json!("bad"));
         assert_eq!(
             inputs(&[before, malformed, inside[0].clone(), inside[1].clone()]),
-            [None, Some(150)]
+            both([None, Some(150)])
+        );
+    }
+
+    #[test]
+    fn only_a_replay_reads_past_a_malformed_record_before_the_window() {
+        let w = Workspace::new();
+        let records = [
+            json!({
+                "type": "session_meta",
+                "timestamp": "2026-11-01T00:00:00Z",
+                "payload": { "id": 5, "source": "cli", "model_provider": "openai" },
+            }),
+            json!({
+                "type": "turn_context",
+                "timestamp": "2026-11-01T00:03:00Z",
+                "payload": { "model": "gpt-5.4", "service_tier": "standard" },
+            }),
+        ];
+        write(w.codex.join("sessions/bad.jsonl"), jsonl(&records));
+        let window = since(options(&w), "2026-11-01T00:02:00Z");
+        let reach = |reach| {
+            scan(&ScanOptions {
+                reach,
+                ..window.clone()
+            })
+            .map(|_| ())
+            .map_err(|e| e.message)
+        };
+        let failed = Err("missing request or session identity".to_string());
+        assert_eq!(reach(Reach::Window), failed);
+        assert_eq!(reach(Reach::History), failed);
+        assert_eq!(reach(Reach::Replay), Ok(()));
+    }
+
+    #[test]
+    fn a_replay_discovers_instructions_only_for_the_window() {
+        let w = Workspace::new();
+        let old = w.home.join("old");
+        let new = w.home.join("new");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        let path = |p: &Path| p.to_str().unwrap().to_string();
+        let mut before = assistant("session", "a");
+        before["cwd"] = json!(path(&old));
+        let mut inside = assistant("session", "b");
+        inside["cwd"] = json!(path(&new));
+        inside["timestamp"] = json!("2026-11-01T00:03:00Z");
+        write(
+            w.claude.join("projects/project/session.jsonl"),
+            jsonl(&[before, inside]),
+        );
+        let data = scan(&ScanOptions {
+            reach: Reach::Replay,
+            ..since(options(&w), "2026-11-01T00:02:00Z")
+        })
+        .unwrap();
+        assert_eq!(data.requests.len(), 2);
+        let memory = data
+            .profiles
+            .iter()
+            .find_map(|p| p.memory.as_ref())
+            .unwrap();
+        assert_eq!(
+            memory.instructed.keys().cloned().collect::<Vec<_>>(),
+            [path(&new)]
         );
     }
 

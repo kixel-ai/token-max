@@ -23,7 +23,7 @@ use std::sync::{Mutex, OnceLock, PoisonError, mpsc};
 
 use sha2::{Digest, Sha256};
 
-use crate::audit::{Audit, Options, audit};
+use crate::audit::{Audit, Options, audit, scanned};
 use crate::cli::{Printed, Render, Rendered, render};
 use crate::discovery::{DiscoveryOptions, discover};
 use crate::doctor::{Event, Offers, Owner, Plan, Style, Written, preview, write as write_plan};
@@ -1089,23 +1089,23 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
                 let sessions = export(&scan, &request.catalog)?;
                 return Ok((Outcome::Sessions { since, sessions }, None));
             }
-            Job::Audit { filter, limit } => {
-                let Some(since) = since else {
-                    return Err(ScanError::new("an audit needs a window"));
-                };
+            Job::Audit {
+                filter,
+                limit,
+                since: cutoff,
+            } => {
+                if since != Some(scanned(*cutoff)) {
+                    return Err(ScanError::new(
+                        "the coordinator asked for another window than this host scanned",
+                    ));
+                }
                 let options = Options {
                     filter,
-                    since,
+                    since: *cutoff,
                     limit: *limit,
                 };
                 let audit = Box::new(audit(&scan, &request.catalog, &options)?);
-                return Ok((
-                    Outcome::Audit {
-                        since: Some(since),
-                        audit,
-                    },
-                    None,
-                ));
+                return Ok((Outcome::Audit { since, audit }, None));
             }
         };
         let Rendered {

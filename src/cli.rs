@@ -1548,7 +1548,7 @@ fn forensics(args: &[String]) -> Result<(Output, u8), ScanError> {
         .chain(destinations.iter().cloned().map(Some))
         .collect();
     let replies = gather(Gather {
-        since: Some(since),
+        since: Some(crate::audit::scanned(since)),
         defaults: false,
         discovery,
         destinations,
@@ -1556,6 +1556,7 @@ fn forensics(args: &[String]) -> Result<(Output, u8), ScanError> {
         job: Job::Audit {
             filter: filter.clone(),
             limit,
+            since,
         },
         home: None,
         progress: None,
@@ -2029,10 +2030,14 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
                             )?))
                         }
                         Job::Sessions => Reply::Sessions(export(&scan, catalog)?),
-                        Job::Audit { filter, limit } => {
+                        Job::Audit {
+                            filter,
+                            limit,
+                            since,
+                        } => {
                             let options = crate::audit::Options {
                                 filter,
-                                since: since.expect("an audit has a window"),
+                                since: *since,
                                 limit: *limit,
                             };
                             Reply::Audit(Box::new(crate::audit::audit(&scan, catalog, &options)?))

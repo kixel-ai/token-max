@@ -96,6 +96,16 @@ impl Sessions {
         )
     }
 
+    /// When a session began: its first record, or for Codex its `session_meta`.
+    pub(crate) fn created(&self, session: &str) -> Option<Millis> {
+        self.facts.get(session)?.created
+    }
+
+    /// Every session's key, in the order first observed.
+    pub(crate) fn keys(&self) -> impl Iterator<Item = &Text> {
+        self.facts.keys()
+    }
+
     /// The transcript files a session's records came from.
     pub(crate) fn files(&self, session: &str) -> &[Text] {
         self.facts.get(session).map_or(&[], |f| &f.files)
@@ -308,6 +318,32 @@ impl<'s> Owners<'s> {
             depth += 1;
         }
         (created, depth)
+    }
+
+    /// The session among `keys` that owns what they share: the earliest source.
+    pub(crate) fn first<'k>(&self, keys: impl IntoIterator<Item = &'k Text>) -> Option<&'k Text> {
+        keys.into_iter().min_by_key(|key| self.rank(key))
+    }
+
+    /// Every session whose files hold a copy of `r`, its own first.
+    pub(crate) fn holding<'r>(&self, r: &'r Request) -> Vec<&'r Text>
+    where
+        's: 'r,
+    {
+        let mut found = vec![&r.session];
+        if r.harness == Harness::Codex {
+            for key in r
+                .locations
+                .iter()
+                .filter_map(|l| self.held.get(&*l.file))
+                .flatten()
+            {
+                if !found.contains(key) {
+                    found.push(key);
+                }
+            }
+        }
+        found
     }
 
     /// The session `r` belongs to. A Codex fork copies its source's records under its own

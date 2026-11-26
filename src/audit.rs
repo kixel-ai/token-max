@@ -583,6 +583,11 @@ fn message(r: &Request) -> Option<&BillingPart> {
         .or_else(|| r.parts.first())
 }
 
+/// Whether the reader could not read `r`'s record, so what it cached is unknown.
+fn unreadable(r: &Request) -> bool {
+    r.evidence == RequestEvidence::Unknown && r.parts.iter().all(|p| p.kind == PartKind::Unknown)
+}
+
 /// A request with recorded prompt usage, which a chain can compare.
 struct Turn<'a> {
     request: &'a Request,
@@ -595,7 +600,8 @@ struct Turn<'a> {
     spans: Option<Vec<(f64, f64)>>,
     /// Whether the session replaying it owns it, rather than holding a fork's copy.
     owned: bool,
-    /// Whether the request before it left its usage unknown, so no comparison reaches back.
+    /// Whether an unreadable record lies between it and the request before it, so no
+    /// comparison reaches back.
     blind: bool,
 }
 
@@ -840,7 +846,12 @@ pub fn audit(scan: &Scan, catalog: &Catalog, options: &Options) -> Result<Audit,
                         blind,
                     })
                 });
-                blind = turn.is_none();
+                // An attempt that never answered, such as one retried after an API error,
+                // cached nothing, so the comparison reaches past it.
+                blind = match &turn {
+                    Some(_) => false,
+                    None => blind || unreadable(r),
+                };
                 turn
             })
             .collect();
@@ -1468,6 +1479,8 @@ mod tests {
             assistant(0.0, "a", OPUS, 0, 100_000, &[]),
             bad,
             assistant(10.0, "b", OPUS, 0, 100_500, &[]),
+            // An attempt that never answered cached nothing, so it hides no predecessor.
+            json!({"type": "api-request", "sessionId": "session", "timestamp": at(15.0), "id": "attempt", "params": {"model": OPUS, "max_tokens": 1_000}}),
             assistant(20.0, "c", OPUS, 0, 100_900, &[]),
         ];
         let mut bad = codex_billed(1.0, "bad", 10_000, 0);
@@ -1490,8 +1503,9 @@ mod tests {
         // Only Claude's second request in the window has a known predecessor.
         let misses = &audit.cache_misses.hotspots;
         assert_eq!(misses.len(), 1, "{misses:?}");
-        assert_eq!((misses[0].previous.line, misses[0].at.line), (3, 4));
-        assert_eq!(audit.totals.requests, 3);
+        assert_eq!((misses[0].previous.line, misses[0].at.line), (3, 5));
+        // The unanswered attempt is a request too.
+        assert_eq!(audit.totals.requests, 4);
     }
 
     fn codex_meta(id: &str, forked_from: Option<&str>) -> Value {

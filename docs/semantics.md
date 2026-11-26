@@ -1280,11 +1280,10 @@ calls and compactions between them count too; findings and totals count only
 requests and tool results in the window. A record before the window that cannot
 be read, such as one with a malformed usage counter, does not fail the audit, as
 it would in the window: it leaves the next request uncompared, since what that
-record cached is unknown. So does a request whose usage was not recorded. A Codex
-fork begins with copies of its source's records, which it replays, so its own
-first request is compared with the last copy; each copy, and each tool result
-and compaction in it, is billed and counted once, in the source session, as in
-the session export.
+record cached is unknown. A Codex fork begins with copies of its source's
+records, which it replays, so its own first request is compared with the last
+copy; each copy, and each tool result and compaction in it, is billed and
+counted once, in the source session, as in the session export.
 
 **Lost cache reuse.** A request lost reuse when it read less of the cache than
 its predecessor left there. For Claude Code that is the predecessor's cached
@@ -1337,8 +1336,8 @@ in the session carries it until a compaction is recorded or a prompt is too
 short to hold it, as after a cleared result; carrying stops there, even if the
 prompt grows past it again. A Codex fork's copy of a prompt too short to hold
 it ends it in the fork too. A result's carriers in its source and in each fork
-that copied it count as one result, in the source session. Each carrying request pays for the result's tokens at the
-prices of the spans they sit in: cache reads, cache writes, then ordinary
+that copied it count as one result, in the source session. Each carrying
+request pays for the result's tokens at the prices of the spans they sit in: cache reads, cache writes, then ordinary
 input, so a Codex request that read none of its prompt from the cache pays
 ordinary input for them. A result whose estimated span crosses from one price
 to another in a carrying prompt, or that an unpriced request carried, has no

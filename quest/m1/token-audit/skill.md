@@ -42,14 +42,25 @@ finalizing wording):
    and `--ssh <host>` for any requested remote hosts). Note that settings-level
    tuning belongs to `token-max doctor` / `vibes` and should be mentioned only as
    a one-line pointer rather than re-audited.
-2. **Targeted slice inspection (strictly bounded)**:
-   - Never read whole JSONL transcripts into context. Read only the top flagged
-     `(host, file, line)` windows (a small window around each flagged line) plus
-     a bounded sample of early exploration turns from the highest-cost sessions.
-   - For local pointers (`host: null`), read the specific lines directly; for
-     remote pointers (`host: "<dest>"`), inspect the specific lines over
-     read-only `ssh <host>` (e.g., `sed -n` / `jq` on the pointed line range).
-   - Never copy raw secrets, tokens, or private prompt quotes into reports or
+2. **Filtered, bounded slice inspection**:
+   - Never read whole JSONL transcripts or dump raw JSONL lines directly into
+     the audit session's tool output (raw lines contain private user prompts,
+     assistant replies, and huge tool payloads that would be retained in the
+     audit session's own history).
+   - Inspect only the top flagged `(host, file, line)` windows plus a bounded
+     sample of early exploration turns from the highest-cost sessions, piping
+     each local read—and each remote `ssh <host>` read—through a read-only
+     filter (such as `jq`) *before* output reaches the agent. The filter strips
+     user prompt prose, assistant reply text, and raw file/env/tool-output
+     bodies, emitting only safe structured evidence: record type, timestamp,
+     model/effort, tool names, truncated tool targets (e.g., command
+     executable/flags or file path with secret-like env/token values redacted),
+     exit code / error status, and result byte/line counts.
+   - If a hotspot genuinely requires reading raw prompt, reply, or tool-output
+     text to diagnose, leave that inspection to the user by citing its
+     `(host, file, line)` pointer rather than pulling raw text into the audit
+     session.
+   - Never copy secrets, tokens, or raw transcript quotes into reports or
      committed files; paraphrase findings with counts and dollar figures.
 3. **Distilled best-practice audit checklist** (Claude Code + Codex + agent
    context engineering):

@@ -39,28 +39,37 @@ Implements the deterministic forensic engine decided in the
 Reuse `src/reader.rs`, `src/cache.rs`, `src/prices.rs`, `src/exposure.rs`, and
 `src/ssh.rs` rather than building a second parser or pricer:
 
-1. **Cache invalidations and prefix busts**: every request where the cached
-   prefix dropped materially (cache rewrite cost priced via `models.dev`),
-   classified by observable cause:
+1. **Cache invalidations and prefix busts**: every request with material lost
+   cache reuse relative to the preceding request's eligible prefix—measuring
+   the drop in cached reads against the prior eligible prefix (`prev_prefix -
+   cache_read`, bounded by the overlapping rewritten/uncached tokens, matching
+   `src/bash.rs`'s `miss()` and `src/cache.rs`) and pricing only that rewritten
+   or uncached overlap at its marginal rate rather than checking whether total
+   prefix size shrank (since a full-prefix TTL rewrite keeps `read + write`
+   unchanged or growing). Classify each event by observable cause:
    - `tool_wait_ttl`: foreground tool/Bash call wait exceeded the active cache
      TTL (reusing `src/bash.rs`'s wait-linking logic).
    - `idle_ttl`: user idle gap exceeded TTL on a large context (cold resume).
    - `control_change`: mid-session model switch, effort/thinking switch,
      fast-mode toggle, or compaction/truncation.
-   - `prefix_bust`: unexplained in-TTL prefix drop with no model/effort/speed/
-     compaction change (e.g., mid-session `CLAUDE.md`/`MEMORY.md` edits,
-     tool/MCP schema churn, or volatile prefix shifts).
+   - `prefix_bust`: unexplained in-TTL lost cache reuse with no
+     model/effort/speed/compaction change (e.g., mid-session
+     `CLAUDE.md`/`MEMORY.md` edits, tool/MCP schema churn, or volatile prefix
+     shifts).
    Emit ranked hotspots with aggregate and per-event USD cost, rewritten tokens,
    preceding tool names (whitelisted names only, never arguments), gap duration,
    and `(host, file, line)` pointers.
 2. **Tool-output bloat and carried-context tax**: estimate each tool result's
    token injection (from recorded token deltas / result byte lengths, keeping
-   size only and discarding content during streaming) weighted by the number of
-   subsequent turns it remained in context before compaction or session end
-   (write cost + cumulative cache-read cost, plus any subsequent cache-rewrite
-   multipliers). Emit per-tool aggregates and the top individual injections with
-   tool name, estimated tokens, turns carried, estimated USD tax, and
-   `(host, file, line)`.
+   size only and discarding content during streaming) and price its carry over
+   subsequent turns before compaction or session end by reusing request-level
+   context pricing (`src/context.rs` and `src/prices.rs::prefix_spans`) so
+   tokens that fall outside a cache hit (such as uncached Codex turns) are not
+   underpriced at the cache-read rate. Where an individual result's placement
+   across cached vs. uncached spans on later turns is ambiguous, leave its
+   individual USD cost unknown/unpriced (matching `token-max`'s "unknown, never
+   zero" rule) while still emitting its estimated token size, turns carried,
+   tool name, and `(host, file, line)` alongside priced per-tool aggregates.
 3. **Repetitive/failing tool loops and session-shape outliers**:
    - Sessions and spans with high tool-call counts, high error/retry rates, or
      long streaks of the same tool name (e.g., repeated reads/greps/shell
@@ -91,8 +100,10 @@ Reuse `src/reader.rs`, `src/cache.rs`, `src/prices.rs`, `src/exposure.rs`, and
 
 - Synthetic Claude Code and Codex JSONL fixtures in `tests/` covering:
   - each cache-miss class (`tool_wait_ttl`, `idle_ttl`, `control_change`,
-    `prefix_bust`),
-  - tool-output carried-context pricing and line-number accuracy,
+    `prefix_bust`), including a full-prefix TTL rewrite whose total prefix size
+    (`read + write`) stays constant or grows,
+  - tool-output carried-context pricing (including uncached Codex spans and
+    unpriced ambiguous placement) and line-number accuracy,
   - repetitive/error tool loops and mega-session outliers,
   - repo-scoped vs. `--all` filtering and outside-repo error behavior,
   - `--ssh` aggregation across hosts,

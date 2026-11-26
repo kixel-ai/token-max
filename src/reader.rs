@@ -2050,6 +2050,10 @@ impl Reader {
                 Some("CommandExecution" | "McpToolCall" | "FileChange")
             ) {
                 let failed = string(item, "status") == Some("failed")
+                    || item
+                        .get("exit_code")
+                        .and_then(Value::as_i64)
+                        .is_some_and(|code| code != 0)
                     || nested(item, "result").get("isError") == Some(&Value::Bool(true));
                 let mut e = event(
                     snapshot,

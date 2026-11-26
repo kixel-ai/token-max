@@ -47,7 +47,7 @@ pub const ASSUMPTIONS: [&str; 7] = [
     "A Codex request can reuse its predecessor's prompt from 1,024 tokens, less the last 128 tokens, whose rendering changes once another message follows, rounded down to OpenAI's 128-token cache step.",
     "A tool result's tokens are estimated as a quarter of its text's bytes; images and other media count nothing.",
     "A tool result sits in later prompts right after the request that called it, until a compaction or a prompt too short to hold it; a result whose span crosses from one price to another in a later prompt has no cost of its own, though its tool's total prices each part.",
-    "Codex records no tool errors, so its sessions' error counts are null.",
+    "A Codex session's tool errors are the commands, MCP calls and file edits Codex recorded as failed; it is null when Codex recorded none finishing.",
 ];
 
 /// Which sessions an audit covers.
@@ -1029,10 +1029,12 @@ fn misses(
         let calls = match r.harness {
             Harness::Claude => events.started(began, r.time),
             Harness::Codex => {
+                // After the request before `prev`, and up to `prev`, whose usage can share
+                // its last call's millisecond.
                 let before = i
                     .checked_sub(1)
                     .map_or(Millis::MIN, |j| turns[j].request.time);
-                events.started(before, began)
+                events.started(before + 1, began + 1)
             }
         };
         let waited = calls.iter().any(|start| {
@@ -1736,12 +1738,13 @@ mod tests {
         let records = vec![
             codex_meta("thread", None),
             codex_turn("gpt-5.4"),
-            // The call comes before the usage of the response that made it.
-            json!({"type": "response_item", "timestamp": at(0.5), "payload": {"type": "function_call", "call_id": "call", "name": "exec", "arguments": "SYNTHETIC_PRIVATE_INPUT"}}),
+            // The call comes before the usage of the response that made it, here in the
+            // same millisecond.
+            json!({"type": "response_item", "timestamp": at(1.0), "payload": {"type": "function_call", "call_id": "call", "name": "exec", "arguments": "SYNTHETIC_PRIVATE_INPUT"}}),
             codex_billed(1.0, "a", 10_000, 0),
             done(
                 10.0,
-                json!({"type": "CommandExecution", "id": "exec-1", "status": "failed", "exit_code": 1}),
+                json!({"type": "CommandExecution", "id": "exec-1", "exit_code": 1}),
             ),
             json!({"type": "response_item", "timestamp": at(10.0), "payload": {"type": "function_call_output", "call_id": "call", "output": "SYNTHETIC_PRIVATE_OUTPUT"}}),
             done(
@@ -1752,6 +1755,10 @@ mod tests {
                 10.2,
                 json!({"type": "FileChange", "id": "f1", "status": "completed"}),
             ),
+            done(
+                10.3,
+                json!({"type": "FileChange", "id": "f2", "status": "failed"}),
+            ),
             codex_billed(10.5, "b", 11_200, 0),
         ];
         let audit = audit_of(&w, &[(".codex/sessions/rollout.jsonl", records)]);
@@ -1761,7 +1768,7 @@ mod tests {
             (Cause::ToolWaitTtl, ["exec".to_string()].as_slice())
         );
         let shape = &audit.sessions.costliest[0];
-        assert_eq!(shape.tool_errors, Some(2));
+        assert_eq!(shape.tool_errors, Some(3));
     }
 
     #[test]

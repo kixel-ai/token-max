@@ -14,8 +14,9 @@ Decided 2026-11-25 (maintainer, /quest-plan in kixel-ai/crabx and here):
 
 - ✅ crabx's pipeline (rejected: keep cargo-dist and release from a tag, which crabx would also
   accept; drop). "We want to dog food. If the crabx pipeline sucks then quest-plan
-  improvements": a gap the pipeline has becomes a crabx quest, not a workaround here. Today
-  crabx 0.2.0 refuses token-max@0.0.1, whose attestation signs from `refs/heads/main`.
+  improvements": a gap the pipeline has becomes a crabx quest, not a workaround here. crabx
+  0.2.0 and later (0.2.1 on 2026-11-26) refuse token-max@0.0.1, whose attestation signs from
+  `refs/heads/main`.
 - ✅ 0.1.0 waits for this switch and is the first pipeline release (rejected: 0.1.0 with
   cargo-dist and the pipeline from 0.1.1; teaching 0.1.0's upgrade the pipeline's names; every
   pipeline release also publishing cargo-dist-named copies). This reverses the same day's first
@@ -34,7 +35,8 @@ Decided 2026-11-25 (maintainer, /quest-plan in kixel-ai/crabx and here):
   ([kixel-ai/crabx `quest/m1/installer-crates.md`](https://github.com/kixel-ai/crabx/blob/main/quest/m1/installer-crates.md))
   (rejected: token-max's own installers; the pipeline publishing per-crate installers). A
   redirect can't pass the crate name, so recommended: serve small scripts at those paths that
-  run crabx's installer for `token-max`, so shared links keep working.
+  run crabx's installer for `token-max`, so shared links keep working. Those installers shipped
+  (`https://crabx.kixel.me/install.sh` reads `CRABX_INSTALL`, checked 2026-11-26).
 
 Recommendations:
 
@@ -59,14 +61,18 @@ Recommendations:
   changes `site/` and leaves the deploys to 0.1.0's release: before publishing, deploy a site whose
   run scripts and install redirects are pinned to `v0.0.1`, so the latest release flipping
   breaks nothing, then deploy this PR's `site/` once the pipeline has uploaded 0.1.0's archives.
-- Validate with the pipeline's manual dispatch on this branch's head. It builds and attests
-  every target without creating tags or releases. Point `run.sh` and the ssh download at a local
-  copy of those archives (`TOKEN_MAX_RELEASES`) to check them end to end.
+- Validate the branch in two halves, since no pipeline run on it leaves archives to download: a
+  consumer's dispatch builds only versions already on crates.io, and the consumer dry run never
+  uploads (crabx's `quest/m1/consumer-dry-run.md`). Run the pipeline's consumer dry run on this
+  branch's head to show every target builds. Check the names and layout end to end on archives
+  the tests and a manual run build locally in the pipeline's shape (binstall's default
+  `token-max-<target>-v<version>/` directory in a `.tgz`), served through `TOKEN_MAX_RELEASES`
+  to `run.sh`, `run.ps1`, `doctor --ssh` and the upgrade offer. The pipeline's real archives
+  are first checked by [0.1.0](/quest/m1/release-0.1.md)'s post-publication checks, while the
+  deployed site is still pinned to `v0.0.1`.
 
 ## Waiting
 
 - kixel-ai/crabx: the `pipeline-v1.1.0` tag, whose pipeline builds musl archives and offers the
   consumer dry run that 0.1.0's Release gates on. Check with
   `git ls-remote --tags https://github.com/kixel-ai/crabx pipeline-v1.1.0`.
-- kixel-ai/crabx: crabx's installers taking crate names. Check that
-  `curl -fsSL https://crabx.kixel.me/install.sh` mentions `CRABX_INSTALL`.

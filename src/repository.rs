@@ -127,8 +127,13 @@ pub fn canonical(url: &str) -> String {
         false => rest.split(['?', '#']).next().unwrap_or(rest),
         true => rest,
     };
-    let rest = rest.rsplit_once('@').map_or(rest, |(_, after)| after);
-    let split = rest.find(|c| c == '/' || (scp && c == ':'));
+    // Userinfo ends at the last `@` before the path, which may hold an `@` of its own.
+    let split = |rest: &str| rest.find(|c| c == '/' || (scp && c == ':'));
+    let rest = match rest[..split(rest).unwrap_or(rest.len())].rfind('@') {
+        Some(at) => &rest[at + 1..],
+        None => rest,
+    };
+    let split = split(rest);
     let (host, path) = match split {
         Some(at) => (&rest[..at], &rest[at + 1..]),
         None => (rest, ""),

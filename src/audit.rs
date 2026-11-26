@@ -1118,11 +1118,43 @@ fn outputs<'a>(
     // Where the next result of each calling request begins in later prompts.
     let mut placed: HashMap<usize, f64> = HashMap::default();
     for &end in &events.ends {
-        let Some(bytes) = end.bytes.filter(|_| end.time >= since) else {
+        let Some(bytes) = end.bytes else {
             continue;
         };
         let (start, tool) = events.call(end);
         let tokens = (f64::from(bytes) * TOKENS_PER_BYTE).round();
+        // The request that called the tool. Claude records a request before the calls its
+        // response makes, so it is the last before the call, or before the result. Codex
+        // records a request's usage after its calls, so it is the first at or after the call.
+        let calling = match start {
+            Some(s) if end.harness == Harness::Codex => {
+                Some(turns.partition_point(|t| t.request.time < s.time))
+                    .filter(|&at| at < turns.len())
+            }
+            _ => {
+                let called = start.map_or(end.time, |s| s.time);
+                turns
+                    .partition_point(|t| t.request.time <= called)
+                    .checked_sub(1)
+            }
+        };
+        // A result before the window still takes its place after its caller's prompt, so
+        // the same response's later results sit after it.
+        let span = calling.map(|index| {
+            let caller = &turns[index];
+            let output = message(caller.request)
+                .and_then(|p| p.usage.output)
+                .unwrap_or(0);
+            let from = *placed
+                .entry(index)
+                .or_insert((caller.input + output) as f64);
+            let to = from + tokens;
+            placed.insert(index, to);
+            (index, from, to)
+        });
+        if end.time < since {
+            continue;
+        }
         let result = found.entry(&end.id).or_insert_with(|| Carried {
             end,
             tool: tool.unwrap_or("unrecorded").to_string(),
@@ -1140,38 +1172,14 @@ fn outputs<'a>(
             result.call = start;
             result.session = Some(session.clone());
         }
-        // The request that called the tool. Claude records a request before the calls its
-        // response makes, so it is the last before the call, or before the result. Codex
-        // records a request's usage after its calls, so it is the first at or after the call.
-        let calling = match start {
-            Some(s) if end.harness == Harness::Codex => {
-                Some(turns.partition_point(|t| t.request.time < s.time))
-                    .filter(|&at| at < turns.len())
-            }
-            _ => {
-                let called = start.map_or(end.time, |s| s.time);
-                turns
-                    .partition_point(|t| t.request.time <= called)
-                    .checked_sub(1)
-            }
+        let Some((index, from, to)) = span else {
+            continue;
         };
         // Compaction replaces the history the result was in.
         let compacted = events
             .compactions
             .get(events.compactions.partition_point(|e| e.time <= end.time))
             .map_or(Millis::MAX, |e| e.time);
-        let Some(index) = calling else {
-            continue;
-        };
-        let caller = &turns[index];
-        let output = message(caller.request)
-            .and_then(|p| p.usage.output)
-            .unwrap_or(0);
-        let from = *placed
-            .entry(index)
-            .or_insert((caller.input + output) as f64);
-        let to = from + tokens;
-        placed.insert(index, to);
         for later in &turns[index + 1..] {
             if later.request.time < end.time {
                 continue;
@@ -1692,6 +1700,33 @@ mod tests {
     }
 
     #[test]
+    fn a_result_after_the_window_starts_sits_after_its_responses_earlier_results() {
+        let w = Workspace::new();
+        let records = vec![
+            assistant(
+                0.0,
+                "a",
+                OPUS,
+                0,
+                10_000,
+                &[("Read", "one"), ("Read", "two")],
+            ),
+            // 10,100 to 11,100, before the window.
+            result(0.5, "one", 4_000, false),
+            // 11,100 to 12,100, in it.
+            result(1.5, "two", 4_000, false),
+            // Read to 11,000, so the second result sits wholly in the write.
+            assistant(2.0, "b", OPUS, 11_000, 1_200, &[]),
+        ];
+        let file = ".claude/projects/project/main.jsonl";
+        let audit = audit_since(&w, &[(file, records)], START + MIN);
+        let output = &audit.tool_outputs.hotspots;
+        assert_eq!(output.len(), 1, "{output:?}");
+        assert_eq!((output[0].at.line, output[0].carried_requests), (3, 1));
+        assert!(close(output[0].cost_usd, 1_000.0 * WRITE), "{output:?}");
+    }
+
+    #[test]
     fn codex_results_carried_uncached_pay_ordinary_input_and_a_step_short_is_no_miss() {
         let w = Workspace::new();
         let billed = |second: u32, input: i64, cached: i64| {
@@ -1909,6 +1944,16 @@ mod tests {
             // slash ok: a remote's key, not a file path
             "github.com/o/r"
         );
+        // Only the authority's userinfo goes, never an `@` in the path.
+        for (given, key) in [
+            (
+                "https://user:t@ken@git.example/team@dept/r.git",
+                "git.example/team@dept/r",
+            ),
+            ("git@git.example:team@dept/r.git", "git.example/team@dept/r"),
+        ] {
+            assert_eq!(repository::canonical(given), key, "{given}");
+        }
         let https = Filter::Remotes(vec![repository::canonical("https://github.com/o/r/")]);
         assert_eq!(Filter::of(&sub).unwrap(), Some(https.clone()));
         let mut scope = Scope {

@@ -2,7 +2,8 @@ def flags: map(select(test("^-{1,2}[A-Za-z][A-Za-z0-9-]*($|=)")) | sub("=.*"; "=
 def prog: split("/") | last | if test("^[a-z0-9][a-z0-9_.+-]{0,39}$") then . else "?" end;
 def simple: (map(select(test("^[A-Za-z_][A-Za-z0-9_]*="))) | length) as $n
   | (.[:$n] | map(sub("=.*"; "="))) + (.[$n:] | if length == 0 then []
-    elif length > 1 and (.[1] | test("^[a-z][a-z0-9-]{0,30}$")) then [(.[0] | prog), .[1]] + (.[2:] | flags)
+    elif length > 1 and (.[0] | split("/") | last | IN("git", "gh", "cargo", "rustup", "go", "npm", "pnpm", "yarn", "bun", "uv", "pip", "nix", "docker", "kubectl", "just", "quest", "token-max", "claude", "codex"))
+      and (.[1] | test("^[a-z][a-z0-9-]{0,30}$")) then [(.[0] | prog), .[1]] + (.[2:] | flags)
     else [.[0] | prog] + (.[1:] | flags) end);
 def cmd: if type == "array" then map(tostring)
     | if length == 3 and (.[0] | test("(^|/)(ba|z|da)?sh$")) then .[2] | cmd else simple end

@@ -1179,11 +1179,12 @@ the skill. When `token-max` is not on `PATH`, the skill runs it through
 
 The agent reads every transcript line through the `jq` program
 `token-max skill filter` prints, locally or piped from `ssh` for a remote
-pointer, as `sed -n '120,140p' FILE | jq -c "$(token-max skill filter)"`; the
-command substitution makes Claude Code ask before each read, so the person sees
-what is read. It keeps record
+pointer, as `f=$(token-max skill filter) && sed -n '120,140p' FILE | jq -c "$f"`,
+which reads nothing when the filter cannot print; Claude Code asks before each
+such read, so the person sees what is read. It keeps record
 types, times, models, effort, tool names, file paths, statuses, exit codes,
-numbers and each command's program, subcommand and flags without their values,
+numbers and each command's program, a known tool's subcommand such as
+`git commit`, and flags without their values,
 and replaces every other string with its length, so prompts, replies, tool
 input and tool output never reach the agent's context. A finding that needs the
 raw text is left to the person, with its file and line.

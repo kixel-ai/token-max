@@ -266,8 +266,8 @@ installs it too.
 
 skill audit prints those instructions. skill filter prints the jq program the agent reads
 transcript lines through, which keeps record types, times, models, tool names, file paths,
-statuses, sizes and each command's program, subcommand and flags without their values,
-and replaces every other string with its length.
+statuses, sizes and each command's program, a known tool's subcommand, and flags without
+their values, and replaces every other string with its length.
 
 skill install writes token-audit/SKILL.md into the skills directory of this host's Claude
 Code home (CLAUDE_CONFIG_DIR or ~/.claude) when it exists, and of ~/.agents, where Codex

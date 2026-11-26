@@ -20,7 +20,7 @@ Hide
 Type `{ rm -rf .tmp/demo && python3 assets/demo/home.py .tmp/demo && exec env -i HOME="$PWD/.tmp/demo" PATH="$PWD/target/release:$PATH" TERM=xterm-256color LANG=C.UTF-8 PS1='$ ' bash --norc --noprofile; } || exit 1`
 Enter
 Sleep 1s
-Type "cd && token-max doctor > /dev/null; clear"
+Type "cd && token-max doctor --plain < /dev/null > /dev/null; clear"
 Enter
 Sleep 3s
 Show
@@ -28,53 +28,46 @@ Show
 Type "token-max doctor"
 Sleep 500ms
 Enter
-Sleep 2s
-# How the profile pays: usage credits, so its main agent's default cache is 5m. The walk
-# then opens with what the settings already save: the subagents' 1h cache, net of fast mode.
-Type "a"
-Sleep 300ms
-Enter
 Sleep 4s
-# The two measured changes: fast mode off, then the 1h cache.
-Type "y"
-Sleep 300ms
-Enter
+# The two measured changes: the 1h cache, a safe win checked already, and fast mode, a
+# tradeoff left for the person to check. The proof under each shows what was replayed.
+Type "j"
+Sleep 500ms
+Right
+Sleep 4s
+Type "k"
+Sleep 500ms
+Right
 Sleep 3s
-Type "y"
-Sleep 300ms
-Enter
-Sleep 5s
-# Write them.
-Type "y"
-Sleep 300ms
-Enter
-Sleep 4s
-# The walk is over: show the advice the transcripts can't price.
-Type "y"
-Sleep 300ms
-Enter
-Sleep 5s
-# Its Bash cap, lowered under the 5m cache the scan saw.
-Type "y"
-Sleep 300ms
-Enter
-Sleep 4s
-# Auto memory off, since the sessions ran in a repository with an AGENTS.md.
-Type "y"
-Sleep 300ms
-Enter
-Sleep 4s
-# The maintainer's smaller compaction window, then a Fable advisor above the Opus main model,
-# then the write.
-Type "y"
-Sleep 300ms
+Space
+Sleep 2s
+# The exact edits, then the write.
 Enter
 Sleep 4s
 Type "y"
-Sleep 300ms
+Sleep 4s
+# The advice the transcripts can't price: its Bash cap, lowered under the 1h cache, auto
+# memory off, since the sessions ran in a repository with an AGENTS.md, a smaller compaction
+# window, and a Fable advisor above the Opus main model.
+Type "token-max vibes"
+Sleep 500ms
+Enter
+Sleep 4s
+Right
+Sleep 3s
+Left
+Space
+Sleep 1s
+Type "j"
+Space
+Sleep 1s
+Type "j"
+Space
+Sleep 1s
+Type "j"
+Space
+Sleep 2s
 Enter
 Sleep 4s
 Type "y"
-Sleep 300ms
-Enter
 Sleep 8s

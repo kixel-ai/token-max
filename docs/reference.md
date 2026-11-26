@@ -78,6 +78,11 @@ run the latest release, so they never see the offer.
 
 ## Applying changes
 
+On a terminal that draws one, `doctor` shows its changes as an inline
+[checklist](#the-checklist) below the prompt. With `--plain`, or under
+`TERM=dumb`, it walks through them line by line, as the rest of this section
+says.
+
 On a terminal, `doctor` opens with one header line naming what it read: the
 requests, the sessions they ran in (each subagent counted with the session
 that spawned it), the window and their cost. The
@@ -204,6 +209,45 @@ profiles whose files resolve to one file share one write. A read-only target, or
 that cannot take the edit, such as a `permissions` that is not an object, makes
 the change a step by hand naming the resolved path. Ctrl-C at any question,
 the last included, exits 2 with no settings changed.
+
+### The checklist
+
+The checklist draws in the terminal's own scrollback, not a separate screen,
+and redraws in place as keys move through it. It skips the question about how
+each Claude profile pays: `b` cycles an unset main-agent cache TTL's saving
+between "up to" both defaults, the API's 5m and a plan's 1h, and rechecks it.
+A box at the top sums the checked changes' savings, as a percent of spend,
+beside the scan's counts and the [savings against the
+defaults](#savings-against-the-defaults).
+
+Each row is a [section](#applying-changes), marked `✗` for a recommended change
+and `!` for one worth considering, with its saving and a bar scaled to the
+largest. A recommended section saving at least $1/mo starts checked; one worth
+considering, such as a tool over `--max-cost-per-use`, starts unchecked, and
+each such feature over its budget is a row of its own. Sections saving under
+$1/mo fold into one line that `m` opens. `→` opens a row's proof: one sentence
+on the change, then what was replayed, such as both cache TTLs' cost over the
+window, cost per use against the budget, or every member's saving. A proof
+taller than the window scrolls with PgUp and PgDn. `s` splits a section into
+its members, each checked on its own. A section that turns off MCP servers
+shows a second box, unchecked, for removing their configuration entries and
+blocking them by name, as the walk's follow-up question offers; `r` checks it.
+Settings already better than the defaults follow under `ALREADY GOOD`, each
+with what it saves against the default when measured. Steps by hand print after the
+checklist closes.
+
+`Tab` or `v` switches to `vibes`' cards from the same scan, each unchecked;
+an SSH destination's show without a box, since asking it for them would swap
+its offers, so `token-max vibes` applies them. A card that another card's
+change rebuilds, such as the advisor card once an Opus main default is
+checked, shows its rebuilt version, as the walk would ask it after a yes.
+
+`Enter` shows the checked edits as the diff the confirm below describes, its
+long lines wrapped. `y` writes them; `Esc` goes back and `q` leaves with
+nothing written. A held or repeated Enter never writes, since `y` is its own
+key. After a write the checklist prints what each host wrote; when a later
+host's write fails, the earlier hosts' receipts print before the error. `q`,
+`Esc` or Ctrl-C at the list writes nothing.
 
 ### Backups
 

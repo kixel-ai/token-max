@@ -64,7 +64,7 @@ Usage: token-max doctor [options]
   --max-cost-per-use USD  Suggest turning off a used tool, skill or MCP server that cost more than this per use (default: 1)
   --details               Show grouped check evidence, assumptions, uncertainty and sources
   --defaults              Report as a user with no settings files would see it, offering nothing
-  --plain                 Plain text without color or decorative Unicode
+  --plain                 Plain text without color or decorative Unicode, asking line by line
   --offline               Use cached public prices and skip the release check, without network access
   --prices-file FILE      Use a local models.dev catalog instead of fetching prices
   --price-cache FILE      Cache path (default: ~/.cache/token-max/models.json)
@@ -136,7 +136,7 @@ Usage: token-max vibes [options]
   --codex-dir DIR         Select a Codex home, including archived sessions (repeatable)
   --t3-dir DIR            Select a T3 state directory (repeatable)
   --ssh HOST              Also read an SSH destination, putting this build there first if needed (repeatable)
-  --plain                 Plain text without color or decorative Unicode
+  --plain                 Plain text without color or decorative Unicode, asking line by line
   --offline               Use cached public prices without network access
   --prices-file FILE      Use a local models.dev catalog without network access
   --price-cache FILE      Cache path (default: ~/.cache/token-max/models.json)
@@ -149,15 +149,15 @@ Kixel's picks, such as auto memory off where most sessions ran in a repository. 
 card says what was measured beside the advice and names whose advice it is: the provider's
 page, or Kixel's pick. None of it is a verdict.
 
-When stdin and stdout are both a terminal, a card that names the settings to change asks
-whether to change them (y, n, or q to stop), shows the accepted edits as a diff of each
-file, and writes the profile's own settings.json only after a final yes, one edit per
-file. A change another owner would override is named to make by hand. Every other card is
-shown with no question. Without a terminal it prints the cards, each change naming its
-edit, and edits nothing.
+When stdin and stdout are both a terminal, the cards are a checklist, each unchecked: Space
+checks a card that names the settings to change, Enter shows the checked edits as a diff of
+each file, and y writes the profile's own settings.json, one edit per file. With --plain,
+each such card asks instead (y, n, or q to stop), and a final yes writes. A change another
+owner would override is named to make by hand. Every other card is shown with no question.
+Without a terminal it prints the cards, each change naming its edit, and edits nothing.
 
-It reads the hosts, profiles and window token-max doctor reads, with the same flags, and
-asks the same question about how each Claude profile pays.
+It reads the hosts, profiles and window token-max doctor reads, with the same flags; with
+--plain or off a terminal it asks the same question about how each Claude profile pays.
 
 Exit 0: printed, or walked. Exit 2: scan, pricing, argument or cancellation failure.
 ";

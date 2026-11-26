@@ -2740,7 +2740,7 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     let codex = json!({"timestamp": "2026-11-02T00:00:00Z", "type": "response_item", "payload": {"type": "function_call", "name": "shell", "arguments": json!({"command": ["bash", "-lc", "SECRET=SYNTHETIC_PRIVATE_TOKEN cargo test --release --features=SYNTHETIC_PRIVATE_ARGS SYNTHETIC_PRIVATE_ARGS && git commit -m \"synthetic_private; prose words\" && claude synthetic-private-prompt && cat <<EOF\nsynthetic_private prose\nEOF"], "workdir": "/w"}).to_string()}});
     let codex_output = json!({"type": "response_item", "payload": {"type": "function_call_output", "output": "SYNTHETIC_PRIVATE_OUTPUT"}});
     // A tool's own input keeps only its paths and command shape, whatever its keys are named.
-    let mcp = json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "mcp__notes__save", "input": {"name": "SYNTHETIC_PRIVATE_NAME", "status": "SYNTHETIC_PRIVATE_STATUS", "file_path": "/notes.md", "command": "echo synthetic-private-note A=1 B=2; NOTE=x\\ synthetic-private-word cat; RUST_LOG=debug \\\ncargo test --release"}}]}});
+    let mcp = json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "mcp__notes__save", "input": {"name": "SYNTHETIC_PRIVATE_NAME", "status": "SYNTHETIC_PRIVATE_STATUS", "file_path": "/notes.md", "command": "echo synthetic-private-note A=1 B=2; NOTE=x\\ synthetic-private-word cat; RUST_LOG=debug \\\ncargo test --release; TOKEN=demo\\\nsynthetic-private-token rg -n"}}]}});
     let lines = format!(
         "{}{codex}\n{codex_output}\n{mcp}\n",
         audited_session("s", &w.home)
@@ -2784,7 +2784,7 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     assert_eq!(records[5]["payload"]["output"], "<24 chars>");
     assert_eq!(
         records[6]["message"]["content"][0]["input"],
-        json!({"name": "<22 chars>", "status": "<24 chars>", "file_path": "/notes.md", "command": [["echo"], ["NOTE=", "cat"], ["RUST_LOG=", "cargo", "test", "--release"]]})
+        json!({"name": "<22 chars>", "status": "<24 chars>", "file_path": "/notes.md", "command": [["echo"], ["NOTE=", "cat"], ["RUST_LOG=", "cargo", "test", "--release"], ["TOKEN=", "rg", "-n"]]})
     );
 }
 

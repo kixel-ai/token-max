@@ -134,7 +134,7 @@ pub fn settled(items: Vec<Item>, written: &[Origin]) -> Vec<Item> {
 impl After {
     /// Whether the card replaces its item in `vibes`' walk, once an earlier card's change
     /// is accepted, rather than after `doctor`'s walk writes a line's change.
-    fn walked(&self) -> bool {
+    pub(crate) fn walked(&self) -> bool {
         self.origins.iter().all(|o| matches!(o, Origin::Vibe(_)))
     }
 }

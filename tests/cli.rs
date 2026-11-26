@@ -1918,7 +1918,7 @@ mod unix {
     }
 
     #[test]
-    fn doctor_rich_tui_applies_prechecked_wins_in_two_enters() {
+    fn doctor_rich_tui_applies_prechecked_wins_on_enter_then_y() {
         let w = Workspace::new();
         let prices = native_path(fixture("prices.json"));
         let settings = "{\n  \"promptCacheTtl\": \"5m\"\n}\n";
@@ -1972,11 +1972,21 @@ mod unix {
             "--prices-file",
             &prices,
         ];
+        // A doubled Enter opens the diff and writes nothing; `q` then leaves.
         let mut c = command(&w, &args);
         c.env("LANG", "C.UTF-8");
-        // Peek at Vibes (`v`), return to Measured (`v`), then Enter (diff) + Enter (write)!
-        // Verifies peeking at Vibes never clobbers the Measured offers/owner.
-        let (status, stdout, stderr) = typed(&mut c, b"vv\r\r");
+        let (status, stdout, stderr) = typed(&mut c, b"\r\rq");
+        assert_eq!(status, 0, "stdout={stdout}\nstderr={stderr}");
+        assert!(stdout.contains("no settings were changed"), "{stdout}");
+        assert_eq!(
+            std::fs::read_to_string(w.claude.join("settings.json")).unwrap(),
+            settings
+        );
+        let mut c = command(&w, &args);
+        c.env("LANG", "C.UTF-8");
+        // Peek at Vibes (`v`), return to Measured (`v`), then Enter (diff) and `y` (write),
+        // so peeking at Vibes never clobbers the Measured offers.
+        let (status, stdout, stderr) = typed(&mut c, b"vv\ry");
         assert_eq!(status, 0, "stdout={stdout}\nstderr={stderr}");
         assert!(
             !stdout.contains("How is ~/.claude paid for?"),

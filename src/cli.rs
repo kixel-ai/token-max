@@ -2583,13 +2583,17 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
                 Some(_) => crate::safe::terminal_text(&t),
                 None => t,
             };
-            kept.extend(rows.into_iter().map(|r| tui::KeptItem {
-                host_label: host.clone().or_else(|| (sections > 1).then(|| "this host".into())),
-                name: text(r.name),
-                value: text(r.value),
-                saving_usd: r.saving_usd,
-                default_value: r.default_value.map(text),
-                summary: text(r.summary),
+            kept.extend(rows.into_iter().map(|r| {
+                tui::KeptItem {
+                    host_label: host
+                        .clone()
+                        .or_else(|| (sections > 1).then(|| "this host".into())),
+                    name: text(r.name),
+                    value: text(r.value),
+                    saving_usd: r.saving_usd,
+                    default_value: r.default_value.map(text),
+                    summary: text(r.summary),
+                }
             }));
         }
         kept.sort_by(|a, b| match (a.saving_usd, b.saving_usd) {
@@ -3172,7 +3176,7 @@ fn run_tui(walk: Walk) -> Result<(), ScanError> {
             &mut self,
             plans: Vec<Option<crate::doctor::Plan>>,
             has_work: Vec<bool>,
-        ) -> Result<WriteResult, ScanError> {
+        ) -> WriteResult {
             enter(Phase::Writing);
             let mut lines = vec![];
             let mut files_written = 0usize;
@@ -3213,16 +3217,17 @@ fn run_tui(walk: Walk) -> Result<(), ScanError> {
                     }
                 }
             }
-            match error {
-                Some(mut err) if !skipped.is_empty() => {
+            // The hosts written before a failure stay written, so their receipts go with it.
+            let failed = error.map(|mut err| {
+                if !skipped.is_empty() {
                     err.message += &format!("; nothing was written on {}", skipped.join(", "));
-                    Err(err)
                 }
-                Some(err) => Err(err),
-                None => Ok(WriteResult {
-                    files_written,
-                    lines,
-                }),
+                err
+            });
+            WriteResult {
+                files_written,
+                lines,
+                failed,
             }
         }
     }
@@ -3235,7 +3240,7 @@ fn run_tui(walk: Walk) -> Result<(), ScanError> {
             self.preview_measured_events(events)
         }
 
-        fn write_measured(&mut self) -> Result<WriteResult, ScanError> {
+        fn write_measured(&mut self) -> WriteResult {
             let plans = std::mem::take(&mut self.measured_plans);
             let work = std::mem::take(&mut self.measured_work);
             self.write_planned(plans, work)
@@ -3259,35 +3264,54 @@ fn run_tui(walk: Walk) -> Result<(), ScanError> {
                             host.items = items;
                             self.vibes_owners.push(Some(owner));
                         }
-                        Side::There { offers, remote } => {
-                            let (items, theirs) = remote.vibes()?;
-                            host.items = items;
-                            *offers = theirs;
-                            self.vibes_owners.push(None);
-                        }
+                        // Asking a destination for `vibes` swaps its walk to `vibes`' offers,
+                        // which would leave Measured's answers naming the wrong changes there,
+                        // so its cards show read-only until `token-max vibes` asks for them.
+                        Side::There { .. } => self.vibes_owners.push(None),
                     }
                 }
                 self.vibes_loaded = true;
             }
             let mut rows = vec![];
             for (host_idx, host) in self.hosts.iter().enumerate() {
-                let offers = self
-                    .vibes_owners
-                    .get(host_idx)
-                    .and_then(Option::as_ref)
-                    .map(Owner::offers)
-                    .unwrap_or_else(|| host.offers());
+                let owner = self.vibes_owners.get(host_idx).and_then(Option::as_ref);
+                let offers = match (&host.side, owner) {
+                    (_, Some(owner)) => Some(owner.offers()),
+                    (Side::There { .. }, None) if !self.start_vibes => None,
+                    _ => Some(host.offers()),
+                };
                 for (item_idx, item) in host.items.iter().enumerate() {
-                    let origin = Origin::Vibe(item_idx);
-                    let offer_index = offers
-                        .offers
-                        .iter()
-                        .position(|o| o.fix.origins.contains(&origin));
+                    // Each version as `vibes`' walk would ask it, with the change it offers.
+                    let version = |item: &Item, origin: Origin, after: Vec<Origin>| {
+                        let change = offers
+                            .and_then(|o| o.change(origin))
+                            .filter(|_| !item.quiet);
+                        let (offer, accepts) = match change {
+                            Some(crate::doctor::Change::Offer(offer, fix)) => {
+                                (Some(offer), fix.origins.clone())
+                            }
+                            _ => (None, vec![]),
+                        };
+                        tui::VibeVersion {
+                            after,
+                            item: item.clone(),
+                            offer,
+                            accepts,
+                        }
+                    };
+                    let mut versions = vec![version(item, Origin::Vibe(item_idx), vec![])];
+                    for (k, after) in item.after.iter().enumerate().filter(|(_, a)| a.walked()) {
+                        versions.push(version(
+                            &after.item,
+                            Origin::Walked(item_idx, k),
+                            after.origins.clone(),
+                        ));
+                    }
                     rows.push(VibeRow {
                         host: host_idx,
                         host_label: host.label.clone(),
-                        item: item.clone(),
-                        offer_index,
+                        versions,
+                        shown: 0,
                         checked: false,
                     });
                 }
@@ -3300,7 +3324,7 @@ fn run_tui(walk: Walk) -> Result<(), ScanError> {
             self.preview_vibes_events(&events)
         }
 
-        fn write_vibes(&mut self) -> Result<WriteResult, ScanError> {
+        fn write_vibes(&mut self) -> WriteResult {
             let plans = std::mem::take(&mut self.vibes_plans);
             let work = std::mem::take(&mut self.vibes_work);
             self.write_planned(plans, work)

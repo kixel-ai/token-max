@@ -2,7 +2,7 @@
 //!
 //! Renders an inline viewport in normal scrollback (no alternate screen) with synchronized
 //! updates, safe-default pre-selection, live Plan/API billing recalculation, real measured
-//! ASCII proof charts, and a two-keypress path (`Enter` -> `Enter`) from findings to
+//! ASCII proof charts, and a two-keypress path (`Enter`, then `y`) from findings to
 //! confirmed atomic writes.
 
 use std::io::{self, Write};
@@ -22,7 +22,7 @@ use crate::doctor::{
     Event, Fix, How, Kind, Proof, Reason, Style, Walking, home_in, section_value, target, why,
 };
 use crate::model::ContextKind;
-use crate::report::{UP_TO, about, share_text};
+use crate::report::{Origin, UP_TO, about, share_text};
 use crate::safe::{ScanError, terminal_text};
 use crate::terminal::{WrapOptions, cells, fit, wrap_text};
 use crate::vibes::Item as VibeItem;
@@ -123,21 +123,74 @@ pub(crate) struct DiffPreview {
 }
 
 /// Outcome of writing the reviewed edits across hosts.
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub(crate) struct WriteResult {
     pub files_written: usize,
     pub lines: Vec<String>,
+    /// The write that failed, after the hosts in `lines` were written: those writes stand,
+    /// so the receipt prints them before the error.
+    pub failed: Option<ScanError>,
 }
 
-/// One vibes item projected for the Vibes tab.
+/// One vibes card projected for the Vibes tab.
 #[derive(Clone, Debug)]
 pub(crate) struct VibeRow {
     pub host: usize,
     pub host_label: Option<String>,
-    pub item: VibeItem,
-    /// Index into the host's vibes `Offers::offers`, when editable.
-    pub offer_index: Option<usize>,
+    /// The card as read, then each version rebuilt on accepting another card's change.
+    pub versions: Vec<VibeVersion>,
+    /// Which of `versions` shows, as [`resolve_vibes`] picks it.
+    pub shown: usize,
     pub checked: bool,
+}
+
+/// One version of a vibes card, and the change it offers.
+#[derive(Clone, Debug)]
+pub(crate) struct VibeVersion {
+    /// The changes whose acceptance on an earlier card shows this version; empty for the
+    /// card as read.
+    pub after: Vec<Origin>,
+    pub item: VibeItem,
+    /// Index into the host's vibes `Offers::offers`, when it offers one.
+    pub offer: Option<usize>,
+    /// The report lines its offer's change comes from, which accepting it accepts.
+    pub accepts: Vec<Origin>,
+}
+
+impl VibeRow {
+    /// The version showing.
+    pub(crate) fn item(&self) -> &VibeItem {
+        &self.versions[self.shown].item
+    }
+
+    /// The offer the showing version makes.
+    pub(crate) fn offer(&self) -> Option<usize> {
+        self.versions[self.shown].offer
+    }
+}
+
+/// Show each card's version as `vibes`' own walk does: the first rebuilt on a change checked on
+/// an earlier card of its host, else the card as read. A card whose version changes, or that
+/// offers nothing, is unchecked, so a check always means the change its card shows.
+pub(crate) fn resolve_vibes(rows: &mut [VibeRow]) {
+    let mut accepted: Vec<(usize, Origin)> = vec![];
+    for row in rows.iter_mut() {
+        let host = row.host;
+        let was = row.shown;
+        row.shown = row
+            .versions
+            .iter()
+            .skip(1)
+            .position(|v| v.after.iter().any(|o| accepted.contains(&(host, *o))))
+            .map_or(0, |p| p + 1);
+        let shown = &row.versions[row.shown];
+        if shown.offer.is_none() || row.shown != was {
+            row.checked = false;
+        }
+        if row.checked {
+            accepted.extend(shown.accepts.iter().map(|o| (host, *o)));
+        }
+    }
 }
 
 /// Host callbacks connecting the pure TUI state to local/SSH file planning and writing.
@@ -145,13 +198,13 @@ pub(crate) trait Bridge {
     /// Preview exact diffs for `events` (one `Vec<Event>` per host) on the measured changes.
     fn preview_measured(&mut self, events: &[Vec<Event>]) -> Result<DiffPreview, ScanError>;
     /// Atomically write the last previewed measured selections.
-    fn write_measured(&mut self) -> Result<WriteResult, ScanError>;
+    fn write_measured(&mut self) -> WriteResult;
     /// Load vibes entries (lazy on first switch to Vibes tab, or immediate for `vibes` command).
     fn load_vibes(&mut self) -> Result<Vec<VibeRow>, ScanError>;
     /// Preview exact diffs for the currently checked vibes `rows`.
     fn preview_vibes(&mut self, rows: &[VibeRow]) -> Result<DiffPreview, ScanError>;
     /// Atomically write the last previewed vibes selections.
-    fn write_vibes(&mut self) -> Result<WriteResult, ScanError>;
+    fn write_vibes(&mut self) -> WriteResult;
 }
 
 /// What happened when the interactive TUI exited.
@@ -172,6 +225,15 @@ struct MemberItem {
     entries_count: usize,
     denials_count: usize,
     checked: bool,
+    /// Also remove the configuration entries and add the `deniedMcpServers` entries the offer
+    /// names, which the plain walk asks apart after a yes: off until chosen with `r`.
+    extras: bool,
+}
+
+impl MemberItem {
+    fn has_extras(&self) -> bool {
+        self.entries_count + self.denials_count > 0
+    }
 }
 
 /// One already-turned-off MCP server cleanup entry.
@@ -224,6 +286,9 @@ pub(crate) struct App {
     show_caveats: bool,
     diff: Option<DiffPreview>,
     diff_scroll: usize,
+    /// Rows scrolled into a focused block taller than the list's window, clamped by each
+    /// render to what the block has.
+    block_scroll: std::cell::Cell<usize>,
     diff_tab: Tab,
     status_error: Option<String>,
     host_count: usize,
@@ -235,18 +300,27 @@ impl App {
     /// Build initial interactive state from every host's offered changes and hero totals.
     pub(crate) fn new(
         hosts: &[Walking<'_>],
-        hero: Hero,
+        mut hero: Hero,
         start_tab: Tab,
         color: bool,
         unicode: bool,
     ) -> Self {
+        for k in &mut hero.kept {
+            for text in [&mut k.name, &mut k.value, &mut k.summary]
+                .into_iter()
+                .chain(k.host_label.as_mut())
+                .chain(k.default_value.as_mut())
+            {
+                *text = terminal_text(text);
+            }
+        }
         let mut groups: Vec<Group> = vec![];
         let mut cleanups: Vec<CleanupItem> = vec![];
         let mut by_hand: Vec<(Option<String>, String, String, String)> = vec![];
         let mut has_unset_main_ttl = false;
 
         for (host_idx, walking) in hosts.iter().enumerate() {
-            let label = walking.label.map(str::to_string);
+            let label = walking.label.map(terminal_text);
             for (offer_index, offer) in walking.offers.offers.iter().enumerate() {
                 let fix = &offer.fix;
                 if is_unset_main_ttl(fix) {
@@ -255,10 +329,11 @@ impl App {
                 let member = MemberItem {
                     host: host_idx,
                     offer_index,
-                    fix: fix.clone(),
+                    fix: clean_fix(fix),
                     entries_count: offer.entries.len(),
                     denials_count: offer.denials.len(),
                     checked: false,
+                    extras: false,
                 };
                 // Costly tradeoffs (e.g. a single $87/mo skill like `dataviz`) stay ungrouped
                 // as their own top-level rows with their own bar graph so huge outliers stand out.
@@ -284,7 +359,7 @@ impl App {
                     host: host_idx,
                     host_label: label.clone(),
                     entry_index,
-                    server: entry.server.clone(),
+                    server: terminal_text(&entry.server),
                     checked: false,
                 });
             }
@@ -347,12 +422,38 @@ impl App {
             show_caveats: false,
             diff: None,
             diff_scroll: 0,
+            block_scroll: std::cell::Cell::new(0),
             diff_tab: start_tab,
             status_error: None,
             host_count: hosts.len(),
             color,
             unicode,
         }
+    }
+
+    /// Show the Vibes tab's `rows`, their text escaped and each card's version resolved.
+    pub(crate) fn set_vibes(&mut self, mut rows: Vec<VibeRow>) {
+        for row in &mut rows {
+            if let Some(label) = &mut row.host_label {
+                *label = terminal_text(label);
+            }
+            for v in &mut row.versions {
+                let item = &mut v.item;
+                for text in [
+                    &mut item.name,
+                    &mut item.value,
+                    &mut item.what,
+                    &mut item.text,
+                ]
+                .into_iter()
+                .chain(item.sources.iter_mut())
+                {
+                    *text = terminal_text(text);
+                }
+            }
+        }
+        resolve_vibes(&mut rows);
+        self.vibes = Some(rows);
     }
 
     /// Whether there are zero interactive items to prompt on in Measured mode.
@@ -441,7 +542,7 @@ impl App {
                 .map(|v| {
                     v.iter()
                         .enumerate()
-                        .filter(|(_, r)| !r.item.quiet || self.show_minor)
+                        .filter(|(_, r)| !r.item().quiet || self.show_minor)
                         .map(|(i, _)| Focus::Vibe(i))
                         .collect()
                 })
@@ -487,12 +588,73 @@ impl App {
             Focus::Vibe(vi) => {
                 if let Some(vibes) = &mut self.vibes
                     && let Some(row) = vibes.get_mut(vi)
-                    && row.offer_index.is_some()
+                    && row.offer().is_some()
                 {
                     row.checked = !row.checked;
+                    resolve_vibes(vibes);
                 }
             }
         }
+    }
+
+    /// Toggle whether the focused change also removes the configuration and adds the blocks
+    /// its offer names; a group toggles every member that has some.
+    pub(crate) fn toggle_extras(&mut self) {
+        let members: Vec<&mut MemberItem> = match self.current_focus() {
+            Some(Focus::Group(gi)) => self.groups[gi]
+                .members
+                .iter_mut()
+                .filter(|m| m.has_extras())
+                .collect(),
+            Some(Focus::Member(gi, mi)) => {
+                let m = &mut self.groups[gi].members[mi];
+                if m.has_extras() { vec![m] } else { vec![] }
+            }
+            _ => vec![],
+        };
+        let next = !members.iter().all(|m| m.extras);
+        for m in members {
+            m.extras = next;
+        }
+    }
+
+    /// The line under a change offering removals or blocks, saying whether they are chosen.
+    fn extras_line<'a>(
+        &self,
+        members: impl Iterator<Item = &'a MemberItem> + Clone,
+        indent: &str,
+        w: usize,
+    ) -> Option<String> {
+        let with: Vec<&MemberItem> = members.filter(|m| m.has_extras()).collect();
+        if with.is_empty() {
+            return None;
+        }
+        let entries: usize = with.iter().map(|m| m.entries_count).sum();
+        let denials: usize = with.iter().map(|m| m.denials_count).sum();
+        let mut what = vec![];
+        if entries > 0 {
+            what.push(format!(
+                "remove {entries} config entr{}",
+                if entries == 1 { "y" } else { "ies" }
+            ));
+        }
+        if denials > 0 {
+            what.push(format!("block {denials} by name wherever configured"));
+        }
+        let on = with.iter().all(|m| m.extras);
+        let box_str = if on {
+            self.style(GREEN, if self.unicode { "[✓]" } else { "[x]" })
+        } else {
+            self.style(DIM, "[ ]")
+        };
+        let text = self.fit_text(
+            &format!("also {}  [r]", what.join(" and ")),
+            w.saturating_sub(cells(indent) + 4),
+        );
+        Some(trim_ansi(
+            &format!("{indent}{box_str} {}", self.style(DIM, &text)),
+            w,
+        ))
     }
 
     /// Toggle all safe wins (non-suggested major items) on or off.
@@ -546,7 +708,7 @@ impl App {
                     offer: m.offer_index,
                     yes: m.checked,
                 });
-                if m.checked {
+                if m.checked && m.extras {
                     for entry in 0..m.entries_count {
                         events[m.host].push(Event::Remove {
                             offer: m.offer_index,
@@ -748,7 +910,7 @@ impl App {
             }
             Tab::Vibes => {
                 let count = self.vibes.as_deref().map_or(self.hero.vibes_pending, |v| {
-                    v.iter().filter(|r| !r.item.quiet).count()
+                    v.iter().filter(|r| !r.item().quiet).count()
                 });
                 body_lines.push(format!(
                     "{} {}",
@@ -787,7 +949,7 @@ impl App {
         if !self.start_vibes_only && (self.hero.vibes_pending > 0 || self.vibes.is_some()) {
             let m_cnt = self.groups.len() + self.cleanups.len();
             let v_cnt = self.vibes.as_deref().map_or(self.hero.vibes_pending, |v| {
-                v.iter().filter(|r| !r.item.quiet).count()
+                v.iter().filter(|r| !r.item().quiet).count()
             });
             let m_lbl = format!(" Measured ({m_cnt}) ");
             let v_lbl = format!(" Vibes ({v_cnt}) ");
@@ -870,7 +1032,7 @@ impl App {
                 ));
             }
         } else if let Some(vibes) = &self.vibes {
-            let quiet_cnt = vibes.iter().filter(|r| r.item.quiet).count();
+            let quiet_cnt = vibes.iter().filter(|r| r.item().quiet).count();
             if quiet_cnt > 0 {
                 let tri = if self.show_minor {
                     if self.unicode { "▾" } else { "v" }
@@ -1031,7 +1193,16 @@ impl App {
 
         // Window body lines so head + body + foot <= max_rows.
         let budget = max_rows.saturating_sub(head.len() + foot.len()).max(4);
-        let body = window_blocks(&body_blocks, budget, w, self.color, self.unicode);
+        let (body, max_scroll) = window_blocks(
+            &body_blocks,
+            budget,
+            w,
+            self.color,
+            self.unicode,
+            self.block_scroll.get(),
+        );
+        self.block_scroll
+            .set(self.block_scroll.get().min(max_scroll));
 
         let mut out = head;
         out.extend(body);
@@ -1170,6 +1341,11 @@ impl App {
             &format!("{left_part}{}{right_part}", " ".repeat(gap)),
             w,
         )];
+        if !g.split
+            && let Some(line) = self.extras_line(g.members.iter(), "          ", w)
+        {
+            rows.push(line);
+        }
 
         // Crisp 1-line subtitle on the focused row (with cost-per-use callout for tradeoffs!).
         if focused {
@@ -1269,6 +1445,9 @@ impl App {
             &format!("{left}{}{usd_styled}", " ".repeat(gap)),
             w,
         )];
+        if let Some(line) = self.extras_line(std::iter::once(m), "              ", w) {
+            rows.push(line);
+        }
         if expanded {
             let _ = max_usd;
             rows.extend(self.render_fix_proof(&m.fix, w));
@@ -1465,7 +1644,7 @@ impl App {
         } else {
             " ".into()
         };
-        let box_str = if v.offer_index.is_none() {
+        let box_str = if v.offer().is_none() {
             self.style(DIM, if self.unicode { " · " } else { " - " })
         } else if v.checked {
             let chk = if self.unicode { "✓" } else { "x" };
@@ -1478,14 +1657,14 @@ impl App {
             .as_deref()
             .map(|h| format!("[{h}] "))
             .unwrap_or_default();
-        let val = if v.item.value.is_empty() {
+        let val = if v.item().value.is_empty() {
             String::new()
         } else {
-            format!("  {}", self.style(DIM, &v.item.value))
+            format!("  {}", self.style(DIM, &terminal_text(&v.item().value)))
         };
-        let source = concise_vibe_source(&v.item.sources);
+        let source = concise_vibe_source(&v.item().sources);
         let tag = self.style(DIM, source);
-        let name = self.fit_text(&format!("{host}{}", v.item.name), w.saturating_sub(24));
+        let name = self.fit_text(&format!("{host}{}", v.item().name), w.saturating_sub(24));
         let name_styled = if focused {
             self.style(BOLD, &name)
         } else {
@@ -1505,7 +1684,7 @@ impl App {
             let wrap_w = w.saturating_sub(11).max(20);
             if expanded {
                 rows.push(String::new());
-                let simple = concise_vibe_copy(&v.item);
+                let simple = concise_vibe_copy(v.item());
                 for line in wrap_text(
                     &simple,
                     WrapOptions {
@@ -1586,7 +1765,7 @@ impl App {
             let max_name = g
                 .members
                 .iter()
-                .map(|m| cells(&m.fix.section.member))
+                .map(|m| cells(&terminal_text(&m.fix.section.member)))
                 .max()
                 .unwrap_or(10)
                 .min(wrap_w.saturating_sub(24).max(12));
@@ -1599,8 +1778,8 @@ impl App {
 
             for m in &g.members {
                 let usd = effective_saving(&m.fix, self.billing);
-                let name = &m.fix.section.member;
-                let pad = " ".repeat(max_name.saturating_sub(cells(name)));
+                let name = fit_plain(&m.fix.section.member, max_name, self.unicode);
+                let pad = " ".repeat(max_name.saturating_sub(cells(&name)));
                 let bar = if bar_w > 0 && top_member_usd > 0.0 {
                     let ratio = usd.unwrap_or(0.0) / top_member_usd;
                     let filled = if ratio > 0.0 {
@@ -1852,14 +2031,14 @@ impl App {
         foot.push(trim_ansi(
             &format!(
                 "  {}  {}  {}",
-                self.style(&format!("{BOLD}{GREEN}"), "[Enter] Write settings"),
+                self.style(&format!("{BOLD}{GREEN}"), "[y] Write settings"),
                 self.style(DIM, "[Esc] Back"),
                 self.style(DIM, "[q] Cancel"),
             ),
             w,
         ));
 
-        let raw_lines: Vec<String> = diff.text.lines().map(|l| trim_ansi(l, w)).collect();
+        let raw_lines: Vec<String> = diff.text.lines().flat_map(|l| wrap_ansi(l, w)).collect();
         let budget = max_rows.saturating_sub(head.len() + foot.len()).max(4);
         let max_scroll = raw_lines.len().saturating_sub(budget);
         let scroll = self.diff_scroll.min(max_scroll);
@@ -2045,7 +2224,7 @@ pub(crate) fn run(
     bridge: &mut impl Bridge,
 ) -> Result<ExitKind, ScanError> {
     if app.tab == Tab::Vibes {
-        app.vibes = Some(bridge.load_vibes()?);
+        app.set_vibes(bridge.load_vibes()?);
     }
 
     // All-clear fast path: print crisp Hero Card + already-good green checks + manual steps.
@@ -2095,12 +2274,24 @@ pub(crate) fn run(
         let TermEvent::Key(KeyEvent {
             code,
             modifiers,
-            kind: KeyEventKind::Press | KeyEventKind::Repeat,
+            kind,
             ..
         }) = ev
         else {
             continue;
         };
+        // Only moving and scrolling repeat when a key is held; every action takes its own press.
+        let moves = matches!(
+            code,
+            KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Char('j' | 'k')
+        );
+        if kind == KeyEventKind::Release || (kind == KeyEventKind::Repeat && !moves) {
+            continue;
+        }
 
         // Ctrl-C always cancels cleanly without touching files.
         if modifiers.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char('c' | 'C')) {
@@ -2110,8 +2301,18 @@ pub(crate) fn run(
 
         app.status_error = None;
 
+        if !matches!(code, KeyCode::PageUp | KeyCode::PageDown) {
+            app.block_scroll.set(0);
+        }
         match app.screen {
             Screen::List => match code {
+                KeyCode::PageDown => {
+                    app.block_scroll.set(app.block_scroll.get() + 1);
+                }
+                KeyCode::PageUp => {
+                    app.block_scroll
+                        .set(app.block_scroll.get().saturating_sub(1));
+                }
                 KeyCode::Char('q') => {
                     viewport.clear(&mut stdout).ok();
                     drop(_raw);
@@ -2178,6 +2379,9 @@ pub(crate) fn run(
                 KeyCode::Char('a') => {
                     app.toggle_all_safe();
                 }
+                KeyCode::Char('r') => {
+                    app.toggle_extras();
+                }
                 KeyCode::Char('b') => {
                     app.cycle_billing();
                 }
@@ -2194,7 +2398,7 @@ pub(crate) fn run(
                         if app.tab == Tab::Measured {
                             if app.vibes.is_none() {
                                 match bridge.load_vibes() {
-                                    Ok(rows) => app.vibes = Some(rows),
+                                    Ok(rows) => app.set_vibes(rows),
                                     Err(e) => {
                                         app.status_error = Some(e.message);
                                         continue;
@@ -2269,16 +2473,28 @@ pub(crate) fn run(
                 KeyCode::Down | KeyCode::Char('j') => {
                     app.diff_scroll = app.diff_scroll.saturating_add(1);
                 }
-                KeyCode::Enter | KeyCode::Char('y') => {
+                // Enter opened this screen, so writing takes `y`: a held or doubled Enter, which
+                // a terminal sends as more presses, never writes before the diff is read.
+                KeyCode::Char('y') => {
                     let saved_usd = if app.diff_tab == Tab::Measured {
                         app.selected_usd()
                     } else {
                         0.0
                     };
                     let written = match app.diff_tab {
-                        Tab::Measured => bridge.write_measured()?,
-                        Tab::Vibes => bridge.write_vibes()?,
+                        Tab::Measured => bridge.write_measured(),
+                        Tab::Vibes => bridge.write_vibes(),
                     };
+                    if let Some(failed) = written.failed {
+                        // What was written before the failure stands, so it prints first.
+                        viewport.clear(&mut stdout).ok();
+                        drop(_raw);
+                        for line in &written.lines {
+                            let _ = writeln!(stdout, "  {line}");
+                        }
+                        let _ = stdout.flush();
+                        return Err(failed);
+                    }
                     // Snappy coin-drop celebration before printing the permanent receipt!
                     play_coin_drop(&mut stdout, &mut viewport, app.color, app.unicode);
                     viewport.clear(&mut stdout).ok();
@@ -2337,15 +2553,22 @@ pub(crate) fn run(
     }
 }
 
-/// Helper used by `cli.rs` to construct vibes events from `VibeRow`s.
+/// Each host's answers to the offers `rows` show: one per offer, yes when any card showing it
+/// is checked, since two cards can name one edit.
 pub(crate) fn vibes_events_from(rows: &[VibeRow], host_count: usize) -> Vec<Vec<Event>> {
     let mut events: Vec<Vec<Event>> = (0..host_count).map(|_| vec![]).collect();
     for row in rows {
-        if let Some(offer_index) = row.offer_index {
-            events[row.host].push(Event::Choose {
-                offer: offer_index,
+        let Some(offer) = row.offer() else { continue };
+        let answered = events[row.host].iter_mut().find_map(|e| match e {
+            Event::Choose { offer: o, yes } if *o == offer => Some(yes),
+            _ => None,
+        });
+        match answered {
+            Some(yes) => *yes |= row.checked,
+            None => events[row.host].push(Event::Choose {
+                offer,
                 yes: row.checked,
-            });
+            }),
         }
     }
     events
@@ -2369,8 +2592,13 @@ fn write_by_hand(
     for (host, name, step, reason) in steps {
         let prefix = host
             .as_deref()
-            .map(|h| format!("[{h}] "))
+            .map(|h| format!("[{}] ", terminal_text(h)))
             .unwrap_or_default();
+        let (name, step, reason) = (
+            terminal_text(name),
+            terminal_text(step),
+            terminal_text(reason),
+        );
         if color {
             writeln!(out, "  {DIM}·{RESET} {BOLD}{prefix}{name}{RESET}: {step}")?;
             writeln!(out, "    {DIM}({reason}){RESET}")?;
@@ -2611,6 +2839,24 @@ impl InlineViewport {
     }
 }
 
+/// `fix` with the text the TUI prints escaped: names and settings come from transcripts and
+/// configuration, or a destination, and may hold terminal controls.
+fn clean_fix(fix: &Fix) -> Fix {
+    let mut fix = fix.clone();
+    for text in [
+        &mut fix.name,
+        &mut fix.value,
+        &mut fix.what,
+        &mut fix.evidence,
+        &mut fix.section.label,
+        &mut fix.section.member,
+        &mut fix.profile,
+    ] {
+        *text = terminal_text(text);
+    }
+    fix
+}
+
 fn is_unset_main_ttl(fix: &Fix) -> bool {
     fix.section.kind == Kind::CacheTtl && fix.section.member == "main" && fix.verb == UP_TO
 }
@@ -2640,23 +2886,52 @@ fn group_usd(g: &Group, billing: BillingMode) -> Option<f64> {
     any.then_some(sum)
 }
 
-/// Window rendered item blocks so the focused block is always visible within `budget` rows.
+/// Window rendered item blocks so the focused block is always visible within `budget` rows,
+/// and return the furthest `scroll` can go. A focused block taller than the window shows the
+/// rows from `scroll` on, with a line saying which, so a long proof never pushes out the keys.
 fn window_blocks(
     blocks: &[(bool, Vec<String>)],
     budget: usize,
     width: usize,
     color: bool,
     unicode: bool,
-) -> Vec<String> {
+    scroll: usize,
+) -> (Vec<String>, usize) {
     let total_lines: usize = blocks.iter().map(|(_, l)| l.len()).sum();
     if total_lines <= budget {
-        return blocks.iter().flat_map(|(_, l)| l.iter().cloned()).collect();
+        return (
+            blocks.iter().flat_map(|(_, l)| l.iter().cloned()).collect(),
+            0,
+        );
     }
     let focus_idx = blocks.iter().position(|(f, _)| *f).unwrap_or(0);
+    let inner_budget = budget.saturating_sub(2).max(1);
+    let dim = |msg: String| {
+        let fitted = fit_plain(&msg, width, unicode);
+        if color {
+            format!("{DIM}{fitted}{RESET}")
+        } else {
+            fitted
+        }
+    };
+    let focused = &blocks[focus_idx].1;
+    if focused.len() > inner_budget {
+        let room = inner_budget.saturating_sub(1).max(1);
+        let max_scroll = focused.len() - room;
+        let from = scroll.min(max_scroll);
+        let mut out: Vec<String> = focused[from..from + room].to_vec();
+        out.push(dim(format!(
+            "  (PgUp/PgDn scroll{}lines {}-{} of {})",
+            if unicode { " · " } else { " | " },
+            from + 1,
+            from + room,
+            focused.len()
+        )));
+        return (out, max_scroll);
+    }
     let mut start = focus_idx;
     let mut end = focus_idx + 1;
-    let mut used = blocks[focus_idx].1.len();
-    let inner_budget = budget.saturating_sub(2).max(1);
+    let mut used = focused.len();
     loop {
         let mut grew = false;
         if end < blocks.len() && used + blocks[end].1.len() <= inner_budget {
@@ -2676,26 +2951,16 @@ fn window_blocks(
     let mut out = vec![];
     let (up, down) = if unicode { ("↑", "↓") } else { ("^", "v") };
     if start > 0 {
-        let msg = format!("  {up} {start} more above");
-        out.push(if color {
-            format!("{DIM}{}{RESET}", fit_plain(&msg, width, unicode))
-        } else {
-            fit_plain(&msg, width, unicode)
-        });
+        out.push(dim(format!("  {up} {start} more above")));
     }
     for (_, lines) in &blocks[start..end] {
         out.extend(lines.iter().cloned());
     }
     if end < blocks.len() {
         let more = blocks.len() - end;
-        let msg = format!("  {down} {more} more below");
-        out.push(if color {
-            format!("{DIM}{}{RESET}", fit_plain(&msg, width, unicode))
-        } else {
-            fit_plain(&msg, width, unicode)
-        });
+        out.push(dim(format!("  {down} {more} more below")));
     }
-    out
+    (out, 0)
 }
 
 /// Format an integer with comma thousands separators.
@@ -2758,6 +3023,55 @@ fn pad_ansi(s: &str, target_cells: usize) -> String {
     } else {
         trimmed
     }
+}
+
+/// Split an ANSI-styled line into rows of at most `max_cells` cells, so none of it is cut
+/// off; each row closes the style it ends in and the next reopens it.
+fn wrap_ansi(s: &str, max_cells: usize) -> Vec<String> {
+    let max_cells = max_cells.max(1);
+    let mut rows = vec![];
+    let mut row = String::new();
+    let mut used = 0usize;
+    // The SGR sequences in effect since the last reset.
+    let mut active = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            let mut seq = String::from(c);
+            seq.push(chars.next().expect("peeked '['"));
+            let mut code = String::new();
+            for next in chars.by_ref() {
+                seq.push(next);
+                if next.is_ascii_alphabetic() {
+                    if next == 'm' {
+                        if code.is_empty() || code == "0" {
+                            active.clear();
+                        } else {
+                            active.push_str(&seq);
+                        }
+                    }
+                    break;
+                }
+                code.push(next);
+            }
+            row.push_str(&seq);
+            continue;
+        }
+        let mut buf = [0u8; 4];
+        let w = cells(c.encode_utf8(&mut buf));
+        if used + w > max_cells && used > 0 {
+            if !active.is_empty() {
+                row.push_str(RESET);
+            }
+            rows.push(std::mem::take(&mut row));
+            row.push_str(&active);
+            used = 0;
+        }
+        row.push(c);
+        used += w;
+    }
+    rows.push(row);
+    rows
 }
 
 /// Clip an ANSI-styled string to at most `max_cells` display cells, closing any open SGR sequence.
@@ -3032,5 +3346,273 @@ mod tests {
         assert!(!ro_frame.contains("Review diff"), "{ro_frame}");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn item(name: &str) -> VibeItem {
+        VibeItem {
+            name: name.into(),
+            value: String::new(),
+            what: String::new(),
+            text: String::new(),
+            sources: vec![],
+            how: None,
+            quiet: false,
+            after: vec![],
+            defers: None,
+        }
+    }
+
+    fn version(after: Vec<Origin>, offer: usize, accepts: Vec<Origin>) -> VibeVersion {
+        VibeVersion {
+            after,
+            item: item("card"),
+            offer: Some(offer),
+            accepts,
+        }
+    }
+
+    #[test]
+    fn a_rebuilt_card_follows_the_check_on_an_earlier_card() {
+        // Card 1 offers its own change, and another once card 0's change is accepted, as an
+        // advisor card does once an Opus main default is.
+        let mut rows = vec![
+            VibeRow {
+                host: 0,
+                host_label: None,
+                versions: vec![version(vec![], 0, vec![Origin::Vibe(0)])],
+                shown: 0,
+                checked: false,
+            },
+            VibeRow {
+                host: 0,
+                host_label: None,
+                versions: vec![
+                    version(vec![], 1, vec![Origin::Vibe(1)]),
+                    version(vec![Origin::Vibe(0)], 2, vec![Origin::Walked(1, 0)]),
+                ],
+                shown: 0,
+                checked: true,
+            },
+        ];
+        resolve_vibes(&mut rows);
+        let choose = |offer, yes| Event::Choose { offer, yes };
+        assert_eq!(
+            vibes_events_from(&rows, 1),
+            [vec![choose(0, false), choose(1, true)]]
+        );
+        // Checking card 0 shows card 1's rebuilt version, unchecked: its check was for the
+        // change it no longer shows.
+        rows[0].checked = true;
+        resolve_vibes(&mut rows);
+        assert_eq!(rows[1].shown, 1);
+        assert!(!rows[1].checked);
+        assert_eq!(
+            vibes_events_from(&rows, 1),
+            [vec![choose(0, true), choose(2, false)]]
+        );
+        // Another host's acceptance moves nothing here.
+        rows[1].host = 1;
+        resolve_vibes(&mut rows);
+        assert_eq!(rows[1].shown, 0);
+    }
+
+    #[test]
+    fn two_cards_naming_one_edit_answer_it_once() {
+        let rows: Vec<VibeRow> = [true, false]
+            .into_iter()
+            .map(|checked| VibeRow {
+                host: 0,
+                host_label: None,
+                versions: vec![version(vec![], 3, vec![])],
+                shown: 0,
+                checked,
+            })
+            .collect();
+        assert_eq!(
+            vibes_events_from(&rows, 1),
+            [vec![Event::Choose {
+                offer: 3,
+                yes: true
+            }]]
+        );
+    }
+
+    #[test]
+    fn removals_and_blocks_wait_for_their_own_choice() {
+        let mut app = App::new(&[], Hero::default(), Tab::Measured, false, false);
+        app.host_count = 1;
+        let fix = sample_fix(
+            "MCP server gmail",
+            "on -> off",
+            5.0,
+            false,
+            Section {
+                kind: Kind::Feature(ContextKind::McpServer, Reason::Unused),
+                label: "Never-used MCP servers".into(),
+                member: "gmail".into(),
+                location: None,
+            },
+            "/synthetic/settings.json",
+        );
+        app.groups.push(Group {
+            host: 0,
+            host_label: None,
+            members: vec![MemberItem {
+                host: 0,
+                offer_index: 0,
+                fix,
+                entries_count: 2,
+                denials_count: 1,
+                checked: true,
+                extras: false,
+            }],
+            split: false,
+            minor: false,
+        });
+        let frame = app.render(90, 40).join("\n");
+        assert!(
+            frame.contains("[ ] also remove 2 config entries and block 1"),
+            "{frame}"
+        );
+        assert_eq!(
+            app.measured_events(),
+            [vec![Event::Choose {
+                offer: 0,
+                yes: true
+            }]]
+        );
+        app.toggle_extras();
+        assert_eq!(
+            app.measured_events(),
+            [vec![
+                Event::Choose {
+                    offer: 0,
+                    yes: true
+                },
+                Event::Remove { offer: 0, entry: 0 },
+                Event::Remove { offer: 0, entry: 1 },
+                Event::Deny { offer: 0, name: 0 },
+            ]]
+        );
+        // Unchecking the change drops its extras with it.
+        app.toggle_focused();
+        assert_eq!(
+            app.measured_events(),
+            [vec![Event::Choose {
+                offer: 0,
+                yes: false
+            }]]
+        );
+    }
+
+    #[test]
+    fn terminal_controls_in_names_print_escaped() {
+        let evil = "gmail\u{1b}]0;owned\u{7}\u{1b}[2J";
+        let mut app = App::new(&[], Hero::default(), Tab::Measured, false, true);
+        app.host_count = 1;
+        let section = |member: &str| Section {
+            kind: Kind::Feature(ContextKind::McpServer, Reason::Unused),
+            label: "Never-used MCP servers".into(),
+            member: member.into(),
+            location: None,
+        };
+        let members = [evil, "drive"]
+            .into_iter()
+            .enumerate()
+            .map(|(offer_index, name)| MemberItem {
+                host: 0,
+                offer_index,
+                fix: clean_fix(&sample_fix(
+                    name,
+                    "on -> off",
+                    5.0,
+                    false,
+                    section(name),
+                    "/s",
+                )),
+                entries_count: 0,
+                denials_count: 0,
+                checked: false,
+                extras: false,
+            })
+            .collect();
+        app.groups.push(Group {
+            host: 0,
+            host_label: None,
+            members,
+            split: false,
+            minor: false,
+        });
+        app.expanded = Some(Focus::Group(0));
+        let frame = app.render(90, 40).join("\n");
+        assert!(frame.contains("gmail\\u001b]0;owned"), "{frame}");
+        assert!(
+            !frame.contains('\u{1b}') && !frame.contains('\u{7}'),
+            "{frame}"
+        );
+
+        let mut by_hand = vec![];
+        let steps = [(
+            Some(evil.to_string()),
+            evil.into(),
+            evil.into(),
+            evil.into(),
+        )];
+        write_by_hand(&mut by_hand, &steps, false).unwrap();
+        let by_hand = String::from_utf8(by_hand).unwrap();
+        assert!(
+            !by_hand.contains('\u{1b}') && !by_hand.contains('\u{7}'),
+            "{by_hand}"
+        );
+    }
+
+    #[test]
+    fn a_proof_taller_than_the_window_scrolls_and_keeps_the_keys() {
+        let lines = |n: usize, tag: &str| (0..n).map(|i| format!("{tag}{i}")).collect();
+        let blocks = vec![
+            (false, lines(3, "a")),
+            (true, lines(50, "p")),
+            (false, lines(3, "b")),
+        ];
+        let (out, max) = window_blocks(&blocks, 10, 80, false, false, 0);
+        assert!(out.len() <= 10, "{out:?}");
+        assert_eq!(out[0], "p0");
+        assert_eq!(max, 50 - 7);
+        let (out, _) = window_blocks(&blocks, 10, 80, false, false, 1000);
+        assert_eq!(out[out.len() - 2], "p49");
+        assert!(out[out.len() - 1].contains("lines 44-50 of 50"), "{out:?}");
+    }
+
+    #[test]
+    fn a_long_diff_line_wraps_whole() {
+        let long = format!("{GREEN}+ \"{}\"{RESET} tail", "x".repeat(230));
+        let rows = wrap_ansi(&long, 80);
+        assert_eq!(rows.len(), 3);
+        let plain = |s: &str| {
+            let mut out = String::new();
+            let mut chars = s.chars();
+            while let Some(c) = chars.next() {
+                if c == '\u{1b}' {
+                    for n in chars.by_ref() {
+                        if n.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        };
+        assert!(rows.iter().all(|r| ansi_cells(r) <= 80), "{rows:?}");
+        assert_eq!(
+            rows.iter().map(|r| plain(r)).collect::<String>(),
+            plain(&long)
+        );
+        // A row ending inside the style closes it, and the next reopens it.
+        assert!(
+            rows[0].ends_with(RESET) && rows[1].starts_with(GREEN),
+            "{rows:?}"
+        );
     }
 }

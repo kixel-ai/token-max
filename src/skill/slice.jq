@@ -13,10 +13,11 @@ def simple: ((to_entries | map(select(.value | test("^[A-Za-z_][A-Za-z0-9_]*=") 
 # past it), whose `&&` and `||` join no commands, and `$(...)`, `((...))`, `<(...)` and an
 # array's `=(...)` as the shell nests them; a continuation is deleted, a comment dropped, and a
 # heredoc ends it, since its body is data, as do PowerShell's here-string (`@'` or `@"` ending
-# its line) and block comment (`<#`), whose quotes this reader would misread.
-def mask: reduce (explode[] | [.] | implode) as $c ({o: "", s: ["t"], e: false, p: "", q: "", x: false, r: false};
+# its line but for spaces or tabs) and block comment (`<#`), whose quotes this reader would
+# misread.
+def mask: reduce (explode[] | [.] | implode) as $c ({o: "", s: ["t"], e: false, p: "", q: "", x: false, r: false, h: false};
   if .x then .
-  elif ($c == "\n" or $c == "\r") and (.p == "'" or .p == "\"") and .q == "@" then .x = true
+  elif .h and ($c == "\n" or $c == "\r") then .x = true
   elif .e then .e = false | if $c == "\n" then . else .o += "%%" | .p = "%" end
   else (if .r and ($c | test("^[^\\s;&|()<>]$")) then .s += ["k"] else . end) | .r = false | .s[-1] as $t
     | if $t == "c" then (if $c == "\n" then .s |= .[:-1] | .o += (if .s[-1] == "t" then "\n" else "%" end) else . end)
@@ -35,6 +36,7 @@ def mask: reduce (explode[] | [.] | implode) as $c ({o: "", s: ["t"], e: false, 
       elif $c == "[" and .p == "[" then .s += ["k"] | .o += "%"
       elif $c == "(" and (.p | IN("$", "=", "<", ">", "(")) then .s += ["u"] | .o += "%"
       else .o += $c end
+    | .h = ((($c == "'" or $c == "\"") and .p == "@") or (.h and ($c == " " or $c == "\t")))
     | if .e then . else .q = .p | .p = $c end
   end) | .o;
 def cmd: if type == "array" then map(tostring)

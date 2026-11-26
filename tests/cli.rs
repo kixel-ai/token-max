@@ -2745,8 +2745,9 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     let escaped = json!({"command": "api_key\\=synthetic-private-key; api_key\\=synthetic-private/git status; KEY=$(echo synthetic-private-sub x) cargo build; printf % 'literal $(' \"x); synthetic-private-word; y\""});
     let answers = json!({"type": "user", "toolUseResult": {"answers": {"SYNTHETIC_PRIVATE_QUESTION text?": "SYNTHETIC_PRIVATE_ANSWER", "SYNTHETIC_PRIVATE_WORD": "yes"}}});
     // A comment's apostrophe opens no quote, and a heredoc's body is data, even in `$(...)`,
-    // as are a PowerShell here-string's and block comment's.
-    let comment = json!({"command": "# don't\ngit commit -m 'fix; synthetic-private word'\n$t = @'\nit's synthetic-private\nsynthetic-private words\n'@"});
+    // as are a PowerShell here-string's, even with spaces or tabs after its opener, and a block
+    // comment's.
+    let comment = json!({"command": "# don't\ngit commit -m 'fix; synthetic-private word'\n$t = @' \t\nit's synthetic-private\nsynthetic-private words\n'@"});
     let heredoc = json!({"command": "v=$(cat <<'EOF'\n)\nsynthetic-private-word\nEOF\n)"});
     // An arithmetic command's operands are no commands, neither a character class's `]]` nor
     // one a word goes on past ends a conditional, and a short option's attached value is no flag.

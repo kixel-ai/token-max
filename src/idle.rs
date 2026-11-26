@@ -3488,6 +3488,7 @@ mod tests {
             idle_attribution: IdleAttribution::Unknown,
             shell: None,
             file: None,
+            bytes: None,
             meta: crate::model::EventMeta {
                 harness: Harness::Claude,
                 session: "sample".into(),
@@ -3503,6 +3504,7 @@ mod tests {
                 usable_window: None,
                 tool: None,
                 t3: None,
+                thread: None,
                 pricing: Some(std::sync::Arc::new(Pricing {
                     model: Some("claude-opus-5-5".into()),
                     provider: Some("anthropic".into()),

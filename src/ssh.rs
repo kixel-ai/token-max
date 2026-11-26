@@ -1,10 +1,10 @@
 //! Audits of selected SSH destinations, each run by this build of `token-max` there.
 //!
 //! The coordinator runs `token-max doctor --ssh-scan`, or `token-max sessions --ssh-scan` for
-//! session lines, on each destination through the local OpenSSH client, with its configuration,
+//! session lines or `token-max audit --ssh-scan` for an audit's findings, on each destination through the local OpenSSH client, with its configuration,
 //! authentication and host keys. The destination reads its own histories and settings, prices
-//! them with the coordinator's catalog, and sends back only its printed report or its session
-//! lines (see [`crate::wire`]); its scan never leaves it.
+//! them with the coordinator's catalog, and sends back only its printed report, its session
+//! lines or its audit's ranked findings (see [`crate::wire`]); its scan never leaves it.
 //!
 //! For a walk through a report's changes, the audit stays open: the destination keeps the
 //! settings files it read, and this host sends it the person's answers and their confirm, so
@@ -23,6 +23,7 @@ use std::sync::{Mutex, OnceLock, PoisonError, mpsc};
 
 use sha2::{Digest, Sha256};
 
+use crate::audit::{Audit, Options, audit};
 use crate::cli::{Printed, Render, Rendered, render};
 use crate::discovery::{DiscoveryOptions, discover};
 use crate::doctor::{Event, Offers, Owner, Plan, Style, Written, preview, write as write_plan};
@@ -149,6 +150,8 @@ pub enum Scope {
     Report { defaults: bool },
     /// Session lines.
     Sessions,
+    /// An audit's findings.
+    Audit,
 }
 
 impl Scope {
@@ -157,6 +160,7 @@ impl Scope {
         match self {
             Scope::Report { .. } => Reach::History,
             Scope::Sessions => Reach::Window,
+            Scope::Audit => Reach::Replay,
         }
     }
 
@@ -176,6 +180,7 @@ impl Scope {
                 Limit::END,
             ]),
             Scope::Sessions => Limit::stream(&[Limit::HEADER, Limit::SESSIONS, Limit::END]),
+            Scope::Audit => Limit::stream(&[Limit::HEADER, Limit::AUDIT, Limit::END]),
         }
     }
 }
@@ -185,6 +190,7 @@ fn run_command(binary: &Binary, since: Option<Millis>, scope: Scope) -> String {
     let command = match scope {
         Scope::Report { .. } => "doctor",
         Scope::Sessions => "sessions",
+        Scope::Audit => "audit",
     };
     let mut args = vec![
         std::env::consts::OS,
@@ -321,6 +327,8 @@ pub enum Reply {
     Vibes(Advice),
     /// Its sessions, ordered by first request, each without a host.
     Sessions(Vec<sessions::Session>),
+    /// Its audit's findings, each pointer without a host.
+    Audit(Box<Audit>),
 }
 
 /// What `vibes` has on a destination.
@@ -482,6 +490,7 @@ pub struct Connected {
     session: Session,
     stream: Stream<BufReader<ChildStdout>>,
     since: Option<Millis>,
+    scope: Scope,
     profiles: Option<Profiles>,
 }
 
@@ -572,12 +581,13 @@ pub fn connect(
                 }));
             }
         },
-        Scope::Sessions => None,
+        Scope::Sessions | Scope::Audit => None,
     };
     Ok(Connected {
         session,
         stream,
         since,
+        scope,
         profiles,
     })
 }
@@ -598,6 +608,7 @@ impl Connected {
             mut session,
             mut stream,
             since,
+            scope,
             profiles,
         } = self;
         if profiles.is_some()
@@ -614,22 +625,29 @@ impl Connected {
             // Dropped without a request when this host fails first, and then stops every destination.
             let _ = forward.send(request.recv().map_or(Step::Cancelled, Step::Request));
         });
-        let limit = match profiles {
-            Some(_) => Limit::REPORT,
-            None => Limit::SESSIONS,
+        let limit = match scope {
+            Scope::Report { .. } => Limit::REPORT,
+            Scope::Sessions => Limit::SESSIONS,
+            Scope::Audit => Limit::AUDIT,
         };
         std::thread::spawn(move || {
             let outcome = stream.value(limit);
             let _ = steps.send(Step::Outcome(outcome, Box::new(stream)));
         });
-        // What the job asked for, once it is sent: sessions, or whether it is walked and
-        // whether it is `vibes`' advice instead of the report.
+        // What the job asked for, once it is sent: sessions or an audit, or whether it is
+        // walked and whether it is `vibes`' advice instead of the report.
         let mut requested = None;
+        // The most entries an audit's list may hold.
+        let mut entries = 0;
         let (outcome, mut stream) = loop {
             match arrived.recv() {
                 Ok(Step::Request(request)) => {
                     requested = Some(match request.job {
                         Job::Sessions => None,
+                        Job::Audit { limit, .. } => {
+                            entries = limit;
+                            None
+                        }
                         Job::Report { walk, vibes, .. } => Some((walk, vibes)),
                     });
                     if let Some(stdin) = session.stdin.as_mut() {
@@ -685,6 +703,7 @@ impl Connected {
             Ok(Outcome::Sessions { since, sessions }) => {
                 (since, Reply::Sessions(sessions), None, false)
             }
+            Ok(Outcome::Audit { since, audit }) => (since, Reply::Audit(audit), None, false),
             Ok(Outcome::Profiles { .. } | Outcome::Reviewed { .. } | Outcome::Wrote { .. }) => {
                 return Err(session.wrong_result(None));
             }
@@ -727,7 +746,14 @@ impl Connected {
                     _ => unreachable!("matched a report or advice"),
                 });
             }
-            (Some(None), Reply::Sessions(_), None) => {}
+            (Some(None), Reply::Sessions(_), None) if scope == Scope::Sessions => {}
+            (Some(None), Reply::Audit(audit), None) if scope == Scope::Audit => {
+                if !audit.within(entries) {
+                    return Err(session.fail(true, |_| {
+                        format!("token-max there sent a list longer than the {entries} entries asked for")
+                    }));
+                }
+            }
             (Some(Some((false, asked))), Reply::Report(_) | Reply::Vibes(_), None)
                 if asked == vibes => {}
             _ => return Err(session.wrong_result(None)),
@@ -963,7 +989,7 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
     std::thread::spawn(move || {
         let mut stdin = BufReader::new(io::stdin());
         let mut stream = Stream::new(&mut stdin, Limit::NONE);
-        if scope != Scope::Sessions {
+        if matches!(scope, Scope::Report { .. }) {
             let Ok(paid) = stream.value::<Paid>(Limit::NONE) else {
                 std::process::exit(2);
             };
@@ -1013,7 +1039,7 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
             discovery.pretend_defaults();
         }
         let home = std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned());
-        if scope != Scope::Sessions {
+        if matches!(scope, Scope::Report { .. }) {
             let roots = discover(&discovery)?.billing_roots();
             let profiles = Outcome::Profiles {
                 home: home.clone(),
@@ -1043,7 +1069,12 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
         let Ok(Incoming::Request(request)) = incoming.recv() else {
             unreachable!("the request comes next")
         };
-        if matches!(request.job, Job::Sessions) != (scope == Scope::Sessions) {
+        let asked = match request.job {
+            Job::Report { .. } => matches!(scope, Scope::Report { .. }),
+            Job::Sessions => scope == Scope::Sessions,
+            Job::Audit { .. } => scope == Scope::Audit,
+        };
+        if !asked {
             return Err(ScanError::new(
                 "the coordinator asked for another job than this host scanned for",
             ));
@@ -1058,6 +1089,24 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
             Job::Sessions => {
                 let sessions = export(&scan, &request.catalog)?;
                 return Ok((Outcome::Sessions { since, sessions }, None));
+            }
+            Job::Audit {
+                filter,
+                limit,
+                since: cutoff,
+            } => {
+                if since != Some(*cutoff) {
+                    return Err(ScanError::new(
+                        "the coordinator asked for another window than this host scanned",
+                    ));
+                }
+                let options = Options {
+                    filter,
+                    since: *cutoff,
+                    limit: *limit,
+                };
+                let audit = Box::new(audit(&scan, &request.catalog, &options)?);
+                return Ok((Outcome::Audit { since, audit }, None));
             }
         };
         let Rendered {

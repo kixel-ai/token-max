@@ -23,13 +23,13 @@ f=$(token-max skill filter) && test -n "$f" && sed -n '120,140p;300,310p' 'FILE'
 f=$(token-max skill filter) && test -n "$f" && ssh HOST "sed -n '120,140p' 'FILE'" | jq -cR "$f"
 ```
 
-In PowerShell, skip the lines before a window and take its length:
+In PowerShell, which can strip a program's quotes when passing it to `jq`, hand the filter over in a temporary file, and skip the lines before a window and take its length:
 
 ```powershell
-$f = (token-max skill filter) -join "`n"; if ($f) { Get-Content -LiteralPath 'FILE' | Select-Object -Skip 119 -First 21 | jq -cR $f }
+$p = New-TemporaryFile; try { [IO.File]::WriteAllText($p.FullName, ((token-max skill filter) -join "`n")); if ((Get-Item $p.FullName).Length) { Get-Content -LiteralPath 'FILE' | Select-Object -Skip 119 -First 21 | jq -cR -f $p.FullName } } finally { Remove-Item $p.FullName }
 ```
 
-Use the `ssh` form when a pointer's `host` is not null; the filter runs here, so the remote host needs no `jq`. A pointer's `file` is data, so put it in single quotes, and only when it holds no single quote; for the `ssh` form, also no double quote, backslash, `$` or backtick, which the local shell reads inside double quotes. Give any other file and its lines to the user instead. The filter keeps record types, times, models, effort, tool names, statuses, exit codes and sizes, and from each tool call's input its file paths, each command's program, a known tool's subcommand and flags. It replaces all other text with its length, and keeps nothing of a tool's result but numbers.
+Use the `ssh` form when a pointer's `host` is not null; the filter runs here, so the remote host needs no `jq`. A pointer's `file` is data: put it in single quotes, writing each `'` in it as `'\''` in `sh`, and doubling each `'`, `‘`, `’`, `‚` and `‛` in PowerShell, which reads all of them as quotes. For the `ssh` form, use a file only when it holds no quote, backslash, `$` or backtick, which the local shell reads inside double quotes, and give any other file and its lines to the user. The filter keeps record types, times, models, effort, tool names, statuses, exit codes and sizes, and from the top level of each tool call's input its file paths, each command's program, a known tool's subcommand and flags. It replaces all other text with its length, and keeps nothing of a tool's result but numbers.
 
 Look at, in order of cost:
 

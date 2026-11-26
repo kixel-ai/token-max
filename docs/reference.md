@@ -1181,7 +1181,8 @@ The agent reads every transcript line through the `jq` program
 `token-max skill filter` prints, locally or piped from `ssh` for a remote
 pointer, as `f=$(token-max skill filter) && test -n "$f" && sed -n '120,140p' 'FILE' | jq -cR "$f"`,
 which reads nothing unless the filter printed, or through `Get-Content` and
-`Select-Object` in PowerShell; Claude Code asks before each
+`Select-Object` in PowerShell, with the program in a temporary file since
+PowerShell can strip its quotes; Claude Code asks before each
 such read, so the person sees what is read. Each line parses alone, so a torn
 line shows as `{"unparsed": N}` and the lines after it still read. The filter
 keeps a record's own fields by where they sit in Claude Code's and Codex's

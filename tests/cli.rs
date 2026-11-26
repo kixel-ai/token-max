@@ -2740,7 +2740,7 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     let codex = json!({"timestamp": "2026-11-02T00:00:00Z", "type": "response_item", "payload": {"type": "function_call", "name": "shell", "arguments": json!({"command": ["bash", "-lc", "SECRET=SYNTHETIC_PRIVATE_TOKEN cargo test --release --features=SYNTHETIC_PRIVATE_ARGS SYNTHETIC_PRIVATE_ARGS && git commit -m \"synthetic_private; prose words\" && claude synthetic-private-prompt && cat <<EOF\nsynthetic_private prose\nEOF"], "workdir": "/w"}).to_string()}});
     let codex_output = json!({"type": "response_item", "payload": {"type": "function_call_output", "output": "SYNTHETIC_PRIVATE_OUTPUT"}});
     // A tool's own input keeps only its paths and command shape, whatever its keys are named.
-    let mcp = json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "mcp__notes__save", "input": {"name": "SYNTHETIC_PRIVATE_NAME", "status": "SYNTHETIC_PRIVATE_STATUS", "file_path": "/notes.md", "command": "echo synthetic-private-note A=1 B=2; NOTE=x\\ synthetic-private-word cat; RUST_LOG=debug \\\ncargo test --release; TOKEN=demo\\\nsynthetic-private-token rg -n"}}]}});
+    let mcp = json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "mcp__notes__save", "input": {"name": "SYNTHETIC_PRIVATE_NAME", "status": "SYNTHETIC_PRIVATE_STATUS", "file_path": "/notes.md", "tags": {"synthetic_private_tag": true}, "command": "echo synthetic-private-note A=1 B=2; NOTE=x\\ synthetic-private-word cat; RUST_LOG=debug \\\ncargo test --release; TOKEN=demo\\\nsynthetic-private-token rg -n"}}]}});
     // An escaped separator is no program name.
     let escaped = json!({"command": "api_key\\=synthetic-private-key; api_key\\=synthetic-private/git status; KEY=$(echo synthetic-private-sub x) cargo build; printf % 'literal $(' \"x); synthetic-private-word; y\""});
     let answers = json!({"type": "user", "toolUseResult": {"answers": {"SYNTHETIC_PRIVATE_QUESTION text?": "SYNTHETIC_PRIVATE_ANSWER", "SYNTHETIC_PRIVATE_WORD": "yes"}}});
@@ -2748,8 +2748,9 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     let comment = json!({"command": "# don't\ngit commit -m 'fix; synthetic-private word'"});
     let heredoc = json!({"command": "v=$(cat <<'EOF'\n)\nsynthetic-private-word\nEOF\n)"});
     let inner = json!({"command": "KEY=$(# a key\nprintf x) cargo build; printf x release\\ #1 && cargo test"});
-    // `$'...'` ends at an unescaped quote.
-    let ansi = json!({"command": "echo $'it\\'s; synthetic-private word' && git status"});
+    // `$'...'` ends at an unescaped quote, and an array's or a process substitution's lines are
+    // no commands.
+    let ansi = json!({"command": "echo $'it\\'s; synthetic-private word' && git status\nlist=(\n  synthetic-private\n)\ndiff <(\nsynthetic-private\n) b"});
     // A torn line hides none after it; a server's result keeps no text, even under a field
     // the records use; a script's argument is no command.
     let torn = r#"{"type": "user", "message": {"content": "synthetic-private"#;
@@ -2786,7 +2787,7 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     assert_eq!(records.len(), 17);
     assert_eq!(
         records[12],
-        json!({"command": [["echo"], ["git", "status"]]})
+        json!({"command": [["echo"], ["git", "status"], ["list="], ["diff"]]})
     );
     assert_eq!(records[13], json!({"unparsed": 58}));
     assert_eq!(
@@ -2835,7 +2836,7 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     assert_eq!(records[5]["payload"]["output"], "<24 chars>");
     assert_eq!(
         records[6]["message"]["content"][0]["input"],
-        json!({"name": "<22 chars>", "status": "<24 chars>", "file_path": "/notes.md", "command": [["echo"], ["NOTE=", "cat"], ["RUST_LOG=", "cargo", "test", "--release"], ["TOKEN=", "rg", "-n"]]})
+        json!({"name": "<22 chars>", "status": "<24 chars>", "file_path": "/notes.md", "tags": {"<21 chars, #0>": true}, "command": [["echo"], ["NOTE=", "cat"], ["RUST_LOG=", "cargo", "test", "--release"], ["TOKEN=", "rg", "-n"]]})
     );
 }
 

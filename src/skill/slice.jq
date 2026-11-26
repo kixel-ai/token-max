@@ -1,5 +1,5 @@
 def flags: map(select(test("^-{1,2}[A-Za-z][A-Za-z0-9-]*($|=)")) | sub("=.*"; "="));
-def prog: split("/") | last | if test("^[a-z0-9][a-z0-9_.+-]{0,39}$") then . else "?" end;
+def prog: if contains("%") then "?" else (split("/") | last | if test("^[a-z0-9][a-z0-9_.+-]{0,39}$") then . else "?" end) end;
 def simple: ((to_entries | map(select(.value | test("^[A-Za-z_][A-Za-z0-9_]*=") | not)) | first.key) // length) as $n
   | (.[:$n] | map(sub("=.*"; "="))) + (.[$n:] | if length == 0 then []
     elif length > 1 and (.[0] | split("/") | last | IN("git", "gh", "cargo", "rustup", "go", "npm", "pnpm", "yarn", "bun", "uv", "pip", "nix", "docker", "kubectl", "just", "quest", "token-max"))

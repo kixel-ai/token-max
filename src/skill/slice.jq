@@ -6,10 +6,10 @@ def simple: ((to_entries | map(select(.value | test("^[A-Za-z_][A-Za-z0-9_]*=") 
       and (.[1] | test("^[a-z][a-z0-9-]{0,30}$")) then [(.[0] | prog), .[1]] + (.[2:] | flags)
     else [.[0] | prog] + (.[1:] | flags) end);
 # A command with everything quoted, escaped or substituted masked as `%`, tracking quotes,
-# `$'...'` with its escapes, `[[ ... ]]`, whose `&&` and `||` join no commands, and `$(...)`,
-# `<(...)` and an array's `=(...)` as the shell nests them; a continuation is deleted, a comment dropped, and a heredoc ends it, since its
-# body is data.
-def mask: reduce (explode[] | [.] | implode) as $c ({o: "", s: ["t"], e: false, p: "", x: false};
+# `$'...'` with its escapes, `[[ ... ]]` to its own `]]` word, whose `&&` and `||` join no
+# commands, and `$(...)`, `<(...)` and an array's `=(...)` as the shell nests them; a
+# continuation is deleted, a comment dropped, and a heredoc ends it, since its body is data.
+def mask: reduce (explode[] | [.] | implode) as $c ({o: "", s: ["t"], e: false, p: "", q: "", x: false};
   if .x then .
   elif .e then .e = false | if $c == "\n" then . else .o += "%%" | .p = "%" end
   else .s[-1] as $t
@@ -25,11 +25,11 @@ def mask: reduce (explode[] | [.] | implode) as $c ({o: "", s: ["t"], e: false, 
       elif $c == "\"" then .s += ["d"] | .o += "%"
       elif $c == "`" then .s += ["b"] | .o += "%"
       elif $t == "u" then (if $c == "(" then .s += ["u"] elif $c == ")" then .s |= .[:-1] else . end) | .o += "%"
-      elif $t == "k" then (if $c == "]" and .p == "]" then .s |= .[:-1] else . end) | .o += "%"
+      elif $t == "k" then (if $c == "]" and .p == "]" and (.q | test("^\\s$")) then .s |= .[:-1] else . end) | .o += "%"
       elif $c == "[" and .p == "[" then .s += ["k"] | .o += "%"
       elif $c == "(" and (.p | IN("$", "=", "<", ">")) then .s += ["u"] | .o += "%"
       else .o += $c end
-    | if .e then . else .p = $c end
+    | if .e then . else .q = .p | .p = $c end
   end) | .o;
 def cmd: if type == "array" then map(tostring)
     | if length == 3 and (.[0] | test("(^|/)(ba|z|da)?sh$")) and (.[1] | test("^-[a-z]*c$")) then .[2] | cmd else simple end

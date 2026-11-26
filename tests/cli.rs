@@ -2747,6 +2747,9 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     // A comment's apostrophe opens no quote, and a heredoc's body is data, even in `$(...)`.
     let comment = json!({"command": "# don't\ngit commit -m 'fix; synthetic-private word'"});
     let heredoc = json!({"command": "v=$(cat <<'EOF'\n)\nsynthetic-private-word\nEOF\n)"});
+    // A character class's `]]` ends no conditional.
+    let class =
+        json!({"command": "[[ $x =~ ^[[:digit:]]+$ || synthetic-private == $x ]] && git status"});
     let inner = json!({"command": "KEY=$(# a key\nprintf x) cargo build; printf x release\\ #1 && cargo test"});
     // `$'...'` ends at an unescaped quote, and an array's or a process substitution's lines, or
     // a conditional's operands, are no commands.
@@ -2758,7 +2761,7 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     let codex_mcp = json!({"type": "event_msg", "payload": {"type": "mcp_tool_call_end", "invocation": {"server": "notes", "tool": "save", "arguments": {"file_path": "/n.md"}}, "result": {"Ok": {"structuredContent": {"name": "SYNTHETIC_PRIVATE_NAME", "status": "SYNTHETIC_PRIVATE_STATUS"}}}}});
     let script = json!({"type": "response_item", "payload": {"type": "function_call", "name": "shell", "arguments": json!({"command": ["bash", "run.sh", "synthetic-private-arg"]}).to_string()}});
     let lines = format!(
-        "{}{codex}\n{codex_output}\n{mcp}\n{escaped}\n{answers}\n{comment}\n{heredoc}\n{inner}\n{ansi}\n{torn}\n{mcp_meta}\n{codex_mcp}\n{script}\n",
+        "{}{codex}\n{codex_output}\n{mcp}\n{escaped}\n{answers}\n{comment}\n{heredoc}\n{inner}\n{ansi}\n{class}\n{torn}\n{mcp_meta}\n{codex_mcp}\n{script}\n",
         audited_session("s", &w.home)
     );
     let mut jq = Command::new("jq")
@@ -2784,26 +2787,27 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    assert_eq!(records.len(), 17);
+    assert_eq!(records.len(), 18);
     assert_eq!(
         records[12],
         json!({"command": [["echo"], ["list="], ["diff"], ["?"]]})
     );
-    assert_eq!(records[13], json!({"unparsed": 58}));
+    assert_eq!(records[13], json!({"command": [["?"], ["git", "status"]]}));
+    assert_eq!(records[14], json!({"unparsed": 58}));
     assert_eq!(
-        records[14]["mcpMeta"],
+        records[15]["mcpMeta"],
         json!({"<17 chars, #0>": {"<4 chars, #0>": "<22 chars>", "<4 chars, #1>": "<18 chars>", "<7 chars, #2>": "<23 chars>"}})
     );
     assert_eq!(
-        records[15]["payload"]["invocation"],
+        records[16]["payload"]["invocation"],
         json!({"server": "<5 chars>", "tool": "save", "arguments": {"file_path": "/n.md"}})
     );
     assert_eq!(
-        records[15]["payload"]["result"],
+        records[16]["payload"]["result"],
         json!({"<2 chars, #0>": {"<17 chars, #0>": {"<4 chars, #0>": "<22 chars>", "<6 chars, #1>": "<24 chars>"}}})
     );
     assert_eq!(
-        records[16]["payload"]["arguments"],
+        records[17]["payload"]["arguments"],
         json!({"command": ["bash"]})
     );
     assert_eq!(

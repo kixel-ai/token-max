@@ -1274,8 +1274,11 @@ stopped there is not asked to end its audit.
 
 `token-max audit` replays each session's requests in time order and compares
 each with the one before it. It reads the transcripts the window depends on, as
-the session export does, so a request just before the window can be the first
-one's predecessor; findings and totals count only requests in the window.
+the session export does, so a request just before the window is the first
+one's predecessor; findings and totals count only requests in the window. Tool
+calls are kept only in the window, so a miss whose predecessor came before it
+sees no tool call in its gap. A request copied into a Codex fork belongs to its
+source session, as in the session export.
 
 **Lost cache reuse.** A request lost reuse when it read less of the cache than
 its predecessor left there. For Claude Code that is the predecessor's cached
@@ -1291,12 +1294,14 @@ a full rewrite after the cache expired keeps reads plus writes the same or
 larger and still counts whole. Those tokens are priced where the request's
 prompt placed them, cache writes and then ordinary input, less what reading
 them would have cost; a request without prices for its model, tier or cache
-lifetimes is counted and left unpriced.
+lifetimes is counted and left unpriced. A request whose cache reads were not
+recorded is not compared, and its session's cache reads and hit ratio are null.
 
 The cause is the first of these that holds:
 
 1. `control_change`: the model, the recorded reasoning effort or the recorded
-   speed differs from the predecessor's; a compaction was recorded between
+   speed (for Codex, the requested speed or service tier) differs from the
+   predecessor's; a compaction was recorded between
    them; or the prompt is shorter than the predecessor's reusable prefix
    (`truncation`), as when old tool results are cleared.
 2. `tool_wait_ttl`: the gap from the predecessor's start passed the cache's
@@ -1309,7 +1314,9 @@ The cause is the first of these that holds:
    early; the transcript cannot tell which.
 
 A Claude Code request's lifetime is the one its predecessor wrote, else the one
-it wrote, else 5 minutes, the shortest. A Codex request's is 5 minutes, the
+it wrote, else 5 minutes, the shortest. A Codex request's is 12 hours once a
+request before it in the session wrote with 12-hour retention, else 30 minutes
+once one wrote at all, as models that bill writes record, else 5 minutes, the
 shortest OpenAI documents keeping a prefix unused.
 
 **Tool results.** Transcripts record each request's input, not each tool
@@ -1318,18 +1325,22 @@ a string result, or the `text` of each content block. Images and other media
 count nothing, so screenshot-heavy tools are undercounted. A result sits in
 later prompts right after the request that called it, its predecessor's input
 and output, after any earlier result of the same request. Every later request
-in the session carries it until one's prompt is too short to hold it, as after
-a compaction or a cleared result; carrying stops there, even if the prompt
-grows past it again. Each carrying request pays for the result's tokens at the
+in the session carries it until a compaction is recorded or a prompt is too
+short to hold it, as after a cleared result; carrying stops there, even if the
+prompt grows past it again. Each carrying request pays for the result's tokens at the
 prices of the spans they sit in: cache reads, cache writes, then ordinary
 input, so a Codex request that read none of its prompt from the cache pays
 ordinary input for them. A result whose estimated span crosses from one price
-to another in a carrying prompt has no cost of its own (`costUsd` is null),
-since an estimated size cannot place the boundary; its tool's total still
-prices each part. A tool result's error flag is Claude Code's `is_error`;
-Codex records none.
+to another in a carrying prompt, or that an unpriced request carried, has no
+cost of its own (`costUsd` is null), since an estimated size cannot place the
+boundary; its tool's total still prices each priced part and counts the result
+in `unpriced`. A tool result's error flag is Claude Code's `is_error`; Codex
+records none. A Codex tool is named with its MCP server or namespace, as the
+context checks name it.
 
-**Sessions.** A session's cost is every request's price in the window. Its
+**Sessions.** A session's cost is every request's price in the window, a lower
+bound (`complete` false, counted in `totals.incomplete`) when a request could
+not be priced or one of its files had unreadable or unfinished lines. Its
 first prompt counts only when the session began in the window. A streak is
 the most calls to one tool in a row, by start time, with no other tool
 between, and one call is no streak. A Claude subagent, or a Codex thread
@@ -1337,9 +1348,10 @@ spawned from another, is a subagent.
 
 **Bounds.** Every list is ranked by its measure, priced findings first by
 dollars and unpriced ones after by tokens, and cut to the limit, dropping
-entries whose measure is zero. Each SSH destination sends lists cut the same
-way, so a tool or session that falls outside one host's top entries does not
-count toward the ranking across hosts. Tool names are kept only when they are
+entries whose measure is zero. Each SSH destination sends its rankings cut the
+same way, which loses nothing, since the top entries across hosts are among each
+host's own; it sends every tool's total uncut, so totals add across hosts before
+the tool ranking is cut. Tool names are kept only when they are
 short labels of letters, digits and `_.:/@<>+-`; anything else is `unrecorded`.
 
 ## Transcript retention

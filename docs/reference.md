@@ -1110,7 +1110,8 @@ The object holds:
 
 - `since`, `scope` (`all`, the `remotes` matched, or the `gitDir` matched),
   `hosts` (null for this host, then each `--ssh` destination) and `limit`.
-- `totals`: the sessions, requests and cost in scope.
+- `totals`: the sessions, requests and cost in scope, and the sessions whose
+  cost is a lower bound (`incomplete`).
 - `cacheMisses`: requests that lost cache reuse against the request before them
   in the session, in all and `byCause`, and the costliest as `hotspots`, each
   with its `cause`, the `change` for a control change, the tokens rewritten or
@@ -1143,8 +1144,9 @@ never zero. Codex records no tool errors, so a Codex session's are null.
 
 Over `--ssh`, each destination audits its own sessions with this host's prices
 and the repository's remotes this host sent, ranks them and sends only its
-lists, each no longer than the limit; this host ranks every host's together and
-names each pointer's host. Any failed host fails the whole run. Errors go to
+rankings, each no longer than the limit, and its tools' totals; this host adds
+the tools across hosts, ranks every host's findings together and names each
+pointer's host. Any failed host fails the whole run. Errors go to
 stderr as JSON. Exit 0: printed. Exit 2: scan, pricing, argument or
 cancellation failure.
 

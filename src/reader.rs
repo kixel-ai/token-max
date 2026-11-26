@@ -2024,7 +2024,11 @@ impl Reader {
                     kind,
                     string(p, "call_id"),
                 );
-                e.tool = text(member(p, "name"));
+                // Named as its MCP server or namespace qualifies it, as exposure names it.
+                e.tool = string(p, "name").and_then(|bare| {
+                    let name = crate::exposure::codex_tool_name(bare, string(p, "namespace"));
+                    text(&Value::from(name))
+                });
                 e.tool_id = opaque(p, "call_id")?.map(Id::from);
                 if kind == EventKind::ToolEnd {
                     e.bytes = Some(text_bytes(member(p, "output")));

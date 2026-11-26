@@ -9,7 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::cache::{observed_ttl, ttl_milliseconds};
+use crate::cache::{CODEX_CACHE_MILLISECONDS, observed_ttl, ttl_milliseconds};
 use crate::collections::{HashMap, HashSet, IndexMap};
 use crate::model::{
     Agent, BillingPart, EventKind, Harness, Id, Location, Millis, PartKind, Request,
@@ -18,6 +18,7 @@ use crate::model::{
 use crate::prices::{Catalog, prefix_spans, price_request};
 use crate::repository::{self, Checkout};
 use crate::safe::ScanError;
+use crate::sessions::Owners;
 
 /// Tokens per byte of a tool result's text: transcripts record each request's input, not
 /// each result's, so a result's size is estimated from its text.
@@ -35,14 +36,17 @@ const CODEX_CACHE_STEP: i64 = 128;
 /// may have outlived it.
 const CODEX_CACHE_LIFETIME: Millis = 5 * 60_000;
 
+/// How long OpenAI keeps a prefix written with extended retention.
+const CODEX_LONG_LIFETIME: Millis = 12 * 60 * 60_000;
+
 /// What each audit states it assumes, printed with its findings.
 pub const ASSUMPTIONS: [&str; 7] = [
     "Dollars are public API prices for the recorded usage, not an invoice.",
     "A request's lost cache reuse is the part of its predecessor's cached prompt it did not read, up to what it wrote or sent uncached, priced at what those tokens cost above a cache read.",
-    "A Claude request's cache lifetime is the one its predecessor wrote, else its own, else 5 minutes; a Codex request's is 5 minutes, the shortest OpenAI keeps a prefix.",
+    "A Claude request's cache lifetime is the one its predecessor wrote, else its own, else 5 minutes; a Codex request's is 12 hours or 30 minutes once its session wrote with that retention, else 5 minutes, the shortest OpenAI keeps a prefix.",
     "A Codex request can reuse its predecessor's prompt from 1,024 tokens, less the last 128 tokens, whose rendering changes once another message follows, rounded down to OpenAI's 128-token cache step.",
     "A tool result's tokens are estimated as a quarter of its text's bytes; images and other media count nothing.",
-    "A tool result sits in later prompts right after the request that called it, until a prompt is too short to hold it, as after compaction; a result whose span crosses from one price to another in a later prompt has no cost of its own, though its tool's total prices each part.",
+    "A tool result sits in later prompts right after the request that called it, until a compaction or a prompt too short to hold it; a result whose span crosses from one price to another in a later prompt has no cost of its own, though its tool's total prices each part.",
     "Codex records no tool errors, so its sessions' error counts are null.",
 ];
 
@@ -204,7 +208,7 @@ pub struct ToolTally {
     pub carried_requests: u64,
     /// Each result's tokens times the requests that carried it, itself included.
     pub carried_tokens: i64,
-    /// Every carrying request's price for each result's tokens; a lower bound when
+    /// Every priced carrying request's price for each result's tokens; a lower bound when
     /// `unpriced` is above zero.
     pub cost_usd: Usd,
     /// Results with a carrying request whose prices are unknown.
@@ -263,11 +267,15 @@ pub struct Shape {
     pub requests: u64,
     /// A lower bound unless `complete`.
     pub cost_usd: Usd,
+    /// False when a request could not be priced or a file had unreadable or unfinished lines.
     pub complete: bool,
+    /// Unreadable lines in the session's files.
+    pub skipped_lines: u64,
     /// Input tokens over every request, cached or not.
     pub input_tokens: i64,
-    pub cache_read_tokens: i64,
-    /// Cache reads over input; null without input.
+    /// Null when a request left them unrecorded.
+    pub cache_read_tokens: Option<i64>,
+    /// Cache reads over input; null without input or recorded reads.
     pub cache_hit_ratio: Option<f64>,
     /// The largest prompt.
     pub peak_input_tokens: i64,
@@ -307,9 +315,11 @@ pub struct Shapes {
 pub struct Totals {
     pub sessions: u64,
     pub requests: u64,
-    /// A lower bound when `unpriced` is above zero.
+    /// A lower bound when `incomplete` is above zero.
     pub cost_usd: Usd,
-    pub unpriced: u64,
+    /// Sessions whose cost is a lower bound: a request could not be priced, or a file had
+    /// unreadable or unfinished lines.
+    pub incomplete: u64,
 }
 
 /// One or more hosts' findings.
@@ -340,13 +350,14 @@ fn one(figure: f64) -> (f64, f64) {
 }
 
 impl Audit {
-    /// Rank and cut every list to `limit`, as one host's or several hosts' findings.
-    fn rank(&mut self, limit: usize) {
+    /// Rank and cut every list to `limit`. Each host keeps every tool, since a tool's total
+    /// adds across hosts; only the merge cuts them.
+    fn rank(&mut self, limit: usize, tools: usize) {
         // Priced findings first by dollars; unpriced ones after them by tokens.
         by(&mut self.cache_misses.hotspots, limit, |m| {
             (m.cost_usd.map_or(0.0, Usd::to_f64), m.tokens as f64)
         });
-        by(&mut self.tool_outputs.by_tool, limit, |t| {
+        by(&mut self.tool_outputs.by_tool, tools, |t| {
             (t.cost_usd.to_f64(), t.carried_tokens as f64)
         });
         by(&mut self.tool_outputs.hotspots, limit, |o| {
@@ -355,7 +366,7 @@ impl Audit {
         let s = &mut self.sessions;
         by(&mut s.costliest, limit, |s| one(s.cost_usd.to_f64()));
         by(&mut s.least_cached, limit, |s| {
-            one((s.input_tokens - s.cache_read_tokens) as f64)
+            one(s.cache_read_tokens.map_or(0, |read| s.input_tokens - read) as f64)
         });
         by(&mut s.most_input, limit, |s| one(s.input_tokens as f64));
         by(&mut s.largest_start, limit, |s| {
@@ -409,12 +420,12 @@ impl Audit {
         }
     }
 
-    /// Whether every list holds at most `limit` entries, as a destination must send them.
+    /// Whether every ranking holds at most `limit` entries, as a destination must send them;
+    /// its tools are bounded by the stream's limit alone.
     pub fn within(&self, limit: usize) -> bool {
         let s = &self.sessions;
         [
             self.cache_misses.hotspots.len(),
-            self.tool_outputs.by_tool.len(),
             self.tool_outputs.hotspots.len(),
             s.costliest.len(),
             s.least_cached.len(),
@@ -452,7 +463,7 @@ impl Audit {
             t.sessions += audit.totals.sessions;
             t.requests += audit.totals.requests;
             t.cost_usd += audit.totals.cost_usd;
-            t.unpriced += audit.totals.unpriced;
+            t.incomplete += audit.totals.incomplete;
             let c = audit.cache_misses;
             all.cache_misses.total.add(&c.total);
             for (cause, tally) in c.by_cause {
@@ -492,7 +503,7 @@ impl Audit {
             a.longest_streaks.extend(s.longest_streaks);
         }
         all.tool_outputs.by_tool = tools.into_values().collect();
-        all.rank(limit);
+        all.rank(limit, limit);
         all
     }
 }
@@ -574,7 +585,8 @@ struct Turn<'a> {
     request: &'a Request,
     part: &'a BillingPart,
     input: i64,
-    read: i64,
+    /// None when the harness did not record it.
+    read: Option<i64>,
     /// Each span of the prompt's price, from its start: the end in tokens and the price per
     /// token. None when unpriced.
     spans: Option<Vec<(f64, f64)>>,
@@ -712,9 +724,10 @@ pub fn audit(scan: &Scan, catalog: &Catalog, options: &Options) -> Result<Audit,
         checkouts: HashMap::default(),
     };
     // Each session's requests, in the order read, which sorts below.
+    let owners = Owners::new(&scan.sessions);
     let mut sessions: IndexMap<&str, Vec<&Request>> = IndexMap::default();
     for r in &scan.requests {
-        sessions.entry(&r.session).or_default().push(r);
+        sessions.entry(owners.of(r)).or_default().push(r);
     }
     let mut covered: HashSet<&str> = HashSet::default();
     for (&key, requests) in &sessions {
@@ -749,6 +762,11 @@ pub fn audit(scan: &Scan, catalog: &Catalog, options: &Options) -> Result<Audit,
         audit.cache_misses.by_cause.insert(cause, Tally::default());
     }
     let mut tools: IndexMap<String, ToolTally> = IndexMap::default();
+    let snapshots: HashMap<&str, _> = scan
+        .snapshots
+        .iter()
+        .map(|s| (s.file.as_str(), s))
+        .collect();
     for (key, mut requests) in sessions {
         requests.sort_by_key(|r| r.time);
         let mut found = events.remove(key).unwrap_or_default();
@@ -765,7 +783,7 @@ pub fn audit(scan: &Scan, catalog: &Catalog, options: &Options) -> Result<Audit,
                     request: r,
                     part,
                     input: part.usage.input?,
-                    read: part.usage.read.unwrap_or(0),
+                    read: part.usage.read,
                     spans: prefix_spans(catalog, r, part).map(ends),
                 })
             })
@@ -784,12 +802,23 @@ pub fn audit(scan: &Scan, catalog: &Catalog, options: &Options) -> Result<Audit,
             parent: parent.map(str::to_string),
             cwd: scan.sessions.cwd(key).map(|c| c.to_string()),
         };
-        let shape = shape(&requests, &turns, found, since, catalog, named);
+        let mut shape = shape(&requests, &turns, found, since, catalog, named);
+        // An unreadable or unfinished line may have held usage, so the cost is a lower bound.
+        let (lines, deferred) = scan
+            .sessions
+            .files(key)
+            .iter()
+            .filter_map(|file| snapshots.get(&**file))
+            .fold((0, 0), |(lines, bytes), s| {
+                (lines + s.skipped_lines, bytes + s.deferred_bytes)
+            });
+        shape.skipped_lines = lines;
+        shape.complete &= lines == 0 && deferred == 0;
         let t = &mut audit.totals;
         t.sessions += 1;
         t.requests += shape.requests;
         t.cost_usd += shape.cost_usd;
-        t.unpriced += u64::from(!shape.complete);
+        t.incomplete += u64::from(!shape.complete);
         let s = &mut audit.sessions;
         for list in [
             &mut s.costliest,
@@ -805,7 +834,7 @@ pub fn audit(scan: &Scan, catalog: &Catalog, options: &Options) -> Result<Audit,
         }
     }
     audit.tool_outputs.by_tool = tools.into_values().collect();
-    audit.rank(options.limit);
+    audit.rank(options.limit, usize::MAX);
     Ok(audit)
 }
 
@@ -817,21 +846,29 @@ fn misses(
     session: &Option<String>,
     found: &mut CacheMisses,
 ) {
+    let mut codex_ttl = CODEX_CACHE_LIFETIME;
     for pair in turns.windows(2) {
         let (prev, cur) = (&pair[0], &pair[1]);
         let r = cur.request;
+        // Each Codex write records how long it is kept, which later requests may read.
+        let u = &prev.part.usage;
+        if u.write12h.unwrap_or(0) > 0 {
+            codex_ttl = CODEX_LONG_LIFETIME;
+        } else if u.write30m.unwrap_or(0) > 0 || u.write.unwrap_or(0) > 0 {
+            codex_ttl = codex_ttl.max(CODEX_CACHE_MILLISECONDS);
+        }
         if r.time < since {
             continue;
         }
-        let Some(cached) = prev.cached() else {
+        let (Some(cached), Some(read)) = (prev.cached(), cur.read) else {
             continue;
         };
-        let lost = (cached - cur.read).max(0).min(cur.input - cur.read);
+        let lost = (cached - read).max(0).min(cur.input - read);
         if lost <= 0 {
             continue;
         }
         let cost = cur
-            .price(cur.read as f64, (cur.read + lost) as f64)
+            .price(read as f64, (read + lost) as f64)
             .and_then(|(usd, _)| {
                 let read = cur.spans.as_ref()?.first()?.1;
                 Some(Usd::from_f64((usd - lost as f64 * read).max(0.0)))
@@ -845,7 +882,9 @@ fn misses(
             Some(Change::Model)
         } else if prev.request.effort != r.effort {
             Some(Change::Effort)
-        } else if p.speed != q.speed {
+        } else if p.speed != q.speed
+            || (r.harness == Harness::Codex && prev.request.requested_speed != r.requested_speed)
+        {
             Some(Change::Speed)
         } else if compacted {
             Some(Change::Compaction)
@@ -860,7 +899,7 @@ fn misses(
                     .or_else(|| observed_ttl(q))
                     .unwrap_or(Ttl::FiveMinutes),
             ),
-            Harness::Codex => CODEX_CACHE_LIFETIME,
+            Harness::Codex => codex_ttl,
         };
         let began = prev.request.time;
         let gap = r.time - began;
@@ -930,8 +969,15 @@ fn outputs(
         let called = start.map_or(end.time, |s| s.time);
         let calling = turns.partition_point(|t| t.request.time <= called);
         let mut carried = 0u64;
-        let mut usd = Some(0.0);
+        // The priced carriers' sum, and whether every carrier was priced.
+        let (mut usd, mut priced) = (0.0, true);
         let mut alone = true;
+        // Compaction replaces the history the result was in.
+        let compacted = events
+            .compactions
+            .get(events.compactions.partition_point(|&t| t <= end.time))
+            .copied()
+            .unwrap_or(Millis::MAX);
         if let Some(index) = calling.checked_sub(1) {
             let caller = &turns[index];
             let output = message(caller.request)
@@ -946,17 +992,17 @@ fn outputs(
                 if later.request.time < end.time {
                     continue;
                 }
-                // A prompt too short to hold the result no longer does, as after compaction.
-                if (later.input as f64) < to {
+                // A prompt too short to hold the result no longer does, as after it was cleared.
+                if later.request.time >= compacted || (later.input as f64) < to {
                     break;
                 }
                 carried += 1;
                 match later.price(from, to) {
                     Some((price, one)) => {
-                        usd = usd.map(|sum| sum + price);
+                        usd += price;
                         alone &= one;
                     }
-                    None => usd = None,
+                    None => priced = false,
                 }
             }
         }
@@ -974,17 +1020,15 @@ fn outputs(
         tally.tokens += tokens;
         tally.carried_requests += carried;
         tally.carried_tokens += tokens * carried as i64;
-        match usd {
-            Some(sum) => tally.cost_usd += Usd::from_f64(sum),
-            None => tally.unpriced += 1,
-        }
+        tally.cost_usd += Usd::from_f64(usd);
+        tally.unpriced += u64::from(!priced);
         hotspots.push(Output {
             tool,
             bytes,
             tokens,
             carried_requests: carried,
             carried_tokens: tokens * carried as i64,
-            cost_usd: usd.filter(|_| alone).map(Usd::from_f64),
+            cost_usd: (priced && alone).then(|| Usd::from_f64(usd)),
             error: (end.harness == Harness::Claude).then_some(end.file.is_none()),
             harness: end.harness,
             session: session.clone(),
@@ -1033,7 +1077,8 @@ fn shape(
     }
     let window: Vec<&Turn> = turns.iter().filter(|t| t.request.time >= since).collect();
     let input: i64 = window.iter().map(|t| t.input).sum();
-    let read: i64 = window.iter().map(|t| t.read).sum();
+    // Unknown when any request left its cache reads unrecorded.
+    let read: Option<i64> = window.iter().map(|t| t.read).sum();
     let calls = events.started(since, Millis::MAX);
     let mut streak: Option<Streak> = None;
     let mut run: Option<(&str, u64, &Location)> = None;
@@ -1068,9 +1113,12 @@ fn shape(
         requests: selected.len() as u64,
         cost_usd: cost,
         complete,
+        skipped_lines: 0,
         input_tokens: input,
         cache_read_tokens: read,
-        cache_hit_ratio: (input > 0).then(|| read as f64 / input as f64),
+        cache_hit_ratio: read
+            .filter(|_| input > 0)
+            .map(|read| read as f64 / input as f64),
         peak_input_tokens: window.iter().map(|t| t.input).max().unwrap_or(0),
         // Only when the session began in the window, so the first prompt is its start.
         start_input_tokens: turns
@@ -1161,6 +1209,10 @@ mod tests {
     }
 
     fn audit_of(w: &Workspace, records: &[(&str, Vec<Value>)]) -> Audit {
+        audit_since(w, records, START)
+    }
+
+    fn audit_since(w: &Workspace, records: &[(&str, Vec<Value>)], since: Millis) -> Audit {
         for (file, lines) in records {
             let path = w.home.join(file);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1170,7 +1222,7 @@ mod tests {
         let scan = scan(&w.scan_options()).unwrap();
         let options = Options {
             filter: &Filter::All,
-            since: START,
+            since,
             limit: 10,
         };
         let audit = audit(&scan, &prices(), &options).unwrap();
@@ -1238,6 +1290,24 @@ mod tests {
     }
 
     #[test]
+    fn the_first_request_in_the_window_is_compared_with_the_one_before_it() {
+        let w = Workspace::new();
+        let records = vec![
+            assistant(0.0, "a", OPUS, 0, 100_000, &[]),
+            assistant(1.0, "b", OPUS, 0, 100_500, &[]),
+        ];
+        let file = ".claude/projects/project/main.jsonl";
+        let audit = audit_since(&w, &[(file, records)], START + MIN / 2);
+        let misses = &audit.cache_misses.hotspots;
+        assert_eq!(misses.len(), 1);
+        assert_eq!((misses[0].previous.line, misses[0].tokens), (1, 100_000));
+        let shape = &audit.sessions.costliest[0];
+        // It began before the window, so its first prompt there is no start.
+        assert_eq!((shape.requests, shape.start_input_tokens), (1, None));
+        assert_eq!(shape.at.line, 1);
+    }
+
+    #[test]
     fn a_result_is_priced_where_it_sits_until_a_prompt_cannot_hold_it() {
         let w = Workspace::new();
         let records = vec![
@@ -1247,10 +1317,11 @@ mod tests {
             // Read to 10,500 and written past it, so the result spans two prices.
             assistant(1.0, "b", OPUS, 10_500, 1_200, &[]),
             assistant(2.0, "c", OPUS, 11_700, 50, &[]),
+            // A model with no public price carries it too.
+            assistant(2.5, "u", "claude-unpriced-9", 11_750, 0, &[]),
             compaction(3.0),
-            assistant(3.1, "d", OPUS, 0, 2_000, &[]),
-            // Long enough again, but the result was compacted away.
-            assistant(4.0, "e", OPUS, 2_000, 20_000, &[]),
+            // Long enough to hold it, but compaction replaced the history it was in.
+            assistant(3.1, "d", OPUS, 0, 20_000, &[]),
         ];
         let audit = audit_of(&w, &[(".claude/projects/project/main.jsonl", records)]);
         let t = &audit.tool_outputs;
@@ -1259,7 +1330,7 @@ mod tests {
             (output.tool.as_str(), output.bytes, output.tokens),
             ("Read", 4_000, 1_000)
         );
-        assert_eq!((output.carried_requests, output.carried_tokens), (2, 2_000));
+        assert_eq!((output.carried_requests, output.carried_tokens), (3, 3_000));
         assert_eq!(
             output.cost_usd, None,
             "its first carrier splits it across two prices"
@@ -1268,10 +1339,11 @@ mod tests {
         assert_eq!((output.call.as_ref().unwrap().line, output.at.line), (1, 2));
         let read = &t.by_tool[0];
         let usd = 400.0 * READ + 600.0 * WRITE + 1_000.0 * READ;
+        // The priced carriers' charges stay, beside the unpriced one.
         assert!(close(Some(read.cost_usd), usd), "{read:?}");
         assert_eq!(
             (read.results, read.carried_requests, read.unpriced),
-            (1, 2, 0)
+            (1, 3, 1)
         );
     }
 
@@ -1323,6 +1395,31 @@ mod tests {
     }
 
     #[test]
+    fn a_codex_prefix_written_for_30_minutes_outlives_a_10_minute_gap() {
+        let w = Workspace::new();
+        let billed = |minute: f64, id: &str, cached: i64, written: i64| {
+            json!({
+                "type": "token_usage_record",
+                "timestamp": at(minute),
+                "payload": {
+                    "response_id": id,
+                    "turn_id": "turn",
+                    "usage": {"input_tokens": 10_500, "output_tokens": 10, "cached_input_tokens": cached, "cache_write_input_tokens": written},
+                },
+            })
+        };
+        let records = vec![
+            json!({"type": "session_meta", "timestamp": at(0.0), "payload": {"id": "thread", "model_provider": "openai", "cli_version": "0.167.0", "originator": "codex_cli_rs", "source": "cli"}}),
+            json!({"type": "turn_context", "timestamp": at(0.0), "payload": {"model": "gpt-6.1-sol", "turn_id": "turn", "service_tier": "standard"}}),
+            billed(0.0, "a", 0, 10_500),
+            billed(10.0, "b", 0, 10_500),
+        ];
+        let audit = audit_of(&w, &[(".codex/sessions/rollout.jsonl", records)]);
+        let miss = &audit.cache_misses.hotspots[0];
+        assert_eq!((miss.cause, miss.ttl_ms), (Cause::PrefixBust, 30 * MIN));
+    }
+
+    #[test]
     fn a_session_shows_its_errors_longest_run_and_first_prompt() {
         let w = Workspace::new();
         let records = vec![
@@ -1335,6 +1432,8 @@ mod tests {
             result(0.5, "r", 100, false),
             assistant(0.6, "d", OPUS, 31_000, 500, &[("Bash", "b4")]),
             result(0.7, "b4", 100, false),
+            // An unreadable line may have held usage.
+            json!("SYNTHETIC_PRIVATE_UNREADABLE"),
         ];
         let audit = audit_of(&w, &[(".claude/projects/project/main.jsonl", records)]);
         let s = &audit.sessions;
@@ -1347,6 +1446,8 @@ mod tests {
         assert_eq!((shape.tool_calls, shape.tool_errors), (5, Some(1)));
         assert_eq!(shape.start_input_tokens, Some(30_000));
         assert_eq!(shape.requests, 4);
+        assert_eq!((shape.complete, shape.skipped_lines), (false, 1));
+        assert_eq!(audit.totals.incomplete, 1);
         assert_eq!(shape.early_lines, [1, 4, 6, 8]);
         assert_eq!(s.most_tool_errors.len(), 1);
         // A main session is no subagent.
@@ -1422,8 +1523,9 @@ mod tests {
             requests: 1,
             cost_usd: Usd::from_f64(cost),
             complete: true,
+            skipped_lines: 0,
             input_tokens: 0,
-            cache_read_tokens: 0,
+            cache_read_tokens: Some(0),
             cache_hit_ratio: None,
             peak_input_tokens: 0,
             start_input_tokens: None,

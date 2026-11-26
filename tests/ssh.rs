@@ -2199,12 +2199,12 @@ fn audits_from_every_host_rank_together_with_each_pointer_on_its_host() {
 
     // A destination may send no more entries than this host asked for.
     let header = hosts.header();
-    let shape = r#"{"harness":"claude","session":null,"parent":null,"subagent":false,"cwd":null,"requests":1,"costUsd":1,"complete":true,"inputTokens":0,"cacheReadTokens":0,"cacheHitRatio":null,"peakInputTokens":0,"startInputTokens":null,"compactions":0,"toolCalls":0,"toolErrors":null,"streak":null,"at":{"host":null,"file":"f","line":1},"earlyLines":[]}"#;
+    let shape = r#"{"harness":"claude","session":null,"parent":null,"subagent":false,"cwd":null,"requests":1,"costUsd":1,"complete":true,"skippedLines":0,"inputTokens":0,"cacheReadTokens":0,"cacheHitRatio":null,"peakInputTokens":0,"startInputTokens":null,"compactions":0,"toolCalls":0,"toolErrors":null,"streak":null,"at":{"host":null,"file":"f","line":1},"earlyLines":[]}"#;
     hosts.host("flood");
     hosts.fake(
         "flood",
         &format!(
-            r#"echo '{header}'; echo '{{"audit":{{"since":1793491200000,"audit":{{"totals":{{"sessions":2,"requests":2,"costUsd":2,"unpriced":0}},"cacheMisses":{{"total":{{"events":0,"tokens":0,"costUsd":0,"unpriced":0}},"byCause":{{}},"hotspots":[]}},"toolOutputs":{{"byTool":[],"hotspots":[]}},"sessions":{{"costliest":[{shape},{shape}],"leastCached":[],"mostInput":[],"largestStart":[],"subagents":[],"mostToolCalls":[],"mostToolErrors":[],"longestStreaks":[]}}}}}}}}'; exec sleep 600"#
+            r#"echo '{header}'; echo '{{"audit":{{"since":1793491200000,"audit":{{"totals":{{"sessions":2,"requests":2,"costUsd":2,"incomplete":0}},"cacheMisses":{{"total":{{"events":0,"tokens":0,"costUsd":0,"unpriced":0}},"byCause":{{}},"hotspots":[]}},"toolOutputs":{{"byTool":[],"hotspots":[]}},"sessions":{{"costliest":[{shape},{shape}],"leastCached":[],"mostInput":[],"largestStart":[],"subagents":[],"mostToolCalls":[],"mostToolErrors":[],"longestStreaks":[]}}}}}}}}'; exec sleep 600"#
         ),
     );
     let (status, stdout, stderr) = run(hosts

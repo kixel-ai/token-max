@@ -584,6 +584,40 @@ impl Credit {
         }
     }
 
+    /// Concise single-line credit summary for the interactive TUI Hero card (never truncates mid-sentence).
+    pub fn short_text(&self, monthly: f64) -> Option<String> {
+        let share = |usd: f64| {
+            if monthly > 0.0 && usd > 0.0 {
+                format!(" ({})", crate::report::share_text(usd / monthly))
+            } else {
+                String::new()
+            }
+        };
+        if self.measured.settings > 0 {
+            let usd = self.measured.usd;
+            if usd > 0.0 {
+                return Some(format!(
+                    "Already saving ~{}/mo{} vs defaults",
+                    crate::report::about(usd),
+                    share(usd)
+                ));
+            }
+            if usd < 0.0 {
+                return Some(format!(
+                    "Current settings cost ~{}/mo more than defaults",
+                    crate::report::about(-usd)
+                ));
+            }
+        }
+        if self.up_to.settings > 0 && self.up_to.usd > 0.0 {
+            return Some(format!(
+                "Already saving up to ~{}/mo vs defaults",
+                crate::report::about(self.up_to.usd)
+            ));
+        }
+        None
+    }
+
     /// How many settings have a saving priced, in full or "up to".
     fn priced(&self) -> usize {
         self.measured.settings + self.up_to.settings + self.up_to_more.settings

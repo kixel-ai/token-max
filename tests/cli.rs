@@ -426,7 +426,7 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     assert_eq!(
         cards,
         format!(
-            "token-max vibes: 3 pieces of advice the transcripts can't price.\n  None of it is measured, so none of it is a verdict. Each card names whose advice it is.\n\n  [1/5] Bash timeout cap  not measured\n        2h -> 4m\n        What    The longest Claude waits on a foreground Bash command before Claude Code moves it to the background.\n        Advice  A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess. A command past the cap is not killed: it keeps running in the background, where Claude checks on it in later turns. Some commands need longer in the foreground; keep the cap if yours do. Project and local settings, which override it, are not read.\n        Source  The maintainer's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching\n        Change  \"env\": {{\"BASH_MAX_TIMEOUT_MS\": \"240000\"}} in ~{0}.claude{0}settings.json\n\n  [2/5] Auto memory  not measured\n        What    Auto memory lets Claude write notes for itself and loads them into every session.\n        Advice  0 of 1 main session (0%) in the window ran in a repository with a CLAUDE.md or AGENTS.md, counting as without 1 session whose transcript recorded loading none and whose directory is gone or unrecorded. Outside a repository, memory may be the only place a fact is kept, so turning it off is not advised. doctor's line could not price it over the window (never read back or written).\n        Source  The maintainer's pick: a lasting fact about a project belongs in its repository. How memory works: https://code.claude.com/docs/en/memory#auto-memory (2026-11-11)\n\n  [3/5] Auto-compact window (claude-opus-5-5)  not measured\n        967k -> 400k\n        What    How large a conversation grows before it is automatically summarized and continued from the summary.\n        Advice  No setting names it, so Claude Code compacts this model near 967k, its window for the model. The maintainer would cap it at 400k for better output, not a smaller bill: a smaller window compacts sooner, so the model works from a shorter context. Anthropic's docs say accuracy and recall degrade as a context grows. doctor's auto-compact window line keeps it on cost. Against the 967k window, its replay of a 400k window changes no recorded request, so it costs the same at API prices. The cap is advice beside that line, not its verdict.\n        Source  The maintainer's pick, for output quality rather than cost. Anthropic's docs on context rot: https://platform.claude.com/docs/en/build-with-claude/context-windows\n        Change  \"modelSettings\": {{\"claude-opus-5-5\": {{\"autoCompactWindow\": 400000}}}} in ~{0}.claude{0}settings.json\n\n  [4/5] Main-session default  not measured\n        What    The model and reasoning effort a main session starts with.\n        Advice  Defaults to claude-opus-5-5 at medium, the maintainer's pick. Ran claude-opus-5-5 at an unrecorded effort 2 times, $0.01.\n        Source  The maintainer's pick of a default. Anthropic's guidance: https://claude.dev/blog/which-claude-model-should-you-build-with/ https://code.claude.com/docs/en/model-config#choose-an-effort-level\n",
+            "token-max vibes: 3 pieces of advice the transcripts can't price.\n  None of it is measured, so none of it is a verdict. Each card names whose advice it is.\n\n  [1/5] Bash timeout cap  not measured\n        2h -> 4m\n        What    The longest Claude waits on a foreground Bash command before Claude Code moves it to the background.\n        Advice  A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess. A command past the cap is not killed: it keeps running in the background, where Claude checks on it in later turns. Some commands need longer in the foreground; keep the cap if yours do. Project and local settings, which override it, are not read.\n        Source  Kixel's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching\n        Change  \"env\": {{\"BASH_MAX_TIMEOUT_MS\": \"240000\"}} in ~{0}.claude{0}settings.json\n\n  [2/5] Auto memory  not measured\n        What    Auto memory lets Claude write notes for itself and loads them into every session.\n        Advice  0 of 1 main session (0%) in the window ran in a repository with a CLAUDE.md or AGENTS.md, counting as without 1 session whose transcript recorded loading none and whose directory is gone or unrecorded. Outside a repository, memory may be the only place a fact is kept, so turning it off is not advised. doctor's line could not price it over the window (never read back or written).\n        Source  Kixel's pick: a lasting fact about a project belongs in its repository. How memory works: https://code.claude.com/docs/en/memory#auto-memory (2026-11-11)\n\n  [3/5] Auto-compact window (claude-opus-5-5)  not measured\n        967k -> 400k\n        What    How large a conversation grows before it is automatically summarized and continued from the summary.\n        Advice  No setting names it, so Claude Code compacts this model near 967k, its window for the model. Kixel would cap it at 400k for better output, not a smaller bill: a smaller window compacts sooner, so the model works from a shorter context. Anthropic's docs say accuracy and recall degrade as a context grows. doctor's auto-compact window line keeps it on cost. Against the 967k window, its replay of a 400k window changes no recorded request, so it costs the same at API prices. The cap is advice beside that line, not its verdict.\n        Source  Kixel's pick, for output quality rather than cost. Anthropic's docs on context rot: https://platform.claude.com/docs/en/build-with-claude/context-windows\n        Change  \"modelSettings\": {{\"claude-opus-5-5\": {{\"autoCompactWindow\": 400000}}}} in ~{0}.claude{0}settings.json\n\n  [4/5] Main-session default  not measured\n        What    The model and reasoning effort a main session starts with.\n        Advice  Defaults to claude-opus-5-5 at medium, Kixel's pick. Ran claude-opus-5-5 at an unrecorded effort 2 times, $0.01.\n        Source  Kixel's pick of a default. Anthropic's guidance: https://claude.dev/blog/which-claude-model-should-you-build-with/ https://code.claude.com/docs/en/model-config#choose-an-effort-level\n",
             std::path::MAIN_SEPARATOR
         )
     );
@@ -468,7 +468,7 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
         stdout.contains("\n  [1/5] Bash timeout cap  not measured\n        What    ")
             && stdout.contains("\n  [3/5] Auto-compact window (claude-opus-5-5)  not measured\n        What    ")
             && stdout.contains("\n  [5/5] Advisor model  not measured\n        What    ")
-            && stdout.contains("Set to 400k. That is at or under the 400k window the maintainer caps it at, so there is nothing to change.")
+            && stdout.contains("Set to 400k. That is at or under the 400k window Kixel caps it at, so there is nothing to change.")
             && stdout.contains("Capped at 55m, the margin suggested under the 1h cache, the current main-agent cache TTL setting.")
             && !stdout.contains("Change"),
         "{stdout}"
@@ -1853,7 +1853,7 @@ mod unix {
             "{entry}"
         );
         assert!(
-            entry.ends_with(r#"Source The maintainer's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching Change "env": {"BASH_MAX_TIMEOUT_MS": "240000"} in ~/.claude/settings.json Accept? [y]es, [n]o, [q]uit:"#),
+            entry.ends_with(r#"Source Kixel's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching Change "env": {"BASH_MAX_TIMEOUT_MS": "240000"} in ~/.claude/settings.json Accept? [y]es, [n]o, [q]uit:"#),
             "{entry}"
         );
         assert!(!entry.contains("Recommended") && !entry.contains("Worth considering"));
@@ -1915,6 +1915,109 @@ mod unix {
             raised.replace("7200000", "240000")
         );
         drop(keyboard);
+    }
+
+    #[test]
+    fn doctor_rich_tui_applies_prechecked_wins_in_two_enters() {
+        let w = Workspace::new();
+        let prices = native_path(fixture("prices.json"));
+        let settings = "{\n  \"promptCacheTtl\": \"5m\"\n}\n";
+        std::fs::write(w.claude.join("settings.json"), settings).unwrap();
+        let base = "2026-10-01T12:00:00.000Z";
+        // Write a 2-request session with a 20m pause so 1h cache saves >$1/mo cleanly.
+        let project = w.claude.join("projects/app");
+        std::fs::create_dir_all(&project).unwrap();
+        let mut lines = String::new();
+        for i in 0..8 {
+            let minute = i * 20;
+            let hour = 12 + minute / 60;
+            let min = minute % 60;
+            let rec = serde_json::json!({
+                "type": "assistant",
+                "uuid": format!("u-{i}"),
+                "sessionId": "tui-session",
+                "timestamp": format!("2026-10-01T{hour:02}:{min:02}:00.000Z"),
+                "version": "2.1.314",
+                "entrypoint": "cli",
+                "cwd": w.home.to_string_lossy(),
+                "message": {
+                    "id": format!("m-{i}"),
+                    "model": "claude-opus-5-5",
+                    "content": [],
+                    "usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 100,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 1_000_000,
+                        "cache_creation": {
+                            "ephemeral_5m_input_tokens": 1_000_000,
+                            "ephemeral_1h_input_tokens": 0
+                        },
+                        "service_tier": "standard",
+                        "speed": "standard",
+                        "inference_geo": "global",
+                        "server_tool_use": { "web_search_requests": 0, "web_fetch_requests": 0 }
+                    }
+                }
+            });
+            lines.push_str(&rec.to_string());
+            lines.push('\n');
+        }
+        std::fs::write(project.join("tui-session.jsonl"), lines).unwrap();
+        let args = [
+            "doctor",
+            "--since",
+            base,
+            "--offline",
+            "--prices-file",
+            &prices,
+        ];
+        let mut c = command(&w, &args);
+        c.env("LANG", "C.UTF-8");
+        // Peek at Vibes (`v`), return to Measured (`v`), then Enter (diff) + Enter (write)!
+        // Verifies peeking at Vibes never clobbers the Measured offers/owner.
+        let (status, stdout, stderr) = typed(&mut c, b"vv\r\r");
+        assert_eq!(status, 0, "stdout={stdout}\nstderr={stderr}");
+        assert!(
+            !stdout.contains("How is ~/.claude paid for?"),
+            "rich TUI must not block on pre-scan billing quiz: {stdout}"
+        );
+        assert!(
+            stdout.contains("Saved ~") || stdout.contains("Updated 1 file"),
+            "expected receipt in stdout: {stdout}"
+        );
+        let written = std::fs::read_to_string(w.claude.join("settings.json")).unwrap();
+        assert!(written.contains("\"promptCacheTtl\": \"1h\""), "{written}");
+        assert_eq!(
+            std::fs::read_to_string(w.claude.join("settings.json.token-max.bak")).unwrap(),
+            settings
+        );
+
+        // Now that promptCacheTtl is already 1h, a second run shows it as already good (✓)
+        // and `--defaults` opens an interactive read-only preview that never writes.
+        let mut defaults_cmd = command(
+            &w,
+            &[
+                "doctor",
+                "--defaults",
+                "--since",
+                base,
+                "--offline",
+                "--prices-file",
+                &prices,
+            ],
+        );
+        defaults_cmd.env("LANG", "C.UTF-8");
+        let (status, stdout, stderr) = typed(&mut defaults_cmd, b"\rq");
+        assert_eq!(status, 0, "stdout={stdout}\nstderr={stderr}");
+        assert!(
+            stdout.contains("--defaults · read-only") && stdout.contains("Preview only"),
+            "expected interactive read-only --defaults TUI: {stdout}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(w.claude.join("settings.json")).unwrap(),
+            written
+        );
     }
 
     /// The binary hard-linked into its own directory, so an upgrade replaces only the link.

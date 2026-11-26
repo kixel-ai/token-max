@@ -5676,12 +5676,12 @@ mod tests {
             assert_eq!(item.value, "600k -> 400k");
             assert_eq!(
                 item.text,
-                "Set to 600k. The maintainer would cap it at 400k for better output, not a smaller bill: a smaller window compacts sooner, so the model works from a shorter context. Anthropic's docs say accuracy and recall degrade as a context grows. doctor's auto-compact window line recommends 100k on cost. Against the 600k window, its replay of a 400k window changes no recorded request, so it costs the same at API prices. The cap is advice beside that line, not its verdict."
+                "Set to 600k. Kixel would cap it at 400k for better output, not a smaller bill: a smaller window compacts sooner, so the model works from a shorter context. Anthropic's docs say accuracy and recall degrade as a context grows. doctor's auto-compact window line recommends 100k on cost. Against the 600k window, its replay of a 400k window changes no recorded request, so it costs the same at API prices. The cap is advice beside that line, not its verdict."
             );
             assert_eq!(
                 item.sources,
                 [
-                    "The maintainer's pick, for output quality rather than cost. Anthropic's docs on context rot:",
+                    "Kixel's pick, for output quality rather than cost. Anthropic's docs on context rot:",
                     "https://platform.claude.com/docs/en/build-with-claude/context-windows",
                 ]
             );
@@ -5711,7 +5711,7 @@ mod tests {
             assert_eq!(after.origins, [Origin::Check(index)]);
             assert_eq!(
                 after.item.text,
-                "doctor's auto-compact window line recommended 100k on cost, and the walk wrote it. That is at or under the 400k window the maintainer caps it at, so there is nothing to change."
+                "doctor's auto-compact window line recommended 100k on cost, and the walk wrote it. That is at or under the 400k window Kixel caps it at, so there is nothing to change."
             );
             assert!(after.item.quiet && after.item.how.is_none());
             let wrote = crate::vibes::settled(vec![item.clone()], &after.origins);
@@ -5832,7 +5832,7 @@ mod tests {
             assert!(item.quiet && item.how.is_none() && item.value.is_empty());
             assert_eq!(
                 item.text,
-                "Set to 300k. That is at or under the 400k window the maintainer caps it at, so there is nothing to change."
+                "Set to 300k. That is at or under the 400k window Kixel caps it at, so there is nothing to change."
             );
             // Unset on a native-1M model, Claude Code compacts near 967k, past the cap.
             scan.profiles[0].compaction = controls(
@@ -5847,7 +5847,7 @@ mod tests {
             let item = card(&self::report(&scan));
             assert_eq!(item.value, "967k -> 400k");
             assert!(
-                item.text.starts_with("No setting names it, so Claude Code compacts this model near 967k, its window for the model. The maintainer would cap it at 400k"),
+                item.text.starts_with("No setting names it, so Claude Code compacts this model near 967k, its window for the model. Kixel would cap it at 400k"),
                 "{}",
                 item.text
             );
@@ -6211,9 +6211,9 @@ mod tests {
             assert_eq!(item.value, "400k -> 240k");
             assert_eq!(
                 item.sources,
-                ["The maintainer's pick, for output quality rather than cost."]
+                ["Kixel's pick, for output quality rather than cost."]
             );
-            assert!(item.text.contains("No OpenAI page says how output changes with the window, so this rests on the maintainer's pick alone."), "{}", item.text);
+            assert!(item.text.contains("No OpenAI page says how output changes with the window, so this rests on Kixel's pick alone."), "{}", item.text);
             assert_eq!(
                 item.how,
                 Some(crate::doctor::How::Edit(crate::doctor::Patch {
@@ -6254,7 +6254,7 @@ mod tests {
             assert!(item.quiet && item.how.is_none() && item.value.is_empty());
             assert_eq!(
                 item.text,
-                "token-max could not resolve this window, so it cannot tell whether it is above the 240k window the maintainer caps it at. Set by config.toml:model_auto_compact_token_limit."
+                "token-max could not resolve this window, so it cannot tell whether it is above the 240k window Kixel caps it at. Set by config.toml:model_auto_compact_token_limit."
             );
             let mut unpriced = s.clone();
             let unsupported = &mut unpriced.profiles[0];

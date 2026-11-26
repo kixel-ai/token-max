@@ -42,6 +42,7 @@ mod t3;
 mod tally;
 mod terminal;
 mod totals;
+mod tui;
 mod turn_end;
 mod unreadable;
 mod upgrade;

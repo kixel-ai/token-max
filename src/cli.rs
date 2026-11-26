@@ -29,6 +29,7 @@ use crate::sessions::{Session, export};
 use crate::ssh::{self, Reply, Scope};
 use crate::terminal::{WrapOptions, wrap_text};
 use crate::totals::{Counts, Totals};
+use crate::tui::{self, Bridge, DiffPreview, ExitKind, Hero, Tab, VibeRow, WriteResult};
 use crate::upgrade::{self, Check, Install};
 use crate::vibes::{self, Item};
 use crate::wire::{Format, Job, Paid, Request};
@@ -141,10 +142,10 @@ Usage: token-max vibes [options]
 
 Prints one card for each piece of advice token-max doctor leaves out because no transcript
 can price it: a provider's guidance, such as an effort above high or an instruction file
-past its budget, settings whose saving is a guess, such as the Bash timeout cap, and the
-maintainer's picks, such as auto memory off where most sessions ran in a repository. Each
+past its budget, settings whose saving is a guess, such as the Bash timeout cap, and
+Kixel's picks, such as auto memory off where most sessions ran in a repository. Each
 card says what was measured beside the advice and names whose advice it is: the provider's
-page, or the maintainer's pick. None of it is a verdict.
+page, or Kixel's pick. None of it is a verdict.
 
 When stdin and stdout are both a terminal, a card that names the settings to change asks
 whether to change them (y, n, or q to stop), shows the accepted edits as a diff of each
@@ -218,9 +219,16 @@ enum Phase {
 /// report or a settings file is either written whole or not at all.
 static PHASE: Mutex<Phase> = Mutex::new(Phase::Running);
 
-/// The cells of the progress line ending stderr, which the next output must clear first;
-/// zero when none is showing.
-static PROGRESS: Mutex<usize> = Mutex::new(0);
+/// What currently occupies stderr's live progress region: either a 1-line bar (`cells`)
+/// or a multi-line animated piggy-bank panel (`rows`).
+#[derive(Default)]
+struct ProgressState {
+    cells: usize,
+    rows: u16,
+}
+
+/// The live progress region ending stderr, which the next output must clear first.
+static PROGRESS: Mutex<ProgressState> = Mutex::new(ProgressState { cells: 0, rows: 0 });
 
 /// Replace the progress line on stderr with `line`, whose text without color is `plain`.
 /// Spaces, not escapes, blank what a longer line left, so this works on any terminal and
@@ -228,6 +236,16 @@ static PROGRESS: Mutex<usize> = Mutex::new(0);
 /// return cannot reach a row the line wrapped onto, and a cut could split a color escape.
 fn show_progress(line: &str, plain: &str) {
     let mut shown = PROGRESS.lock().unwrap_or_else(PoisonError::into_inner);
+    if shown.rows > 0 {
+        let mut stderr = io::stderr();
+        let _ = crossterm::execute!(
+            stderr,
+            crossterm::cursor::MoveUp(shown.rows),
+            crossterm::cursor::MoveToColumn(0),
+            crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown)
+        );
+        shown.rows = 0;
+    }
     let room = progress_room();
     let cells = crate::terminal::cells(plain);
     let (text, cells) = if cells > room {
@@ -236,9 +254,40 @@ fn show_progress(line: &str, plain: &str) {
     } else {
         (line, cells)
     };
-    let pad = " ".repeat((*shown).min(room).saturating_sub(cells));
+    let pad = " ".repeat(shown.cells.min(room).saturating_sub(cells));
     eprint!("\r{text}{pad}");
-    *shown = cells;
+    shown.cells = cells;
+}
+
+/// Draw a multi-line animated scan block on stderr without flicker.
+fn show_progress_block(lines: &[String]) {
+    let mut shown = PROGRESS.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut stderr = io::stderr();
+    let _ = crossterm::execute!(stderr, crossterm::terminal::BeginSynchronizedUpdate);
+    if shown.rows > 0 {
+        let _ = crossterm::execute!(
+            stderr,
+            crossterm::cursor::MoveUp(shown.rows),
+            crossterm::cursor::MoveToColumn(0),
+        );
+    } else if shown.cells > 0 {
+        let _ = write!(
+            stderr,
+            "\r{}\r",
+            " ".repeat(shown.cells.min(progress_room()))
+        );
+        shown.cells = 0;
+    }
+    let _ = crossterm::execute!(
+        stderr,
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown)
+    );
+    for line in lines {
+        let _ = writeln!(stderr, "{line}");
+    }
+    let _ = crossterm::execute!(stderr, crossterm::terminal::EndSynchronizedUpdate);
+    let _ = stderr.flush();
+    shown.rows = u16::try_from(lines.len()).unwrap_or(u16::MAX);
 }
 
 /// The cells a progress line may take: one less than stderr's terminal is wide now, so
@@ -249,13 +298,25 @@ fn progress_room() -> usize {
     columns.max(2) - 1
 }
 
-/// Clear the progress line, if one is showing, so what follows starts on a clean row. The
-/// returned lock keeps another thread from drawing one again while it is held.
-fn clear_progress() -> MutexGuard<'static, usize> {
+/// Clear the progress line or block, if one is showing, so what follows starts on a clean row.
+/// The returned lock keeps another thread from drawing one again while it is held.
+fn clear_progress() -> MutexGuard<'static, ProgressState> {
     let mut shown = PROGRESS.lock().unwrap_or_else(PoisonError::into_inner);
-    if *shown > 0 {
-        eprint!("\r{}\r", " ".repeat((*shown).min(progress_room())));
-        *shown = 0;
+    if shown.rows > 0 {
+        let mut stderr = io::stderr();
+        let _ = crossterm::execute!(
+            stderr,
+            crossterm::terminal::BeginSynchronizedUpdate,
+            crossterm::cursor::MoveUp(shown.rows),
+            crossterm::cursor::MoveToColumn(0),
+            crossterm::terminal::Clear(crossterm::terminal::ClearType::FromCursorDown),
+            crossterm::terminal::EndSynchronizedUpdate
+        );
+        let _ = stderr.flush();
+        shown.rows = 0;
+    } else if shown.cells > 0 {
+        eprint!("\r{}\r", " ".repeat(shown.cells.min(progress_room())));
+        shown.cells = 0;
     }
     shown
 }
@@ -465,6 +526,10 @@ impl Meter {
                     }
                     let total = shared.reading.total.load(Ordering::Relaxed);
                     let read = shared.reading.read.load(Ordering::Relaxed);
+                    let room = progress_room();
+                    let height = terminal_size::terminal_size_of(io::stderr())
+                        .map_or(24usize, |(_, h)| h.0.into());
+                    let rich_scan = shared.look.unicode && room >= 64 && height >= 14;
                     // The local scan may still be reading after the phase moves on, as
                     // when SSH hosts' prices or reports arrive first.
                     if read < total {
@@ -474,15 +539,15 @@ impl Meter {
                             total,
                             elapsed: began.elapsed(),
                         };
-                        let figures = shared.figures();
-                        let (line, plain) = bar(
-                            &progress,
-                            figures,
-                            shared.whose,
-                            shared.look,
-                            progress_room(),
-                        );
-                        show_progress(&line, &plain);
+                        if rich_scan {
+                            let lines = piggy_progress(name, Some(&progress), &shared, tick, room);
+                            show_progress_block(&lines);
+                        } else {
+                            let figures = shared.figures();
+                            let (line, plain) =
+                                bar(&progress, figures, shared.whose, shared.look, room);
+                            show_progress(&line, &plain);
+                        }
                     } else {
                         // Reading has ended only once the scan knows what it reads.
                         if total != 0 {
@@ -494,7 +559,12 @@ impl Meter {
                             .lock()
                             .unwrap_or_else(PoisonError::into_inner);
                         let (name, since) = after_reading((name, since), step, read_end);
-                        shared.show(busy(name, since.elapsed(), tick, shared.look.unicode));
+                        if rich_scan {
+                            let lines = piggy_progress(name, None, &shared, tick, room);
+                            show_progress_block(&lines);
+                        } else {
+                            shared.show(busy(name, since.elapsed(), tick, shared.look.unicode));
+                        }
                     }
                 }
             })
@@ -744,6 +814,175 @@ fn bar(
         plain.clone()
     };
     (line, plain)
+}
+
+/// Render the roomy 10-line half-block piggy-bank loading panel beside real live telemetry
+/// (no decorative/random bars — only real read/check progress, request counts, and savings).
+fn piggy_progress(
+    phase: &str,
+    reading: Option<&Progress>,
+    shared: &Shown,
+    tick: usize,
+    room: usize,
+) -> Vec<String> {
+    let color = shared.look.color;
+    let s = |code: &str, text: &str| {
+        if color {
+            format!("\x1b[{code}m{text}\x1b[0m")
+        } else {
+            text.to_string()
+        }
+    };
+    const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    // Advance coin drop every 2 ticks (~200ms per stage) for a smooth, unhurried drop.
+    let pig = tui::piggy_lines(color, true, tick / 2);
+    let right_room = room.saturating_sub(37);
+    let spin = s("1;35", FRAMES[tick % FRAMES.len()]);
+
+    // Row 1: Brand wordmark
+    let wordmark = format!(
+        "{}{}  {}",
+        s("1", "token-"),
+        s("1;35", "max"),
+        s("2", env!("CARGO_PKG_VERSION"))
+    );
+
+    // Row 3: Active phase with braille spinner
+    let phase_line = format!(
+        "{spin} {}",
+        s(
+            "1",
+            crate::terminal::fit(&format!("{phase}…"), right_room.saturating_sub(3))
+        )
+    );
+
+    // Row 4: Real progress bar (bytes read during reading, or completed checks during analysis)
+    let checked = shared
+        .reading
+        .checked
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .map(|c| (c.done, c.of));
+
+    let bar_line = if let Some(p) = reading {
+        let frac = (p.read as f64 / p.total.max(1) as f64).clamp(0.0, 1.0);
+        let track = right_room.saturating_sub(24).clamp(10, 26);
+        let filled = ((frac * track as f64).round() as usize).min(track);
+        let bar = format!(
+            "{}{}{}",
+            s("35", &"━".repeat(filled)),
+            if filled < track {
+                s("35", "╸")
+            } else {
+                String::new()
+            },
+            s(
+                "2",
+                &"─".repeat(track.saturating_sub(filled + usize::from(filled < track)))
+            )
+        );
+        let pct = format!(" {:>3.0}%", frac * 100.0);
+        let eta = if p.elapsed >= Duration::from_secs(1) && frac >= 0.02 {
+            let left = p.elapsed.as_secs_f64() * (1.0 - frac) / frac;
+            format!(" · ~{} left", duration(left))
+        } else {
+            String::new()
+        };
+        let bytes = format!(
+            "  {} / {}{eta}",
+            crate::report::size(p.read),
+            crate::report::size(p.total)
+        );
+        let bytes_fit = crate::terminal::fit(&bytes, right_room.saturating_sub(track + 5));
+        format!("{bar}{}{}", s("1", &pct), s("2", bytes_fit))
+    } else if let Some((done, of)) = checked
+        && of > 0
+    {
+        let frac = (done as f64 / of as f64).clamp(0.0, 1.0);
+        let track = right_room.saturating_sub(18).clamp(10, 26);
+        let filled = ((frac * track as f64).round() as usize).min(track);
+        let bar = format!(
+            "{}{}{}",
+            s("35", &"━".repeat(filled)),
+            if filled < track {
+                s("35", "╸")
+            } else {
+                String::new()
+            },
+            s(
+                "2",
+                &"─".repeat(track.saturating_sub(filled + usize::from(filled < track)))
+            )
+        );
+        format!("{bar}  {}", s("2", &format!("{done}/{of} checks")))
+    } else {
+        String::new()
+    };
+
+    // Row 5: Real live counts (sessions, requests, API spend)
+    let counts_line = shared
+        .counts()
+        .map(|c| {
+            let mut parts = vec![];
+            if c.sessions > 0 {
+                parts.push(format!("{} sessions", tui::commas(c.sessions)));
+            }
+            if c.requests > 0 {
+                parts.push(format!("{} reqs", tui::commas(c.requests)));
+            }
+            if let Some(spent) = c.spend {
+                parts.push(crate::report::spend_text(
+                    spent.usd,
+                    spent.margin,
+                    spent.floor,
+                    spent.partial,
+                ));
+            }
+            s("2", crate::terminal::fit(&parts.join(" · "), right_room))
+        })
+        .unwrap_or_default();
+
+    // Row 6: Real live savings found so far
+    let found_line = if shared.tally
+        && let Some((savings, _)) = shared.tally()
+    {
+        let usd = savings.usd().unwrap_or(0.0);
+        if usd >= 1.0 {
+            s(
+                "1;32",
+                &format!("+~{}/mo found so far", crate::report::about(usd)),
+            )
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    let right = [
+        String::new(),
+        String::new(),
+        wordmark,
+        String::new(),
+        phase_line,
+        bar_line,
+        counts_line,
+        found_line,
+        String::new(),
+        String::new(),
+    ];
+
+    pig.into_iter()
+        .zip(right)
+        .map(|(p, r)| {
+            if r.is_empty() {
+                format!("  {p}")
+            } else {
+                format!("  {p}   {r}")
+            }
+        })
+        .collect()
 }
 
 /// Whole seconds as `42s` or `3m 05s`.
@@ -1125,7 +1364,7 @@ enum Output {
     /// Already streamed, as an SSH audit destination does.
     Written,
     /// A report, then the walk through its changes on this terminal.
-    Walk(Walk),
+    Walk(Box<Walk>),
 }
 
 /// Every host's changes, to walk through on this terminal.
@@ -1139,6 +1378,10 @@ struct Walk {
     command: Command,
     /// Show the exact JSON or TOML of the edits left to make.
     details: bool,
+    /// Use the rich inline crossterm TUI rather than plain line-by-line prompts.
+    rich_tui: bool,
+    /// Summary hero metadata for the interactive TUI.
+    hero: Option<Hero>,
 }
 
 /// The command a run's hosts are read for.
@@ -1906,8 +2149,6 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
     }
     let stdout = io::stdout().is_terminal();
     let terminal = stdout && io::stdin().is_terminal();
-    // A report with the settings files pretended away has no changes to make.
-    let walk = terminal && !values.defaults;
     let term_dumb = env("TERM").as_deref() == Some("dumb");
     let unicode_locale = env_nonempty("LC_ALL")
         .or_else(|| env_nonempty("LC_CTYPE"))
@@ -1918,6 +2159,12 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
         });
     let color = stdout && !values.plain && env_nonempty("NO_COLOR").is_none() && !term_dumb;
     let unicode = stdout && !values.plain && !term_dumb && unicode_locale;
+    // Use the interactive inline TUI on capable terminals (unless `--plain` or `TERM=dumb`),
+    // including `--defaults` in read-only preview mode.
+    let rich_tui = terminal && !values.plain && !term_dumb;
+    // Plain `--defaults` prints the static report without walking; rich terminals open the
+    // interactive TUI in read-only preview mode.
+    let walk = terminal && (!values.defaults || rich_tui);
     let format = Format {
         width: width(),
         color,
@@ -1937,10 +2184,9 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
             (releases, check)
         })
     });
-    // On a terminal, offer a newer release before anything else, then open with what the run
-    // is about to read, then ask how each host's Claude profiles on the Anthropic API pay,
-    // which picks each one's main TTL default; without a terminal the report names both
-    // defaults.
+    // On a terminal, offer a newer release before anything else. In plain / `--defaults`
+    // plain mode, print the opening list and ask how each Claude profile pays before scanning; in
+    // the rich TUI, launch the animated replay immediately and let `[b]` toggle Plan/API live.
     let ask = if terminal {
         let found = discover(&discovery)?;
         // A run reporting as a default user would changes nothing, so it only says how.
@@ -1949,16 +2195,20 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
         {
             return Ok((Output::Written, code));
         }
-        let failed = |_| ScanError::new("cannot use the terminal; no report produced");
-        let opening = opening(&Found::list(&found), &destinations, &style);
-        io::stdout()
-            .lock()
-            .write_all(opening.as_bytes())
-            .map_err(failed)?;
-        Some(Ask {
-            roots: found.billing_roots(),
-            style: style.clone(),
-        })
+        if rich_tui {
+            None
+        } else {
+            let failed = |_| ScanError::new("cannot use the terminal; no report produced");
+            let opening = opening(&Found::list(&found), &destinations, &style);
+            io::stdout()
+                .lock()
+                .write_all(opening.as_bytes())
+                .map_err(failed)?;
+            Some(Ask {
+                roots: found.billing_roots(),
+                style: style.clone(),
+            })
+        }
     } else {
         None
     };
@@ -2132,14 +2382,76 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
             _ => String::new(),
         };
         let head = format!("{head}{}{credit}", title.unwrap_or_default());
+        let hero = rich_tui.then(|| {
+            let mut kept = vec![];
+            let mut kept_features = 0usize;
+            for host in &hosts {
+                if let Side::Here {
+                    listing: Some(listing),
+                    ..
+                } = &host.side
+                {
+                    let (rows, extra) = listing.kept();
+                    kept_features += extra;
+                    for r in rows {
+                        kept.push(tui::KeptItem {
+                            host_label: host.label.clone(),
+                            name: r.name,
+                            value: r.value,
+                            saving_usd: r.saving_usd,
+                            default_value: r.default_value,
+                            summary: r.summary,
+                        });
+                    }
+                }
+            }
+            kept.sort_by(|a, b| match (a.saving_usd, b.saving_usd) {
+                (Some(x), Some(y)) => y.total_cmp(&x),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            });
+            let mut h = Hero {
+                host_count: hosts.len(),
+                vibes_pending: if values.defaults { 0 } else { pending },
+                read_only: values.defaults,
+                kept,
+                kept_features,
+                caveats: vec![
+                    "~ marks figures extrapolated across unpriced requests; costs use public API rates from models.dev.".into(),
+                    "Each change is priced independently; overlapping changes may save slightly less together.".into(),
+                    "Run with --details or --plain for every untouched setting and full footnote ledger.".into(),
+                ],
+                ..Hero::default()
+            };
+            if let Some(sum) = &sum {
+                h.requests = sum.requests;
+                h.tokens = sum.tokens;
+                h.sessions = sum.sessions;
+                h.monthly_spend = sum.monthly;
+                h.spend_text = crate::report::spend_text(
+                    sum.spend,
+                    sum.margin,
+                    sum.floor,
+                    sum.partial,
+                );
+                h.credit = sum
+                    .credit
+                    .as_ref()
+                    .and_then(|c| c.short_text(sum.monthly));
+            }
+            h
+        });
         let walk = Walk {
             hosts,
             head,
             style,
             command,
             details: values.details,
+            rich_tui,
+            hero,
         };
-        return Ok((Output::Walk(walk), 0));
+        return Ok((Output::Walk(Box::new(walk)), 0));
     }
     if advice {
         let hosts: Vec<vibes::Host> = cards
@@ -2348,12 +2660,16 @@ fn warn_upgrade(check: Check) {
 /// then write them once the person confirms. After `doctor`'s walk, offer `vibes`' advice
 /// from the same scan and walk through it the same way.
 fn walk(walk: Walk) -> Result<(), ScanError> {
+    if walk.rich_tui {
+        return run_tui(walk);
+    }
     let Walk {
         mut hosts,
         head,
         style,
         command,
         details,
+        ..
     } = walk;
     let mut stdout = io::stdout().lock();
     let mut stdin = io::stdin().lock();
@@ -2463,6 +2779,356 @@ fn walk(walk: Walk) -> Result<(), ScanError> {
         }
     }
     walked.and(ended)
+}
+
+/// Interactive inline TUI runner backed by local and SSH `WalkHost`s.
+fn run_tui(walk: Walk) -> Result<(), ScanError> {
+    struct WalkBridge<'a> {
+        hosts: &'a mut [WalkHost],
+        style: &'a Style,
+        start_vibes: bool,
+        /// Independent vibes owners for local hosts so peeking at Vibes never overwrites
+        /// the Measured `Owner`.
+        vibes_owners: Vec<Option<Owner>>,
+        vibes_loaded: bool,
+        measured_plans: Vec<Option<crate::doctor::Plan>>,
+        measured_work: Vec<bool>,
+        vibes_plans: Vec<Option<crate::doctor::Plan>>,
+        vibes_work: Vec<bool>,
+    }
+
+    impl WalkBridge<'_> {
+        fn preview_measured_events(
+            &mut self,
+            events: &[Vec<crate::doctor::Event>],
+        ) -> Result<DiffPreview, ScanError> {
+            let mut text = String::new();
+            let mut plans = vec![];
+            let mut has_work = vec![];
+            let mut file_count = 0usize;
+            let mut change_count = 0usize;
+            for (host, host_events) in self.hosts.iter_mut().zip(events) {
+                let any_yes = host_events
+                    .iter()
+                    .any(|e| !matches!(e, crate::doctor::Event::Choose { yes: false, .. }));
+                if !any_yes {
+                    plans.push(None);
+                    has_work.push(false);
+                    continue;
+                }
+                change_count += host_events
+                    .iter()
+                    .filter(|e| {
+                        matches!(
+                            e,
+                            crate::doctor::Event::Choose { yes: true, .. }
+                                | crate::doctor::Event::Cleanup { .. }
+                        )
+                    })
+                    .count();
+                let shown = match &mut host.side {
+                    Side::Here { owner, .. } => {
+                        let plan = owner.plan(host_events)?;
+                        let shown = preview(&plan, &host.style);
+                        if !shown.is_empty() {
+                            file_count += 1;
+                        }
+                        plans.push(Some(plan));
+                        shown
+                    }
+                    Side::There { remote, .. } => {
+                        let (_, shown) = remote.review(host_events)?;
+                        let safe = crate::safe::remote_text(&shown, self.style.color);
+                        if !safe.is_empty() {
+                            file_count += 1;
+                        }
+                        plans.push(None);
+                        safe
+                    }
+                };
+                if !shown.is_empty() {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(shown.trim_start_matches('\n'));
+                }
+                has_work.push(true);
+            }
+            self.measured_plans = plans;
+            self.measured_work = has_work;
+            Ok(DiffPreview {
+                text,
+                file_count: file_count.max(1),
+                change_count,
+                backups: vec![],
+            })
+        }
+
+        fn preview_vibes_events(
+            &mut self,
+            events: &[Vec<crate::doctor::Event>],
+        ) -> Result<DiffPreview, ScanError> {
+            let mut text = String::new();
+            let mut plans = vec![];
+            let mut has_work = vec![];
+            let mut file_count = 0usize;
+            let mut change_count = 0usize;
+            for (idx, (host, host_events)) in self.hosts.iter_mut().zip(events).enumerate() {
+                let any_yes = host_events
+                    .iter()
+                    .any(|e| !matches!(e, crate::doctor::Event::Choose { yes: false, .. }));
+                if !any_yes {
+                    plans.push(None);
+                    has_work.push(false);
+                    continue;
+                }
+                change_count += host_events
+                    .iter()
+                    .filter(|e| matches!(e, crate::doctor::Event::Choose { yes: true, .. }))
+                    .count();
+                let shown = if let Some(owner) = self.vibes_owners.get(idx).and_then(Option::as_ref)
+                {
+                    let plan = owner.plan(host_events)?;
+                    let shown = preview(&plan, &host.style);
+                    if !shown.is_empty() {
+                        file_count += 1;
+                    }
+                    plans.push(Some(plan));
+                    shown
+                } else {
+                    match &mut host.side {
+                        Side::Here { owner, .. } => {
+                            let plan = owner.plan(host_events)?;
+                            let shown = preview(&plan, &host.style);
+                            if !shown.is_empty() {
+                                file_count += 1;
+                            }
+                            plans.push(Some(plan));
+                            shown
+                        }
+                        Side::There { remote, .. } => {
+                            let (_, shown) = remote.review(host_events)?;
+                            let safe = crate::safe::remote_text(&shown, self.style.color);
+                            if !safe.is_empty() {
+                                file_count += 1;
+                            }
+                            plans.push(None);
+                            safe
+                        }
+                    }
+                };
+                if !shown.is_empty() {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(shown.trim_start_matches('\n'));
+                }
+                has_work.push(true);
+            }
+            self.vibes_plans = plans;
+            self.vibes_work = has_work;
+            Ok(DiffPreview {
+                text,
+                file_count: file_count.max(1),
+                change_count,
+                backups: vec![],
+            })
+        }
+
+        fn write_planned(
+            &mut self,
+            plans: Vec<Option<crate::doctor::Plan>>,
+            has_work: Vec<bool>,
+        ) -> Result<WriteResult, ScanError> {
+            enter(Phase::Writing);
+            let mut lines = vec![];
+            let mut files_written = 0usize;
+            let mut error = None;
+            let mut skipped = vec![];
+            for ((host, plan), active) in self.hosts.iter_mut().zip(plans).zip(has_work) {
+                if !active {
+                    continue;
+                }
+                if error.is_none() && ssh::cancelled() {
+                    error = Some(ScanError::new("cancelled while writing"));
+                }
+                if error.is_some() {
+                    skipped.push(host.label.clone().unwrap_or_else(|| "this host".into()));
+                    continue;
+                }
+                let result = match (&mut host.side, plan) {
+                    (Side::Here { written, .. }, Some(plan)) => write(&plan).inspect(|_| {
+                        written.extend(plan.accepted());
+                    }),
+                    (Side::There { remote, .. }, None) => remote.write(),
+                    _ => unreachable!("a plan for each local host"),
+                };
+                match result {
+                    Ok(files) => {
+                        host.wrote = true;
+                        files_written += files.len();
+                        let formatted = wrote(&files, &host.style);
+                        for line in formatted.lines() {
+                            let trimmed = line.trim();
+                            if !trimmed.is_empty() {
+                                lines.push(trimmed.to_string());
+                            }
+                        }
+                    }
+                    Err(failed) => {
+                        error = Some(failed);
+                    }
+                }
+            }
+            match error {
+                Some(mut err) if !skipped.is_empty() => {
+                    err.message += &format!("; nothing was written on {}", skipped.join(", "));
+                    Err(err)
+                }
+                Some(err) => Err(err),
+                None => Ok(WriteResult {
+                    files_written,
+                    lines,
+                }),
+            }
+        }
+    }
+
+    impl Bridge for WalkBridge<'_> {
+        fn preview_measured(
+            &mut self,
+            events: &[Vec<crate::doctor::Event>],
+        ) -> Result<DiffPreview, ScanError> {
+            self.preview_measured_events(events)
+        }
+
+        fn write_measured(&mut self) -> Result<WriteResult, ScanError> {
+            let plans = std::mem::take(&mut self.measured_plans);
+            let work = std::mem::take(&mut self.measured_work);
+            self.write_planned(plans, work)
+        }
+
+        fn load_vibes(&mut self) -> Result<Vec<VibeRow>, ScanError> {
+            if !self.vibes_loaded {
+                self.vibes_owners = vec![];
+                for host in self.hosts.iter_mut() {
+                    if self.start_vibes {
+                        // Already in `vibes` command: `host.side` holds the vibes owner directly.
+                        self.vibes_owners.push(None);
+                        continue;
+                    }
+                    match &mut host.side {
+                        Side::Here {
+                            monthly, written, ..
+                        } => {
+                            let items = vibes::settled(host.items.clone(), written);
+                            let owner = vibes::owner(&items, host.style.home.clone(), *monthly);
+                            host.items = items;
+                            self.vibes_owners.push(Some(owner));
+                        }
+                        Side::There { offers, remote } => {
+                            let (items, theirs) = remote.vibes()?;
+                            host.items = items;
+                            *offers = theirs;
+                            self.vibes_owners.push(None);
+                        }
+                    }
+                }
+                self.vibes_loaded = true;
+            }
+            let mut rows = vec![];
+            for (host_idx, host) in self.hosts.iter().enumerate() {
+                let offers = self
+                    .vibes_owners
+                    .get(host_idx)
+                    .and_then(Option::as_ref)
+                    .map(Owner::offers)
+                    .unwrap_or_else(|| host.offers());
+                for (item_idx, item) in host.items.iter().enumerate() {
+                    let origin = Origin::Vibe(item_idx);
+                    let offer_index = offers
+                        .offers
+                        .iter()
+                        .position(|o| o.fix.origins.contains(&origin));
+                    rows.push(VibeRow {
+                        host: host_idx,
+                        host_label: host.label.clone(),
+                        item: item.clone(),
+                        offer_index,
+                        checked: false,
+                    });
+                }
+            }
+            Ok(rows)
+        }
+
+        fn preview_vibes(&mut self, rows: &[VibeRow]) -> Result<DiffPreview, ScanError> {
+            let events = tui::vibes_events_from(rows, self.hosts.len());
+            self.preview_vibes_events(&events)
+        }
+
+        fn write_vibes(&mut self) -> Result<WriteResult, ScanError> {
+            let plans = std::mem::take(&mut self.vibes_plans);
+            let work = std::mem::take(&mut self.vibes_work);
+            self.write_planned(plans, work)
+        }
+    }
+
+    let Walk {
+        mut hosts,
+        style,
+        command,
+        hero,
+        ..
+    } = walk;
+    let start_tab = match command {
+        Command::Doctor => Tab::Measured,
+        Command::Vibes => Tab::Vibes,
+    };
+    let app = {
+        let walking: Vec<Walking> = hosts
+            .iter()
+            .map(|h| Walking {
+                label: h.label.as_deref(),
+                offers: h.offers(),
+                style: &h.style,
+            })
+            .collect();
+        tui::App::new(
+            &walking,
+            hero.unwrap_or_default(),
+            start_tab,
+            style.color,
+            style.unicode,
+        )
+    };
+    let mut bridge = WalkBridge {
+        hosts: &mut hosts,
+        style: &style,
+        start_vibes: command == Command::Vibes,
+        vibes_owners: vec![],
+        vibes_loaded: false,
+        measured_plans: vec![],
+        measured_work: vec![],
+        vibes_plans: vec![],
+        vibes_work: vec![],
+    };
+    let outcome = tui::run(app, &style, &mut bridge);
+
+    let mut ended = Ok(());
+    for host in hosts {
+        if let (Side::There { remote, .. }, true) = (host.side, host.wrote)
+            && let Err(error) = remote.end()
+            && ended.is_ok()
+        {
+            ended = Err(error);
+        }
+    }
+    match outcome {
+        Ok(ExitKind::Done) => ended,
+        Ok(ExitKind::Cancelled) => Err(ScanError::new("cancelled; no settings were changed")),
+        Err(error) => Err(error),
+    }
 }
 
 /// The terminal failed under a walk, after `wrote` says whether settings were written.
@@ -2629,6 +3295,8 @@ pub fn main() -> ExitCode {
         };
         // The analysis may be blocked in I/O, so exit now, holding the lock so nothing else
         // is written, after deleting any partial price download it would have cleaned up.
+        // Always leave the terminal out of raw mode with cursor visible if TUI was active.
+        tui::restore_if_active();
         cancel_downloads();
         ssh::cancel();
         diagnose(json, &ScanError::new(message));
@@ -2659,7 +3327,7 @@ pub fn main() -> ExitCode {
         Ok((Output::Written, code)) => Ok(code),
         Ok((Output::Walk(w), code)) => {
             // The walk runs on this thread, outside the panic guard around the analysis.
-            match panic::catch_unwind(AssertUnwindSafe(|| walk(w))) {
+            match panic::catch_unwind(AssertUnwindSafe(|| walk(*w))) {
                 Ok(Ok(())) => Ok(code),
                 Ok(Err(error)) => {
                     diagnose(json, &error);

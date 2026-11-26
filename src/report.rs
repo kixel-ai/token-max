@@ -482,11 +482,11 @@ fn default_item(e: &EffortCheck, profile: &str, how: Option<How>, out: &Out<'_>)
     let current = default_pair(c.model.as_deref(), c.effective.as_deref());
     let quiet = crate::effort::accepted(c, e.harness);
     let mut text = if current == pick {
-        format!("Defaults to {current}, the maintainer's pick.")
+        format!("Defaults to {current}, Kixel's pick.")
     } else if quiet {
-        format!("Defaults to {current}, which the maintainer accepts beside their pick, {pick}.")
+        format!("Defaults to {current}, which Kixel accepts beside {pick}.")
     } else {
-        let mut text = format!("Defaults to {current}. The maintainer's pick is {pick}");
+        let mut text = format!("Defaults to {current}. Kixel's pick is {pick}");
         if !fine.is_empty() {
             let _ = write!(text, ", and {} is fine too", fine.join(" or "));
         }
@@ -507,11 +507,11 @@ fn default_item(e: &EffortCheck, profile: &str, how: Option<How>, out: &Out<'_>)
     }
     let (lead, guides): (&str, &[&str]) = match e.harness {
         Harness::Claude => (
-            "The maintainer's pick of a default. Anthropic's guidance:",
+            "Kixel's pick of a default. Anthropic's guidance:",
             &[CLAUDE_MODEL_GUIDE, CLAUDE_EFFORT_DOCS],
         ),
         Harness::Codex => (
-            "The maintainer's pick of a default. OpenAI's guidance:",
+            "Kixel's pick of a default. OpenAI's guidance:",
             &[OPENAI_REASONING],
         ),
     };
@@ -618,7 +618,7 @@ fn subagent_item(line: &SubagentLine<'_>, out: &Out<'_>) -> Option<Item> {
     if let Some(guidance) = &guidance {
         let _ = write!(
             text,
-            " {guidance} The maintainer's pick for subagents is {SUBAGENT_PICK}. A different effort changes the output tokens, so what {SUBAGENT_PICK} would cost is not measured."
+            " {guidance} Kixel's pick for subagents is {SUBAGENT_PICK}. A different effort changes the output tokens, so what {SUBAGENT_PICK} would cost is not measured."
         );
     }
     // The edit stays on offer beside an upgrade, which token-max does not make itself.
@@ -627,12 +627,12 @@ fn subagent_item(line: &SubagentLine<'_>, out: &Out<'_>) -> Option<Item> {
         .then(|| crate::doctor::subagent_effort_how(&effort.owner, p, SUBAGENT_PICK));
     let mut sources: Vec<String> = match p.harness {
         Harness::Claude => vec![
-            "The maintainer's pick of a subagent default. Anthropic's guidance:".into(),
+            "Kixel's pick of a subagent default. Anthropic's guidance:".into(),
             CLAUDE_MODEL_GUIDE.into(),
             CLAUDE_EFFORT_DOCS.into(),
         ],
         Harness::Codex => vec![
-            "The maintainer's pick of a subagent default. OpenAI's guidance:".into(),
+            "Kixel's pick of a subagent default. OpenAI's guidance:".into(),
             OPENAI_REASONING.into(),
         ],
     };
@@ -1589,7 +1589,81 @@ pub enum Choice {
     Manual(String),
 }
 
+/// One already-good setting or feature extracted from a rendered `Listing` for the interactive TUI.
+#[derive(Clone, Debug)]
+pub(crate) struct KeptRow {
+    pub name: String,
+    pub value: String,
+    pub saving_usd: Option<f64>,
+    pub default_value: Option<String>,
+    pub summary: String,
+}
+
 impl Listing {
+    /// Already-good settings (and any features saving >= $1/mo vs defaults) for the TUI's
+    /// green-check scorecard, plus the count of other in-budget features folded into a summary.
+    pub(crate) fn kept(&self) -> (Vec<KeptRow>, usize) {
+        use crate::defaults::Saving;
+
+        let mut items: Vec<KeptRow> = vec![];
+        let mut other_features = 0usize;
+        for row in self.rows.iter().filter(|r| r.mark == Mark::Keep) {
+            let (saving_usd, default_value) = match &row.baseline {
+                Some(b) => {
+                    let usd = match b.saving {
+                        Saving::Saves(u) | Saving::UpTo(u) | Saving::Estimated(u) if u > 0.0 => {
+                            Some(u)
+                        }
+                        _ => None,
+                    };
+                    (usd, Some(b.default.clone()))
+                }
+                None => (None, None),
+            };
+            let is_core_setting = row.group.is_none();
+            let saves_meaningfully = saving_usd.is_some_and(|u| u >= 1.0);
+            if !is_core_setting && !saves_meaningfully {
+                other_features += 1;
+                continue;
+            }
+            let summary = match (&default_value, saving_usd) {
+                (Some(def), Some(usd)) => format!(
+                    "Default is {def} — keeping {} saves ~{}/mo.",
+                    row.value,
+                    about(usd)
+                ),
+                (Some(def), None) => format!("Already set to {} (default {def}).", row.value),
+                (None, _) if !row.what.is_empty() => row.what.clone(),
+                (None, _) => format!("Already at the recommended value ({}).", row.value),
+            };
+            if let Some(existing) = items
+                .iter_mut()
+                .find(|k| k.name == row.name && k.value == row.value)
+            {
+                if saving_usd.unwrap_or(0.0) > existing.saving_usd.unwrap_or(0.0) {
+                    existing.saving_usd = saving_usd;
+                    existing.default_value = default_value;
+                    existing.summary = summary;
+                }
+            } else {
+                items.push(KeptRow {
+                    name: row.name.clone(),
+                    value: row.value.clone(),
+                    saving_usd,
+                    default_value,
+                    summary,
+                });
+            }
+        }
+        items.sort_by(|a, b| match (a.saving_usd, b.saving_usd) {
+            (Some(x), Some(y)) => y.total_cmp(&x),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
+        (items, other_features)
+    }
+
     /// The report as printed without a terminal, ending with the edits its changes name.
     pub fn text(&self) -> String {
         format!(
@@ -5399,7 +5473,7 @@ fn tagged(name: String, profile: &str) -> String {
 
 /// Whose advice the advisor pairing is, before Claude Code's page on the advisor.
 const ADVISOR_PICK: &str =
-    "The maintainer's pick of one rank above the main-session default. Claude Code's docs:";
+    "Kixel's pick of one rank above the main-session default. Claude Code's docs:";
 
 /// What an advisor line's recorded calls cost, as sentences.
 fn advisor_calls(u: &AdvisorUse) -> String {
@@ -5697,8 +5771,7 @@ fn project_file<'a>(owner: &'a str, user_file: &str) -> Option<&'a str> {
 }
 
 /// Whose advice the Bash cap's margin is, before the pages on how the cap and cache work.
-const BASH_PICK: &str =
-    "The maintainer's pick of a margin under the cache TTL. Claude Code's docs:";
+const BASH_PICK: &str = "Kixel's pick of a margin under the cache TTL. Claude Code's docs:";
 
 /// A Bash timeout cap as `vibes` shows it: the long waits measured under it, the cap a
 /// guessed margin under the cache TTL suggests, and what moving it trades.
@@ -5783,7 +5856,7 @@ fn bash_item(cap: &BashCap, profile: &str, how: Option<How>, out: &Out<'_>) -> I
 }
 
 /// Whose advice the compaction window cap is.
-const WINDOW_PICK: &str = "The maintainer's pick, for output quality rather than cost.";
+const WINDOW_PICK: &str = "Kixel's pick, for output quality rather than cost.";
 /// Anthropic's page on context rot: accuracy and recall fall as a context grows.
 const CONTEXT_ROT: &str = "https://platform.claude.com/docs/en/build-with-claude/context-windows";
 
@@ -5838,7 +5911,7 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
             if w > cap && c.scenarios.is_empty() && profile.compaction.percent.is_some() =>
         {
             item.text = format!(
-                "Set to {}, but {} lowers where each model compacts under it, and with no request in the window to name a model token-max cannot tell whether that is above the {} window the maintainer caps it at.",
+                "Set to {}, but {} lowers where each model compacts under it, and with no request in the window to name a model token-max cannot tell whether that is above the {} window Kixel caps it at.",
                 tokens(w),
                 crate::controls::PERCENT_KEY,
                 tokens(cap)
@@ -5866,7 +5939,7 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
         // A smaller default would rise to the cap, so an unknown window is not advised down.
         (_, None) => {
             item.text = format!(
-                "token-max could not resolve this window, so it cannot tell whether it is above the {} window the maintainer caps it at. Set by {}.",
+                "token-max could not resolve this window, so it cannot tell whether it is above the {} window Kixel caps it at. Set by {}.",
                 tokens(cap),
                 out.home(&c.base.owner)
             );
@@ -5875,13 +5948,13 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
     };
     if window <= cap {
         item.text = format!(
-            "{now} That is at or under the {} window the maintainer caps it at, so there is nothing to change.",
+            "{now} That is at or under the {} window Kixel caps it at, so there is nothing to change.",
             tokens(cap)
         );
         return item;
     }
     let why = if codex {
-        "No OpenAI page says how output changes with the window, so this rests on the maintainer's pick alone."
+        "No OpenAI page says how output changes with the window, so this rests on Kixel's pick alone."
     } else {
         "Anthropic's docs say accuracy and recall degrade as a context grows."
     };
@@ -5963,7 +6036,7 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
         Doctor::Unknown => format!(" {line} gives no verdict on cost."),
     };
     item.text = format!(
-        "{now} The maintainer would cap it at {} for better output, not a smaller bill: a smaller window compacts sooner, so the model works from a shorter context. {why}{verdict} {cost} The cap is advice beside that line, not its verdict.",
+        "{now} Kixel would cap it at {} for better output, not a smaller bill: a smaller window compacts sooner, so the model works from a shorter context. {why}{verdict} {cost} The cap is advice beside that line, not its verdict.",
         tokens(cap)
     );
     item.value = format!("{} {} {}", tokens(window), out.arrow, tokens(cap));
@@ -6007,7 +6080,8 @@ fn window_rescan(c: &CompactionCheck, profile: &Profile, out: &Out<'_>) -> Item 
 }
 
 /// Whose advice turning memory off is, before the providers' pages on it.
-const MEMORY_PICK: &str = "The maintainer's pick: a lasting fact about a project belongs in its repository. How memory works:";
+const MEMORY_PICK: &str =
+    "Kixel's pick: a lasting fact about a project belongs in its repository. How memory works:";
 
 /// Auto memory's line as `vibes`' card reads it.
 struct MemoryLine<'a> {
@@ -6159,7 +6233,7 @@ fn memory_item(line: MemoryLine<'_>, out: &Out<'_>) -> Item {
 
 /// What the maintainer picked for how long Claude Code keeps transcripts, before the pages
 /// on the setting and on what the sweep deletes.
-const RETENTION_PICK: &str = "The maintainer's pick of 365 days, which keeps a year of history without growing disk without bound. Claude Code's docs:";
+const RETENTION_PICK: &str = "Kixel's pick of 365 days, which keeps a year of history without growing disk without bound. Claude Code's docs:";
 
 /// The days of transcripts Claude Code is advised to keep, a year.
 const RETENTION_DAYS: u64 = 365;
@@ -10856,7 +10930,7 @@ mod tests {
         );
         assert!(text.contains("prone to overthinking"), "{text}");
         assert!(
-            text.contains("The maintainer's pick for subagents is high"),
+            text.contains("Kixel's pick for subagents is high"),
             "{text}"
         );
         assert!(text.contains(CLAUDE_MODEL_GUIDE), "{text}");
@@ -11200,14 +11274,14 @@ mod tests {
         assert!(!card.quiet);
         let warning = said(&card);
         assert!(
-            warning.starts_with("Defaults to claude-opus-5-5 at max. The maintainer's pick is claude-opus-5-5 at medium, and claude-opus-5-5 at high is fine too. Anthropic's model guide says"),
+            warning.starts_with("Defaults to claude-opus-5-5 at max. Kixel's pick is claude-opus-5-5 at medium, and claude-opus-5-5 at high is fine too. Anthropic's model guide says"),
             "{warning}"
         );
         assert!(warning.contains("prone to overthinking"));
         assert!(warning.contains("Ran claude-opus-5-5 at an unrecorded effort 4 times"));
         assert!(warning.contains("what the pick would cost is not measured"));
         assert!(warning.contains(&format!(
-            "The maintainer's pick of a default. Anthropic's guidance: {CLAUDE_MODEL_GUIDE} {CLAUDE_EFFORT_DOCS}"
+            "Kixel's pick of a default. Anthropic's guidance: {CLAUDE_MODEL_GUIDE} {CLAUDE_EFFORT_DOCS}"
         )));
         // The edit sets the variable that decides the level, in the file that sets it.
         match card.how {
@@ -12833,6 +12907,7 @@ mod tests {
             },
             profile: String::new(),
             removal: vec![],
+            proof: None,
             how: How::Edit(crate::doctor::Patch {
                 file,
                 harness: Harness::Claude,
@@ -12929,7 +13004,7 @@ mod tests {
             item.text,
             "3 of 4 main sessions (75%) in the window ran in a repository with a CLAUDE.md or AGENTS.md. A lasting fact about a project belongs in that file, where it is reviewed and every host and teammate sees it, not saved silently on one machine. doctor's line measured $150 at API prices over the window, used 3 times (1 read, 2 writes); judging only cost, it offers no change. Its cost per read or write is within --max-cost-per-use."
         );
-        assert!(item.sources[0].starts_with("The maintainer's pick"));
+        assert!(item.sources[0].starts_with("Kixel's pick"));
         // doctor already suggests it off: its walk asks, and the card advises nothing more.
         let m = memory(&mut report);
         (m.base.action, m.base.recommended) = (Action::Advisory, Some(false));

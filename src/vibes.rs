@@ -117,6 +117,7 @@ pub fn fixes(items: &[Item]) -> Vec<Fix> {
             },
             profile: String::new(),
             removal: vec![],
+            proof: None,
         })
     };
     let base: Vec<Fix> = items

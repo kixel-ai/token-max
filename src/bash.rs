@@ -517,7 +517,7 @@ mod tests {
         ] {
             assert!(card.text.contains(said), "{}", card.text);
         }
-        assert!(card.sources[0].contains("The maintainer's pick"));
+        assert!(card.sources[0].contains("Kixel's pick"));
         assert!(!format!("{report:?}").contains("SYNTHETIC_PRIVATE"));
         assert!(!format!("{card:?}").contains("SYNTHETIC_PRIVATE"));
     }

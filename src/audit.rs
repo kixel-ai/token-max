@@ -292,6 +292,10 @@ pub struct Shape {
     pub at: Pointer,
     /// The lines of the session's first requests in that file, to sample how it started.
     pub early_lines: Vec<u64>,
+    /// The lines of the session's first failed tool results in that file; absent from an
+    /// older token-max across SSH.
+    #[serde(default)]
+    pub error_lines: Vec<u64>,
 }
 
 /// Sessions that stand out, one list per measure.
@@ -453,7 +457,7 @@ impl Audit {
                 .chain(&s.most_tool_calls)
                 .chain(&s.most_tool_errors)
                 .chain(&s.longest_streaks)
-                .all(|shape| shape.early_lines.len() <= EARLY)
+                .all(|shape| shape.early_lines.len() <= EARLY && shape.error_lines.len() <= EARLY)
     }
 
     /// Several hosts' findings as one, in the order given, re-ranked and cut to `limit`.
@@ -1287,8 +1291,13 @@ fn shape(
         .copied()
         .filter(|e| e.time >= since && events.owns(e))
         .collect();
-    let errors = (harness == Harness::Claude || !finished.is_empty())
-        .then(|| finished.iter().filter(|e| e.file.is_none()).count() as u64);
+    let failed: Vec<&StructuralEvent> = finished
+        .iter()
+        .copied()
+        .filter(|e| e.file.is_none())
+        .collect();
+    let errors =
+        (harness == Harness::Claude || !finished.is_empty()).then_some(failed.len() as u64);
     Shape {
         harness,
         session,
@@ -1323,6 +1332,18 @@ fn shape(
             .iter()
             .filter_map(|r| r.locations.first())
             .filter(|l| l.file == first.file)
+            .take(EARLY)
+            .map(|l| l.line)
+            .collect(),
+        // A failure another rollout also records keeps the first-read copy's location, and
+        // the rest among its origins, so each points at the copy in this session's file.
+        error_lines: failed
+            .iter()
+            .filter_map(|e| {
+                std::iter::once(&e.location)
+                    .chain(e.origins.iter().map(|o| &o.location))
+                    .find(|l| l.file == first.file)
+            })
             .take(EARLY)
             .map(|l| l.line)
             .collect(),
@@ -1841,9 +1862,10 @@ mod tests {
             .sessions
             .most_tool_errors
             .iter()
-            .map(|s| (s.session.as_deref(), s.tool_errors))
+            .map(|s| (s.session.as_deref(), s.tool_errors, s.error_lines.clone()))
             .collect();
-        assert_eq!(errors, [(Some("child"), Some(1))]);
+        // It points at the child's own copy, though the parent's was read first.
+        assert_eq!(errors, [(Some("child"), Some(1), vec![4])]);
     }
 
     #[test]
@@ -1901,6 +1923,7 @@ mod tests {
         assert_eq!((shape.complete, shape.skipped_lines), (false, 1));
         assert_eq!(audit.totals.incomplete, 1);
         assert_eq!(shape.early_lines, [1, 4, 6, 8]);
+        assert_eq!(shape.error_lines, [2]);
         assert_eq!(s.most_tool_errors.len(), 1);
         // A main session is no subagent.
         assert!(s.subagents.is_empty());
@@ -2001,6 +2024,7 @@ mod tests {
                 line: (cost * 10.0) as u64,
             },
             early_lines: vec![],
+            error_lines: vec![],
         }
     }
 

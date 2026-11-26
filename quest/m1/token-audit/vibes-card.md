@@ -20,10 +20,10 @@ Implements the `vibes` discovery surface decided in the
   subagent`): never writes `SKILL.md` files from `doctor`/`vibes`.
 - Detection (local and over `--ssh`, reusing `src/discovery.rs`):
   - Check whether `skills/token-audit/SKILL.md` exists under each discovered
-    Claude profile dir (`<claude-dir>/skills/token-audit/SKILL.md`), Codex home
-    (`<codex-dir>/skills/token-audit/SKILL.md`), or the shared
-    `~/.agents/skills/token-audit/SKILL.md` (following symlinks safely, never
-    reading unrelated files).
+    Claude profile dir (`<claude-dir>/skills/token-audit/SKILL.md`) and, for
+    Codex, the shared `~/.agents/skills/token-audit/SKILL.md` or the deprecated
+    `<codex-dir>/skills/token-audit/SKILL.md` Codex still reads (following
+    symlinks safely, never reading unrelated files).
   - If all discovered harness profiles on the host have `token-audit` available,
     emit the card with `quiet: true` (visible when running `token-max vibes`
     directly, not counted by `doctor`'s end-of-walk offer).
@@ -31,10 +31,11 @@ Implements the `vibes` discovery surface decided in the
     stating concisely what `/token-audit` finds beyond settings (cache-busting
     commands/actions, bloated/repetitive tool calls, useless and missing
     context), citing the maintainer's pick as source, and naming
-    `token-max skill install` (with `npx skills add kixel-ai/token-max -g` as an
-    alternative) as the step by hand. Include `--claude-dir`/`--codex-dir` when
-    non-default profiles are missing it, matching how `Code intelligence` scopes
-    its install command.
+    `token-max skill install` (with `npx skills add kixel-ai/token-max --skill token-audit -g` as an
+    alternative) as the step by hand. Include `--claude-dir` when a non-default
+    Claude profile is missing it, matching how `Code intelligence` scopes its
+    install command; `skill install` takes no `--codex-dir`, since Codex reads
+    `~/.agents/skills` for every home.
 - Keep `token-max doctor` strictly measured: no new line in `doctor`, and no
   change to `doctor`'s exit code.
 - Check whether `assets/demo/walk.tape` and `assets/demo/site.py` are affected
@@ -48,7 +49,3 @@ Implements the `vibes` discovery surface decided in the
   `~/.agents/skills` (quiet card, `doctor` does not offer `vibes` solely for
   it), partial install (one harness missing), and `--ssh` per-host detection.
 - Document the card in `docs/reference.md#vibes`.
-
-## Required
-
-- [token-audit skill and installer](/quest/m1/token-audit/skill.md) - ships the `token-audit` skill and `token-max skill install` command the card checks for and names

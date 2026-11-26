@@ -37,6 +37,7 @@ mod rows;
 mod safe;
 mod scenarios;
 mod sessions;
+mod skill;
 mod skills;
 mod ssh;
 mod subagents;

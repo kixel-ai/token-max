@@ -59,7 +59,10 @@ Recommendations:
   tokens. Any line that needs a lifetime, such as a T3 idle-compaction
   replay on an `antigravity` instance (first check whether T3 runs idle
   compaction there), should take it from the user's own logs: the longest
-  gap still followed by a cache hit. Don't assume 15 minutes. Treat a change
+  gap still followed by a cache hit is a lower bound, and the shortest gap
+  followed by a miss on an unchanged prefix an upper bound. A gap between
+  the two stays unpriced, and with no upper bound the line says the lifetime
+  is unmeasured. Don't assume 15 minutes. Treat a change
   of the slug's effort suffix as a model change that starts with a cold
   cache.
 - Exposure and edits: audit configured MCP servers (`mcp_config.json`),

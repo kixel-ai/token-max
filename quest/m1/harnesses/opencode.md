@@ -70,6 +70,9 @@ Recommendations:
   open). The post says OpenCode v2.3.2 moved the prompt there. When the
   latest OpenCode session on a profile ran an older version with a gpt-6.2
   model, price the system prompt's uncached input and recommend upgrading.
+  OpenCode's stored token counts don't split out the system prompt, so
+  that price is an estimate: mark it `~` with its margin of error, and say
+  which part of the prompt it could not size.
   Record OpenCode's version per request for that, and reuse the
   version-gated upgrade advice `doctor` gained in
   [kixel-ai/token-max#247](https://github.com/kixel-ai/token-max/pull/247)

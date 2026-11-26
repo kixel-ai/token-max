@@ -384,6 +384,15 @@ Use `--offline` for that cache, `--price-cache FILE` to choose its location, or
 A failed price fetch fails the run; offline use is explicit. Cached prices include
 their file timestamp, so an old catalog remains visible.
 
+A Claude request that records no provider is priced at the catalog of the
+provider its profile sends requests to: Amazon Bedrock's for Bedrock or its
+Mantle endpoint, the cloud's own for Google Cloud's Agent Platform or
+Microsoft Foundry, and Anthropic's otherwise, including Claude Platform on AWS
+and Claude Models on Google Cloud. That provider is read from the profile's
+settings file and the shell, not from project settings, so a project whose
+settings choose a different provider, or turn the profile's off, is still
+priced at the profile's catalog.
+
 ## Plans and API prices
 
 token-max is written for people on a Claude or ChatGPT plan. No provider
@@ -431,7 +440,7 @@ On a terminal, before the report, `doctor` asks how each Claude profile on the
 Anthropic API pays, on this host and then on each `--ssh` destination in the
 order given: a Claude plan, or an API key or usage credits. It asks once per
 profile root that has transcripts, including one T3 Code shares, and skips
-profiles under Bedrock, Vertex or Foundry, whose default is 5m. A
+profiles under a cloud provider, whose default is 5m. A
 destination's profile is named after its host, as in `devbox:~/.claude`.
 Answer `p`, `a` or `s` to skip. A plan answer prices the main-agent TTL
 against 1h and an API answer against 5m, in its line, the comparison with the
@@ -441,8 +450,7 @@ stored: the next run asks again, so a profile that changes how it pays is
 never priced from a stale answer.
 
 An answer holds only where every recorded project of the profile resolves the
-same default. A project whose settings send its requests to Bedrock, Vertex or
-Foundry defaults to 5m under the same unset setting, so under a plan answer the
+same default. A project whose settings send its requests to a cloud provider defaults to 5m under the same unset setting, so under a plan answer the
 profile's main default goes back to unknown: the line names both defaults and
 offers to pin the replay's winner, which outranks both.
 
@@ -716,7 +724,7 @@ one that cannot be measured is counted, never priced at zero.
 | Setting | Default | What the current value saves |
 | --- | --- | --- |
 | Subagent prompt cache TTL | 5m | The TTL replay's gap, when the line has a verdict; otherwise not measured. |
-| Main-agent prompt cache TTL | 1h on a Claude plan within its included usage, 5m on usage credits or an API key; 5m under Bedrock, Vertex or Foundry | The replay's gap as "up to", saved only while the default would be the other value; against the answered default alone when `doctor` asked [how the profile pays](#how-a-profile-pays); under a cloud provider, the replay's gap against 5m. "Up to" savings and costs are bounded apart, never netted. |
+| Main-agent prompt cache TTL | 1h on a Claude plan within its included usage, 5m on usage credits or an API key; 5m under a cloud provider | The replay's gap as "up to", saved only while the default would be the other value; against the answered default alone when `doctor` asked [how the profile pays](#how-a-profile-pays); under a cloud provider, the replay's gap against 5m. "Up to" savings and costs are bounded apart, never netted. |
 | Compaction window | The model's tuned window (see [Compaction window](#compaction-window)), or Codex's per-model limit | Not measured: a window smaller than the default can't be replayed at the default, since the detail its summaries dropped is gone. |
 | Turn-end compaction | Off | Not measured: a threshold in force can't be replayed off, since the detail its summaries dropped is gone. |
 | Idle compaction | On | The on and off replay under the current settings. |
@@ -758,8 +766,9 @@ documented default. Managed and system policy (`managed-settings.json`,
 user can't change them. What says where each CLI keeps its files stays:
 `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `T3CODE_HOME` and each T3 instance's home.
 So does where its requests went, which sets their prices:
-`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` and
-`CLAUDE_CODE_USE_FOUNDRY`, from the shell or a settings file's `env`, and
+`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_MANTLE`, `CLAUDE_CODE_USE_VERTEX`,
+`CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_USE_ANTHROPIC_AWS` and
+`CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD`, from the shell or a settings file's `env`, and
 Codex's `model_provider` and `model_providers`.
 Each MCP server a Codex file declares stays declared, without its `enabled`,
 `enabled_tools` or `disabled_tools`, since a server is something installed
@@ -1968,8 +1977,8 @@ a Claude profile with another settings file that signs in to Anthropic reads
 the same transcripts,
 the line says how many Fable requests it shares, since whose they were is
 unknown; one on a cloud provider has no plan limit and is not counted. A profile
-with `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` or
-`CLAUDE_CODE_USE_FOUNDRY` is billed by its cloud provider and gets no line.
+with a true provider variable, one of those `--defaults` keeps, is billed
+through its cloud provider and gets no line.
 Change the model with `/model` or the `model` setting.
 See [Fable weekly use](semantics.md#fable-weekly-use).
 

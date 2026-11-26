@@ -82,7 +82,7 @@ pub fn check(result: &CheckResult, profile: Option<&Profile>) -> Option<Baseline
                     Saving::NotMeasured
                 }
             };
-            // Bedrock, Vertex and Foundry default the main conversation to 5m too, whatever
+            // A cloud provider defaults the main conversation to 5m too, whatever
             // sets the current value; on the Anthropic API the default follows how the
             // profile pays, when doctor asked.
             let cloud = profile.is_some_and(|p| p.provider.is_some());

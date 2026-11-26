@@ -314,23 +314,12 @@ pub fn claude_effort(
         }
         control.picked = Some(Box::new(picked));
     }
-    control.provider = claude_provider(&environment);
+    // Claude Platform on AWS and on Google Cloud take Anthropic's own model IDs.
+    control.provider = crate::controls::claude_provider(&environment)
+        .map(|p| p.pricing)
+        .filter(|p| *p != "anthropic")
+        .map(String::from);
     Ok(control)
-}
-
-/// The cloud provider a Claude Code environment sends requests to; None for Anthropic's
-/// API, which a custom ANTHROPIC_BASE_URL (a gateway or proxy) still speaks.
-pub(crate) fn claude_provider(environment: &ScopedEnvironment) -> Option<String> {
-    let enabled =
-        |key: &str| matches!(environment.values.get(key), Some(Value::String(s)) if s == "1");
-    [
-        ("CLAUDE_CODE_USE_BEDROCK", "amazon-bedrock"),
-        ("CLAUDE_CODE_USE_VERTEX", "google-vertex-anthropic"),
-        ("CLAUDE_CODE_USE_FOUNDRY", "azure"),
-    ]
-    .into_iter()
-    .find(|(key, _)| enabled(key))
-    .map(|(_, provider)| provider.to_string())
 }
 
 /// A Claude profile's default effort on `model`, which `named` names in the settings or

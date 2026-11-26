@@ -46,9 +46,6 @@ const DEFAULT_DISABLED_DRIVERS: &[&str] = &[
 const ENVIRONMENT: &[&str] = &[
     "CLAUDE_CONFIG_DIR",
     "CODEX_HOME",
-    "CLAUDE_CODE_USE_BEDROCK",
-    "CLAUDE_CODE_USE_VERTEX",
-    "CLAUDE_CODE_USE_FOUNDRY",
     "DISABLE_PROMPT_CACHING",
     "FORCE_PROMPT_CACHING_5M",
     "ENABLE_PROMPT_CACHING_1H",
@@ -67,6 +64,15 @@ const ENVIRONMENT: &[&str] = &[
     "BASH_MAX_TIMEOUT_MS",
     "BASH_DEFAULT_TIMEOUT_MS",
 ];
+
+/// Whether an instance environment variable is one discovery reads: one in `ENVIRONMENT` or a
+/// Claude provider's.
+fn readable_variable(name: &str) -> bool {
+    ENVIRONMENT.contains(&name)
+        || crate::controls::CLAUDE_PROVIDERS
+            .iter()
+            .any(|p| p.variable == name)
+}
 
 /// The variables only subagent discovery reads, whose secret value leaves just the subagent
 /// controls unresolved.
@@ -409,7 +415,7 @@ impl<'de> Deserialize<'de> for Environment {
                 value,
             });
         }
-        let allowed = ENVIRONMENT.contains(&entry.name.as_str()) && readable;
+        let allowed = readable_variable(&entry.name) && readable;
         let value = if allowed {
             entry
                 .value
@@ -652,7 +658,9 @@ pub(crate) fn discover(
                 // Only the variables that choose its home or its provider stay.
                 instance.environment.retain(|e| {
                     matches!(e.name.as_str(), "CLAUDE_CONFIG_DIR" | "CODEX_HOME")
-                        || crate::discovery::CLAUDE_PROVIDERS.contains(&e.name.as_str())
+                        || crate::controls::CLAUDE_PROVIDERS
+                            .iter()
+                            .any(|p| p.variable == e.name)
                 });
             }
         }
@@ -710,9 +718,7 @@ pub(crate) fn discover(
                 .env
                 .iter()
                 // Where plugins are, which only the code intelligence card reads.
-                .filter(|(k, _)| {
-                    ENVIRONMENT.contains(&k.as_str()) || k.as_str() == crate::lsp::CACHE_DIR
-                })
+                .filter(|(k, _)| readable_variable(k) || k.as_str() == crate::lsp::CACHE_DIR)
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
             let mut unresolved_env = false;
@@ -731,7 +737,7 @@ pub(crate) fn discover(
                             env.remove(&entry.name);
                         }
                     }
-                } else if ENVIRONMENT.contains(&entry.name.as_str()) {
+                } else if readable_variable(&entry.name) {
                     match entry.value {
                         Some(value) => {
                             if !own_environment.contains(&entry.name) {
@@ -2972,6 +2978,24 @@ mod tests {
             open(&["native", "gone"]),
             ["compaction", "main ttl", "speed", "subagent ttl"]
         );
+    }
+
+    #[test]
+    fn an_instance_environment_reads_every_claude_provider() {
+        let w = Workspace::new();
+        let root = state(
+            &w,
+            json!({"providerInstances":{"claudeAgent":{"driver":"claudeAgent","environment":[{"name":"CLAUDE_CODE_USE_MANTLE","value":"true"}]}}}),
+        );
+        seed(&db(&root), "claudeAgent", "claudeAgent");
+        let data = scan(&w.scan_options()).unwrap();
+        let providers: Vec<_> = data
+            .profiles
+            .iter()
+            .filter(|p| p.harness == Harness::Claude)
+            .map(|p| p.provider.as_deref())
+            .collect();
+        assert!(providers.contains(&Some("amazon-bedrock")), "{providers:?}");
     }
 
     #[test]

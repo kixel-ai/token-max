@@ -1064,6 +1064,8 @@ pub struct Profile {
     pub histories: Vec<String>,
     pub settings_file: String,
     pub ttl: PerBucket<TtlControl>,
+    /// The cloud provider its requests go to, by the price catalog it bills at; None for the
+    /// harness's own API.
     pub provider: Option<String>,
     /// How a Claude profile pays, when doctor asked; None when unasked or for a cloud provider.
     pub billing: Option<Billing>,
@@ -1133,6 +1135,16 @@ pub struct Profile {
     /// Under `doctor --defaults`, the switches policy turns off, with the policy file, which
     /// keep a feature off whatever `pretended_on` restores; empty otherwise.
     pub policy_off: Vec<(String, Control)>,
+}
+
+impl Profile {
+    /// The price catalog its requests use when they record none: a Claude profile on
+    /// Anthropic's own API prices at `anthropic`, like one on Claude Platform on AWS.
+    pub fn catalog(&self) -> Option<&str> {
+        self.provider
+            .as_deref()
+            .or((self.harness == Harness::Claude).then_some("anthropic"))
+    }
 }
 
 /// A setting's current value and the file or variable that sets it.

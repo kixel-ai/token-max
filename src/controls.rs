@@ -189,17 +189,93 @@ fn scoped_bool<'a>(
     Ok(result)
 }
 
-/// Environment variables that can change background generation or its feature-flag gate.
-pub(crate) const CLAUDE_BACKGROUND_ENV: [&str; 8] = [
-    "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION",
-    "CLAUDE_CODE_ENABLE_AWAY_SUMMARY",
-    "CLAUDE_CODE_GOAL_CHECKIN_MINUTES",
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
-    "DISABLE_TELEMETRY",
-    "CLAUDE_CODE_USE_BEDROCK",
-    "CLAUDE_CODE_USE_VERTEX",
-    "CLAUDE_CODE_USE_FOUNDRY",
+/// A cloud provider Claude Code can send requests to instead of Anthropic's API.
+pub(crate) struct ClaudeProvider {
+    /// The variable that selects it, read as a boolean.
+    pub variable: &'static str,
+    /// Its name in Claude Code's docs.
+    pub name: &'static str,
+    /// The models.dev provider whose prices it bills at, `anthropic` where Anthropic runs it.
+    pub pricing: &'static str,
+}
+
+/// Claude Code's providers other than Anthropic's API, the first selected one winning.
+pub(crate) const CLAUDE_PROVIDERS: [ClaudeProvider; 6] = [
+    ClaudeProvider {
+        variable: "CLAUDE_CODE_USE_BEDROCK",
+        name: "Amazon Bedrock",
+        pricing: "amazon-bedrock",
+    },
+    ClaudeProvider {
+        variable: "CLAUDE_CODE_USE_MANTLE",
+        name: "Amazon Bedrock's Mantle endpoint",
+        pricing: "amazon-bedrock",
+    },
+    ClaudeProvider {
+        variable: "CLAUDE_CODE_USE_VERTEX",
+        name: "Google Cloud's Agent Platform",
+        pricing: "google-vertex-anthropic",
+    },
+    ClaudeProvider {
+        variable: "CLAUDE_CODE_USE_FOUNDRY",
+        name: "Microsoft Foundry",
+        pricing: "azure",
+    },
+    ClaudeProvider {
+        variable: "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+        name: "Claude Platform on AWS",
+        pricing: "anthropic",
+    },
+    ClaudeProvider {
+        variable: "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+        name: "Claude Models on Google Cloud",
+        pricing: "anthropic",
+    },
 ];
+
+/// The provider `environment` sends Claude Code's requests to; None for Anthropic's API, which
+/// a custom ANTHROPIC_BASE_URL (a gateway or proxy) still speaks.
+pub(crate) fn claude_provider(environment: &ScopedEnvironment) -> Option<&'static ClaudeProvider> {
+    CLAUDE_PROVIDERS
+        .iter()
+        .find(|p| environment.values.get(p.variable).and_then(env_flag) == Some(true))
+}
+
+/// Variables that stop Claude Code fetching its feature flags, and whether any non-empty value
+/// does, even `0`, rather than only a true one.
+const CLAUDE_FLAGS_OFF: [(&str, bool); 5] = [
+    ("DISABLE_TELEMETRY", true),
+    ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", true),
+    ("DO_NOT_TRACK", false),
+    ("CLAUDE_CODE_DISABLE_FEATURE_FLAGS", false),
+    ("DISABLE_GROWTHBOOK", false),
+];
+
+/// The variable that stops Claude Code fetching its feature flags in `environment`, an opt-out
+/// before a provider; None when it fetches them.
+pub(crate) fn claude_flags_off(environment: &ScopedEnvironment) -> Option<&'static str> {
+    CLAUDE_FLAGS_OFF
+        .iter()
+        .find(|(key, any)| match environment.values.get(*key) {
+            Some(v) if *any => !js_string(Some(v)).is_empty(),
+            Some(v) => env_flag(v) == Some(true),
+            None => false,
+        })
+        .map(|(key, _)| *key)
+        .or_else(|| claude_provider(environment).map(|p| p.variable))
+}
+
+/// Environment variables that can change background generation or its feature-flag gate.
+pub(crate) fn claude_background_env() -> impl Iterator<Item = &'static str> {
+    [
+        "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION",
+        "CLAUDE_CODE_ENABLE_AWAY_SUMMARY",
+        "CLAUDE_CODE_GOAL_CHECKIN_MINUTES",
+    ]
+    .into_iter()
+    .chain(CLAUDE_FLAGS_OFF.iter().map(|(key, _)| *key))
+    .chain(CLAUDE_PROVIDERS.iter().map(|p| p.variable))
+}
 
 /// Resolve Claude background controls in terminal precedence, including settings env over shell.
 pub fn claude_background(
@@ -208,24 +284,7 @@ pub fn claude_background(
 ) -> Result<Vec<BackgroundControl>, ScanError> {
     let first = scopes.first().map_or("settings.json", |s| s.file);
     let environment = scoped_environment(scopes, env);
-    // These gates stop flag fetching, including nonempty "0" for the traffic switches.
-    let flags = ![
-        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
-        "DISABLE_TELEMETRY",
-    ]
-    .iter()
-    .any(|key| {
-        environment
-            .values
-            .get(*key)
-            .is_some_and(|v| !js_string(Some(v)).is_empty())
-    }) && ![
-        "CLAUDE_CODE_USE_BEDROCK",
-        "CLAUDE_CODE_USE_VERTEX",
-        "CLAUDE_CODE_USE_FOUNDRY",
-    ]
-    .iter()
-    .any(|key| environment.values.get(*key).and_then(env_flag) == Some(true));
+    let flags = claude_flags_off(&environment).is_none();
     let environment_off = |variable: &str, off: &str| {
         let owner = environment.owners.get(variable);
         let file = scopes
@@ -1963,15 +2022,7 @@ pub fn speed_controls(
             .values
             .get("ANTHROPIC_BASE_URL")
             .is_some_and(|url| url.as_str() != Some("https://api.anthropic.com"));
-        if gateway
-            || [
-                "CLAUDE_CODE_USE_BEDROCK",
-                "CLAUDE_CODE_USE_VERTEX",
-                "CLAUDE_CODE_USE_FOUNDRY",
-            ]
-            .iter()
-            .any(|key| env.is(key, "1"))
-        {
+        if gateway || claude_provider(&env).is_some() {
             return Ok(result(
                 None,
                 &fast.owner,
@@ -2455,6 +2506,16 @@ mod tests {
             Some(true)
         );
         assert_eq!(on(&[("DISABLE_TELEMETRY", "1")], true), Some(false));
+        // The advisor's opt-outs and providers stop the fetch here too.
+        assert_eq!(on(&[("DO_NOT_TRACK", "1")], true), Some(false));
+        assert_eq!(on(&[("DO_NOT_TRACK", "0")], true), Some(true));
+        assert_eq!(on(&[("DISABLE_GROWTHBOOK", "yes")], true), Some(false));
+        assert_eq!(
+            on(&[("CLAUDE_CODE_USE_BEDROCK", "true")], true),
+            Some(false)
+        );
+        assert_eq!(on(&[("CLAUDE_CODE_USE_MANTLE", "1")], true), Some(false));
+        assert_eq!(on(&[("CLAUDE_CODE_USE_BEDROCK", "")], true), Some(true));
         let project = map(json!({ "env": { "CLAUDE_CODE_USE_VERTEX": "1" } }));
         let scoped = [SettingsScope {
             config: &project,

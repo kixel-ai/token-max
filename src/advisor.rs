@@ -4,7 +4,9 @@
 use serde_json::Value;
 
 use crate::collections::IndexMap;
-use crate::controls::{Env, SettingsScope, env_flag, js_string, scoped_environment};
+use crate::controls::{
+    Env, SettingsScope, claude_flags_off, claude_provider, env_flag, js_string, scoped_environment,
+};
 use crate::model::{
     AdvisorControl, AdvisorLine, AdvisorUse, Cost, Harness, Millis, PartKind, Profile, Request,
     Scan, Share,
@@ -16,30 +18,6 @@ pub(crate) const DOCS: &str = "https://code.claude.com/docs/en/advisor";
 
 /// The setting that names the advisor model.
 const KEY: &str = "advisorModel";
-
-/// Providers with no advisor tool, by the variable that selects each.
-const UNSUPPORTED: [(&str, &str); 4] = [
-    ("CLAUDE_CODE_USE_BEDROCK", "Amazon Bedrock"),
-    ("CLAUDE_CODE_USE_MANTLE", "Amazon Bedrock's Mantle endpoint"),
-    ("CLAUDE_CODE_USE_VERTEX", "Google Cloud's Agent Platform"),
-    ("CLAUDE_CODE_USE_FOUNDRY", "Microsoft Foundry"),
-];
-
-/// Providers that serve the advisor without the feature flag Claude Code fetches.
-const FLAGLESS: [&str; 2] = [
-    "CLAUDE_CODE_USE_ANTHROPIC_AWS",
-    "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
-];
-
-/// Variables that stop Claude Code fetching its feature flags, the advisor's among them, and
-/// whether any non-empty value does (rather than only a true one).
-const FLAG_OFF: [(&str, bool); 5] = [
-    ("DISABLE_TELEMETRY", true),
-    ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", true),
-    ("DO_NOT_TRACK", false),
-    ("CLAUDE_CODE_DISABLE_FEATURE_FLAGS", false),
-    ("DISABLE_GROWTHBOOK", false),
-];
 
 /// Resolve the advisor from `scopes`, lowest precedence first, and the terminal `env`.
 /// `user_file` is where an advisor would be set when no scope sets one. A value that is no
@@ -83,7 +61,9 @@ pub fn control(scopes: &[SettingsScope], env: &Env, user_file: &str) -> AdvisorC
             None => format!("{key}, set in the environment,"),
         }
     };
-    let flagless = FLAGLESS.iter().any(|key| on(key));
+    let provider = claude_provider(&environment);
+    // A provider Anthropic runs serves the advisor without the flag; the others have none.
+    let flagless = provider.is_some_and(|p| p.pricing == "anthropic");
     let blocked = if invalid {
         Some(format!("{KEY} is no model name Claude Code recognizes"))
     } else if on("CLAUDE_CODE_DISABLE_ADVISOR_TOOL") {
@@ -91,23 +71,21 @@ pub fn control(scopes: &[SettingsScope], env: &Env, user_file: &str) -> AdvisorC
             "{} turns the advisor tool off",
             named("CLAUDE_CODE_DISABLE_ADVISOR_TOOL")
         ))
-    } else if let Some((key, provider)) = UNSUPPORTED.iter().find(|(key, _)| on(key)) {
+    } else if let Some(p) = provider.filter(|p| p.pricing != "anthropic") {
         Some(format!(
-            "{} sends requests to {provider}, which has no advisor tool",
-            named(key)
+            "{} sends requests to {}, which has no advisor tool",
+            named(p.variable),
+            p.name
         ))
     } else if flagless {
         None
     } else {
-        FLAG_OFF
-            .iter()
-            .find(|(key, any)| if *any { value(key).is_some() } else { on(key) })
-            .map(|(key, _)| {
-                format!(
-                    "{} turns off the feature-flag fetch the advisor needs",
-                    named(key)
-                )
-            })
+        claude_flags_off(&environment).map(|key| {
+            format!(
+                "{} turns off the feature-flag fetch the advisor needs",
+                named(key)
+            )
+        })
     };
     let gateway =
         (!flagless && value("ANTHROPIC_BASE_URL").is_some()).then(|| named("ANTHROPIC_BASE_URL"));

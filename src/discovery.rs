@@ -8,10 +8,10 @@ use std::io::ErrorKind;
 use serde_json::{Map, Value};
 
 use crate::controls::{
-    CLAUDE_BACKGROUND_ENV, CompactionSources, Env, SettingsScope, TURN_END_KEY, bash_cap_control,
-    claude_background, claude_inbound, claude_memory, codex_background, codex_memory,
-    compaction_controls, idle_controls, js_string, members, retention_control, scoped_environment,
-    speed_controls,
+    CLAUDE_PROVIDERS, CompactionSources, Env, SettingsScope, TURN_END_KEY, bash_cap_control,
+    claude_background, claude_background_env, claude_inbound, claude_memory, claude_provider,
+    codex_background, codex_memory, compaction_controls, idle_controls, js_string, members,
+    retention_control, scoped_environment, speed_controls,
 };
 use crate::effort::{claude_effort, codex_catalog, codex_effort, latest_model};
 use crate::model::{
@@ -81,7 +81,7 @@ impl DiscoveryOptions {
             matches!(
                 k.as_str(),
                 "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "T3CODE_HOME"
-            ) || CLAUDE_PROVIDERS.contains(&k.as_str())
+            ) || CLAUDE_PROVIDERS.iter().any(|p| p.variable == k)
         });
     }
 
@@ -216,7 +216,7 @@ impl DiscoveryOptions {
             // Which cloud the requests went to, and so how they were billed.
             let env: Map<String, Value> = members(real.get("env"))
                 .iter()
-                .filter(|(k, _)| CLAUDE_PROVIDERS.contains(&k.as_str()))
+                .filter(|(k, _)| CLAUDE_PROVIDERS.iter().any(|p| p.variable == k.as_str()))
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
             if !env.is_empty() {
@@ -242,14 +242,6 @@ impl DiscoveryOptions {
         Ok(pretended)
     }
 }
-
-/// The variables that send Claude Code's requests to a cloud provider, which say how they
-/// were billed rather than set anything, so `--defaults` keeps them.
-pub(crate) const CLAUDE_PROVIDERS: [&str; 3] = [
-    "CLAUDE_CODE_USE_BEDROCK",
-    "CLAUDE_CODE_USE_VERTEX",
-    "CLAUDE_CODE_USE_FOUNDRY",
-];
 
 /// Every root considered, the selected profiles, and each history file's frozen identity and length.
 #[derive(Clone, Debug, PartialEq)]
@@ -640,10 +632,7 @@ fn ttl_controls(sources: &TtlSources) -> PerBucket<TtlControl> {
         } else if subagent {
             value = Some(Ttl::FiveMinutes);
             reason = "documented default; agent frontmatter and server helpers may override";
-        } else if is("CLAUDE_CODE_USE_BEDROCK")
-            || is("CLAUDE_CODE_USE_VERTEX")
-            || is("CLAUDE_CODE_USE_FOUNDRY")
-        {
+        } else if claude_provider(&environment).is_some() {
             value = Some(Ttl::FiveMinutes);
             reason = "explicit cloud-provider billing default";
         } else if let Some(billing) = billing {
@@ -1466,11 +1455,11 @@ pub fn discover_claude_controls(
             let mut idle = idle_controls(&scopes, local_env)?;
             let background = claude_background(&scopes, local_env)?;
             let settings_env = scoped_environment(&scopes, &empty);
-            let launch_conflict = CLAUDE_BACKGROUND_ENV.iter().any(|key| {
+            let launch_conflict = claude_background_env().any(|key| {
                 settings_env
                     .values
-                    .get(*key)
-                    .zip(local_env.get(*key))
+                    .get(key)
+                    .zip(local_env.get(key))
                     .is_some_and(|(setting, inherited)| js_string(Some(setting)) != *inherited)
             });
             let mut conflicted = None;
@@ -2622,7 +2611,9 @@ pub(crate) fn profile(
         local_env,
     );
     let provider = if claude {
-        crate::effort::claude_provider(&environment)
+        claude_provider(&environment)
+            .map(|p| p.pricing)
+            .map(String::from)
     } else {
         label(config.get("model_provider").unwrap_or(&Value::Null))
     };
@@ -4175,6 +4166,29 @@ mod tests {
         let p = claude(&d);
         assert_eq!(p.provider.as_deref(), Some("google-vertex-anthropic"));
         assert_eq!(p.background[0].value, Some(false));
+        // Any true value selects a provider, as the advisor card reads it: Mantle is Bedrock, and
+        // Claude Platform on AWS is Anthropic's API, billed by AWS rather than a plan.
+        for (file, provider) in [
+            (
+                r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":"true"}}"#,
+                "amazon-bedrock",
+            ),
+            (
+                r#"{"env":{"CLAUDE_CODE_USE_MANTLE":"1"}}"#,
+                "amazon-bedrock",
+            ),
+            (
+                r#"{"env":{"CLAUDE_CODE_USE_ANTHROPIC_AWS":"1"}}"#,
+                "anthropic",
+            ),
+        ] {
+            write(w.claude.join("settings.json"), file);
+            let d = discover(&options(&w)).unwrap();
+            let p = claude(&d);
+            assert_eq!(p.provider.as_deref(), Some(provider), "{file}");
+            assert_eq!(p.background[0].value, Some(false), "{file}");
+            assert_eq!(p.ttl.main.value, Some(Ttl::FiveMinutes), "{file}");
+        }
     }
 
     #[test]

@@ -241,7 +241,8 @@ excluded or assigned observed zero billing.
 
 Current TTL resolution follows disabled caching (no TTL), force-5m, bucket
 environment, bucket setting, enable-1h, then defaults: 5m for subagents, and for
-a main bucket on Bedrock, Vertex or Foundry. Shell overrides apply only to the active config root;
+a main bucket on a cloud provider: any of the `CLAUDE_CODE_USE_*` provider
+variables `--defaults` keeps, with a true value. Shell overrides apply only to the active config root;
 each profile's settings environment is read separately. Whether a main request
 is within a Claude plan's included usage or paid by usage credits is not
 inferred from credential files, so its unset default is unknown, and the line
@@ -1040,9 +1041,11 @@ unrecorded launch overrides and historical files remain explicit uncertainty.
 The background variables are feature toggles or limits that can load before
 Claude's workspace trust prompt. `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` and
 `CLAUDE_CODE_ENABLE_AWAY_SUMMARY` override their settings when they hold a
-boolean form. Suggestions are off without feature flags, on Bedrock, Vertex or
-Foundry or with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, unless the variable
-turns them on. `CLAUDE_CODE_GOAL_CHECKIN_MINUTES` accepts plain whole minutes up
+boolean form. Suggestions are off without feature flags, unless the variable
+turns them on. Feature flags are off on any cloud provider and with any
+variable that turns off their fetch, read as the advisor card reads them (see
+the [reference](reference.md#advisor-model)); a provider variable selects its
+provider with any true value, and an empty one selects none. `CLAUDE_CODE_GOAL_CHECKIN_MINUTES` accepts plain whole minutes up
 to 10,080; `0` turns check-ins off and anything else means the 30-minute default.
 Codex reads `tui.auto_recap`, default true, from system and user config, then
 trusted project `.codex/config.toml` layers from root down to the recorded cwd.

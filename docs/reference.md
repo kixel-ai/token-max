@@ -1116,7 +1116,9 @@ The object holds:
   in the session, in all and `byCause`, and the costliest as `hotspots`, each
   with its `cause`, the `change` for a control change, the tokens rewritten or
   sent again, the gap and the cache lifetime it was compared with, the tools
-  called between the two requests, and pointers to both. The causes are
+  the earlier request's response called, and pointers to both. Claude records
+  those calls between the two requests; Codex records them before the earlier
+  request's usage, so they can sit before the `previous` pointer. The causes are
   `tool_wait_ttl`, a tool call outlasting the cache; `idle_ttl`, a gap
   outlasting it with no tool call that did; `control_change`, a model, effort,
   speed, compaction or truncation `change`; and `prefix_bust`, a prefix that
@@ -1141,7 +1143,9 @@ Every list is ranked and keeps `--limit` entries, 10 by default, so the object
 fits an agent's context. A cost is a lower bound where `unpriced` counts
 findings whose prices are unknown; a single finding's unknown cost is null,
 never zero. A Codex session's tool errors are the commands, MCP calls and file
-edits Codex recorded as failed, and null when it recorded none finishing.
+edits Codex recorded as failed, and null when it recorded none finishing. Each
+counts once, for the thread its record names, even where another rollout, such
+as its parent's, records it too.
 
 Over `--ssh`, each destination audits its own sessions with this host's prices
 and the repository's remotes this host sent, ranks them and sends only its

@@ -180,7 +180,9 @@ pub struct Miss {
     pub gap_ms: Millis,
     /// The cache lifetime the gap was compared with.
     pub ttl_ms: Millis,
-    /// Each tool called between the two requests, by name, once.
+    /// Each tool the earlier request's response called, by name, once: those called
+    /// between the two requests, or for Codex, which records a response's calls before its
+    /// usage, those recorded before `previous` and after the request before it.
     pub tools: Vec<String>,
     pub harness: Harness,
     pub session: Option<String>,
@@ -802,7 +804,12 @@ pub fn audit(scan: &Scan, catalog: &Catalog, options: &Options) -> Result<Audit,
     let mut events: HashMap<&str, Events> = HashMap::default();
     for e in &scan.events {
         let held = || std::iter::once(&e.session).chain(e.origins.iter().map(|o| &o.session));
-        let owner = owners.first(held());
+        // A Codex completion names its thread, which owns it even when an earlier session's
+        // rollout also records it.
+        let owner = match &e.thread {
+            Some(thread) => Some(thread),
+            None => owners.first(held()),
+        };
         let mut seen: Vec<&str> = vec![];
         for key in held() {
             if !covered.contains(&**key) || seen.contains(&&**key) {
@@ -1769,6 +1776,39 @@ mod tests {
         );
         let shape = &audit.sessions.costliest[0];
         assert_eq!(shape.tool_errors, Some(3));
+    }
+
+    #[test]
+    fn a_codex_completion_belongs_to_the_thread_it_names() {
+        let w = Workspace::new();
+        let failed = json!({"type": "event_msg", "timestamp": at(2.0), "payload": {"type": "item_completed", "thread_id": "child", "item": {"type": "CommandExecution", "id": "exec-1", "exit_code": 1}}});
+        // The older parent's rollout also records its child's completion.
+        let parent = vec![
+            codex_meta("parent", None),
+            codex_turn("gpt-5.4"),
+            codex_billed(1.0, "a", 10_000, 0),
+            failed.clone(),
+        ];
+        let child = vec![
+            json!({"type": "session_meta", "timestamp": at(0.5), "payload": {"id": "child", "model_provider": "openai", "cli_version": "0.167.0", "originator": "codex_cli_rs", "source": "cli"}}),
+            codex_turn("gpt-5.4"),
+            codex_billed(1.5, "b", 10_000, 0),
+            failed,
+        ];
+        let audit = audit_of(
+            &w,
+            &[
+                (".codex/sessions/a-parent.jsonl", parent),
+                (".codex/sessions/b-child.jsonl", child),
+            ],
+        );
+        let errors: Vec<_> = audit
+            .sessions
+            .most_tool_errors
+            .iter()
+            .map(|s| (s.session.as_deref(), s.tool_errors))
+            .collect();
+        assert_eq!(errors, [(Some("child"), Some(1))]);
     }
 
     #[test]

@@ -861,6 +861,7 @@ mod tests {
                 usable_window: None,
                 tool: None,
                 t3: None,
+                thread: None,
                 pricing: None,
             }
             .into(),

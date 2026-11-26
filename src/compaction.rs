@@ -2827,6 +2827,7 @@ mod tests {
                 usable_window: None,
                 tool: None,
                 t3: None,
+                thread: None,
                 pricing: Some(std::sync::Arc::new(Pricing {
                     provider: Some("anthropic".into()),
                     model: Some("claude-opus-5-5".into()),

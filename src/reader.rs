@@ -953,6 +953,7 @@ fn event(
             usable_window: context.usable_window,
             tool: None,
             t3: None,
+            thread: None,
             pricing: context.pricing.clone(),
         }
         .into(),
@@ -2064,6 +2065,11 @@ impl Reader {
                     string(item, "id"),
                 );
                 e.file = (!failed).then_some(crate::lsp::File::Done);
+                // A rollout may also record another thread's completion, such as a
+                // subagent's, so the thread it names owns it rather than the earliest holder.
+                if let Some(thread) = p.get("thread_id").filter(|t| !t.is_null()) {
+                    e.thread = Some(id(thread)?.into());
+                }
                 self.add_event(e);
             }
         } else if kind == Some("response_item")

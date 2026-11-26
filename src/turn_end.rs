@@ -566,6 +566,7 @@ mod tests {
                 usable_window: Some(200_000),
                 tool: None,
                 t3: None,
+                thread: None,
                 pricing: Some(std::sync::Arc::new(Pricing {
                     provider: Some("openai".into()),
                     model: Some(MODEL.into()),

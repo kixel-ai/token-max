@@ -1512,9 +1512,31 @@ tool turned off, then an unsupported provider, then a variable that turns off
 feature-flag fetching, which Claude Platform on AWS and Claude Models on
 Google Cloud (Anthropic managed) don't need. T3 instances have none.
 
+`Profile.allowlist` is Claude Code's `availableModels`, read from the same
+scopes: the managed file's list alone when it sets one, else the user,
+project and local lists concatenated without duplicates, each file once. A
+null sets no list. `Allowlist::Unknown` holds why the list can't be judged:
+the admin console's cached settings (`remote-settings.json` in the profile's
+directory) set one or can't be read, the managed file or that cache sets
+`deniedModels` or `availableModelsMatch`, or a value is not a list of strings. An `advisorModel`
+the list blocks is blocked, last in Claude Code's order. `allowlist::Verdict`
+matches a model by Claude Code's rules, lowercased and without a
+context-window suffix: a family entry permits its family unless a version
+prefix or full ID in that family is listed; a version prefix permits itself
+and the IDs that extend it by `-` segments. An alias the list narrows to
+specific entries is `Narrowed`, since it runs on the newest permitted
+version; an entry that is neither a family nor a well-formed Claude model ID
+leaves any model it may permit `Unknown`, a narrowed alias included, and is
+never quoted. The Main-session default card checks the lists of every
+profile whose effective model the edit would change: one whose `model`
+setting the edit writes, matched by resolved file and key, a null included,
+and one that reads the edited file, such as a home-directory session reading
+another profile's user file as its project's, unless a file above it names
+its model. A file the edit would create matches through its directory.
+
 `vibes` gives one card to each group of profiles that share the
 `advisorModel` owner, the resolved main-session default and the setting that
-names it, and what stops the advisor, and `Report.advisor` one entry to each
+names it, what stops the advisor, and the allowlist, and `Report.advisor` one entry to each
 such line, then to the lines below. A request counts when it recorded an `advisor_message` iteration,
 each iteration is a call, and only those iterations are priced, at the model
 the iteration names (one that names none stays unknown, never the

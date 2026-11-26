@@ -1983,6 +1983,36 @@ mod unix {
         );
     }
 
+    #[test]
+    fn vibes_offers_no_model_the_allowlist_blocks() {
+        let w = Workspace::new();
+        w.fixture();
+        let mut base = vec!["vibes".to_string()];
+        base.extend(prices_args(&w));
+        let base: Vec<&str> = base.iter().map(String::as_str).collect();
+        let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        // Sonnet only: no Opus default, and no Opus advisor.
+        w.settings(r#"{"model":"claude-sonnet-5-5","availableModels":["sonnet"]}"#);
+        let (_, stdout, _) = run(&mut command(&w, &base));
+        let stdout = words(&stdout);
+        assert!(
+            stdout.contains("The maintainer's pick, claude-opus-5-5 at medium, is not offered: ~/.claude/settings.json:availableModels excludes it.")
+                && stdout.contains("No advisor is suggested: Opus ranks one above claude-sonnet-5-5")
+                && !stdout.contains("-> opus")
+                && !stdout.contains("-> claude-opus-5-5"),
+            "{stdout}"
+        );
+        // A set advisor the list blocks is disabled.
+        w.settings(
+            r#"{"model":"claude-sonnet-5-5","availableModels":["sonnet"],"advisorModel":"opus"}"#,
+        );
+        let (_, stdout, _) = run(&mut command(&w, &base));
+        assert!(
+            words(&stdout).contains("Set to opus in ~/.claude/settings.json, but none would load from these settings: ~/.claude/settings.json:availableModels excludes it."),
+            "{stdout}"
+        );
+    }
+
     /// Every name in `dir`.
     fn names(dir: &Path) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(dir)

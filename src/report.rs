@@ -464,6 +464,20 @@ fn default_pair(model: Option<&str>, level: Option<&str>) -> String {
     }
 }
 
+/// The settings file and key a profile's `model` owner names, null or not, or that the
+/// Main-session default card's edit writes for a recorded model, the profile's own
+/// `settings_file`; None for an owner outside any file.
+fn model_setting(owner: &str, settings_file: &str) -> Option<(String, String)> {
+    if owner == crate::effort::RECORDED {
+        return Some((settings_file.into(), "model".into()));
+    }
+    let (file, key) = owner
+        .strip_suffix(crate::effort::NULL_MODEL)
+        .unwrap_or(owner)
+        .rsplit_once(':')?;
+    Some((file.into(), key.into()))
+}
+
 /// The main-session default as `vibes` shows it: the maintainer's pick beside the default
 /// the settings give, the provider's guidance past `high`, and what each recorded model and
 /// effort pair cost. None when the default is unresolved.
@@ -480,9 +494,64 @@ fn default_item(e: &EffortCheck, profile: &str, how: Option<How>, out: &Out<'_>)
         .map(|(m, l)| default_pair(Some(m), Some(l)))
         .collect();
     let current = default_pair(c.model.as_deref(), c.effective.as_deref());
-    let quiet = crate::effort::accepted(c, e.harness);
+    // The pick reaches every profile the card covers, and every other whose model the same
+    // setting names, such as a project's, even through a symlink, as a null the edit
+    // replaces, or as a recorded model the edit writes into a shared settings file, so an
+    // allowlist among them that blocks it keeps it from being offered, unless it is the
+    // default already.
+    let written: Vec<(String, String)> = out
+        .profiles
+        .values()
+        .filter(|p| e.base.profiles.contains(&p.id))
+        .filter_map(|p| model_setting(&c.model_owner, &p.settings_file))
+        .collect();
+    let shared = |p: &Profile| {
+        // The files the profile reads, lowest precedence first: a session in the home
+        // directory reads another profile's user file as its project's. A file read twice,
+        // such as through a symlink, ranks at its last read, where its settings win.
+        let rank = |file: &str| {
+            std::iter::once(&p.settings_file)
+                .chain(&p.project_files)
+                .enumerate()
+                .filter(|(_, r)| crate::discovery::same_file(r, file))
+                .map(|(i, _)| i)
+                .last()
+        };
+        p.effort.as_ref().is_some_and(|o| {
+            match model_setting(&o.model_owner, &p.settings_file) {
+                // A write reaches it in the file and key that name its model, or in any file
+                // it reads when no setting names one, or above a file `model` that the
+                // write's own `model` or a model variable outranks.
+                Some((g, l)) => written.iter().any(|(f, k)| {
+                    (*k == l && crate::discovery::same_file(f, &g))
+                        || rank(f).is_some_and(|r| {
+                            o.model_owner == crate::effort::RECORDED
+                                || (l == "model"
+                                    && (k != "model" || rank(&g).is_some_and(|at| r > at)))
+                        })
+                }),
+                // An owner outside any file, such as the shell's ANTHROPIC_MODEL, matches by
+                // name.
+                None => o.model_owner == c.model_owner,
+            }
+        })
+    };
+    let members: Vec<&Profile> = out
+        .profiles
+        .values()
+        .copied()
+        .filter(|p| e.base.profiles.contains(&p.id) || shared(p))
+        .collect();
+    let refused = members
+        .iter()
+        .filter(|_| c.model.as_deref() != Some(model))
+        .find_map(|p| allowlist_refusal(p, model, None));
+    let quiet = crate::effort::accepted(c, e.harness) || refused.is_some();
+    let how = how.filter(|_| refused.is_none());
     let mut text = if current == pick {
         format!("Defaults to {current}, the maintainer's pick.")
+    } else if let Some(why) = &refused {
+        format!("Defaults to {current}. The maintainer's pick, {pick}, is not offered: {why}.")
     } else if quiet {
         format!("Defaults to {current}, which the maintainer accepts beside their pick, {pick}.")
     } else {
@@ -500,6 +569,9 @@ fn default_item(e: &EffortCheck, profile: &str, how: Option<How>, out: &Out<'_>)
         .and_then(|l| past_high(l, e.harness))
     {
         let _ = write!(text, " {guidance}");
+    }
+    if !quiet && let Some(note) = members.iter().find_map(|p| allowlist_note(p, model, None)) {
+        text += &note;
     }
     let _ = write!(text, " {}", effort_runs(e));
     if !quiet {
@@ -523,7 +595,7 @@ fn default_item(e: &EffortCheck, profile: &str, how: Option<How>, out: &Out<'_>)
             format!("{current} {} {pick}", out.arrow)
         },
         what: "The model and reasoning effort a main session starts with.".into(),
-        text,
+        text: out.home_in(&text),
         sources: std::iter::once(lead)
             .chain(guides.iter().copied())
             .map(String::from)
@@ -5912,7 +5984,13 @@ fn advisor_item(
                         "{set}, but Claude Code's pairing table doesn't take it as an advisor for {main}, the main-session default ({owner}), so none is attached.{calls}"
                     ))
                 }
-                _ => quiet(format!("{set}.{calls}")),
+                Some((main, _)) if let Some(why) = allowlist_refusal(p, m, Some(main)) => advise(
+                    format!("{set}, but {why} ({owner}), so none is attached.{calls}"),
+                ),
+                _ => quiet(format!(
+                    "{set}.{}{calls}",
+                    allowlist_note(p, m, main).unwrap_or_default()
+                )),
             }
         }
         // A recorded call shows the advisor loaded where the blocker did not reach.
@@ -5937,6 +6015,12 @@ fn advisor_item(
             Pick::Unsupported => quiet(format!(
                 "No advisor is suggested: Claude Code attaches none to {main}, the main-session default. It takes one on Fable, on Opus and Sonnet 4.6 or later, and on Haiku 4.5 or later.{recorded}"
             )),
+            Pick::Advisor(pick) if let Some(why) = allowlist_refusal(p, pick, Some(main)) => {
+                quiet(format!(
+                    "No advisor is suggested: {} ranks one above {main}, the main-session default ({owner}), but {why}.{recorded}",
+                    capitalize(pick)
+                ))
+            }
             Pick::Advisor(pick) => {
                 let mut text = format!(
                     "Claude consults the advisor at decision points rather than on every turn, so a faster main model with a stronger advisor \"typically costs less than running the stronger model throughout\", Claude Code's page says. {} ranks one above {main}, the main-session default ({owner}). Each call reads the whole conversation again at the advisor's rates, uncached, and what the pairing saves or costs is not measured.{calls} The advisor is experimental, and Amazon Bedrock, Google Cloud's Agent Platform and Microsoft Foundry have none.",
@@ -5948,6 +6032,7 @@ fn advisor_item(
                         " {gateway} sends requests through a gateway, which must pass the advisor tool on intact."
                     );
                 }
+                text += &allowlist_note(p, pick, Some(main)).unwrap_or_default();
                 if pick == "fable" {
                     text += " A Fable advisor needs Fable access, and on plans that bill Fable to usage credits, the one-time consent /model fable asks for; until then Claude Code sends requests without it.";
                 }
@@ -6008,6 +6093,50 @@ fn advisor_item(
         after: vec![],
         defers: None,
     }
+}
+
+/// Why `p`'s model allowlist keeps a card from offering `model`, which pairs with `main` as
+/// its advisor when given: the list blocks it, or narrows an alias to versions Claude Code
+/// pairs none of with `main`. None when the list may let it run.
+fn allowlist_refusal(p: &Profile, model: &str, main: Option<&str>) -> Option<String> {
+    use crate::allowlist::Verdict;
+    match p.allowlist.as_ref()?.verdict(model) {
+        Verdict::Blocked(why) => Some(why),
+        Verdict::Narrowed(entries) => main
+            .filter(|main| !crate::allowlist::pairs(main, &entries))
+            .map(|main| {
+                format!(
+                    "availableModels permits only {} of the {} family, and Claude Code's pairing table takes none of those as an advisor for {main}",
+                    entries.join(", "),
+                    capitalize(&crate::advisor::normalize(model))
+                )
+            }),
+        Verdict::Permitted | Verdict::Unknown(_) => None,
+    }
+}
+
+/// What a card offering `model` says of `p`'s model allowlist when the list may still run it:
+/// on another version, for an alias it narrows, or unknown. None when it permits `model` or
+/// no list is set.
+fn allowlist_note(p: &Profile, model: &str, main: Option<&str>) -> Option<String> {
+    use crate::allowlist::Verdict;
+    Some(match p.allowlist.as_ref()?.verdict(model) {
+        Verdict::Narrowed(entries) => {
+            let mut text = format!(
+                " availableModels permits only {} of the {} family, so on the Anthropic API Claude Code runs {model} as the newest version the list permits",
+                entries.join(", "),
+                capitalize(&crate::advisor::normalize(model))
+            );
+            if let Some(main) = main {
+                let _ = write!(text, ", where its pairing table takes it for {main}");
+            }
+            text + "."
+        }
+        Verdict::Unknown(why) => {
+            format!(" Whether availableModels permits {model} is unknown: {why}.")
+        }
+        Verdict::Permitted | Verdict::Blocked(_) => return None,
+    })
 }
 
 /// The main-session default once the Main-session default card's edit is written: the
@@ -13113,6 +13242,19 @@ pub(crate) mod tests {
             "{}",
             c.text
         );
+        // So does one whose suggestion the allowlist blocks.
+        set(&mut report, None, None, Some("claude-sonnet-5-5"));
+        report.scan.profiles[0].allowlist = Some(crate::model::Allowlist::Read {
+            entries: vec!["sonnet".into()],
+            owners: vec!["/synthetic/home/.claude/settings.json:availableModels".into()],
+        });
+        let c = card(&report);
+        assert!(
+            c.text.ends_with("excludes it. 4 advisor calls on 3 requests ran on claude-opus-5-5, costing $2.50 at API prices over the window."),
+            "{}",
+            c.text
+        );
+        report.scan.profiles[0].allowlist = None;
         set(&mut report, Some("opus"), None, Some("claude-sonnet-5-5"));
         // A set advisor the main model can't take is advice with no edit, naming where the
         // main model comes from.
@@ -13217,6 +13359,235 @@ pub(crate) mod tests {
         // A disabled instance runs no threads.
         report.scan.profiles[1].t3.as_mut().unwrap().enabled = false;
         assert!(!card(&report).text.contains("T3 Code threads"));
+    }
+
+    #[test]
+    fn the_model_cards_offer_no_model_the_allowlist_blocks() {
+        use crate::effort::{EffortInput, effort_checks};
+        use crate::model::Allowlist;
+        let file = format!("{ROOT}/settings.json");
+        let owner = format!("{file}:availableModels");
+        // A Sonnet main with `advisor` set, under `allowlist`, and another profile with the
+        // same model setting under `other`'s, its effort set where `other` names, and the two
+        // profiles' model owners and the second's settings file, which `owners` names if not
+        // the file's `model` and `file`, and the project files it reads: the first default
+        // card and the advisor card.
+        let line = |allowlist: Option<Allowlist>,
+                    advisor: Option<&str>,
+                    other: Option<(Option<Allowlist>, &str)>,
+                    owners: Option<(&str, &str, &str, &[&str])>| {
+            let mut report = synthetic();
+            report.checks.clear();
+            report.context.clear();
+            let p = &mut report.scan.profiles[0];
+            p.settings_file = file.clone();
+            p.allowlist = allowlist;
+            p.advisor = Some(crate::model::AdvisorControl {
+                model: advisor.map(Into::into),
+                owner: format!("{file}:advisorModel"),
+                blocked: None,
+                gateway: None,
+            });
+            p.effort = Some(EffortControl {
+                model: Some("claude-sonnet-5-5".into()),
+                model_owner: format!("{file}:model"),
+                level: Some("medium".into()),
+                owner: format!("{file}:env.CLAUDE_CODE_EFFORT_LEVEL"),
+                effective: Some("medium".into()),
+                lowered: None,
+                caps: vec![],
+                default: None,
+                unresolved: None,
+                picked: None,
+                provider: None,
+            });
+            if let Some((allowlist, effort)) = other {
+                let mut other = report.scan.profiles[0].clone();
+                other.id = "other".into();
+                other.allowlist = allowlist;
+                other.effort.as_mut().unwrap().owner = effort.into();
+                report.scan.profiles.push(other);
+            }
+            if let Some((first, second, settings_file, project)) = owners {
+                for (p, owner) in report.scan.profiles.iter_mut().zip([first, second]) {
+                    p.effort.as_mut().unwrap().model_owner = owner.into();
+                }
+                report.scan.profiles[1].settings_file = settings_file.into();
+                report.scan.profiles[1].project_files =
+                    project.iter().map(|f| f.to_string()).collect();
+            }
+            let checks = effort_checks(&EffortInput {
+                scan: &report.scan,
+                catalog: &prices(),
+                since: None,
+                now: NOV1 + DAY_MS,
+            });
+            report.checks = checks.into_iter().map(CheckResult::Effort).collect();
+            let items = advice(&report, ReportOptions::default());
+            let find = |name: &str| {
+                items
+                    .iter()
+                    .find(|i| i.name.starts_with(name))
+                    .unwrap()
+                    .clone()
+            };
+            (
+                find("Main-session default"),
+                items
+                    .iter()
+                    .find(|i| i.name.starts_with("Advisor model"))
+                    .unwrap()
+                    .clone(),
+            )
+        };
+        let cards = |allowlist: Option<Allowlist>| line(allowlist, None, None, None);
+        let read = |entries: &[&str]| {
+            Some(Allowlist::Read {
+                entries: entries.iter().map(|e| e.to_string()).collect(),
+                owners: vec![owner.clone()],
+            })
+        };
+        // No list changes nothing.
+        let (default, advisor) = cards(None);
+        assert!(matches!(default.how, Some(How::Edit(_))));
+        assert_eq!(advisor.value, "none -> opus");
+        assert!(!advisor.text.contains("availableModels"));
+        // A list of Sonnet blocks both the Opus default and an Opus advisor.
+        let (default, advisor) = cards(read(&["sonnet"]));
+        assert_eq!(
+            (&default.how, default.quiet, default.value.as_str()),
+            (&None, true, "")
+        );
+        assert!(
+            default.text.starts_with(&format!("Defaults to claude-sonnet-5-5 at medium. The maintainer's pick, claude-opus-5-5 at medium, is not offered: {owner} excludes it.")),
+            "{}",
+            default.text
+        );
+        assert_eq!(
+            (&advisor.how, advisor.quiet, advisor.value.as_str()),
+            (&None, true, "")
+        );
+        assert!(
+            advisor.text.contains(&format!("No advisor is suggested: Opus ranks one above claude-sonnet-5-5, the main-session default ({file}:model), but {owner} excludes it.")),
+            "{}",
+            advisor.text
+        );
+        // An Opus version too old to advise Sonnet 5.5 leaves the alias with nothing to pair.
+        let (_, advisor) = cards(read(&["sonnet", "claude-opus-4-6"]));
+        assert_eq!((&advisor.how, advisor.quiet), (&None, true));
+        assert!(
+            advisor.text.contains("availableModels permits only claude-opus-4-6 of the Opus family, and Claude Code's pairing table takes none of those as an advisor for claude-sonnet-5-5."),
+            "{}",
+            advisor.text
+        );
+        // Opus 5 and later permits the Opus default and an Opus advisor, on the version the
+        // list permits. Accepting the default moves the advisor to Fable, which it blocks.
+        let (default, advisor) = cards(read(&["sonnet", "claude-opus-5"]));
+        assert!(matches!(default.how, Some(How::Edit(_))));
+        assert!(
+            !default.text.contains("availableModels"),
+            "{}",
+            default.text
+        );
+        assert!(matches!(advisor.how, Some(How::Edit(_))));
+        assert!(
+            advisor.text.contains("availableModels permits only claude-opus-5 of the Opus family, so on the Anthropic API Claude Code runs opus as the newest version the list permits, where its pairing table takes it for claude-sonnet-5-5."),
+            "{}",
+            advisor.text
+        );
+        assert!(
+            advisor.text.ends_with("Accepting the Main-session default card's change to claude-opus-5-5 leaves no advisor to suggest."),
+            "{}",
+            advisor.text
+        );
+        let rebuilt = &advisor.after[0].item;
+        assert_eq!((&rebuilt.how, rebuilt.quiet), (&None, true));
+        assert!(
+            rebuilt.text.contains(&format!("but {owner} excludes it.")),
+            "{}",
+            rebuilt.text
+        );
+        // A set Opus advisor narrowed to a version Sonnet 5.5 doesn't pair with attaches none.
+        let (_, advisor) = line(
+            read(&["sonnet", "claude-opus-4-6"]),
+            Some("opus"),
+            None,
+            None,
+        );
+        assert_eq!((&advisor.how, advisor.quiet), (&None, false));
+        assert!(
+            advisor.text.contains(&format!("Set to opus in {file}, but availableModels permits only claude-opus-4-6 of the Opus family, and Claude Code's pairing table takes none of those as an advisor for claude-sonnet-5-5 ({file}:model), so none is attached.")),
+            "{}",
+            advisor.text
+        );
+        // A profile on the default's line whose list blocks the pick keeps it unoffered, as
+        // does one on another line whose model the same setting names.
+        let level = format!("{file}:env.CLAUDE_CODE_EFFORT_LEVEL");
+        for effort in [level.as_str(), "/elsewhere/settings.json:effortLevel"] {
+            let (default, _) = line(None, None, Some((read(&["sonnet"]), effort)), None);
+            assert_eq!((&default.how, default.quiet), (&None, true), "{effort}");
+        }
+        // So does one whose model the same setting names as a null the edit replaces, through
+        // a symlink, or as a recorded model in the file the edit writes; one on another
+        // setting, or a recorded model in another file, does not. A profile that reads the
+        // edited file as its project's is reached unless a file above it names its model.
+        let w = crate::test_support::Workspace::new();
+        let real = w.home.join("settings.json");
+        std::fs::write(&real, "{}").unwrap();
+        let real = real.display().to_string();
+        let null = format!("{real}:model{}", crate::effort::NULL_MODEL);
+        let recorded = crate::effort::RECORDED;
+        let elsewhere = "/elsewhere/settings.json";
+        let local = "/elsewhere/.claude/settings.local.json";
+        let own = format!("{elsewhere}:model");
+        let above = format!("{local}:model");
+        let reads: &[&str] = &[file.as_str(), local];
+        let again: &[&str] = &[file.as_str(), local, file.as_str()];
+        let mut cases = vec![
+            ((null.as_str(), null.as_str(), file.as_str(), &[][..]), true),
+            ((recorded, recorded, file.as_str(), &[]), true),
+            ((recorded, recorded, elsewhere, &[]), false),
+            ((recorded, recorded, elsewhere, reads), true),
+            ((recorded, own.as_str(), elsewhere, reads), true),
+            ((recorded, above.as_str(), elsewhere, reads), false),
+            // A file read again above the one naming the model ranks at its last read.
+            ((recorded, above.as_str(), elsewhere, again), true),
+        ];
+        let set = format!("{real}:model");
+        let env = format!("{real}:env.ANTHROPIC_MODEL");
+        cases.push(((set.as_str(), env.as_str(), file.as_str(), &[]), false));
+        #[cfg(unix)]
+        let link = {
+            let link = w.home.join("link.json");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            format!("{}:model", link.display())
+        };
+        #[cfg(unix)]
+        cases.push(((set.as_str(), link.as_str(), file.as_str(), &[]), true));
+        for (owners, blocked) in cases {
+            let other = Some((read(&["sonnet"]), "/elsewhere/settings.json:effortLevel"));
+            let (default, _) = line(None, None, other, Some(owners));
+            assert_eq!(default.how.is_none(), blocked, "{owners:?}");
+        }
+        // A list token-max can't read keeps both offers, saying so.
+        let why = "the admin console's settings, cached in /r.json, set availableModels, which token-max doesn't resolve";
+        let (default, advisor) = cards(Some(Allowlist::Unknown(why.into())));
+        assert!(matches!(default.how, Some(How::Edit(_))));
+        assert!(
+            default.text.contains(&format!(
+                "Whether availableModels permits claude-opus-5-5 is unknown: {why}."
+            )),
+            "{}",
+            default.text
+        );
+        assert!(matches!(advisor.how, Some(How::Edit(_))));
+        assert!(
+            advisor.text.contains(&format!(
+                "Whether availableModels permits opus is unknown: {why}."
+            )),
+            "{}",
+            advisor.text
+        );
     }
 
     #[test]

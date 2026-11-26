@@ -942,6 +942,20 @@ pub struct AdvisorControl {
     pub gateway: Option<String>,
 }
 
+/// Claude Code's `availableModels` allowlist as the settings read now give it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Allowlist {
+    /// The list Claude Code applies, read from settings files.
+    Read {
+        /// Its entries, as written, duplicates dropped.
+        entries: Vec<String>,
+        /// Each `{file}:availableModels` that contributes them, lowest precedence first.
+        owners: Vec<String>,
+    },
+    /// Why token-max can't tell what the list permits, such as one the admin console sets.
+    Unknown(String),
+}
+
 /// What a line of Claude profiles' advisor calls cost over the window.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AdvisorUse {
@@ -1084,6 +1098,12 @@ pub struct Profile {
     pub effort: Option<EffortControl>,
     /// Claude Code's advisor model; None for Codex and T3, whose threads pick their own model.
     pub advisor: Option<AdvisorControl>,
+    /// Claude Code's `availableModels` allowlist, read where the advisor is; None when no
+    /// settings file sets one.
+    pub allowlist: Option<Allowlist>,
+    /// The project and local settings files Claude reads at its latest session's directory,
+    /// besides its own, where an edit to another profile's file can still reach it.
+    pub project_files: Vec<String>,
     pub speed_directories: Option<IndexMap<String, SpeedControl>>,
     /// Current project controls observed at recorded working directories.
     pub idle_directories: Option<IndexMap<String, IdleControl>>,

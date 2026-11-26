@@ -1548,7 +1548,7 @@ fn forensics(args: &[String]) -> Result<(Output, u8), ScanError> {
         .chain(destinations.iter().cloned().map(Some))
         .collect();
     let replies = gather(Gather {
-        since: Some(crate::audit::scanned(since)),
+        since: Some(since),
         defaults: false,
         discovery,
         destinations,

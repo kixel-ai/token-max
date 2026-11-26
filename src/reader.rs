@@ -55,6 +55,11 @@ pub enum Reach {
     History,
     /// Only transcripts the window's requests and sessions depend on.
     Window,
+    /// The transcripts [`Reach::Window`] reads, with every record in them kept as if in the
+    /// window, so an audit can compare the window's first request with the one before it
+    /// however old. A malformed record before the window cannot fail the scan; it becomes a
+    /// request of unknown usage, so no comparison crosses it.
+    Replay,
 }
 
 /// How far a scan has read its transcripts and what it has counted, which another thread may
@@ -1145,6 +1150,8 @@ impl Requests {
 /// State shared across every file of one scan.
 struct Reader {
     since: Option<Millis>,
+    /// Keep records before `since` too, as [`Reach::Replay`] reads them.
+    replay: bool,
     exposure: ExposureCollector,
     strings: Interner,
     requests: Requests,
@@ -1273,9 +1280,30 @@ impl Reader {
                 "invalid pre-window component metadata; subsequent exposure is incomplete".into(),
             );
         }
-        match snapshot.harness {
-            Harness::Claude => self.claude(snapshot, file, raw, location, time, selected)?,
-            Harness::Codex => self.codex(snapshot, file, raw, location, time, selected)?,
+        let kept = selected || self.replay;
+        let read = match snapshot.harness {
+            Harness::Claude => self.claude(snapshot, file, raw, location, time, kept),
+            Harness::Codex => self.codex(snapshot, file, raw, location, time, kept),
+        };
+        if let Err(error) = read {
+            if selected {
+                return Err(error);
+            }
+            // Only a replay reads a record before the window as selected, and a record with
+            // no time is selected, so this one has a time.
+            let time = time.expect("a record before the window has a time");
+            let mut r = request(
+                snapshot,
+                location,
+                &file.context,
+                time,
+                identity(&line_key(snapshot, location)),
+            );
+            r.parts = vec![part(&Map::new(), None, PartKind::Unknown)?];
+            r.evidence = RequestEvidence::Unknown;
+            r.issues
+                .push("pre-window record is invalid; cache predecessor remains unknown".into());
+            self.add(r);
         }
         self.sessions.observe(Record {
             harness: snapshot.harness,
@@ -2228,7 +2256,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         mut t3,
     } = discover(&options.discovery)?;
     let snapshot_finished_at = iso(now());
-    if let (Reach::Window, Some(since)) = (options.reach, since) {
+    if let (Reach::Window | Reach::Replay, Some(since)) = (options.reach, since) {
         let mut reads = crate::window::reads(&snapshots, since)?.into_iter();
         snapshots.retain(|_| reads.next().expect("one per snapshot"));
     }
@@ -2241,6 +2269,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     let has_t3 = profiles.iter().any(|p| p.t3.is_some());
     let mut reader = Reader {
         since,
+        replay: options.reach == Reach::Replay,
         exposure: ExposureCollector::new(since),
         strings: Interner::default(),
         requests: Requests {
@@ -2467,6 +2496,8 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         refs,
         ref_to_request,
     ));
+    // A replay keeps every record it read, so nothing after reading splits at the window.
+    let since = since.filter(|_| options.reach != Reach::Replay);
     // Every request and event stays in memory, so sort in place: a stable slice sort would
     // buffer half of them, and splitting at the window keeps the selected part where it is.
     // Request IDs are a harness name and a hex digest, where byte order is locale order.

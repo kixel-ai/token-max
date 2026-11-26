@@ -39,12 +39,6 @@ const CODEX_CACHE_LIFETIME: Millis = 5 * 60_000;
 /// How long OpenAI keeps a prefix written with extended retention.
 const CODEX_LONG_LIFETIME: Millis = 12 * 60 * 60_000;
 
-/// Where an audit since `since` starts its scan: the longest any cache keeps a prefix
-/// earlier, so the first request in the window is compared with the request before it.
-pub fn scanned(since: Millis) -> Millis {
-    since - CODEX_LONG_LIFETIME
-}
-
 /// What each audit states it assumes, printed with its findings.
 pub const ASSUMPTIONS: [&str; 7] = [
     "Dollars are public API prices for the recorded usage, not an invoice.",
@@ -601,6 +595,8 @@ struct Turn<'a> {
     spans: Option<Vec<(f64, f64)>>,
     /// Whether the session replaying it owns it, rather than holding a fork's copy.
     owned: bool,
+    /// Whether the request before it left its usage unknown, so no comparison reaches back.
+    blind: bool,
 }
 
 impl Turn<'_> {
@@ -651,7 +647,9 @@ fn ends(spans: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
 struct Events<'a> {
     starts: Vec<&'a StructuralEvent>,
     ends: Vec<&'a StructuralEvent>,
-    compactions: Vec<Millis>,
+    compactions: Vec<&'a StructuralEvent>,
+    /// The events the session owns, rather than holds as a fork's copy, by ID.
+    owned: HashSet<&'a Id>,
     /// Each call's start and its first result, by the call's ID.
     calls: HashMap<&'a Id, (Option<&'a StructuralEvent>, Option<&'a StructuralEvent>)>,
 }
@@ -660,7 +658,7 @@ impl<'a> Events<'a> {
     fn sort(&mut self) {
         self.starts.sort_by_key(|e| e.time);
         self.ends.sort_by_key(|e| e.time);
-        self.compactions.sort_unstable();
+        self.compactions.sort_by_key(|e| e.time);
         for &start in &self.starts {
             if let Some(id) = &start.tool_id {
                 self.calls.entry(id).or_default().0.get_or_insert(start);
@@ -677,6 +675,11 @@ impl<'a> Events<'a> {
     fn started(&self, from: Millis, to: Millis) -> &[&'a StructuralEvent] {
         let at = |time: Millis| self.starts.partition_point(|e| e.time < time);
         &self.starts[at(from)..at(to).max(at(from))]
+    }
+
+    /// Whether the session owns `e`, rather than holding a fork's copy.
+    fn owns(&self, e: &StructuralEvent) -> bool {
+        self.owned.contains(&e.id)
     }
 
     /// The start of the call `end` answers, and the tool's name; None when unrecorded.
@@ -790,18 +793,22 @@ pub fn audit(scan: &Scan, catalog: &Catalog, options: &Options) -> Result<Audit,
     sessions.retain(|key, _| covered.contains(key));
     let mut events: HashMap<&str, Events> = HashMap::default();
     for e in &scan.events {
-        let held = std::iter::once(&e.session).chain(e.origins.iter().map(|o| &o.session));
+        let held = || std::iter::once(&e.session).chain(e.origins.iter().map(|o| &o.session));
+        let owner = owners.first(held());
         let mut seen: Vec<&str> = vec![];
-        for key in held {
+        for key in held() {
             if !covered.contains(&**key) || seen.contains(&&**key) {
                 continue;
             }
             seen.push(key);
             let found = events.entry(key).or_default();
+            if owner == Some(key) {
+                found.owned.insert(&e.id);
+            }
             match e.kind {
                 EventKind::ToolStart => found.starts.push(e),
                 EventKind::ToolEnd => found.ends.push(e),
-                EventKind::Compaction => found.compactions.push(e.time),
+                EventKind::Compaction => found.compactions.push(e),
                 _ => {}
             }
         }
@@ -809,7 +816,7 @@ pub fn audit(scan: &Scan, catalog: &Catalog, options: &Options) -> Result<Audit,
     for cause in Cause::ALL {
         audit.cache_misses.by_cause.insert(cause, Tally::default());
     }
-    let mut tools: IndexMap<String, ToolTally> = IndexMap::default();
+    let mut results: IndexMap<&Id, Carried> = IndexMap::default();
     for (key, mut requests) in sessions {
         requests.sort_by_key(|r| r.time);
         let mut found = events.remove(key).unwrap_or_default();
@@ -817,35 +824,28 @@ pub fn audit(scan: &Scan, catalog: &Catalog, options: &Options) -> Result<Audit,
         let found = &found;
         let (id, parent) = scan.sessions.native(key);
         let native = id.map(str::to_string);
+        let mut blind = false;
         let turns: Vec<Turn> = requests
             .iter()
-            .filter(|r| r.evidence != RequestEvidence::Unknown)
             .filter_map(|&r| {
-                let part = message(r)?;
-                Some(Turn {
-                    request: r,
-                    part,
-                    input: part.usage.input?,
-                    read: part.usage.read,
-                    spans: prefix_spans(catalog, r, part).map(ends),
-                    owned: &**owners.of(r) == key,
-                })
+                let part = message(r).filter(|_| r.evidence != RequestEvidence::Unknown);
+                let turn = part.and_then(|part| {
+                    Some(Turn {
+                        request: r,
+                        part,
+                        input: part.usage.input?,
+                        read: part.usage.read,
+                        spans: prefix_spans(catalog, r, part).map(ends),
+                        owned: &**owners.of(r) == key,
+                        blind,
+                    })
+                });
+                blind = turn.is_none();
+                turn
             })
             .collect();
         misses(&turns, found, since, &native, &mut audit.cache_misses);
-        let own = |e: &StructuralEvent| {
-            let held = std::iter::once(&e.session).chain(e.origins.iter().map(|o| &o.session));
-            owners.first(held).is_some_and(|owner| &**owner == key)
-        };
-        outputs(
-            &turns,
-            found,
-            since,
-            &native,
-            &own,
-            &mut tools,
-            &mut audit.tool_outputs.hotspots,
-        );
+        outputs(&turns, found, since, &native, &mut results);
         let owned: Vec<&Request> = requests
             .iter()
             .copied()
@@ -883,6 +883,45 @@ pub fn audit(scan: &Scan, catalog: &Catalog, options: &Options) -> Result<Audit,
         ] {
             list.push(shape.clone());
         }
+    }
+    let mut tools: IndexMap<String, ToolTally> = IndexMap::default();
+    for result in results.into_values() {
+        let tally = tools
+            .entry(result.tool.clone())
+            .or_insert_with(|| ToolTally {
+                tool: result.tool.clone(),
+                results: 0,
+                tokens: 0,
+                carried_requests: 0,
+                carried_tokens: 0,
+                cost_usd: Usd::ZERO,
+                unpriced: 0,
+            });
+        let carried = result.carried as i64;
+        tally.carried_requests += result.carried;
+        tally.carried_tokens += result.tokens * carried;
+        tally.cost_usd += Usd::from_f64(result.usd);
+        tally.unpriced += u64::from(!result.priced);
+        // A result whose owner is out of scope adds only its in-scope copies' carriers.
+        let Some(session) = result.session else {
+            continue;
+        };
+        tally.results += 1;
+        tally.tokens += result.tokens;
+        let end = result.end;
+        audit.tool_outputs.hotspots.push(Output {
+            tool: result.tool,
+            bytes: result.bytes,
+            tokens: result.tokens,
+            carried_requests: result.carried,
+            carried_tokens: result.tokens * carried,
+            cost_usd: (result.priced && result.alone).then(|| Usd::from_f64(result.usd)),
+            error: (end.harness == Harness::Claude).then_some(end.file.is_none()),
+            harness: end.harness,
+            session,
+            call: result.call.map(|s| Pointer::at(&s.location)),
+            at: Pointer::at(&end.location),
+        });
     }
     audit.tool_outputs.by_tool = tools.into_values().collect();
     audit.rank(options.limit, usize::MAX);
@@ -925,7 +964,7 @@ fn misses(
             Some(read) if read > 0 => codex_ttl.max(written),
             _ => written,
         };
-        if r.time < since || !cur.owned {
+        if r.time < since || !cur.owned || cur.blind {
             continue;
         }
         let (Some(cached), Some(read)) = (prev.cached(), cur.read) else {
@@ -945,7 +984,7 @@ fn misses(
         let compacted = events
             .compactions
             .iter()
-            .any(|&t| t > prev.request.time && t <= r.time);
+            .any(|e| e.time > prev.request.time && e.time <= r.time);
         let change = if p.model != q.model {
             Some(Change::Model)
         } else if prev.request.effort != r.effort {
@@ -1015,15 +1054,33 @@ fn misses(
     }
 }
 
-/// Each tool result since `since`, and what the requests that carried it paid for it.
-fn outputs(
+/// One tool result and what the requests carrying it paid for it, over every session that
+/// holds a copy: a Codex fork carries its source's results in its own later prompts.
+struct Carried<'a> {
+    end: &'a StructuralEvent,
+    tool: String,
+    bytes: u32,
+    tokens: i64,
+    /// The call, as the owning session recorded it.
+    call: Option<&'a StructuralEvent>,
+    /// The owning session's ID, once it replays the result; None while only copies have.
+    session: Option<Option<String>>,
+    carried: u64,
+    /// The priced carriers' sum, whether every carrier was priced, and whether each priced
+    /// carrier holds the result at one price.
+    usd: f64,
+    priced: bool,
+    alone: bool,
+}
+
+/// Each tool result since `since` in one session's replay, and what the requests that
+/// carried it paid for it, added to `found` by result.
+fn outputs<'a>(
     turns: &[Turn],
-    events: &Events,
+    events: &Events<'a>,
     since: Millis,
     session: &Option<String>,
-    own: &dyn Fn(&StructuralEvent) -> bool,
-    tools: &mut IndexMap<String, ToolTally>,
-    hotspots: &mut Vec<Output>,
+    found: &mut IndexMap<&'a Id, Carried<'a>>,
 ) {
     // Where the next result of each calling request begins in later prompts.
     let mut placed: HashMap<usize, f64> = HashMap::default();
@@ -1032,84 +1089,66 @@ fn outputs(
             continue;
         };
         let (start, tool) = events.call(end);
-        let tool = tool.unwrap_or("unrecorded").to_string();
         let tokens = (f64::from(bytes) * TOKENS_PER_BYTE).round();
+        let result = found.entry(&end.id).or_insert_with(|| Carried {
+            end,
+            tool: tool.unwrap_or("unrecorded").to_string(),
+            bytes,
+            tokens: tokens as i64,
+            call: start,
+            session: None,
+            carried: 0,
+            usd: 0.0,
+            priced: true,
+            alone: true,
+        });
+        if events.owns(end) {
+            result.tool = tool.unwrap_or("unrecorded").to_string();
+            result.call = start;
+            result.session = Some(session.clone());
+        }
         // The request that called the tool: the last before the call, or before the result.
         let called = start.map_or(end.time, |s| s.time);
         let calling = turns.partition_point(|t| t.request.time <= called);
-        let mut carried = 0u64;
-        // The priced carriers' sum, and whether every carrier was priced.
-        let (mut usd, mut priced) = (0.0, true);
-        let mut alone = true;
         // Compaction replaces the history the result was in.
         let compacted = events
             .compactions
-            .get(events.compactions.partition_point(|&t| t <= end.time))
-            .copied()
-            .unwrap_or(Millis::MAX);
-        if let Some(index) = calling.checked_sub(1) {
-            let caller = &turns[index];
-            let output = message(caller.request)
-                .and_then(|p| p.usage.output)
-                .unwrap_or(0);
-            let from = *placed
-                .entry(index)
-                .or_insert((caller.input + output) as f64);
-            let to = from + tokens;
-            placed.insert(index, to);
-            for later in &turns[index + 1..] {
-                // A fork's copy is billed to its source, which carried it there.
-                if later.request.time < end.time || !later.owned {
-                    continue;
+            .get(events.compactions.partition_point(|e| e.time <= end.time))
+            .map_or(Millis::MAX, |e| e.time);
+        let Some(index) = calling.checked_sub(1) else {
+            continue;
+        };
+        let caller = &turns[index];
+        let output = message(caller.request)
+            .and_then(|p| p.usage.output)
+            .unwrap_or(0);
+        let from = *placed
+            .entry(index)
+            .or_insert((caller.input + output) as f64);
+        let to = from + tokens;
+        placed.insert(index, to);
+        for later in &turns[index + 1..] {
+            if later.request.time < end.time {
+                continue;
+            }
+            // A prompt too short to hold the result no longer does, as after it was cleared;
+            // a fork's copied prompt clears it in the fork too.
+            if later.request.time >= compacted || (later.input as f64) < to {
+                break;
+            }
+            // A fork's copy is billed to its source, which carried it there.
+            if !later.owned {
+                continue;
+            }
+            result.carried += 1;
+            match later.price(from, to) {
+                Some((price, one)) => {
+                    result.usd += price;
+                    result.alone &= one;
                 }
-                // A prompt too short to hold the result no longer does, as after it was cleared.
-                if later.request.time >= compacted || (later.input as f64) < to {
-                    break;
-                }
-                carried += 1;
-                match later.price(from, to) {
-                    Some((price, one)) => {
-                        usd += price;
-                        alone &= one;
-                    }
-                    None => priced = false,
-                }
+                None => result.priced = false,
             }
         }
-        let tally = tools.entry(tool.clone()).or_insert_with(|| ToolTally {
-            tool: tool.clone(),
-            results: 0,
-            tokens: 0,
-            carried_requests: 0,
-            carried_tokens: 0,
-            cost_usd: Usd::ZERO,
-            unpriced: 0,
-        });
-        let tokens = tokens as i64;
-        let owned = own(end);
-        tally.results += u64::from(owned);
-        tally.tokens += if owned { tokens } else { 0 };
-        tally.carried_requests += carried;
-        tally.carried_tokens += tokens * carried as i64;
-        tally.cost_usd += Usd::from_f64(usd);
-        tally.unpriced += u64::from(!priced);
-        // A fork lists its copy's later carriers only in its tool's total.
-        if !owned {
-            continue;
-        }
-        hotspots.push(Output {
-            tool,
-            bytes,
-            tokens,
-            carried_requests: carried,
-            carried_tokens: tokens * carried as i64,
-            cost_usd: (priced && alone).then(|| Usd::from_f64(usd)),
-            error: (end.harness == Harness::Claude).then_some(end.file.is_none()),
-            harness: end.harness,
-            session: session.clone(),
-            call: start.map(|s| Pointer::at(&s.location)),
-            at: Pointer::at(&end.location),
-        });
     }
 }
 
@@ -1160,10 +1199,16 @@ fn shape(
     let input: i64 = window.iter().map(|t| t.input).sum();
     // Unknown when any request left its cache reads unrecorded.
     let read: Option<i64> = window.iter().map(|t| t.read).sum();
-    let calls = events.started(since, Millis::MAX);
+    // A fork's copies of its source's calls, results and compactions are its source's work.
+    let calls: Vec<&StructuralEvent> = events
+        .started(since, Millis::MAX)
+        .iter()
+        .copied()
+        .filter(|e| events.owns(e))
+        .collect();
     let mut streak: Option<Streak> = None;
     let mut run: Option<(&str, u64, &Location)> = None;
-    for call in calls {
+    for call in &calls {
         let tool = call.tool.as_deref().unwrap_or("unrecorded");
         run = match run {
             Some((name, n, at)) if name == tool => Some((name, n + 1, at)),
@@ -1182,7 +1227,7 @@ fn shape(
         events
             .ends
             .iter()
-            .filter(|e| e.time >= since && e.file.is_none())
+            .filter(|e| e.time >= since && e.file.is_none() && events.owns(e))
             .count() as u64
     });
     Shape {
@@ -1206,7 +1251,11 @@ fn shape(
             .first()
             .filter(|t| t.owned && created.is_some_and(|c| c >= since))
             .map(|t| t.input),
-        compactions: events.compactions.iter().filter(|&&t| t >= since).count() as u64,
+        compactions: events
+            .compactions
+            .iter()
+            .filter(|e| e.time >= since && events.owns(e))
+            .count() as u64,
         tool_calls: calls.len() as u64,
         tool_errors: errors,
         streak,
@@ -1300,9 +1349,10 @@ mod tests {
             let text: String = lines.iter().map(|r| format!("{r}\n")).collect();
             std::fs::write(path, text).unwrap();
         }
-        // As the command scans: from before the window, so its first request has a predecessor.
+        // As the command scans: its window, replaying every record before it.
         let mut scanning = w.scan_options();
-        scanning.since = Some(scanned(since));
+        scanning.since = Some(since);
+        scanning.reach = crate::reader::Reach::Replay;
         let scan = scan(&scanning).unwrap();
         let options = Options {
             filter: &Filter::All,
@@ -1375,16 +1425,20 @@ mod tests {
 
     #[test]
     fn the_first_request_in_the_window_is_compared_with_the_one_before_it() {
+        // Resumed the next morning, past any cache's lifetime and the window's start.
+        const NIGHT: f64 = 15.0 * 60.0;
         let w = Workspace::new();
         let records = vec![
             assistant(0.0, "a", OPUS, 0, 100_000, &[]),
-            assistant(1.0, "b", OPUS, 0, 100_500, &[]),
+            assistant(NIGHT, "b", OPUS, 0, 100_500, &[]),
         ];
         let file = ".claude/projects/project/main.jsonl";
-        let audit = audit_since(&w, &[(file, records)], START + MIN / 2);
+        let since = START + 14 * 60 * MIN;
+        let audit = audit_since(&w, &[(file, records)], since);
         let misses = &audit.cache_misses.hotspots;
         assert_eq!(misses.len(), 1);
         assert_eq!((misses[0].previous.line, misses[0].tokens), (1, 100_000));
+        assert_eq!(misses[0].cause, Cause::IdleTtl);
         let shape = &audit.sessions.costliest[0];
         // It began before the window, so its first prompt there is no start.
         assert_eq!((shape.requests, shape.start_input_tokens), (1, None));
@@ -1396,13 +1450,48 @@ mod tests {
             codex_meta("thread", None),
             codex_turn("gpt-5.4"),
             codex_billed(0.0, "a", 10_000, 0),
-            codex_billed(10.0, "b", 10_500, 0),
+            codex_billed(NIGHT, "b", 10_500, 0),
         ];
         let file = ".codex/sessions/rollout.jsonl";
-        let audit = audit_since(&w, &[(file, records)], START + 5 * MIN);
+        let audit = audit_since(&w, &[(file, records)], since);
         let misses = &audit.cache_misses.hotspots;
         assert_eq!((misses.len(), misses[0].previous.line), (1, 3));
         assert_eq!(audit.sessions.costliest[0].start_input_tokens, None);
+    }
+
+    #[test]
+    fn a_malformed_record_before_the_window_leaves_its_successor_uncompared() {
+        let w = Workspace::new();
+        let mut bad = assistant(1.0, "bad", OPUS, 0, 100_000, &[]);
+        bad["message"]["usage"]["input_tokens"] = json!("SYNTHETIC_PRIVATE_BAD");
+        let claude = vec![
+            assistant(0.0, "a", OPUS, 0, 100_000, &[]),
+            bad,
+            assistant(10.0, "b", OPUS, 0, 100_500, &[]),
+            assistant(20.0, "c", OPUS, 0, 100_900, &[]),
+        ];
+        let mut bad = codex_billed(1.0, "bad", 10_000, 0);
+        bad["payload"]["usage"]["input_tokens"] = json!("SYNTHETIC_PRIVATE_BAD");
+        let codex = vec![
+            codex_meta("thread", None),
+            codex_turn("gpt-5.4"),
+            codex_billed(0.0, "a", 10_000, 0),
+            bad,
+            codex_billed(10.0, "b", 10_500, 0),
+        ];
+        let audit = audit_since(
+            &w,
+            &[
+                (".claude/projects/project/main.jsonl", claude),
+                (".codex/sessions/rollout.jsonl", codex),
+            ],
+            START + 5 * MIN,
+        );
+        // Only Claude's second request in the window has a known predecessor.
+        let misses = &audit.cache_misses.hotspots;
+        assert_eq!(misses.len(), 1, "{misses:?}");
+        assert_eq!((misses[0].previous.line, misses[0].at.line), (3, 4));
+        assert_eq!(audit.totals.requests, 3);
     }
 
     fn codex_meta(id: &str, forked_from: Option<&str>) -> Value {
@@ -1464,8 +1553,46 @@ mod tests {
         let output = &audit.tool_outputs.hotspots[0];
         assert_eq!(
             (output.session.as_deref(), output.carried_requests),
-            (Some("source"), 1)
+            (Some("source"), 2)
         );
+        // The fork made no call of its own.
+        let calls: Vec<_> = audit
+            .sessions
+            .most_tool_calls
+            .iter()
+            .map(|s| (s.session.as_deref(), s.tool_calls))
+            .collect();
+        assert_eq!(calls, [(Some("source"), 1)]);
+    }
+
+    #[test]
+    fn a_copied_prompt_too_short_to_hold_a_result_ends_it_in_the_fork() {
+        let w = Workspace::new();
+        let history = vec![
+            codex_turn("gpt-5.4"),
+            codex_billed(1.0, "a", 10_000, 0),
+            json!({"type": "response_item", "timestamp": at(1.5), "payload": {"type": "function_call", "call_id": "call", "name": "exec", "arguments": "SYNTHETIC_PRIVATE_INPUT"}}),
+            json!({"type": "response_item", "timestamp": at(1.6), "payload": {"type": "function_call_output", "call_id": "call", "output": format!("SYNTHETIC_PRIVATE_OUTPUT{}", "x".repeat(3_976))}}),
+            // Too short to hold the result, as after the history was cleared.
+            codex_billed(2.0, "b", 2_000, 0),
+        ];
+        let mut source = vec![codex_meta("source", None)];
+        source.extend(history.clone());
+        let mut fork = vec![
+            json!({"type": "session_meta", "timestamp": at(3.0), "payload": {"id": "fork", "forked_from_id": "source", "model_provider": "openai", "cli_version": "0.167.0", "originator": "codex_cli_rs", "source": "cli"}}),
+        ];
+        fork.extend(history);
+        // The fork's own prompt grows past the result's place again.
+        fork.push(codex_billed(4.0, "c", 12_000, 1_920));
+        let audit = audit_of(
+            &w,
+            &[
+                (".codex/sessions/a-fork.jsonl", fork),
+                (".codex/sessions/b-source.jsonl", source),
+            ],
+        );
+        let exec = &audit.tool_outputs.by_tool[0];
+        assert_eq!((exec.results, exec.carried_requests), (1, 0));
     }
 
     #[test]

@@ -23,7 +23,7 @@ use std::sync::{Mutex, OnceLock, PoisonError, mpsc};
 
 use sha2::{Digest, Sha256};
 
-use crate::audit::{Audit, Options, audit, scanned};
+use crate::audit::{Audit, Options, audit};
 use crate::cli::{Printed, Render, Rendered, render};
 use crate::discovery::{DiscoveryOptions, discover};
 use crate::doctor::{Event, Offers, Owner, Plan, Style, Written, preview, write as write_plan};
@@ -159,7 +159,8 @@ impl Scope {
     pub fn reach(self) -> Reach {
         match self {
             Scope::Report { .. } => Reach::History,
-            Scope::Sessions | Scope::Audit => Reach::Window,
+            Scope::Sessions => Reach::Window,
+            Scope::Audit => Reach::Replay,
         }
     }
 
@@ -1094,7 +1095,7 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
                 limit,
                 since: cutoff,
             } => {
-                if since != Some(scanned(*cutoff)) {
+                if since != Some(*cutoff) {
                     return Err(ScanError::new(
                         "the coordinator asked for another window than this host scanned",
                     ));

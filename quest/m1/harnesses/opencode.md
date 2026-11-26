@@ -48,11 +48,17 @@ Recommendations:
   `step-finish` records). Capture `directory`/`worktree`, `parent_id`, and
   timestamps for `token-max sessions` and subagent cost breakdown. Deduplicate
   shared histories.
-- Exposure checks: resolve configured MCP servers (`mcp.servers`), skills
-  (`~/.config/opencode/skills/`, `.opencode/skills/`, `skills.paths`), and
-  instructions (`AGENTS.md`, `instructions` paths); measure recurring context
-  overhead against recorded uses, following `AGENTS.md` (red/exit 1 when never
-  used, yellow/exit 0 above `--max-cost-per-use`, green otherwise).
+- Exposure checks: resolve configured MCP servers in both shapes OpenCode
+  accepts, v2's `mcp.servers.<name>` and v1's `mcp.<name>` beside
+  `mcp.timeout`, counting only servers whose `enabled` is not `false`; skills
+  from the `skills` array (and its deprecated `skills.paths`/`skills.urls`
+  object form) plus the discovery directories `~/.config/opencode/skills/`,
+  `.opencode/skills/`, `~/.agents/skills/`, `.agents/skills/`,
+  `~/.claude/skills/`, and `.claude/skills/`; and instructions (`AGENTS.md`,
+  `instructions` paths). A skill directory Claude Code also loads costs each
+  harness that loads it, so price it per harness, not once. Measure recurring
+  context overhead against recorded uses, following `AGENTS.md` (red/exit 1
+  when never used, yellow/exit 0 above `--max-cost-per-use`, green otherwise).
 - Exercise against the local host's real `~/.local/share/opencode/opencode.db`
   and `~/.config/opencode/opencode.jsonc` before review, and cover v1, v2, T3,
   `sessions`, and comment-preserving JSONC edits with synthetic fixtures.
@@ -64,8 +70,10 @@ Recommendations:
   open). The post says OpenCode v2.3.2 moved the prompt there. When the
   latest OpenCode session on a profile ran an older version with a gpt-6.2
   model, price the system prompt's uncached input and recommend upgrading.
-  Record OpenCode's version per request for that, and use the upgrade
-  wording from `quest/m1/harness-upgrades.md` if it has landed.
+  Record OpenCode's version per request for that, and reuse the
+  version-gated upgrade advice `doctor` gained in
+  [kixel-ai/token-max#247](https://github.com/kixel-ai/token-max/pull/247)
+  (`docs/reference.md`'s Harness upgrades).
   Codex itself shows no gap on the maintainer's host: since 2026-11-18,
   gpt-6.2-sol cached 90.2% of input over 1,281 requests, and gpt-6.1-sol
   88.9% over 7,960. So Codex gets no line.

@@ -48,7 +48,17 @@ Decision prompts, chosen options marked ✅:
   Desktop App `~/.gemini/antigravity/`; T3 `antigravity-acp` only).
 - `vibes` boundary: ✅ keep this epic strictly measured (`doctor` + `sessions`),
   deferring OpenCode and Antigravity `vibes` cards until `vibes` lands and
-  opinions are ready (rejected: include `vibes` cards now).
+  opinions are ready (rejected: include `vibes` cards now). `vibes` has since
+  landed ([kixel-ai/token-max#205](https://github.com/kixel-ai/token-max/pull/205));
+  the boundary stands, and OpenCode or Antigravity cards are a later quest
+  once a provider or the maintainer has advice for them.
+
+Recommended 2026-11-26 (`/quest-iterate` takeover, for review):
+`token-max audit`
+([kixel-ai/token-max#273](https://github.com/kixel-ai/token-max/pull/273)),
+which landed after this plan, stays Claude Code and Codex only in this epic.
+Its hotspot buckets rest on each harness's tool and cache records, which the
+child quests only start to read; extend it once both readers ship.
 
 ## Related
 

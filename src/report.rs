@@ -3804,7 +3804,7 @@ pub(crate) fn monthly(usd: f64, since: Option<Millis>, until: Option<Millis>) ->
 }
 
 /// A share of this host's spend as a whole percent, or under 1% when it rounds to none;
-/// none past 100%, which only a base that is a lower bound or an estimate can give.
+/// none past 100%, which only a lower-bound base, an estimate, or overlapping savings give.
 pub(crate) fn share_text(share: f64) -> Option<String> {
     let percent = share * 100.0;
     if percent > 0.0 && percent < 0.5 {

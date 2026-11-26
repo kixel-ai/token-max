@@ -3803,13 +3803,14 @@ pub(crate) fn monthly(usd: f64, since: Option<Millis>, until: Option<Millis>) ->
     }
 }
 
-/// A share of this host's spend as a whole percent, or under 1% when it rounds to none.
-pub(crate) fn share_text(share: f64) -> String {
+/// A share of this host's spend as a whole percent, or under 1% when it rounds to none;
+/// none past 100%, which only a lower-bound base, an estimate, or overlapping savings give.
+pub(crate) fn share_text(share: f64) -> Option<String> {
     let percent = share * 100.0;
     if percent > 0.0 && percent < 0.5 {
-        "<1%".into()
+        Some("<1%".into())
     } else {
-        format!("{}%", js_number(js_round(percent)))
+        (share <= 1.0).then(|| format!("{}%", js_number(js_round(percent))))
     }
 }
 
@@ -5155,7 +5156,7 @@ fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
         all().map(|r| cells(&amount(r))),
         verb_cells + 1 + FIGURE_CELLS,
     );
-    let shares = |r: &Row| r.share.map_or_else(String::new, share_text);
+    let shares = |r: &Row| r.share.and_then(share_text).unwrap_or_default();
     let share_cells = all().map(|r| cells(&shares(r))).max().unwrap_or(0);
     let tag_cells = column(all().map(|r| cells(&r.profile)), TAG_CELLS);
     let tagged = all().any(|r| !r.profile.is_empty());
@@ -14492,6 +14493,30 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_share_past_the_whole_is_left_out() {
+        // A host whose only profile priced nothing totals a floor below what its lines cost.
+        let mut report = synthetic_report();
+        for group in &mut report.historical {
+            group.cost.total_usd = None;
+            group.cost.known_usd = Usd::from_f64(0.001);
+            group.estimate = None;
+        }
+        let summary = text(&report, None, true);
+        assert!(
+            summary.lines().next().unwrap().contains(" at least "),
+            "{summary}"
+        );
+        let percents = summary
+            .split_whitespace()
+            .filter_map(|w| w.strip_suffix('%')?.parse::<f64>().ok());
+        assert!(percents.clone().all(|p| p <= 100.0), "{summary}");
+        assert!(percents.count() > 0, "{summary}");
+        assert_eq!(share_text(0.004).as_deref(), Some("<1%"));
+        assert_eq!(share_text(1.0).as_deref(), Some("100%"));
+        assert_eq!(share_text(1.49), None);
+    }
+
+    #[test]
     fn a_spend_partly_extrapolated_keeps_its_margin_beside_the_lower_bound() {
         let spend = |usd, margin, floor, partial| Spend {
             usd,
@@ -14946,7 +14971,7 @@ pub(crate) mod tests {
         ]);
         let text = text(&report, None, false);
         let line = report_line(&text, "Prompt suggestions");
-        assert!(line.head.contains(" costs at least $4 "), "{text}");
+        assert!(line.head.contains(" costs at least $4"), "{text}");
     }
 
     #[test]
@@ -15022,12 +15047,13 @@ pub(crate) mod tests {
         check.base.until = Some(since + 3_600_000);
         check.base.savings_usd = Some(1.0);
         check.base.monthly_savings_usd = Some(720.0);
-        // A percent of so short a window can be absurd; only its presence is checked.
+        // $720/mo against a host spending $0.30/mo would pass 100%, so its percent is left out.
         let head = report_line(&text(&report, None, false), "Main-agent prompt cache TTL").head;
-        let percent = head
-            .strip_prefix("Main-agent prompt cache TTL 5m -> 1h saves $720/mo ")
-            .unwrap_or_else(|| panic!("{head}"));
-        assert!(percent.ends_with('%'), "{head}");
+        assert!(
+            head.starts_with("Main-agent prompt cache TTL 5m -> 1h saves $720/mo")
+                && !head.contains('%'),
+            "{head}"
+        );
 
         let name = "google-drive-comments";
         report.checks.clear();
@@ -15083,11 +15109,12 @@ pub(crate) mod tests {
         // An offered change's saving scales to 30 days, however short the window, and its
         // evidence keeps the window's total.
         let line = report_line(&text(&report, None, true), "Skill google-drive-comments");
-        let percent = line
-            .head
-            .strip_prefix("Skill google-drive-comments on -> typed only saves $150/mo ")
-            .unwrap_or_else(|| panic!("{}", line.head));
-        assert!(percent.ends_with('%'), "{}", line.head);
+        assert!(
+            line.head
+                .starts_with("Skill google-drive-comments on -> typed only saves $150/mo"),
+            "{}",
+            line.head
+        );
         assert!(line.evidence.starts_with("The model never used it"));
         assert!(
             line.evidence.contains("it cost $5 over the window"),
@@ -15135,11 +15162,7 @@ pub(crate) mod tests {
         });
         // A cost without a change stays the window's total.
         let head = report_line(&text(&report, None, false), "System prompt").head;
-        assert!(
-            head.strip_prefix("System prompt and core tools costs $1 ")
-                .is_some_and(|p| p.ends_with('%')),
-            "{head}"
-        );
+        assert_eq!(head, "System prompt and core tools costs $1", "{head}");
         let details = text(&report, Some(200), true);
         assert!(details.contains("\n  1 change recommended.\n"), "{details}");
         assert!(!details.contains("No applicable"));

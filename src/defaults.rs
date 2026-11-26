@@ -497,14 +497,10 @@ impl Sum {
         } else {
             about_word
         };
-        let share = if monthly > 0.0 {
-            format!(
-                ", {} of {whose} spend",
-                crate::report::share_text(usd / monthly)
-            )
-        } else {
-            String::new()
-        };
+        let share = (monthly > 0.0)
+            .then(|| crate::report::share_text(usd / monthly))
+            .flatten()
+            .map_or_else(String::new, |s| format!(", {s} of {whose} spend"));
         let verb = if lead {
             format!("{verb} ")
         } else {

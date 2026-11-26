@@ -1957,7 +1957,7 @@ fn saving(
     usd.map(|usd| {
         (
             format!("{verb} {}", approx(usd, margin, "/mo")),
-            share.map_or_else(String::new, share_text),
+            share.and_then(share_text).unwrap_or_default(),
         )
     })
 }
@@ -1989,9 +1989,9 @@ pub(crate) fn home_in(text: &str, home: Option<&str>) -> String {
 /// ", 3% of this host's spend", or nothing when the spend is unknown; `whose` names the
 /// host or hosts, such as "this host's".
 fn share_of(share: Option<f64>, whose: &str) -> String {
-    share.map_or_else(String::new, |s| {
-        format!(", {} of {whose} spend", share_text(s))
-    })
+    share
+        .and_then(share_text)
+        .map_or_else(String::new, |s| format!(", {s} of {whose} spend"))
 }
 
 /// A settings file the walk may write.
@@ -3537,7 +3537,7 @@ impl Question<'_> {
                     approx(measured.usd, measured.margin, "/mo"),
                     approx(up_to.usd, up_to.margin, "/mo")
                 ),
-                share.map_or_else(String::new, share_text),
+                share.and_then(share_text).unwrap_or_default(),
             )),
         }
     }

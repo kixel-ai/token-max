@@ -29,14 +29,18 @@ a `walk.gif` rerun if the cards changed doctor's questions, dispatching
 **Release** on `main`, deploying `site/`, and the post-publication installer
 checks. Also:
 
-- dispatch the pipeline's dry run on the version PR's head before publishing. The pipeline builds
-  only versions crates.io has, so this is the check that every target builds from the commit the
-  crate will name. A build that still fails after the publish is fixed forward with 0.1.1;
+- before the crates.io publish, the Release run dry-runs the pipeline on its own commit, the one
+  the crate will name, and publishes only if every target builds. The pipeline builds only
+  versions crates.io has, so it can't stage artifacts to promote later, but its run after the
+  publish builds the same commit, and a flaky job reruns alone, reusing the other targets'
+  archives (`pipeline/README.md` in kixel-ai/crabx);
+- before the publish, deploy the site pinned to `v0.0.1` that the switch describes, and after
+  the pipeline uploads 0.1.0's archives, deploy main's `site/`;
 - check that `gh attestation verify` on each archive names crabx's pipeline workflow as signer;
 - run `npx @kixel/crabx token-max@0.1.0 --version` on x86_64 glibc Linux, on macOS and on Windows
   (CI legs are fine), and `run.sh` on Alpine, which picks the musl archive;
 - run `doctor --ssh` to a host of another platform, so it downloads the new archives;
-- after deploying `site/`, check that `curl -LsSf https://max.kixel.me/install.sh | sh` installs
+- after that deploy, check that `curl -LsSf https://max.kixel.me/install.sh | sh` installs
   crabx and token-max.
 
 Decided 2026-11-24 (maintainer, /quest-run): ✅ release without the language

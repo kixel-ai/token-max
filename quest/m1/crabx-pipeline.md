@@ -55,9 +55,9 @@ Recommendations:
   installer lines.
 - The page deploys by hand. The deployed run scripts request cargo-dist's names from the latest
   release, and the new ones and `/install.sh` need a release with pipeline assets. So this PR
-  changes `site/` and leaves the deploy to 0.1.0's release, right after the pipeline uploads its
-  archives. Between the pipeline creating the release and that deploy, the old `run.sh` gets a
-  404, a window of minutes.
+  changes `site/` and leaves the deploys to 0.1.0's release: before publishing, deploy a site whose
+  run scripts and install redirects are pinned to `v0.0.1`, so the latest release flipping
+  breaks nothing, then deploy this PR's `site/` once the pipeline has uploaded 0.1.0's archives.
 - Validate with the pipeline's manual dispatch on this branch's head. It builds and attests
   every target without creating tags or releases. Point `run.sh` and the ssh download at a local
   copy of those archives (`TOKEN_MAX_RELEASES`) to check them end to end.

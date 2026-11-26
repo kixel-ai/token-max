@@ -2741,8 +2741,10 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     let codex_output = json!({"type": "response_item", "payload": {"type": "function_call_output", "output": "SYNTHETIC_PRIVATE_OUTPUT"}});
     // A tool's own input keeps only its paths and command shape, whatever its keys are named.
     let mcp = json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "mcp__notes__save", "input": {"name": "SYNTHETIC_PRIVATE_NAME", "status": "SYNTHETIC_PRIVATE_STATUS", "file_path": "/notes.md", "command": "echo synthetic-private-note A=1 B=2; NOTE=x\\ synthetic-private-word cat; RUST_LOG=debug \\\ncargo test --release; TOKEN=demo\\\nsynthetic-private-token rg -n"}}]}});
+    // An escaped separator is no program name.
+    let escaped = json!({"command": "api_key\\=synthetic-private-key"});
     let lines = format!(
-        "{}{codex}\n{codex_output}\n{mcp}\n",
+        "{}{codex}\n{codex_output}\n{mcp}\n{escaped}\n",
         audited_session("s", &w.home)
     );
     let mut jq = Command::new("jq")
@@ -2768,7 +2770,8 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    assert_eq!(records.len(), 7);
+    assert_eq!(records.len(), 8);
+    assert_eq!(records[7], json!({"command": [["?"]]}));
     // What the audit needs survives: models, tool names, commands' shape, sizes.
     assert_eq!(records[1]["message"]["model"], "claude-opus-5-5");
     assert_eq!(records[1]["message"]["content"][1]["name"], "Bash");

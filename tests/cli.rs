@@ -1972,10 +1972,14 @@ mod unix {
             "--prices-file",
             &prices,
         ];
-        // A doubled Enter opens the diff and writes nothing; `q` then leaves.
+        // The checklist follows the billing question, read a line at a time, so its keys wait
+        // for its first frame. A doubled Enter opens the diff and writes nothing; `q` then
+        // leaves, and `n` declines vibes' advice.
+        let paid = ("How is ~/.claude paid for?", &b"a\n"[..]);
         let mut c = command(&w, &args);
         c.env("LANG", "C.UTF-8");
-        let (status, stdout, stderr) = typed(&mut c, b"\r\rq");
+        let steps = [paid, ("Review diff", b"\r\rq"), ("Show them?", b"n")];
+        let (status, stdout, stderr) = typed_after(&mut c, &steps);
         assert_eq!(status, 0, "stdout={stdout}\nstderr={stderr}");
         assert!(stdout.contains("no settings were changed"), "{stdout}");
         assert_eq!(
@@ -1985,17 +1989,11 @@ mod unix {
         let mut c = command(&w, &args);
         c.env("LANG", "C.UTF-8");
         // Peek at Vibes (`v`), return to Measured (`v`), then Enter (diff) and `y` (write),
-        // so peeking at Vibes never clobbers the Measured offers.
-        let (status, stdout, stderr) = typed(&mut c, b"vv\ry");
+        // so peeking at Vibes never clobbers the Measured offers; then decline vibes.
+        let steps = [paid, ("Review diff", b"vv\ry"), ("Show them?", b"n")];
+        let (status, stdout, stderr) = typed_after(&mut c, &steps);
         assert_eq!(status, 0, "stdout={stdout}\nstderr={stderr}");
-        assert!(
-            !stdout.contains("How is ~/.claude paid for?"),
-            "rich TUI must not block on pre-scan billing quiz: {stdout}"
-        );
-        assert!(
-            stdout.contains("Saved ~") || stdout.contains("Updated 1 file"),
-            "expected receipt in stdout: {stdout}"
-        );
+        assert!(stdout.contains("updated 1 file"), "{stdout}");
         let written = std::fs::read_to_string(w.claude.join("settings.json")).unwrap();
         assert!(written.contains("\"promptCacheTtl\": \"1h\""), "{written}");
         assert_eq!(
@@ -2037,6 +2035,49 @@ mod unix {
         let bin = dir.join("token-max");
         std::fs::hard_link(BIN, &bin).unwrap();
         bin
+    }
+
+    /// Run `command` with stdin, stdout and stderr on terminals, typing each step's keys once
+    /// stdout shows its text, so keys meant for the checklist never reach a line read first.
+    fn typed_after(command: &mut Command, steps: &[(&str, &[u8])]) -> (i32, String, String) {
+        let Pty { master, slave } = Pty::new(80);
+        let Pty {
+            master: screen,
+            slave: shown,
+        } = Pty::new(80);
+        let (stderr, err) = Pty::new(80).drain();
+        command
+            .stdin(Stdio::from(slave))
+            .stdout(Stdio::from(shown))
+            .stderr(stderr);
+        let mut child = command.spawn().unwrap();
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut keyboard = std::fs::File::from(master);
+        let mut screen = std::fs::File::from(screen);
+        let (mut out, mut buf) = (vec![], [0; 4096]);
+        for (text, keys) in steps {
+            while !String::from_utf8_lossy(&out).contains(text) {
+                match screen.read(&mut buf) {
+                    Ok(n @ 1..) => out.extend_from_slice(&buf[..n]),
+                    _ => panic!(
+                        "stdout ended before {text:?}: {}",
+                        String::from_utf8_lossy(&out)
+                    ),
+                }
+            }
+            keyboard.write_all(keys).unwrap();
+        }
+        // Linux reports EIO once the last slave descriptor closes.
+        while let Ok(n @ 1..) = screen.read(&mut buf) {
+            out.extend_from_slice(&buf[..n]);
+        }
+        let status = child.wait().unwrap().code().unwrap();
+        drop(keyboard);
+        let out = String::from_utf8(out).unwrap();
+        (status, out, err.join().unwrap())
     }
 
     /// Run `command` with stdin, stdout and stderr on terminals, typing `keys`.

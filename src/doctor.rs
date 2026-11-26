@@ -1906,7 +1906,7 @@ impl Style {
     }
 
     /// `question` and its `options` as the walk asks them, ready for an answer on the line.
-    fn ask(&self, question: &str, options: &str) -> String {
+    pub(crate) fn ask(&self, question: &str, options: &str) -> String {
         let text = self.spans(
             &[(question, BOLD), (" ", ""), (options, DIM), (":", "")],
             self.width,
@@ -2596,6 +2596,13 @@ impl Total {
             up_to: up_to.into_iter().collect(),
             unmeasured,
         }
+    }
+
+    /// The measured savings and those that depend on the default they replace, each as a
+    /// figure with its margin, such as `~$343/mo ± $12`; None where there are none.
+    pub(crate) fn figures(&self) -> (Option<String>, Option<String>) {
+        let figure = |s: &Sum| (s.changes > 0).then(|| approx(s.usd, s.margin, "/mo"));
+        (figure(&self.measured), figure(&self.up_to))
     }
 
     /// How many changes were accepted.

@@ -79,9 +79,11 @@ says so on stderr and goes on with this build.
 
 Prints which settings to change, with the evidence for each. When stdin and stdout are
 both a terminal, it then offers the changes it can make in sections, such as never-used
-skills or the cache TTLs (y, n, s to split a section, or q to stop), shows the accepted
-edits as a diff of each file, and writes the profile's own settings.json or config.toml
-only after a final yes. A change another owner would override, such as a shell variable,
+skills or the cache TTLs, as a checklist (Space checks, s splits a section, Enter shows
+the checked edits as a diff of each file, y writes, q stops), and writes the profile's own
+settings.json or config.toml only after that y. With --plain or --details, or under
+TERM=dumb, it asks about each section instead (y, n, s to split a section, or q to stop)
+and writes after a final yes. A change another owner would override, such as a shell variable,
 a project or managed settings file or T3, is listed to make by hand. Without a terminal it
 prints the report, each change or section naming its settings and the rest one line
 per kind of feature or setting, and edits nothing; --details lists every line under its
@@ -156,8 +158,8 @@ each such card asks instead (y, n, or q to stop), and a final yes writes. A chan
 owner would override is named to make by hand. Every other card is shown with no question.
 Without a terminal it prints the cards, each change naming its edit, and edits nothing.
 
-It reads the hosts, profiles and window token-max doctor reads, with the same flags; with
---plain or off a terminal it asks the same question about how each Claude profile pays.
+It reads the hosts, profiles and window token-max doctor reads, with the same flags, and
+on a terminal it asks the same question about how each Claude profile pays.
 
 Exit 0: printed, or walked. Exit 2: scan, pricing, argument or cancellation failure.
 ";
@@ -2382,9 +2384,10 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
     let unicode = stdout && !values.plain && !term_dumb && unicode_locale;
     // A report with the settings files pretended away has no changes to make.
     let walk = terminal && !values.defaults;
-    // The walk is the inline TUI on a terminal that draws one, unless `--plain` asks for the
-    // line-by-line questions.
-    let rich_tui = walk && !values.plain && !term_dumb;
+    // The walk is the inline TUI on a terminal big enough to draw one, unless `--plain` asks
+    // for the line-by-line questions or `--details` for the report's full evidence, which
+    // only the line-by-line walk prints.
+    let rich_tui = walk && !values.plain && !values.details && !term_dumb && tui::fits();
     let format = Format {
         width: width(),
         color,
@@ -2404,10 +2407,10 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
             (releases, check)
         })
     });
-    // On a terminal, offer a newer release before anything else, then, unless the TUI walks,
-    // open with what the run is about to read and ask how each host's Claude profiles on the
-    // Anthropic API pay, which picks each one's main TTL default; the TUI's `[b]` toggles that
-    // live instead. Without a terminal the report names both defaults.
+    // On a terminal, offer a newer release before anything else, then open with what the run
+    // is about to read, then ask how each host's Claude profiles on the Anthropic API pay,
+    // which picks each one's main TTL default and the advice that follows from it; without a
+    // terminal the report names both defaults.
     let ask = if terminal {
         let found = discover(&discovery)?;
         // A run reporting as a default user would changes nothing, so it only says how.
@@ -2416,20 +2419,16 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
         {
             return Ok((Output::Written, code));
         }
-        if rich_tui {
-            None
-        } else {
-            let failed = |_| ScanError::new("cannot use the terminal; no report produced");
-            let opening = opening(&Found::list(&found), &destinations, &style);
-            io::stdout()
-                .lock()
-                .write_all(opening.as_bytes())
-                .map_err(failed)?;
-            Some(Ask {
-                roots: found.billing_roots(),
-                style: style.clone(),
-            })
-        }
+        let failed = |_| ScanError::new("cannot use the terminal; no report produced");
+        let opening = opening(&Found::list(&found), &destinations, &style);
+        io::stdout()
+            .lock()
+            .write_all(opening.as_bytes())
+            .map_err(failed)?;
+        Some(Ask {
+            roots: found.billing_roots(),
+            style: style.clone(),
+        })
     } else {
         None
     };
@@ -2939,26 +2938,7 @@ fn walk(walk: Walk) -> Result<(), ScanError> {
                 .collect();
             write!(stdout, "{unwritten}").map_err(|_| unusable(hosts.iter().any(|h| h.wrote)))?;
             let wrote = hosts.iter().any(|h| h.wrote);
-            // What a host wrote can change its advice, so its count is read again below.
-            if !wrote && hosts.iter().all(|h| vibes::pending(&h.items) == 0) {
-                return Ok(());
-            }
-            enter(if wrote {
-                Phase::AskingMore
-            } else {
-                Phase::Asking
-            });
-            // A Ctrl-C while the changes were written ends the run after them. Read once the
-            // phase has moved on, since one that lands after that exits in the handler.
-            if ssh::cancelled() {
-                return Ok(());
-            }
-            // A host that wrote reads its advice again for the count; the rest only on a yes.
-            for host in hosts.iter_mut().filter(|h| h.wrote) {
-                host.advise()?;
-            }
-            join(&mut hosts);
-            let pending: usize = hosts.iter().map(|h| vibes::pending(&h.items)).sum();
+            let pending = vibes_after(&mut hosts)?;
             if pending == 0 {
                 return Ok(());
             }
@@ -2967,10 +2947,7 @@ fn walk(walk: Walk) -> Result<(), ScanError> {
                 return Ok(());
             }
             writeln!(stdout).map_err(failed)?;
-            for host in hosts.iter_mut().filter(|h| !h.wrote) {
-                host.advise()?;
-            }
-            join(&mut hosts);
+            open_vibes(&mut hosts)?;
         }
         let wrote = hosts.iter().any(|h| h.wrote);
         let asking: Vec<vibes::Host> = hosts
@@ -3011,6 +2988,39 @@ fn walk(walk: Walk) -> Result<(), ScanError> {
         }
     }
     walked.and(ended)
+}
+
+/// How many pieces of advice `vibes` has once `doctor`'s walk ends, none when the walk should
+/// not offer them: a host that wrote reads its advice again, since what it wrote can change it.
+fn vibes_after(hosts: &mut [WalkHost]) -> Result<usize, ScanError> {
+    let wrote = hosts.iter().any(|h| h.wrote);
+    if !wrote && hosts.iter().all(|h| vibes::pending(&h.items) == 0) {
+        return Ok(0);
+    }
+    enter(if wrote {
+        Phase::AskingMore
+    } else {
+        Phase::Asking
+    });
+    // A Ctrl-C while the changes were written ends the run after them. Read once the phase
+    // has moved on, since one that lands after that exits in the handler.
+    if ssh::cancelled() {
+        return Ok(0);
+    }
+    for host in hosts.iter_mut().filter(|h| h.wrote) {
+        host.advise()?;
+    }
+    join(hosts);
+    Ok(hosts.iter().map(|h| vibes::pending(&h.items)).sum())
+}
+
+/// Go on from `doctor`'s walk to `vibes`' on every host that did not read its advice again.
+fn open_vibes(hosts: &mut [WalkHost]) -> Result<(), ScanError> {
+    for host in hosts.iter_mut().filter(|h| !h.wrote) {
+        host.advise()?;
+    }
+    join(hosts);
+    Ok(())
 }
 
 /// Interactive inline TUI runner backed by local and SSH `WalkHost`s.
@@ -3333,39 +3343,67 @@ fn run_tui(walk: Walk) -> Result<(), ScanError> {
         hero,
         ..
     } = walk;
-    let start_tab = match command {
-        Command::Doctor => Tab::Measured,
-        Command::Vibes => Tab::Vibes,
+    // `doctor`'s checklist, then, as its walk does, an offer of `vibes`' from the same scan.
+    let mut phase = command;
+    let mut hero = hero.unwrap_or_default();
+    let outcome = loop {
+        let start_tab = match phase {
+            Command::Doctor => Tab::Measured,
+            Command::Vibes => Tab::Vibes,
+        };
+        let app = {
+            let walking: Vec<Walking> = hosts
+                .iter()
+                .map(|h| Walking {
+                    label: h.label.as_deref(),
+                    offers: h.offers(),
+                    style: &h.style,
+                })
+                .collect();
+            tui::App::new(
+                &walking,
+                std::mem::take(&mut hero),
+                start_tab,
+                style.color,
+                style.unicode,
+            )
+        };
+        let mut bridge = WalkBridge {
+            hosts: &mut hosts,
+            style: &style,
+            start_vibes: phase == Command::Vibes,
+            vibes_owners: vec![],
+            vibes_loaded: false,
+            measured_plans: vec![],
+            measured_work: vec![],
+            vibes_plans: vec![],
+            vibes_work: vec![],
+        };
+        let outcome = tui::run(app, &style, &mut bridge);
+        if phase == Command::Vibes || !matches!(outcome, Ok(ExitKind::Done)) {
+            break outcome;
+        }
+        let wrote = hosts.iter().any(|h| h.wrote);
+        let more = vibes_after(&mut hosts).and_then(|pending| {
+            if pending == 0 || !tui::offer_vibes(pending, &style).map_err(|_| unusable(wrote))? {
+                return Ok(None);
+            }
+            open_vibes(&mut hosts)?;
+            Ok(Some(pending))
+        });
+        match more {
+            Ok(Some(pending)) => {
+                phase = Command::Vibes;
+                hero = Hero {
+                    host_count: hosts.len(),
+                    vibes_pending: pending,
+                    ..Hero::default()
+                };
+            }
+            Ok(None) => break Ok(ExitKind::Done),
+            Err(error) => break Err(error),
+        }
     };
-    let app = {
-        let walking: Vec<Walking> = hosts
-            .iter()
-            .map(|h| Walking {
-                label: h.label.as_deref(),
-                offers: h.offers(),
-                style: &h.style,
-            })
-            .collect();
-        tui::App::new(
-            &walking,
-            hero.unwrap_or_default(),
-            start_tab,
-            style.color,
-            style.unicode,
-        )
-    };
-    let mut bridge = WalkBridge {
-        hosts: &mut hosts,
-        style: &style,
-        start_vibes: command == Command::Vibes,
-        vibes_owners: vec![],
-        vibes_loaded: false,
-        measured_plans: vec![],
-        measured_work: vec![],
-        vibes_plans: vec![],
-        vibes_work: vec![],
-    };
-    let outcome = tui::run(app, &style, &mut bridge);
 
     let mut ended = Ok(());
     for host in hosts {

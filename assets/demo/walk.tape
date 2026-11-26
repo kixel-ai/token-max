@@ -28,6 +28,11 @@ Show
 Type "token-max doctor"
 Sleep 500ms
 Enter
+Sleep 2s
+# How the profile pays: usage credits, so its main agent's default cache is 5m.
+Type "a"
+Sleep 300ms
+Enter
 Sleep 4s
 # The two measured changes: the 1h cache, a safe win checked already, and fast mode, a
 # tradeoff left for the person to check. The proof under each shows what was replayed.
@@ -45,13 +50,11 @@ Sleep 2s
 Enter
 Sleep 4s
 Type "y"
-Sleep 4s
-# The advice the transcripts can't price: its Bash cap, lowered under the 1h cache, auto
-# memory off, since the sessions ran in a repository with an AGENTS.md, a smaller compaction
-# window, and a Fable advisor above the Opus main model.
-Type "token-max vibes"
-Sleep 500ms
-Enter
+Sleep 3s
+# Then the advice the transcripts can't price, from the same scan: its Bash cap, lowered
+# under the 1h cache, auto memory off, since the sessions ran in a repository with an
+# AGENTS.md, a smaller compaction window, and a Fable advisor above the Opus main model.
+Type "y"
 Sleep 4s
 Right
 Sleep 3s

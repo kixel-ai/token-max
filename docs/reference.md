@@ -78,10 +78,10 @@ run the latest release, so they never see the offer.
 
 ## Applying changes
 
-On a terminal that draws one, `doctor` shows its changes as an inline
-[checklist](#the-checklist) below the prompt. With `--plain`, or under
-`TERM=dumb`, it walks through them line by line, as the rest of this section
-says.
+On a terminal at least 48 columns by 20 rows, `doctor` shows its changes as an
+inline [checklist](#the-checklist) below the prompt. With `--plain` or
+`--details`, under `TERM=dumb`, or on a smaller terminal, it walks through them
+line by line, as the rest of this section says.
 
 On a terminal, `doctor` opens with one header line naming what it read: the
 requests, the sessions they ran in (each subagent counted with the session
@@ -213,20 +213,20 @@ the last included, exits 2 with no settings changed.
 ### The checklist
 
 The checklist draws in the terminal's own scrollback, not a separate screen,
-and redraws in place as keys move through it. It skips the question about how
-each Claude profile pays: `b` cycles an unset main-agent cache TTL's saving
-between "up to" both defaults, the API's 5m and a plan's 1h, and rechecks it.
-A box at the top sums the checked changes' savings, as a percent of spend,
-beside the scan's counts and the [savings against the
-defaults](#savings-against-the-defaults).
+and redraws in place as keys move through it. It follows the same question about
+how each Claude profile pays; after a skip, `b` cycles an unset main-agent cache
+TTL's saving between "up to" both defaults, the API's 5m and a plan's 1h, and
+rechecks it. A box at the top sums the checked changes' savings as the walk's
+running total does, the "up to" ones apart, beside the scan's counts and the
+[savings against the defaults](#savings-against-the-defaults).
 
 Each row is a [section](#applying-changes), marked `✗` for a recommended change
 and `!` for one worth considering, with its saving and a bar scaled to the
 largest. A recommended section saving at least $1/mo starts checked; one worth
 considering, such as a tool over `--max-cost-per-use`, starts unchecked, and
 each such feature over its budget is a row of its own. Sections saving under
-$1/mo fold into one line that `m` opens. `→` opens a row's proof: one sentence
-on the change, then what was replayed, such as both cache TTLs' cost over the
+$1/mo fold into one line that `m` opens. `→` opens a row's proof: the words
+from the report line on what the setting does and what was measured, then what was replayed, such as both cache TTLs' cost over the
 window, cost per use against the budget, or every member's saving. A proof
 taller than the window scrolls with PgUp and PgDn. `s` splits a section into
 its members, each checked on its own. A section that turns off MCP servers
@@ -236,7 +236,9 @@ Settings already better than the defaults follow under `ALREADY GOOD`, each
 with what it saves against the default when measured. Steps by hand print after the
 checklist closes.
 
-`Tab` or `v` switches to `vibes`' cards from the same scan, each unchecked;
+Each row is a section across every host, as the walk asks it. `Tab` or `v`
+switches to `vibes`' cards from the same scan, each unchecked, each opening to
+its own advice and sources;
 an SSH destination's show without a box, since asking it for them would swap
 its offers, so `token-max vibes` applies them. A card that another card's
 change rebuilds, such as the advisor card once an Opus main default is
@@ -247,7 +249,9 @@ long lines wrapped. `y` writes them; `Esc` goes back and `q` leaves with
 nothing written. A held or repeated Enter never writes, since `y` is its own
 key. After a write the checklist prints what each host wrote; when a later
 host's write fails, the earlier hosts' receipts print before the error. `q`,
-`Esc` or Ctrl-C at the list writes nothing.
+`Esc` or Ctrl-C at the list writes nothing. Once the checklist closes, `doctor`
+asks whether to show `vibes`' advice, as the walk does, and a `y` opens it as a
+checklist of its own.
 
 ### Backups
 
@@ -1704,11 +1708,14 @@ an exit code.
 The effort, instruction-file, subagent, Fable and advisor lines stay in `doctor`, where
 their costs are measured; only the advice about them is here.
 
-On a terminal, a card that names the settings to change ends with `Change`,
-the edit and its file, and asks `Accept?` with `y`, `n` or `q` to stop. Every
-other card is shown with no question. The accepted edits are then shown as a
-diff of each file and written only after a final yes, with the checks, lock
-and [backups](#backups) `doctor` uses. One card is one edit to one file, even
+On a terminal, the cards are a [checklist](#the-checklist), each unchecked:
+Space checks a card that names the settings to change, Enter shows the checked
+edits as a diff of each file and `y` writes them. With `--plain` or under
+`TERM=dumb`, such a card ends with `Change`, the edit and its file, and asks
+`Accept?` with `y`, `n` or `q` to stop, and the accepted edits are shown as a
+diff and written after a final yes. Every other card is shown with no question.
+Either way the write uses the checks, lock and [backups](#backups) `doctor`
+uses. One card is one edit to one file, even
 when it sets two keys. A change another owner would override, such as a shell
 variable or T3, is named on its card as a step by hand. Without a terminal,
 `vibes` prints the cards, each change naming its edit, and edits nothing.

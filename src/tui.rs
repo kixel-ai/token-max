@@ -19,9 +19,9 @@ use crossterm::terminal::{
 };
 
 use crate::doctor::{
-    Event, Fix, How, Kind, Proof, Reason, Style, Walking, home_in, section_value, target, why,
+    Event, Fix, How, Kind, Proof, Reason, Style, Total, Walking, home_in, section_value, target,
+    why,
 };
-use crate::model::ContextKind;
 use crate::report::{Origin, UP_TO, about, share_text};
 use crate::safe::{ScanError, terminal_text};
 use crate::terminal::{WrapOptions, cells, fit, wrap_text};
@@ -38,6 +38,18 @@ const BRAND: &str = "\x1b[35m";
 
 /// Minimum monthly saving (USD) to appear unfolded in the main checklist.
 const MINOR_THRESHOLD_USD: f64 = 1.0;
+
+/// The smallest terminal the checklist draws in: narrower rows would wrap, which the inline
+/// viewport cannot count, and fewer would push the keys off screen.
+const MIN_COLS: usize = 48;
+const MIN_ROWS: usize = 20;
+
+/// Whether stdout's terminal is big enough for the checklist, which the line-by-line walk
+/// takes the place of when it is not.
+pub(crate) fn fits() -> bool {
+    crossterm::terminal::size()
+        .is_ok_and(|(cols, rows)| usize::from(cols) >= MIN_COLS && usize::from(rows) >= MIN_ROWS)
+}
 
 /// Summary figures displayed in the Hero Savings Card.
 #[derive(Clone, Debug, Default)]
@@ -218,6 +230,7 @@ pub(crate) enum ExitKind {
 #[derive(Clone, Debug)]
 struct MemberItem {
     host: usize,
+    host_label: Option<String>,
     offer_index: usize,
     fix: Fix,
     entries_count: usize,
@@ -244,10 +257,12 @@ struct CleanupItem {
     checked: bool,
 }
 
-/// One top-level row in the Measured checklist.
+/// One top-level row in the Measured checklist: a section across every host, as the walk
+/// asks it, so a section's total decides whether it folds the same way `vibes` reads it.
 #[derive(Clone, Debug)]
 struct Group {
-    host: usize,
+    /// The host every member is on, when the walk covers another host than this one and all
+    /// members share it.
     host_label: Option<String>,
     members: Vec<MemberItem>,
     /// Expanded into individual member rows (`s`).
@@ -287,6 +302,8 @@ pub(crate) struct App {
     /// Rows scrolled into a focused block taller than the list's window, clamped by each
     /// render to what the block has.
     block_scroll: std::cell::Cell<usize>,
+    /// Whether the last frame fit the terminal whole, keys included.
+    whole: std::cell::Cell<bool>,
     diff_tab: Tab,
     status_error: Option<String>,
     host_count: usize,
@@ -326,8 +343,9 @@ impl App {
                 }
                 let member = MemberItem {
                     host: host_idx,
+                    host_label: label.clone(),
                     offer_index,
-                    fix: clean_fix(fix),
+                    fix: clean_fix(fix, walking.style.home.as_deref()),
                     entries_count: offer.entries.len(),
                     denials_count: offer.denials.len(),
                     checked: false,
@@ -337,14 +355,14 @@ impl App {
                 // as their own top-level rows with their own bar graph so huge outliers stand out.
                 let keep_individual = matches!(fix.section.kind, Kind::Feature(_, Reason::Costly));
                 if !keep_individual
-                    && let Some(existing) = groups
-                        .iter_mut()
-                        .find(|g| g.host == host_idx && g.members[0].fix.joins(fix))
+                    && let Some(existing) = groups.iter_mut().find(|g| g.members[0].fix.joins(fix))
                 {
+                    if existing.host_label != member.host_label {
+                        existing.host_label = None;
+                    }
                     existing.members.push(member);
                 } else {
                     groups.push(Group {
-                        host: host_idx,
                         host_label: label.clone(),
                         members: vec![member],
                         split: false,
@@ -421,6 +439,7 @@ impl App {
             diff: None,
             diff_scroll: 0,
             block_scroll: std::cell::Cell::new(0),
+            whole: std::cell::Cell::new(false),
             diff_tab: start_tab,
             status_error: None,
             host_count: hosts.len(),
@@ -478,6 +497,40 @@ impl App {
             .filter(|m| m.checked)
             .filter_map(|m| effective_saving(&m.fix, self.billing))
             .sum()
+    }
+
+    /// The checked changes' savings as the walk's running total adds them, the billing toggle
+    /// applied: a saving that holds only under one default stays "up to" until billing names
+    /// it, apart from the measured ones.
+    fn selected_total(&self) -> Total {
+        let fixes: Vec<Fix> = self
+            .groups
+            .iter()
+            .flat_map(|g| &g.members)
+            .filter(|m| m.checked)
+            .map(|m| {
+                let mut fix = m.fix.clone();
+                if is_unset_main_ttl(&fix) && self.billing != BillingMode::Auto {
+                    fix.saving = effective_saving(&fix, self.billing);
+                    fix.verb = "saves";
+                }
+                fix
+            })
+            .collect();
+        Total::of(&fixes)
+    }
+
+    /// The checked changes' savings, such as `Save ~$40/mo ± $3, up to $90/mo by billing`;
+    /// None when nothing checked was measured.
+    fn savings_text(&self, verb: &str) -> Option<String> {
+        match self.selected_total().figures() {
+            (Some(measured), Some(up_to)) => {
+                Some(format!("{verb} {measured}, up to {up_to} more by billing"))
+            }
+            (Some(measured), None) => Some(format!("{verb} {measured}")),
+            (None, Some(up_to)) => Some(format!("{verb} up to {up_to}, by billing")),
+            (None, None) => None,
+        }
     }
 
     /// Number of checked top-level items on the active tab.
@@ -735,15 +788,20 @@ impl App {
     /// Render the current frame as terminal lines, each guaranteed `<= width` cells and
     /// total line count `<= max_rows`.
     pub(crate) fn render(&self, width: usize, max_rows: usize) -> Vec<String> {
-        let w = width.clamp(48, 104);
+        // A terminal shrunk below the checklist's size shows only how to go on, and `y`
+        // writes nothing until the confirm is whole on screen again.
+        if width < MIN_COLS || max_rows + 1 < MIN_ROWS {
+            self.whole.set(false);
+            let text = format!("  Enlarge the terminal to {MIN_COLS}x{MIN_ROWS}, or press q.");
+            return vec![self.style(YELLOW, &fit_plain(&text, width.max(1), self.unicode))];
+        }
+        let w = width.min(104);
         let mut lines = match self.screen {
             Screen::List => self.render_list(w, max_rows),
             Screen::Diff => self.render_diff(w, max_rows),
         };
-        let cap = max_rows.max(8);
-        if lines.len() > cap {
-            lines.truncate(cap);
-        }
+        self.whole.set(lines.len() <= max_rows);
+        lines.truncate(max_rows);
         lines.into_iter().map(|l| trim_ansi(&l, w)).collect()
     }
 
@@ -792,8 +850,17 @@ impl App {
             Tab::Measured => {
                 let sel = self.selected_usd();
                 let avail = self.total_available_usd();
-                let pct = (self.hero.monthly_spend > 0.0 && sel > 0.0)
-                    .then(|| share_text(sel / self.hero.monthly_spend))
+                // The share is of the measured savings alone, as the walk's running total says.
+                let measured: f64 = self
+                    .groups
+                    .iter()
+                    .flat_map(|g| &g.members)
+                    .filter(|m| m.checked)
+                    .filter(|m| !is_unset_main_ttl(&m.fix) || self.billing != BillingMode::Auto)
+                    .filter_map(|m| effective_saving(&m.fix, self.billing))
+                    .sum();
+                let pct = (self.hero.monthly_spend > 0.0 && measured > 0.0)
+                    .then(|| share_text(measured / self.hero.monthly_spend))
                     .flatten()
                     .map_or_else(String::new, |s| format!(" ({s} of spend)"));
                 let mut pills = vec![];
@@ -809,11 +876,9 @@ impl App {
                         self.style(DIM, "no changes recommended")
                     )
                 } else {
-                    let save_str = if sel > 0.0 {
-                        format!("Save ~{}/mo", about(sel))
-                    } else {
-                        "Select changes to preview".into()
-                    };
+                    let save_str = self
+                        .savings_text("Save")
+                        .unwrap_or_else(|| "Select changes to preview".into());
                     format!(
                         "{}{}",
                         self.style(&format!("{BOLD}{GREEN}"), &save_str),
@@ -1418,7 +1483,7 @@ impl App {
             self.style(DIM, &format!("{usd_text:>9}"))
         };
         let left_budget = w.saturating_sub(24);
-        let name_fit = self.fit_text(&m.fix.name, left_budget);
+        let name_fit = self.fit_text(&member_name(m, &m.fix.name), left_budget);
         let name_styled = if focused {
             self.style(BOLD, &name_fit)
         } else {
@@ -1671,17 +1736,27 @@ impl App {
             let wrap_w = w.saturating_sub(11).max(20);
             if expanded {
                 rows.push(String::new());
-                let simple = concise_vibe_copy(v.item());
-                for line in wrap_text(
-                    &simple,
-                    WrapOptions {
-                        width: Some(wrap_w),
-                        ..Default::default()
-                    },
-                )
-                .lines()
-                {
-                    rows.push(trim_ansi(&format!("      {pipe} {line}"), w));
+                let item = v.item();
+                let mut paragraphs = vec![];
+                if !item.what.is_empty() {
+                    paragraphs.push(item.what.clone());
+                }
+                paragraphs.push(item.text.clone());
+                if !item.sources.is_empty() {
+                    paragraphs.push(format!("Source: {}", item.sources.join(" ")));
+                }
+                for paragraph in paragraphs {
+                    for line in wrap_text(
+                        &paragraph,
+                        WrapOptions {
+                            width: Some(wrap_w),
+                            ..Default::default()
+                        },
+                    )
+                    .lines()
+                    {
+                        rows.push(trim_ansi(&format!("      {pipe} {line}"), w));
+                    }
                 }
             } else {
                 rows.push(self.style(
@@ -1704,21 +1779,6 @@ impl App {
         let pipe = self.style(BRAND, if self.unicode { "│" } else { "|" });
         let wrap_w = w.saturating_sub(11).max(20);
         let mut out = vec![];
-
-        let summary = concise_fix_copy(&g.members[0].fix, true);
-        if !summary.is_empty() {
-            for line in wrap_text(
-                &summary,
-                WrapOptions {
-                    width: Some(wrap_w),
-                    ..Default::default()
-                },
-            )
-            .lines()
-            {
-                out.push(trim_ansi(&format!("      {pipe} {line}"), w));
-            }
-        }
 
         // If members are CacheTtl with Proof::CacheTtl, show aggregated real 5m vs 1h cost chart!
         let mut five = 0.0;
@@ -1752,7 +1812,7 @@ impl App {
             let max_name = g
                 .members
                 .iter()
-                .map(|m| cells(&terminal_text(&m.fix.section.member)))
+                .map(|m| cells(&member_name(m, &m.fix.section.member)))
                 .max()
                 .unwrap_or(10)
                 .min(wrap_w.saturating_sub(24).max(12));
@@ -1765,7 +1825,11 @@ impl App {
 
             for m in &g.members {
                 let usd = effective_saving(&m.fix, self.billing);
-                let name = fit_plain(&m.fix.section.member, max_name, self.unicode);
+                let name = fit_plain(
+                    &member_name(m, &m.fix.section.member),
+                    max_name,
+                    self.unicode,
+                );
                 let pad = " ".repeat(max_name.saturating_sub(cells(&name)));
                 let bar = if bar_w > 0 && top_member_usd > 0.0 {
                     let ratio = usd.unwrap_or(0.0) / top_member_usd;
@@ -1799,10 +1863,13 @@ impl App {
         let wrap_w = w.saturating_sub(11).max(20);
         let mut out = vec![];
 
-        let summary = concise_fix_copy(fix, false);
-        if !summary.is_empty() {
+        // The report line's own words: what the setting does, then what was measured.
+        for paragraph in [fix.what.as_str(), why(&fix.evidence)] {
+            if paragraph.is_empty() {
+                continue;
+            }
             for line in wrap_text(
-                &summary,
+                paragraph,
                 WrapOptions {
                     width: Some(wrap_w),
                     ..Default::default()
@@ -2049,133 +2116,6 @@ impl App {
     }
 }
 
-/// Short, plain-English 1-sentence explanation for a measured fix in the interactive TUI.
-fn concise_fix_copy(fix: &Fix, grouped: bool) -> String {
-    let name_lc = fix.name.to_ascii_lowercase();
-    match fix.section.kind {
-        Kind::CacheTtl => {
-            if target(&fix.value) == "1h" {
-                "Your pauses between turns often pass 5m, forcing full cache rewrites. 1h costs less overall.".into()
-            } else {
-                "Your turns are fast enough that 1h's write fee costs more than 5m.".into()
-            }
-        }
-        Kind::Feature(ContextKind::Skill, Reason::Unused | Reason::Unrecorded) => {
-            "Listed in every prompt, never used once. Still works whenever you type /name.".into()
-        }
-        Kind::Feature(ContextKind::Skill, Reason::Costly) => {
-            "Always-on in every prompt, rarely triggered by the model. Switching to typed-only keeps /name working.".into()
-        }
-        Kind::Feature(ContextKind::Skill, Reason::Duplicate) => {
-            "Duplicate skill copy riding along in every prompt. Keeping only the used copy saves tokens.".into()
-        }
-        Kind::Feature(ContextKind::Tool, Reason::Unused | Reason::Unrecorded) => {
-            if grouped {
-                "Built-in tool schemas sent on every request, never called once in this window."
-                    .into()
-            } else {
-                "Sent on every request, never called once in this window.".into()
-            }
-        }
-        Kind::Feature(ContextKind::Tool, Reason::Costly) => {
-            "Tool schema rides along on every request and costs more per call than your budget."
-                .into()
-        }
-        Kind::Feature(ContextKind::McpServer | ContextKind::McpTool | ContextKind::McpDiscovery, Reason::Unused | Reason::Unrecorded) => {
-            "MCP server tools sent on every request, never called once in this window.".into()
-        }
-        Kind::Feature(ContextKind::McpServer | ContextKind::McpTool | ContextKind::McpDiscovery, Reason::Costly) => {
-            "MCP tools cost more per call in prompt overhead than your budget.".into()
-        }
-        _ if name_lc.contains("fast mode") => {
-            "Same model at a higher per-token price. Turn off unless faster replies are worth the premium.".into()
-        }
-        _ if name_lc.contains("auto memory") || name_lc.contains("memories") => {
-            "Loads saved notes into every session, but was rarely read compared to what it costs."
-                .into()
-        }
-        _ if name_lc.contains("prompt suggestion") => {
-            "Sends an extra background request after every reply just to suggest your next prompt."
-                .into()
-        }
-        _ if name_lc.contains("recap") => {
-            "Sends an extra background request to summarize the session when you step away.".into()
-        }
-        _ if name_lc.contains("check-in") => {
-            "Starts background turns to check on idle tasks even while you're away.".into()
-        }
-        _ if name_lc.contains("compact") => {
-            "Compacting at this window saves more in later cache reads than the extra summaries cost."
-                .into()
-        }
-        _ => {
-            // Keep fallback short: first sentence of `what` or `why`, with "the maintainer" -> "Kixel".
-            let raw = if !fix.what.is_empty() {
-                fix.what.as_str()
-            } else {
-                why(&fix.evidence)
-            };
-            first_sentence(&replace_maintainer(raw))
-        }
-    }
-}
-
-/// Short, plain-English tip copy for the Vibes tab (human attention span, zero legal disclaimers).
-fn concise_vibe_copy(item: &VibeItem) -> String {
-    let name_lc = item.name.to_ascii_lowercase();
-    let text_lc = item.text.to_ascii_lowercase();
-    if name_lc.contains("fable") || text_lc.contains("fable") {
-        if name_lc.contains("advisor") {
-            return "Uses a stronger advisor only on hard steps instead of paying for it on every turn."
-                .into();
-        }
-        return "Opus 5.5 xhigh is usually better and cheaper than Fable 5.2.".into();
-    }
-    if name_lc.contains("bash timeout") {
-        return "A command hanging past your cache TTL lets the prompt cache expire. Lowering moves slow commands to the background sooner."
-            .into();
-    }
-    if name_lc.contains("auto memory") {
-        if item.how.is_some() {
-            return "Your repos already have CLAUDE.md / AGENTS.md — keep lasting project facts there instead."
-                .into();
-        }
-        return "Outside a repo, auto memory may be the only place facts persist — fine to keep on."
-            .into();
-    }
-    if name_lc.contains("auto-compact") || name_lc.contains("compact window") {
-        return "Compacting earlier keeps context sharp and avoids context rot, even when cost is similar."
-            .into();
-    }
-    if name_lc.contains("main-session default") {
-        return "Start sessions on Opus 5.5 at medium/high — cheaper than max with similar quality."
-            .into();
-    }
-    if name_lc.contains("subagent") && name_lc.contains("effort") {
-        return "Run subagents at high effort instead of max for a better cost/quality balance."
-            .into();
-    }
-    if name_lc.contains("advisor") {
-        return "Pairs your main model with a stronger advisor only on hard steps instead of every turn."
-            .into();
-    }
-    if name_lc.contains("retention") || name_lc.contains("transcript") {
-        return "Keep 365 days of transcripts so token-max can measure long-term habits.".into();
-    }
-    if name_lc.contains("claude.md")
-        || name_lc.contains("agents.md")
-        || name_lc.contains("instruction")
-    {
-        return "Keep root instructions under ~200 lines so adherence stays high and prefix cost stays lean."
-            .into();
-    }
-    if name_lc.contains("lsp") {
-        return "Gives the model real jump-to-definition and type errors instead of grepping files."
-            .into();
-    }
-    first_sentence(&replace_maintainer(&item.text))
-}
-
 /// Short source attribution label for a vibes row (`Kixel`, `Anthropic`, `OpenAI`, etc.).
 fn concise_vibe_source(sources: &[String]) -> &'static str {
     let joined = sources.join(" ").to_ascii_lowercase();
@@ -2187,20 +2127,6 @@ fn concise_vibe_source(sources: &[String]) -> &'static str {
         "OpenAI"
     } else {
         "tip"
-    }
-}
-
-fn replace_maintainer(text: &str) -> String {
-    text.replace("The maintainer", "Kixel")
-        .replace("the maintainer", "Kixel")
-}
-
-fn first_sentence(text: &str) -> String {
-    let trimmed = text.trim();
-    if let Some(idx) = trimmed.find(". ") {
-        format!("{}.", &trimmed[..idx])
-    } else {
-        trimmed.to_string()
     }
 }
 
@@ -2244,7 +2170,8 @@ pub(crate) fn run(
     let _raw = RawGuard::enter().map_err(|_| {
         ScanError::new("cannot enable interactive terminal mode; rerun with --plain")
     })?;
-    let mut stdout = io::stdout().lock();
+    // Unlocked, so a signal can restore the terminal while this waits on a key.
+    let mut stdout = io::stdout();
     let mut viewport = InlineViewport::default();
 
     loop {
@@ -2427,7 +2354,10 @@ pub(crate) fn run(
                             app.diff_tab = app.tab;
                             app.screen = Screen::Diff;
                         }
-                        Err(e) => app.status_error = Some(e.message),
+                        Err(error) => {
+                            viewport.clear(&mut stdout).ok();
+                            return Err(error);
+                        }
                     }
                 }
                 _ => {}
@@ -2456,12 +2386,13 @@ pub(crate) fn run(
                 }
                 // Enter opened this screen, so writing takes `y`: a held or doubled Enter, which
                 // a terminal sends as more presses, never writes before the diff is read.
+                KeyCode::Char('y') if !app.whole.get() => {
+                    app.status_error = Some("Enlarge the terminal to see the whole diff.".into());
+                }
                 KeyCode::Char('y') => {
-                    let saved_usd = if app.diff_tab == Tab::Measured {
-                        app.selected_usd()
-                    } else {
-                        0.0
-                    };
+                    let saved = (app.diff_tab == Tab::Measured)
+                        .then(|| app.savings_text("Saved"))
+                        .flatten();
                     let written = match app.diff_tab {
                         Tab::Measured => bridge.write_measured(),
                         Tab::Vibes => bridge.write_vibes(),
@@ -2483,48 +2414,23 @@ pub(crate) fn run(
 
                     let ok = if app.unicode { "✓" } else { "OK" };
                     let count = written.files_written;
-                    let headline = if app.diff_tab == Tab::Measured && saved_usd > 0.0 {
-                        format!(
-                            "  {} — updated {} file{}",
-                            app.style(
-                                &format!("{BOLD}{GREEN}"),
-                                &format!("{ok} Saved ~{}/mo", about(saved_usd))
-                            ),
-                            count,
-                            if count == 1 { "" } else { "s" }
-                        )
-                    } else {
-                        format!(
+                    let files = format!("{count} file{}", if count == 1 { "" } else { "s" });
+                    let headline = match saved {
+                        Some(saved) => format!(
+                            "  {} {} updated {files}",
+                            app.style(&format!("{BOLD}{GREEN}"), &format!("{ok} {saved}")),
+                            app.sep().trim(),
+                        ),
+                        None => format!(
                             "  {}",
-                            app.style(
-                                &format!("{BOLD}{GREEN}"),
-                                &format!(
-                                    "{ok} Updated {} file{}",
-                                    count,
-                                    if count == 1 { "" } else { "s" }
-                                )
-                            )
-                        )
+                            app.style(&format!("{BOLD}{GREEN}"), &format!("{ok} Updated {files}"))
+                        ),
                     };
                     let _ = writeln!(stdout, "{headline}");
                     for line in &written.lines {
                         let _ = writeln!(stdout, "  {}", app.style(DIM, line));
                     }
                     let _ = write_by_hand(&mut stdout, &app.by_hand, app.color);
-                    if app.diff_tab == Tab::Measured && app.hero.vibes_pending > 0 {
-                        let n = app.hero.vibes_pending;
-                        let _ = writeln!(
-                            stdout,
-                            "  {}",
-                            app.style(
-                                DIM,
-                                &format!(
-                                    "Optional: run `token-max vibes` for {n} unmeasured tip{}.",
-                                    if n == 1 { "" } else { "s" }
-                                )
-                            )
-                        );
-                    }
                     let _ = stdout.flush();
                     return Ok(ExitKind::Done);
                 }
@@ -2532,6 +2438,35 @@ pub(crate) fn run(
             },
         }
     }
+}
+
+/// Ask whether to show `vibes`' `count` pieces of advice once `doctor`'s checklist closes,
+/// reading one key as the checklist does, since its keys typed ahead wait in the same queue;
+/// `y` is a yes and any other key a no.
+pub(crate) fn offer_vibes(count: usize, style: &Style) -> io::Result<bool> {
+    let show = if count == 1 { "Show it?" } else { "Show them?" };
+    let prompt = style.ask(
+        &format!("{} {show}", crate::vibes::hint(count)),
+        "[y]es, [n]o",
+    );
+    let mut stdout = io::stdout();
+    write!(stdout, "\n{}", prompt.trim_end_matches('\n'))?;
+    stdout.flush()?;
+    let yes = {
+        let _raw = RawGuard::enter()?;
+        loop {
+            match event::read()? {
+                TermEvent::Key(KeyEvent {
+                    code,
+                    kind: KeyEventKind::Press,
+                    ..
+                }) => break matches!(code, KeyCode::Char('y' | 'Y')),
+                _ => continue,
+            }
+        }
+    };
+    writeln!(stdout, " {}", if yes { "y" } else { "n" })?;
+    Ok(yes)
 }
 
 /// Each host's answers to the offers `rows` show: one per offer, yes when any card showing it
@@ -2820,10 +2755,21 @@ impl InlineViewport {
     }
 }
 
-/// `fix` with the text the TUI prints escaped: names and settings come from transcripts and
-/// configuration, or a destination, and may hold terminal controls.
-fn clean_fix(fix: &Fix) -> Fix {
+/// A member's `name` after its host's, when the walk covers another host than this one.
+fn member_name(m: &MemberItem, name: &str) -> String {
+    match &m.host_label {
+        Some(host) => format!("[{host}] {name}"),
+        None => name.to_string(),
+    }
+}
+
+/// `fix` with the text the TUI prints escaped, since names and settings come from transcripts
+/// and configuration, or a destination, and may hold terminal controls; its prose names paths
+/// under `home` from `~`, as the walk's cards do.
+fn clean_fix(fix: &Fix, home: Option<&str>) -> Fix {
     let mut fix = fix.clone();
+    fix.what = home_in(&fix.what, home);
+    fix.evidence = home_in(&fix.evidence, home);
     for text in [
         &mut fix.name,
         &mut fix.value,
@@ -3274,11 +3220,18 @@ mod tests {
         assert_eq!(app.checked_count(), 1);
         assert!((app.selected_usd() - 413.0).abs() < 0.01);
         assert_eq!(app.visible_rows().len(), 5);
+        // An unset main TTL's saving holds only under one default, so it stays "up to" until
+        // billing names it.
+        assert_eq!(
+            app.savings_text("Save").as_deref(),
+            Some("Save up to $413/mo, by billing")
+        );
 
         // Live billing toggle: Auto -> API ($413) -> Plan ($0, auto-unchecks unset 1h!).
         app.cycle_billing();
         assert_eq!(app.billing, BillingMode::Api);
         assert!((app.selected_usd() - 413.0).abs() < 0.01);
+        assert_eq!(app.savings_text("Save").as_deref(), Some("Save $413/mo"));
         app.cycle_billing();
         assert_eq!(app.billing, BillingMode::Plan);
         assert!((app.selected_usd() - 0.0).abs() < 0.01);
@@ -3427,10 +3380,10 @@ mod tests {
             "/synthetic/settings.json",
         );
         app.groups.push(Group {
-            host: 0,
             host_label: None,
             members: vec![MemberItem {
                 host: 0,
+                host_label: None,
                 offer_index: 0,
                 fix,
                 entries_count: 2,
@@ -3493,15 +3446,12 @@ mod tests {
             .enumerate()
             .map(|(offer_index, name)| MemberItem {
                 host: 0,
+                host_label: None,
                 offer_index,
-                fix: clean_fix(&sample_fix(
-                    name,
-                    "on -> off",
-                    5.0,
-                    false,
-                    section(name),
-                    "/s",
-                )),
+                fix: clean_fix(
+                    &sample_fix(name, "on -> off", 5.0, false, section(name), "/s"),
+                    None,
+                ),
                 entries_count: 0,
                 denials_count: 0,
                 checked: false,
@@ -3509,7 +3459,6 @@ mod tests {
             })
             .collect();
         app.groups.push(Group {
-            host: 0,
             host_label: None,
             members,
             split: false,
@@ -3586,5 +3535,56 @@ mod tests {
             rows[0].ends_with(RESET) && rows[1].starts_with(GREEN),
             "{rows:?}"
         );
+    }
+
+    #[test]
+    fn a_section_spans_hosts_as_the_walk_asks_it() {
+        let dir = std::env::temp_dir().join(format!("token-max-tui-hosts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = dir.join("settings.json");
+        std::fs::write(&settings, "{}\n").unwrap();
+        let file = settings.to_string_lossy().into_owned();
+        let fix = || {
+            sample_fix(
+                "Auto memory",
+                "on -> off",
+                0.6,
+                false,
+                Section {
+                    kind: Kind::Setting,
+                    label: "Auto memory".into(),
+                    member: "Auto memory".into(),
+                    location: None,
+                },
+                &file,
+            )
+        };
+        let owners = [
+            Owner::new(vec![fix()], vec![], None, 100.0),
+            Owner::new(vec![fix()], vec![], None, 100.0),
+        ];
+        let style = Style {
+            width: Some(80),
+            color: false,
+            unicode: false,
+            home: None,
+            host: None,
+        };
+        let hosts: Vec<Walking> = owners
+            .iter()
+            .zip([None, Some("devbox")])
+            .map(|(owner, label)| Walking {
+                label,
+                offers: owner.offers(),
+                style: &style,
+            })
+            .collect();
+        let app = App::new(&hosts, Hero::default(), Tab::Measured, false, false);
+        // $0.60 on each host is one $1.20 section, which neither folds nor reads as two.
+        assert_eq!(app.groups.len(), 1);
+        assert_eq!(app.groups[0].members.len(), 2);
+        assert!(!app.groups[0].minor);
+        assert_eq!(app.groups[0].host_label, None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

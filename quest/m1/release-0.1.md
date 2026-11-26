@@ -29,13 +29,17 @@ a `walk.gif` rerun if the cards changed doctor's questions, dispatching
 **Release** on `main`, deploying `site/`, and the post-publication installer
 checks. Also:
 
-- before the crates.io publish, the Release run dry-runs the pipeline on its own commit, the one
-  the crate will name, and publishes only if every target builds. The pipeline builds only
-  versions crates.io has, so it can't stage artifacts to promote later, but its run after the
-  publish builds the same commit, and a flaky job reruns alone, reusing the other targets'
-  archives (`pipeline/README.md` in kixel-ai/crabx);
-- before the publish, deploy the site pinned to `v0.0.1` that the switch describes, and after
-  the pipeline uploads 0.1.0's archives, deploy main's `site/`;
+- before the crates.io publish, the Release run uses the pipeline's consumer dry run on its own
+  commit, the one the crate will name, and publishes only if every target builds. Decided
+  2026-11-25 (maintainer, this quest's planning review): ✅ gate on a consumer dry run that crabx
+  adds (rejected: fixing a post-publish build failure forward). The pipeline's real run after the
+  publish builds the same commit, and a flaky job reruns alone;
+- before the publish, deploy the site pinned to `v0.0.1` that the switch describes. Once the
+  pipeline has uploaded every 0.1.0 archive, mark the release latest (`gh release edit v0.1.0
+  --latest`, a step in the Release run), since the pipeline creates releases with `make_latest`
+  false and 0.0.1 is latest today. Check that `/releases/latest` redirects to `v0.1.0`, then
+  deploy main's `site/`. Decided 2026-11-25 (maintainer, this quest's planning review): ✅ mark it
+  latest here (rejected: accepting the risk);
 - check that `gh attestation verify` on each archive names crabx's pipeline workflow as signer;
 - run `npx @kixel/crabx token-max@0.1.0 --version` on x86_64 glibc Linux, on macOS and on Windows
   (CI legs are fine), and `run.sh` on Alpine, which picks the musl archive;

@@ -43,7 +43,8 @@ Recommendations:
   `crates-io`, trusted publishing). After the publish, it pushes the `v<version>` tag on Cargo's
   recorded commit, so the pipeline reuses it instead of creating `token-max-v<version>`, which
   `run.sh`, `ssh.rs` and `upgrade.rs` don't expect. Then it dispatches the pipeline instead of
-  waiting for the daily schedule. If `crabx init`'s workflow can't be run this way cleanly, plan
+  waiting for the daily schedule, and once the archives are up it marks the release latest.
+  Before the publish, it runs the pipeline's consumer dry run on its own commit. If `crabx init`'s workflow can't be run this way cleanly, plan
   that gap in crabx rather than working around it.
 - The pipeline's assets are `token-max-<target>-v<version>.tgz` on every platform, Windows
   included, with the binary under `token-max-<target>-v<version>/`. Move `run.sh`, `run.ps1`,
@@ -64,7 +65,8 @@ Recommendations:
 
 ## Waiting
 
-- kixel-ai/crabx: the `pipeline-v1.1.0` tag, whose pipeline builds musl archives. Check with
+- kixel-ai/crabx: the `pipeline-v1.1.0` tag, whose pipeline builds musl archives and offers the
+  consumer dry run that 0.1.0's Release gates on. Check with
   `git ls-remote --tags https://github.com/kixel-ai/crabx pipeline-v1.1.0`.
 - kixel-ai/crabx: crabx's installers taking crate names. Check that
   `curl -fsSL https://crabx.kixel.me/install.sh` mentions `CRABX_INSTALL`.

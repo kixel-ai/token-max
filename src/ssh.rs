@@ -627,7 +627,7 @@ impl Connected {
         let (scanned, reply, offers, vibes) = match outcome {
             Ok(Outcome::Report {
                 since,
-                text,
+                listing,
                 change,
                 totals,
                 offers,
@@ -635,7 +635,7 @@ impl Connected {
             }) => (
                 since,
                 Reply::Report(Printed {
-                    text,
+                    listing,
                     change,
                     totals,
                     vibes,
@@ -762,9 +762,9 @@ impl Remote {
         }
     }
 
-    /// The destination's report with the walk's `events` marked on it, and its preview of
-    /// each file the accepted changes would write; nothing is written there yet.
-    pub fn review(&mut self, events: &[Event]) -> Result<(String, String), ScanError> {
+    /// The destination's preview of each file the walk's `events` would write, once it
+    /// checked them against its files; nothing is written there yet.
+    pub fn review(&mut self, events: &[Event]) -> Result<String, ScanError> {
         let answer = Answer::Review {
             events: events.to_vec(),
         };
@@ -773,7 +773,7 @@ impl Remote {
             false => "during the walk; no settings were changed there",
         };
         match self.exchange(&answer, doing)? {
-            Outcome::Reviewed { report, preview } => Ok((report, preview)),
+            Outcome::Reviewed { preview } => Ok(preview),
             _ => Err(self.session.wrong_result(None)),
         }
     }
@@ -873,11 +873,9 @@ enum Incoming {
     Answer(Answer),
 }
 
-/// A destination's side of a walk: its files as it read them, its report, and how to print.
+/// A destination's side of a walk: its files as it read them, and how to print.
 struct Walked {
     owner: Owner,
-    /// The report `doctor`'s walk reviews; none once the walk is `vibes`'.
-    listing: Option<Box<crate::report::Listing>>,
     style: Style,
     /// What `vibes` has here, from the same scan.
     vibes: Vec<Item>,
@@ -895,7 +893,6 @@ impl Walked {
     fn advise(&mut self) -> Outcome {
         self.vibes = crate::vibes::settled(std::mem::take(&mut self.vibes), &self.written);
         self.owner = crate::vibes::owner(&self.vibes, self.home.clone(), self.monthly);
-        self.listing = None;
         self.advice()
     }
 
@@ -1028,15 +1025,13 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
         let Rendered {
             printed:
                 Printed {
-                    text,
+                    listing,
                     change,
                     totals,
-                    vibes: pending,
+                    vibes,
                 },
             fixes,
-            listing,
             turned_off,
-            vibes,
         } = render(
             scan,
             Render {
@@ -1056,7 +1051,6 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
         };
         let walked = walk.then(|| Walked {
             owner: owner(home.clone()),
-            listing: (!advice).then_some(listing),
             style: format.style(home.clone()),
             vibes: vibes.clone(),
             home: home.clone(),
@@ -1074,11 +1068,11 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
             },
             (false, walked) => Outcome::Report {
                 since,
-                text,
+                listing,
                 change,
                 totals,
                 offers: walked.as_ref().map(|w| Box::new(w.owner.offers().clone())),
-                vibes: pending,
+                vibes,
             },
         };
         Ok((outcome, walked))
@@ -1117,18 +1111,12 @@ fn walk_here(
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| match answer {
             Answer::Done => Ok(None),
             Answer::Review { events } => {
+                // Checked against the files as they were read, which the coordinator's report
+                // of the answers leaves to this host.
                 let reviewed = walked.owner.plan(&events)?;
-                // Under its own header, which this host prints only for its own report.
-                let report = walked.listing.as_ref().map_or_else(String::new, |listing| {
-                    format!(
-                        "{}{}",
-                        listing.title(),
-                        listing.review(reviewed.choices(), &reviewed.total("Accepted"))
-                    )
-                });
                 let preview = preview(&reviewed, &walked.style);
                 plan = Some(reviewed);
-                Ok(Some(Outcome::Reviewed { report, preview }))
+                Ok(Some(Outcome::Reviewed { preview }))
             }
             Answer::Write => match plan.take() {
                 Some(plan) => write_plan(&plan).map(|written| {

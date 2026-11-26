@@ -23,7 +23,7 @@ use crate::collections::IndexMap;
 use crate::doctor::{Event, Offers, Style, Written};
 use crate::model::{Billing, Millis};
 use crate::prices::Catalog;
-use crate::report::{Host, ReportOptions};
+use crate::report::{Host, Listing, ReportOptions};
 use crate::safe::ScanError;
 use crate::sessions::Session;
 use crate::totals::Totals;
@@ -159,16 +159,17 @@ pub enum Outcome {
     Report {
         /// The window the destination scanned, which must be the one requested.
         since: Option<Millis>,
-        /// The report's text.
-        text: String,
+        /// The report's lines and what it says around them, which this host joins with
+        /// every other host's into one report.
+        listing: Box<Listing>,
         /// Whether the report recommends a change, which sets the exit code.
         change: bool,
         /// What the report adds to a total across hosts.
         totals: Box<Totals>,
         /// The changes the destination offers, when this host walks through them.
         offers: Option<Box<Offers>>,
-        /// How many pieces of advice `vibes` has there, which `doctor` offers to show.
-        vibes: usize,
+        /// The advice `vibes` has there, whose count `doctor` offers to show.
+        vibes: Vec<Item>,
     },
     /// `vibes`' advice: the job's result, or the destination's answer to [`Answer::Vibes`].
     #[serde(rename_all = "camelCase")]
@@ -182,12 +183,10 @@ pub enum Outcome {
         /// host walks through them.
         offers: Option<Box<Offers>>,
     },
-    /// The destination's answer to [`Answer::Review`].
+    /// The destination's answer to [`Answer::Review`], once it checked the answers against
+    /// its files: each file's text as the accepted changes would change it, for the confirm.
     #[serde(rename_all = "camelCase")]
     Reviewed {
-        /// The report again, each change marked as the walk answered it; empty for `vibes`.
-        report: String,
-        /// Each file's text as the accepted changes would change it, for the confirm.
         preview: String,
     },
     /// The destination's answer to [`Answer::Write`]: the files it wrote.
@@ -350,11 +349,11 @@ mod tests {
             &mut bytes,
             &Outcome::Report {
                 since: None,
-                text: "report\n".into(),
+                listing: Box::new(crate::report::tests::listing()),
                 change: true,
                 totals: Box::default(),
                 offers: None,
-                vibes: 0,
+                vibes: vec![],
             },
         )
         .unwrap();
@@ -366,7 +365,8 @@ mod tests {
         assert_eq!(stream.header().unwrap().token_max_scan, build());
         assert!(matches!(
             outcome(&mut stream).unwrap(),
-            Outcome::Report { text, change: true, .. } if text == "report\n"
+            Outcome::Report { listing, change: true, .. }
+                if listing.text() == crate::report::tests::listing().text()
         ));
         // Truncated, or followed by anything.
         let mut stream = Stream::new(&bytes[..bytes.len() - 3]);

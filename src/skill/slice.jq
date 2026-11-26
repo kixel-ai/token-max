@@ -28,22 +28,34 @@ def mask: reduce (explode[] | [.] | implode) as $c ({o: "", s: ["t"], e: false, 
     | if .e then . else .p = $c end
   end) | .o;
 def cmd: if type == "array" then map(tostring)
-    | if length == 3 and (.[0] | test("(^|/)(ba|z|da)?sh$")) then .[2] | cmd else simple end
+    | if length == 3 and (.[0] | test("(^|/)(ba|z|da)?sh$")) and (.[1] | test("^-[a-z]*c$")) then .[2] | cmd else simple end
   else [tostring | mask
     | splits("&&|\\|\\||[;|\\n]") | [splits("\\s+") | select(. != "")] | select(length > 0) | simple] | .[:4] end;
-def safe($tool): if type == "object" then
+# The string fields kept at a path of keys from the line's root, skipping array indexes: a
+# record's own fields, then a tool call's input as the model wrote it. Tool results, a
+# server's data and anything else stay opaque; an attachment can carry a server's name.
+def envelope: IN([], ["message"], ["message", "content"], ["message", "usage"], ["attachment"],
+  ["payload"], ["payload", "content"], ["payload", "item"], ["payload", "invocation"]);
+def kept: if . == ["attachment"] then "^(type|timestamp)$"
+  elif envelope then "^(type|subtype|role|name|tool|model|effort|status|phase|timestamp|sessionId|session_id|id|call_id|tool_use_id|file_path|path|notebook_path|cwd|workdir|exit_code|is_error|stop_reason|service_tier|speed)$"
+  elif .[:2] == ["payload", "arguments"] or (.[:3] | IN(["message", "content", "input"],
+    ["payload", "invocation", "arguments"], ["payload", "item", "parsed_cmd"]))
+  then "^(file_path|path|notebook_path|cwd|workdir)$"
+  else null end;
+def safe($at): ($at | kept) as $keep | ($at | envelope) as $env
+  | if type == "object" then
     del(.internal_chat_message_metadata_passthrough, .permission_profile, .sandbox_policy, .rate_limits, .encrypted_content, .signature, .betas, .annotations, .logprobs, .text_elements, .parentUuid, .uuid, .promptId)
-    # A tool's payload can key its data by text, as AskUserQuestion keys answers by question.
-    | if $tool then to_entries | to_entries | map(.key as $i | .value
+    # A payload can key its data by text, as AskUserQuestion keys answers by question.
+    | if $env then . else to_entries | to_entries | map(.key as $i | .value
         | if .key | test("^[A-Za-z_][A-Za-z0-9_]{0,40}$") then . else .key = "<\(.key | length) chars, #\($i)>" end) | from_entries
-      else . end
-    | with_entries(.key as $k | ($tool or ($k | IN("input", "arguments", "output", "toolUseResult"))) as $in | .value |= (type as $t
-      | if $k == "arguments" and $t == "string" then (. as $s | try (fromjson | safe(true)) catch "<\($s | length) chars>")
-      elif ($k == "command" or $k == "cmd") and ($t == "string" or $t == "array") then cmd
-      elif $t == "string" and ($k | test(if $tool then "^(file_path|path|notebook_path|cwd|workdir)$"
-          else "^(type|subtype|role|name|tool|model|effort|status|phase|timestamp|sessionId|session_id|id|call_id|tool_use_id|file_path|path|notebook_path|cwd|workdir|exit_code|is_error|stop_reason|service_tier|speed)$" end)) then .[:200]
-      else safe($in) end))
-  elif type == "array" then (.[:20] | map(safe($tool))) + (if length > 20 then ["+\(length - 20) more"] else [] end)
+      end
+    | with_entries(.key as $k | .value |= (type as $t
+      | if $k == "arguments" and $t == "string" then (. as $s | try (fromjson | safe($at + ["arguments"])) catch "<\($s | length) chars>")
+      elif $keep and ($k == "command" or $k == "cmd") and ($t == "string" or $t == "array") then cmd
+      elif $keep and $t == "string" and ($k | test($keep)) then .[:200]
+      else safe($at + [$k]) end))
+  elif type == "array" then (.[:20] | map(safe($at))) + (if length > 20 then ["+\(length - 20) more"] else [] end)
   elif type == "string" then "<\(length) chars>"
   else . end;
-safe(false)
+# Each line read raw (`jq -R`) parses alone, so a torn line hides none after it.
+if type == "string" then (. as $s | try fromjson catch {unparsed: ($s | length)}) else . end | safe([])

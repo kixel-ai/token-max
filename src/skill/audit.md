@@ -16,18 +16,18 @@ Run `token-max audit` in the repository the user means. Pass `--all` when they a
 
 ## 2. Inspect
 
-Read transcript lines only through the `jq` program `token-max skill filter` prints, without retyping or saving it, and only once it printed: an empty program would show the lines whole. Read several windows of one file in one command, since a harness may ask before each:
+Read transcript lines only through the `jq` program `token-max skill filter` prints, without retyping or saving it, and only once it printed: an empty program would show the lines whole. Pass `-R` so each line parses alone and a torn one shows as `{"unparsed": N}` instead of ending the read. Read several windows of one file in one command, since a harness may ask before each:
 
 ```sh
-f=$(token-max skill filter) && test -n "$f" && sed -n '120,140p;300,310p' FILE | jq -c "$f"
-f=$(token-max skill filter) && test -n "$f" && ssh HOST "sed -n '120,140p' 'FILE'" | jq -c "$f"
+f=$(token-max skill filter) && test -n "$f" && sed -n '120,140p;300,310p' 'FILE' | jq -cR "$f"
+f=$(token-max skill filter) && test -n "$f" && ssh HOST "sed -n '120,140p' 'FILE'" | jq -cR "$f"
 ```
 
-Use the second form when a pointer's `host` is not null; the filter runs here, so the remote host needs no `jq`. The filter keeps record types, times, models, effort, tool names, each command's program, a known tool's subcommand, and flags, file paths, statuses, exit codes and sizes, and replaces all other text with its length.
+Use the second form when a pointer's `host` is not null; the filter runs here, so the remote host needs no `jq`. Put a pointer's `file` into a command only when it holds no quote, backslash, `$` or backtick, which a shell would read as code; give any other file and its lines to the user instead. The filter keeps record types, times, models, effort, tool names, statuses, exit codes and sizes, and from each tool call's input its file paths, each command's program, a known tool's subcommand and flags. It replaces all other text with its length, and keeps nothing of a tool's result but numbers.
 
 Look at, in order of cost:
 
-- each `cacheMisses` hotspot, from its `previous` line to its `at` line;
+- each `cacheMisses` hotspot, from its `previous` line to its `at` line; for a Codex hotspot, start a few dozen lines before `previous`, since Codex records a response's tool calls before its usage;
 - each `toolOutputs` hotspot's `call` and `at` lines;
 - a window around the `streak.at` of the `longestStreaks` and `mostToolErrors` sessions;
 - the `earlyLines` of the `costliest` and `largestStart` sessions, for what each had to discover before working.
@@ -39,7 +39,7 @@ Keep windows to tens of lines and stop reading once a cause is clear.
 - Cache busts. `tool_wait_ttl`: a command outlasted the cache; run it in the background, speed it up, or cap it. `idle_ttl`: the session sat past the cache's lifetime; when a long session resumes after a break, `/clear` with a short summary can cost less than rereading the whole history. `control_change`: a model, effort or speed switch mid-session rewrote the cache. `prefix_bust`: the prompt's prefix changed, such as an instruction or memory file edited mid-session, tools or MCP servers connecting, or a hook injecting changing text.
 - Tool output bloat: large results that many later requests carried. Look for noisy build, test or log output (quiet flags, only failures, output written to a file and its tail read), whole files read where a range would do, and the same file read again.
 - Loops: long runs of one tool, a failing command retried, repeated errors. Name what would have stopped them, such as a missing command in the instruction file, a broken script, or a hook.
-- Unused context: a large `startInputTokens` is always-loaded instruction files, memory and tool definitions. Read the repository's `AGENTS.md`, `CLAUDE.md` and what they import: a rule the inspected sessions never needed can move to a skill, a nested `AGENTS.md` or a path-scoped rule, or be deleted.
+- Unused context: a large `startInputTokens` is a lead, not a cause: it counts the first prompt whole, the user's first message included. Blame always-loaded instruction files, memory and tool definitions only when the `earlyLines` show the first user message is small, or several sessions start equally large. Then read the repository's `AGENTS.md`, `CLAUDE.md` and what they import: a rule the inspected sessions never needed can move to a skill, a nested `AGENTS.md` or a path-scoped rule, or be deleted.
 - Missing context: what sessions rediscover in their first requests, such as the same build or test command found by trial, the same files read to learn the layout, or the same failure worked around. Check the instruction files first so nothing is duplicated; a line earns its place when it costs less than the rediscovery, since every session pays for it.
 
 ## 4. Report and fix

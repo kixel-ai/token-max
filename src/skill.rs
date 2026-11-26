@@ -44,6 +44,22 @@ struct Target {
     resolved: PathBuf,
 }
 
+impl Target {
+    /// The path, and for a symlinked `SKILL.md` the file it points at, which a write replaces.
+    fn shown(&self) -> String {
+        let path = display(&self.path.to_string_lossy());
+        let linked = fs::symlink_metadata(&self.path).is_ok_and(|m| m.file_type().is_symlink());
+        if linked && self.resolved.exists() {
+            format!(
+                "{path} (a link to {})",
+                display(&self.resolved.to_string_lossy())
+            )
+        } else {
+            path
+        }
+    }
+}
+
 /// What happened to one target.
 enum State {
     Current,
@@ -77,7 +93,7 @@ pub fn install(options: &Install) -> Result<String, ScanError> {
         .iter()
         .zip(&states)
         .filter(|(_, s)| matches!(s, State::Different) && !options.force)
-        .map(|(t, _)| display(&t.path.to_string_lossy()))
+        .map(|(t, _)| t.shown())
         .collect();
     if !refused.is_empty() {
         return Err(ScanError::new(format!(
@@ -87,7 +103,7 @@ pub fn install(options: &Install) -> Result<String, ScanError> {
     }
     let mut out = String::new();
     for (target, state) in targets.iter().zip(&states) {
-        let shown = display(&target.path.to_string_lossy());
+        let shown = target.shown();
         if matches!(state, State::Current) {
             out.push_str(&format!("up to date: {shown}\n"));
             continue;

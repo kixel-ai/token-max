@@ -1,3 +1,6 @@
 quest/** merge=quest
 # Fixtures are byte-exact test data: a Windows checkout must not add CRLF.
 test/fixtures/** -text
+# Embedded in the binary byte for byte: a Windows checkout must not print or install CRLF.
+skills/token-audit/SKILL.md -text
+src/skill/* -text

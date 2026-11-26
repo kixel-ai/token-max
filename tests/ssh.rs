@@ -1263,7 +1263,7 @@ fn a_destination_that_strays_from_the_protocol_fails_the_report() {
         (
             "trailing",
             "; echo '{}'".to_string(),
-            "trailing: invalid SSH audit stream at line ",
+            "trailing: token-max sent more than 1 byte after its result",
         ),
         (
             "failing",
@@ -1281,6 +1281,79 @@ fn a_destination_that_strays_from_the_protocol_fails_the_report() {
             "{host}: {stderr}"
         );
     }
+}
+
+#[test]
+fn a_destination_that_sends_more_than_a_limit_fails_the_report() {
+    let hosts = Hosts::new();
+    hosts.host("devbox");
+    // A MiB of whitespace, which a value may hold anywhere and costs nothing to parse.
+    let pad = hosts.root.join("pad");
+    std::fs::write(&pad, vec![b' '; 1 << 20]).unwrap();
+    let pads = |mib: u32| {
+        format!(
+            "i=0; while [ $i -lt {mib} ]; do cat '{}'; i=$((i + 1)); done",
+            pad.display()
+        )
+    };
+    let header = hosts.header();
+    let profiles = r#"{"profiles":{"home":null,"roots":[]}}"#;
+    for (command, host, body, expected) in [
+        (
+            "doctor",
+            "header",
+            r#"printf '{"tokenMaxScan":"%01025d' 0; exec sleep 600"#.to_string(),
+            "header: token-max sent more than 1 KiB for its header, the most this host reads",
+        ),
+        (
+            "doctor",
+            "profiles",
+            format!(
+                "echo '{header}'; printf '{{\"profiles\":'; {}; exec sleep 600",
+                pads(1)
+            ),
+            "profiles: token-max sent more than 1 MiB for its profiles",
+        ),
+        (
+            "doctor",
+            "report",
+            format!(
+                "echo '{header}'; echo '{profiles}'; printf '{{\"report\":'; {}; exec sleep 600",
+                pads(16)
+            ),
+            "report: token-max sent more than 16 MiB for its report",
+        ),
+        (
+            "doctor",
+            "trailing",
+            format!("'{BIN}' \"$@\"; echo"),
+            "trailing: token-max sent more than 1 byte after its result",
+        ),
+    ] {
+        hosts.host(host);
+        hosts.fake(host, &body);
+        let (status, stdout, stderr) =
+            run(&mut hosts.invoke(command, &["--ssh", "devbox", "--ssh", host]));
+        assert_eq!(status, 2, "{host}: {stderr}");
+        assert_eq!(stdout, "", "{host}");
+        assert!(
+            stderr.starts_with(&format!("token-max: {expected}")),
+            "{host}: {stderr}"
+        );
+    }
+    // Sessions, which grow with history, may pass a report's limit.
+    hosts.host("history");
+    hosts.fake(
+        "history",
+        &format!(
+            r#"echo '{header}'; printf '{{"sessions":'; {}; echo '{{"since":null,"sessions":[]}}}}'"#,
+            pads(17)
+        ),
+    );
+    let (status, stdout, stderr) =
+        run(&mut hosts.invoke("sessions", &["--ssh", "devbox", "--ssh", "history"]));
+    assert_eq!(status, 0, "{stderr}");
+    assert!(!lines(&stdout).is_empty());
 }
 
 #[test]

@@ -1140,7 +1140,8 @@ The object holds:
 Every list is ranked and keeps `--limit` entries, 10 by default, so the object
 fits an agent's context. A cost is a lower bound where `unpriced` counts
 findings whose prices are unknown; a single finding's unknown cost is null,
-never zero. Codex records no tool errors, so a Codex session's are null.
+never zero. A Codex session's tool errors are the commands, MCP calls and file
+edits Codex recorded as failed, and null when it recorded none finishing.
 
 Over `--ssh`, each destination audits its own sessions with this host's prices
 and the repository's remotes this host sent, ranks them and sends only its

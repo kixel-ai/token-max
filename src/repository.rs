@@ -122,6 +122,11 @@ pub fn canonical(url: &str) -> String {
         Some(at) => (&url[at + 3..], false),
         None => (url, true),
     };
+    // A URL's query or fragment may hold a token, and never names the repository.
+    let rest = match scp {
+        false => rest.split(['?', '#']).next().unwrap_or(rest),
+        true => rest,
+    };
     let rest = rest.rsplit_once('@').map_or(rest, |(_, after)| after);
     let split = rest.find(|c| c == '/' || (scp && c == ':'));
     let (host, path) = match split {

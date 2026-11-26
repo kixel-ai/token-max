@@ -648,6 +648,8 @@ pub enum EventKind {
     /// A turn Claude Code started without a prompt, such as for a subagent's report or a
     /// scheduled task; it only ends the turn before it.
     AutoTurn,
+    /// Codex's record that a tool finished, with whether it failed; it names no call.
+    ToolDone,
 }
 
 /// What tied an idle period to its cause, when anything did.

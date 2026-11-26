@@ -558,6 +558,7 @@ fn kind_name(kind: EventKind) -> &'static str {
         EventKind::PeerTurn => "peer-turn",
         EventKind::PeerMessage => "peer-message",
         EventKind::AutoTurn => "auto-turn",
+        EventKind::ToolDone => "tool-done",
     }
 }
 
@@ -2034,6 +2035,31 @@ impl Reader {
                 };
                 let mut e = event(snapshot, location, context, time, kind, key);
                 e.settings = structural_settings(if settings_applied { applied } else { p }).into();
+                self.add_event(e);
+            }
+        } else if kind == Some("event_msg")
+            && payload_kind == Some("item_completed")
+            && selected
+            && let Some(time) = time
+        {
+            // A finished tool's status, the only error flag Codex records; its ID names the
+            // process or call, never the tool call the model made.
+            let item = nested(p, "item");
+            if matches!(
+                string(item, "type"),
+                Some("CommandExecution" | "McpToolCall" | "FileChange")
+            ) {
+                let failed = string(item, "status") == Some("failed")
+                    || nested(item, "result").get("isError") == Some(&Value::Bool(true));
+                let mut e = event(
+                    snapshot,
+                    location,
+                    context,
+                    time,
+                    EventKind::ToolDone,
+                    string(item, "id"),
+                );
+                e.file = (!failed).then_some(crate::lsp::File::Done);
                 self.add_event(e);
             }
         } else if kind == Some("response_item")

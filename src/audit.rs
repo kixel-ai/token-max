@@ -654,6 +654,8 @@ struct Events<'a> {
     starts: Vec<&'a StructuralEvent>,
     ends: Vec<&'a StructuralEvent>,
     compactions: Vec<&'a StructuralEvent>,
+    /// Codex's records that a tool finished, which say whether it failed.
+    done: Vec<&'a StructuralEvent>,
     /// The events the session owns, rather than holds as a fork's copy, by ID.
     owned: HashSet<&'a Id>,
     /// Each call's start and its first result, by the call's ID.
@@ -815,6 +817,7 @@ pub fn audit(scan: &Scan, catalog: &Catalog, options: &Options) -> Result<Audit,
                 EventKind::ToolStart => found.starts.push(e),
                 EventKind::ToolEnd => found.ends.push(e),
                 EventKind::Compaction => found.compactions.push(e),
+                EventKind::ToolDone => found.done.push(e),
                 _ => {}
             }
         }
@@ -957,7 +960,7 @@ fn misses(
     found: &mut CacheMisses,
 ) {
     let mut codex_ttl = CODEX_CACHE_LIFETIME;
-    for pair in turns.windows(2) {
+    for (i, pair) in turns.windows(2).enumerate() {
         let (prev, cur) = (&pair[0], &pair[1]);
         let r = cur.request;
         // Each Codex write records how long it is kept. A request that read none of its
@@ -1021,7 +1024,17 @@ fn misses(
         };
         let began = prev.request.time;
         let gap = r.time - began;
-        let calls = events.started(began, r.time);
+        // The calls whose results `r` waited on: `prev`'s. Claude records a request before
+        // its response's calls, Codex after them.
+        let calls = match r.harness {
+            Harness::Claude => events.started(began, r.time),
+            Harness::Codex => {
+                let before = i
+                    .checked_sub(1)
+                    .map_or(Millis::MIN, |j| turns[j].request.time);
+                events.started(before, began)
+            }
+        };
         let waited = calls.iter().any(|start| {
             let end = start
                 .tool_id
@@ -1118,15 +1131,27 @@ fn outputs<'a>(
             result.call = start;
             result.session = Some(session.clone());
         }
-        // The request that called the tool: the last before the call, or before the result.
-        let called = start.map_or(end.time, |s| s.time);
-        let calling = turns.partition_point(|t| t.request.time <= called);
+        // The request that called the tool. Claude records a request before the calls its
+        // response makes, so it is the last before the call, or before the result. Codex
+        // records a request's usage after its calls, so it is the first at or after the call.
+        let calling = match start {
+            Some(s) if end.harness == Harness::Codex => {
+                Some(turns.partition_point(|t| t.request.time < s.time))
+                    .filter(|&at| at < turns.len())
+            }
+            _ => {
+                let called = start.map_or(end.time, |s| s.time);
+                turns
+                    .partition_point(|t| t.request.time <= called)
+                    .checked_sub(1)
+            }
+        };
         // Compaction replaces the history the result was in.
         let compacted = events
             .compactions
             .get(events.compactions.partition_point(|e| e.time <= end.time))
             .map_or(Millis::MAX, |e| e.time);
-        let Some(index) = calling.checked_sub(1) else {
+        let Some(index) = calling else {
             continue;
         };
         let caller = &turns[index];
@@ -1234,13 +1259,19 @@ fn shape(
             });
         }
     }
-    let errors = (harness == Harness::Claude).then(|| {
-        events
-            .ends
-            .iter()
-            .filter(|e| e.time >= since && e.file.is_none() && events.owns(e))
-            .count() as u64
-    });
+    // A failed result, as Claude flags it on the result and Codex on its record that the
+    // tool finished. Unknown for a Codex session that recorded no such record.
+    let finished = match harness {
+        Harness::Claude => &events.ends,
+        Harness::Codex => &events.done,
+    };
+    let finished: Vec<&StructuralEvent> = finished
+        .iter()
+        .copied()
+        .filter(|e| e.time >= since && events.owns(e))
+        .collect();
+    let errors = (harness == Harness::Claude || !finished.is_empty())
+        .then(|| finished.iter().filter(|e| e.file.is_none()).count() as u64);
     Shape {
         harness,
         session,
@@ -1533,8 +1564,9 @@ mod tests {
         let w = Workspace::new();
         let history = vec![
             codex_turn("gpt-5.4"),
+            // Codex records a response's call, then its usage, then the call's result.
+            json!({"type": "response_item", "timestamp": at(0.9), "payload": {"type": "function_call", "call_id": "call", "name": "exec", "arguments": "SYNTHETIC_PRIVATE_INPUT"}}),
             codex_billed(1.0, "a", 10_000, 0),
-            json!({"type": "response_item", "timestamp": at(1.5), "payload": {"type": "function_call", "call_id": "call", "name": "exec", "arguments": "SYNTHETIC_PRIVATE_INPUT"}}),
             json!({"type": "response_item", "timestamp": at(1.6), "payload": {"type": "function_call_output", "call_id": "call", "output": format!("SYNTHETIC_PRIVATE_OUTPUT{}", "x".repeat(3_976))}}),
             codex_billed(2.0, "b", 11_200, 9_856),
         ];
@@ -1584,8 +1616,9 @@ mod tests {
         let w = Workspace::new();
         let history = vec![
             codex_turn("gpt-5.4"),
+            // Codex records a response's call, then its usage, then the call's result.
+            json!({"type": "response_item", "timestamp": at(0.9), "payload": {"type": "function_call", "call_id": "call", "name": "exec", "arguments": "SYNTHETIC_PRIVATE_INPUT"}}),
             codex_billed(1.0, "a", 10_000, 0),
-            json!({"type": "response_item", "timestamp": at(1.5), "payload": {"type": "function_call", "call_id": "call", "name": "exec", "arguments": "SYNTHETIC_PRIVATE_INPUT"}}),
             json!({"type": "response_item", "timestamp": at(1.6), "payload": {"type": "function_call_output", "call_id": "call", "output": format!("SYNTHETIC_PRIVATE_OUTPUT{}", "x".repeat(3_976))}}),
             // Too short to hold the result, as after the history was cleared.
             codex_billed(2.0, "b", 2_000, 0),
@@ -1666,8 +1699,8 @@ mod tests {
         let records = vec![
             json!({"type": "session_meta", "timestamp": at(0.0), "payload": {"id": "thread", "model_provider": "openai", "cli_version": "0.167.0", "originator": "codex_cli_rs", "source": "cli"}}),
             json!({"type": "turn_context", "timestamp": at(0.0), "payload": {"model": "gpt-5.4", "turn_id": "turn", "service_tier": "standard"}}),
+            json!({"type": "response_item", "timestamp": at(0.5 / 60.0), "payload": {"type": "function_call", "call_id": "call", "name": "exec", "arguments": "SYNTHETIC_PRIVATE_INPUT"}}),
             billed(1, 10_000, 0),
-            json!({"type": "response_item", "timestamp": at(2.0 / 60.0), "payload": {"type": "function_call", "call_id": "call", "name": "exec", "arguments": "SYNTHETIC_PRIVATE_INPUT"}}),
             json!({"type": "response_item", "timestamp": at(3.0 / 60.0), "payload": {"type": "function_call_output", "call_id": "call", "output": format!("SYNTHETIC_PRIVATE_OUTPUT{}", "x".repeat(3_976))}}),
             // One 128-token step short of the whole prompt: its rendered end.
             billed(4, 11_200, 9_856),
@@ -1694,6 +1727,41 @@ mod tests {
         let shape = &audit.sessions.costliest[0];
         assert_eq!((shape.harness, shape.tool_errors), (Harness::Codex, None));
         assert_eq!(shape.session.as_deref(), Some("thread"));
+    }
+
+    #[test]
+    fn a_codex_miss_waits_on_its_predecessors_calls_and_failed_completions_are_errors() {
+        let w = Workspace::new();
+        let done = |minute: f64, item: Value| json!({"type": "event_msg", "timestamp": at(minute), "payload": {"type": "item_completed", "item": item}});
+        let records = vec![
+            codex_meta("thread", None),
+            codex_turn("gpt-5.4"),
+            // The call comes before the usage of the response that made it.
+            json!({"type": "response_item", "timestamp": at(0.5), "payload": {"type": "function_call", "call_id": "call", "name": "exec", "arguments": "SYNTHETIC_PRIVATE_INPUT"}}),
+            codex_billed(1.0, "a", 10_000, 0),
+            done(
+                10.0,
+                json!({"type": "CommandExecution", "id": "exec-1", "status": "failed", "exit_code": 1}),
+            ),
+            json!({"type": "response_item", "timestamp": at(10.0), "payload": {"type": "function_call_output", "call_id": "call", "output": "SYNTHETIC_PRIVATE_OUTPUT"}}),
+            done(
+                10.1,
+                json!({"type": "McpToolCall", "id": "m1", "server": "s", "tool": "t", "status": "completed", "result": {"isError": true}}),
+            ),
+            done(
+                10.2,
+                json!({"type": "FileChange", "id": "f1", "status": "completed"}),
+            ),
+            codex_billed(10.5, "b", 11_200, 0),
+        ];
+        let audit = audit_of(&w, &[(".codex/sessions/rollout.jsonl", records)]);
+        let miss = &audit.cache_misses.hotspots[0];
+        assert_eq!(
+            (miss.cause, miss.tools.as_slice()),
+            (Cause::ToolWaitTtl, ["exec".to_string()].as_slice())
+        );
+        let shape = &audit.sessions.costliest[0];
+        assert_eq!(shape.tool_errors, Some(2));
     }
 
     #[test]
@@ -1788,6 +1856,12 @@ mod tests {
         .unwrap();
         let elsewhere = dir("elsewhere");
 
+        // A token in the query never reaches the key that is printed and sent.
+        assert_eq!(
+            repository::canonical("https://github.com/o/r.git?token=SECRET#x"),
+            // slash ok: a remote's key, not a file path
+            "github.com/o/r"
+        );
         let https = Filter::Remotes(vec![repository::canonical("https://github.com/o/r/")]);
         assert_eq!(Filter::of(&sub).unwrap(), Some(https.clone()));
         let mut scope = Scope {

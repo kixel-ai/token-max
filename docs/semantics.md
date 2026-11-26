@@ -1312,8 +1312,10 @@ The cause is the first of these that holds:
    them; or the prompt is shorter than the predecessor's reusable prefix
    (`truncation`), as when old tool results are cleared.
 2. `tool_wait_ttl`: the gap from the predecessor's start passed the cache's
-   lifetime, and a tool call started in that gap returned after the lifetime
-   ended. Only Claude Code and Codex calls with a recorded result count.
+   lifetime, and a tool call the predecessor's reply made returned after the
+   lifetime ended. Only Claude Code and Codex calls with a recorded result
+   count. Claude Code records a request before its reply's calls and Codex
+   after them, so a Codex call belongs to the first request recorded after it.
 3. `idle_ttl`: the gap passed the lifetime with no such call.
 4. `prefix_bust`: within the lifetime, with nothing above changed. The prefix
    itself changed, as when an instruction or memory file was edited mid-session
@@ -1347,7 +1349,10 @@ cost of its own (`costUsd` is null), since an estimated size cannot place the
 boundary; its tool's total still prices each priced part, and counts in
 `unpriced` the results an unpriced request carried, whose total is then a lower
 bound. A tool result's error flag is Claude Code's `is_error`; Codex
-records none. A Codex tool is named with its MCP server or namespace, as the
+records none on a result. A Codex session's tool errors are the commands, MCP
+calls and file edits Codex recorded as failed when they finished, which name no
+call, so a Codex result's own flag stays null; a session with no such record has
+null errors. A Codex tool is named with its MCP server or namespace, as the
 context checks name it.
 
 **Sessions.** A session's cost is every request's price in the window, a lower

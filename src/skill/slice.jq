@@ -6,23 +6,26 @@ def simple: ((to_entries | map(select(.value | test("^[A-Za-z_][A-Za-z0-9_]*=") 
       and (.[1] | test("^[a-z][a-z0-9-]{0,30}$")) then [(.[0] | prog), .[1]] + (.[2:] | flags)
     else [.[0] | prog] + (.[1:] | flags) end);
 # A command with everything quoted, escaped or substituted masked as `%`, tracking quotes and
-# `$(...)` as the shell nests them; a continuation is deleted, and a heredoc ends it.
+# `$(...)` as the shell nests them; a continuation is deleted, a comment dropped, and a heredoc
+# ends it, since its body is data.
 def mask: reduce (explode[] | [.] | implode) as $c ({o: "", s: ["t"], e: false, p: "", x: false};
   if .x then .
-  elif .e then .e = false | (if $c == "\n" then . else .o += "%%" end) | .p = ""
+  elif .e then .e = false | if $c == "\n" then . else .o += "%%" | .p = "" end
   else .s[-1] as $t
-    | if $t == "s" then (if $c == "'" then .s |= .[:-1] else . end) | .o += "%"
+    | if $t == "c" then (if $c == "\n" then .s |= .[:-1] | .o += "\n" else . end)
+      elif $t == "s" then (if $c == "'" then .s |= .[:-1] else . end) | .o += "%"
       elif $c == "\\" then .e = true
       elif $t == "d" then (if $c == "\"" then .s |= .[:-1] elif $c == "(" and .p == "$" then .s += ["u"] elif $c == "`" then .s += ["b"] else . end) | .o += "%"
       elif $t == "b" then (if $c == "`" then .s |= .[:-1] else . end) | .o += "%"
+      elif $c == "<" and .p == "<" then .x = true
+      elif $c == "#" and (.p | test("^$|[\\s;&|()]")) then .s += ["c"]
       elif $c == "'" then .s += ["s"] | .o += "%"
       elif $c == "\"" then .s += ["d"] | .o += "%"
       elif $c == "`" then .s += ["b"] | .o += "%"
       elif $t == "u" then (if $c == "(" then .s += ["u"] elif $c == ")" then .s |= .[:-1] else . end) | .o += "%"
       elif $c == "(" and .p == "$" then .s += ["u"] | .o += "%"
-      elif $c == "<" and .p == "<" then .x = true
       else .o += $c end
-    | .p = $c
+    | if .e then . else .p = $c end
   end) | .o;
 def cmd: if type == "array" then map(tostring)
     | if length == 3 and (.[0] | test("(^|/)(ba|z|da)?sh$")) then .[2] | cmd else simple end

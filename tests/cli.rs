@@ -2744,8 +2744,11 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     // An escaped separator is no program name.
     let escaped = json!({"command": "api_key\\=synthetic-private-key; api_key\\=synthetic-private/git status; KEY=$(echo synthetic-private-sub x) cargo build; printf % 'literal $(' \"x); synthetic-private-word; y\""});
     let answers = json!({"type": "user", "toolUseResult": {"answers": {"SYNTHETIC_PRIVATE_QUESTION text?": "SYNTHETIC_PRIVATE_ANSWER", "Enable CD?": "yes"}}});
+    // A comment's apostrophe opens no quote, and a heredoc's body is data, even in `$(...)`.
+    let comment = json!({"command": "# don't\ngit commit -m 'fix; synthetic-private word'"});
+    let heredoc = json!({"command": "v=$(cat <<'EOF'\n)\nsynthetic-private-word\nEOF\n)"});
     let lines = format!(
-        "{}{codex}\n{codex_output}\n{mcp}\n{escaped}\n{answers}\n",
+        "{}{codex}\n{codex_output}\n{mcp}\n{escaped}\n{answers}\n{comment}\n{heredoc}\n",
         audited_session("s", &w.home)
     );
     let mut jq = Command::new("jq")
@@ -2771,7 +2774,9 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    assert_eq!(records.len(), 9);
+    assert_eq!(records.len(), 11);
+    assert_eq!(records[9], json!({"command": [["git", "commit", "-m"]]}));
+    assert_eq!(records[10], json!({"command": [["v="]]}));
     assert_eq!(
         records[7],
         json!({"command": [["?"], ["?"], ["KEY=", "cargo", "build"], ["printf"]]})

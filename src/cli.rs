@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde_json::ser::Formatter;
 
+use crate::audit::{Audit, Filter};
 use crate::collections::IndexMap;
 use crate::defaults::Credit;
 use crate::discovery::{DiscoveryOptions, discover};
@@ -42,6 +43,7 @@ Commands:
   doctor    Report which settings to change, then offer to change them
   vibes     Advice the transcripts can't price, with no verdict
   sessions  Each session's priced usage as JSON lines
+  audit     A repository's priced transcript hotspots as JSON, for the token-audit skill
 
   -v, --version  Show the package version
   -h, --help     Show this help
@@ -199,6 +201,48 @@ fails the whole run.
 Costs are public API prices, not an invoice. Reads transcripts and Git config only
 and prints no prompt or reply text. Errors go to stderr as JSON.
 Exit 0: printed. Exit 2: scan, pricing, argument or cancellation failure.
+";
+
+const AUDIT_HELP: &str = "token-max audit: a repository's priced transcript hotspots as JSON
+
+Usage: token-max audit [options]
+
+  --all                   Audit every session, not only the current repository's
+  --repo DIR              Audit the repository of the Git checkout at DIR instead
+  --limit N               Keep N entries in each ranked list (default: 10)
+  --since YYYY-MM-DD|ISO  Select from midnight UTC or an instant with timezone (default: 14 days ago)
+  --claude-dir DIR        Select a Claude profile (repeatable)
+  --codex-dir DIR         Select a Codex home, including archived sessions (repeatable)
+  --t3-dir DIR            Select a T3 state directory (repeatable)
+  --ssh HOST              Also audit an SSH destination, putting this build there first if needed (repeatable)
+  --offline               Use cached public prices without network access
+  --prices-file FILE      Use a local models.dev catalog without network access
+  --price-cache FILE      Cache path (default: ~/.cache/token-max/models.json)
+  -h, --help              Show this help
+
+Prints one JSON object of where Claude Code and Codex sessions spent tokens they need not
+have, priced at public API prices, for an agent such as the token-audit skill to inspect.
+Each finding points at its transcript as host, file and line, so the agent reads only those
+slices. By default it covers sessions in the current directory's Git repository, matched by
+remote URL, or by Git directory when the repository has no remote; --repo picks another
+checkout, and --all every session.
+
+cacheMisses lists requests that lost cache reuse against the one before them, by cause:
+tool_wait_ttl, a tool call outlasting the cache; idle_ttl, a gap outlasting it; control_change,
+a model, effort, speed, compaction or truncation change; or prefix_bust, a changed prefix
+within the cache's lifetime. toolOutputs lists tool results by tool and the ones later
+requests carried the most, with what carrying them cost. sessions lists the sessions that
+stand out by cost, uncached input, total input, first prompt, subagent cost, tool calls,
+tool errors and repeated calls to one tool, each once with the lines of its first
+requests, and ranks them per measure by index. assumptions names what the prices assume.
+Each ranking keeps --limit entries.
+
+This host is always audited, and directory flags select its profiles only. Each SSH
+destination audits its own sessions with this host's prices, matching the repository by
+remote URL, and only its ranked findings cross SSH. Any failed host fails the whole run.
+
+Never prints or keeps prompt, reply, tool input or tool output text. Errors go to stderr as
+JSON. Exit 0: printed. Exit 2: scan, pricing, argument or cancellation failure.
 ";
 
 /// What a cancelling signal interrupts.
@@ -765,6 +809,9 @@ fn enter(phase: Phase) {
 struct Values {
     since: Option<String>,
     max_cost_per_use: Option<String>,
+    repo: Option<String>,
+    limit: Option<String>,
+    all: bool,
     offline: bool,
     plain: bool,
     details: bool,
@@ -787,6 +834,8 @@ impl Values {
         match name {
             "since" => self.since = Some(value),
             "max-cost-per-use" => self.max_cost_per_use = Some(value),
+            "repo" => self.repo = Some(value),
+            "limit" => self.limit = Some(value),
             "claude-dir" => self.claude_dirs.push(value),
             "codex-dir" => self.codex_dirs.push(value),
             "t3-dir" => self.t3_dirs.push(value),
@@ -800,6 +849,7 @@ impl Values {
 
     fn flag(&mut self, name: &str) -> Option<&mut bool> {
         Some(match name {
+            "all" => &mut self.all,
             "offline" => &mut self.offline,
             "plain" => &mut self.plain,
             "details" => &mut self.details,
@@ -816,6 +866,8 @@ impl Values {
             name,
             "since"
                 | "max-cost-per-use"
+                | "repo"
+                | "limit"
                 | "claude-dir"
                 | "codex-dir"
                 | "t3-dir"
@@ -1369,7 +1421,8 @@ fn sessions(args: &[String]) -> Result<(Output, u8), ScanError> {
         || values.details
         || values.defaults
         || values.version
-        || values.max_cost_per_use.is_some();
+        || values.max_cost_per_use.is_some()
+        || audit_only(&values);
     if report_only {
         return Err(invalid());
     }
@@ -1419,6 +1472,158 @@ fn sessions(args: &[String]) -> Result<(Output, u8), ScanError> {
     Ok((Output::Text(lines), 0))
 }
 
+/// Whether any option only `token-max audit` takes is set.
+fn audit_only(values: &Values) -> bool {
+    values.all || values.repo.is_some() || values.limit.is_some()
+}
+
+/// `token-max audit`: rank the selected sessions' hotspots on every host.
+fn forensics(args: &[String]) -> Result<(Output, u8), ScanError> {
+    let invalid = || ScanError::new("invalid arguments; use token-max audit --help");
+    let mut values = parse(args).ok_or_else(invalid)?;
+    if values.help {
+        return Ok((Output::Text(help(AUDIT_HELP)), 0));
+    }
+    if values.plain
+        || values.details
+        || values.defaults
+        || values.version
+        || values.max_cost_per_use.is_some()
+        || (values.all && values.repo.is_some())
+    {
+        return Err(invalid());
+    }
+    let limit = match values.limit.as_deref() {
+        None => 10,
+        Some(value) => value
+            .parse::<usize>()
+            .ok()
+            .filter(|&n| n > 0 && value.bytes().all(|b| b.is_ascii_digit()))
+            .ok_or_else(|| ScanError::new("--limit requires a whole number above zero"))?,
+    };
+    if values.ssh_scan {
+        // The coordinator names the window and sends the filter and limit with its job.
+        if chosen_here(&values) || audit_only(&values) || values.since.is_none() {
+            return Err(invalid());
+        }
+        return Ok((Output::Written, ssh::serve(window(&values)?, Scope::Audit)));
+    }
+    let now = crate::reader::now();
+    let since = window(&values)?.unwrap_or(now - 14 * 24 * 60 * 60 * 1000);
+    let filter = if values.all {
+        Filter::All
+    } else {
+        let (dir, named) = match values.repo.take() {
+            Some(dir) => (dir, true),
+            None => {
+                let cwd = std::env::current_dir()
+                    .map_err(|_| ScanError::new("cannot read the current directory"))?;
+                (cwd.to_string_lossy().into_owned(), false)
+            }
+        };
+        let absolute =
+            std::path::absolute(&dir).map_err(|_| ScanError::new("--repo requires a directory"))?;
+        let found = Filter::of(&absolute.to_string_lossy())?;
+        match found {
+            Some(filter) => filter,
+            None if named => {
+                return Err(ScanError::new(format!(
+                    "--repo {dir} is not in a Git checkout"
+                )));
+            }
+            None => {
+                return Err(ScanError::new(
+                    "the current directory is not in a Git checkout; use --all or --repo DIR",
+                ));
+            }
+        }
+    };
+    if matches!(filter, Filter::Common(_)) && !values.ssh.is_empty() {
+        return Err(ScanError::new(
+            "the repository has no remote, so SSH hosts cannot match it; use --all",
+        ));
+    }
+    let (discovery, destinations) = hosts(&mut values)?;
+    let hosts_named: Vec<Option<String>> = std::iter::once(None)
+        .chain(destinations.iter().cloned().map(Some))
+        .collect();
+    let replies = gather(Gather {
+        since: Some(since),
+        defaults: false,
+        discovery,
+        destinations,
+        prices: price_options(values.prices_file, values.price_cache, values.offline)?,
+        job: Job::Audit {
+            filter: filter.clone(),
+            limit,
+        },
+        home: None,
+        progress: None,
+        ask: None,
+    })?;
+    let mut audits = vec![];
+    for (host, reply) in replies {
+        let Reply::Audit(mut found) = reply else {
+            unreachable!("an audit job gets audits");
+        };
+        if let Some(host) = &host {
+            found.on(host);
+        }
+        audits.push(*found);
+    }
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Printed<'a> {
+        since: String,
+        scope: Selected<'a>,
+        hosts: Vec<Option<String>>,
+        limit: usize,
+        totals: crate::audit::Totals,
+        cache_misses: crate::audit::CacheMisses,
+        tool_outputs: crate::audit::ToolOutputs,
+        sessions: crate::audit::Ranked,
+        assumptions: &'a [&'a str],
+    }
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Selected<'a> {
+        all: bool,
+        /// The remotes sessions were matched by, without scheme or user.
+        remotes: Option<&'a [String]>,
+        /// The Git directory sessions were matched by, for a repository with no remote.
+        git_dir: Option<&'a str>,
+    }
+    let audit = Audit::merge(audits, limit);
+    let printed = Printed {
+        since: crate::safe::iso(since),
+        scope: Selected {
+            all: filter == Filter::All,
+            remotes: match &filter {
+                Filter::Remotes(remotes) => Some(remotes),
+                _ => None,
+            },
+            git_dir: match &filter {
+                Filter::Common(dir) => Some(dir),
+                _ => None,
+            },
+        },
+        hosts: hosts_named,
+        limit,
+        totals: audit.totals,
+        cache_misses: audit.cache_misses,
+        tool_outputs: audit.tool_outputs,
+        sessions: audit.sessions.ranked(),
+        assumptions: &crate::audit::ASSUMPTIONS,
+    };
+    let mut text = vec![];
+    write_json(&mut text, &printed)
+        .map_err(|_| ScanError::new("analysis failed; no report produced"))?;
+    Ok((
+        Output::Text(String::from_utf8(text).expect("JSON is UTF-8")),
+        0,
+    ))
+}
+
 /// Run one command, returning the output and exit code without writing either.
 fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
     match args.first().map(String::as_str) {
@@ -1426,6 +1631,7 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
         Some("doctor") => return audit(&args[1..], Command::Doctor),
         Some("vibes") => return audit(&args[1..], Command::Vibes),
         Some("sessions") => return sessions(&args[1..]),
+        Some("audit") => return forensics(&args[1..]),
         Some(_) => {}
     }
     let invalid = || ScanError::new("invalid arguments; use --help");
@@ -1592,6 +1798,7 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
     let scope = match job {
         Job::Report { .. } => Scope::Report { defaults },
         Job::Sessions => Scope::Sessions,
+        Job::Audit { .. } => Scope::Audit,
     };
     let remote = !destinations.is_empty();
     // Each host's report is named once the run covers several.
@@ -1611,6 +1818,7 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
             vibes: *vibes,
         },
         Job::Sessions => Job::Sessions,
+        Job::Audit { .. } => job.clone(),
     };
     let (sender, results) = mpsc::channel();
     {
@@ -1783,6 +1991,7 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
                     phase(match job {
                         Job::Report { .. } => "Checking settings",
                         Job::Sessions => "Pricing sessions",
+                        Job::Audit { .. } => "Auditing sessions",
                     });
                     catalog = Some(loaded);
                 }
@@ -1820,6 +2029,14 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
                             )?))
                         }
                         Job::Sessions => Reply::Sessions(export(&scan, catalog)?),
+                        Job::Audit { filter, limit } => {
+                            let options = crate::audit::Options {
+                                filter,
+                                since: since.expect("an audit has a window"),
+                                limit: *limit,
+                            };
+                            Reply::Audit(Box::new(crate::audit::audit(&scan, catalog, &options)?))
+                        }
                     },
                     Scanned::Remote(reply) => reply,
                 });
@@ -1856,6 +2073,9 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
         })
     };
     let mut values = parse(args).ok_or_else(invalid)?;
+    if audit_only(&values) {
+        return Err(invalid());
+    }
     // Advice has no verdict to tune, evidence cards to expand or settings to pretend away.
     if advice
         && (values.details
@@ -2047,7 +2267,7 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
                 walk: Some((offers, remote)),
                 ..
             }) => (None, Some(Side::There { offers, remote }), items),
-            Reply::Sessions(_) => unreachable!("a report job gets reports"),
+            Reply::Sessions(_) | Reply::Audit(_) => unreachable!("a report job gets reports"),
         };
         if let Some(printed) = printed {
             code = code.max(u8::from(printed.change));
@@ -2626,8 +2846,10 @@ pub fn main() -> ExitCode {
         .skip(1)
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
-    // The session export keeps its diagnostics machine-readable too.
-    let json = args.first().is_some_and(|a| a == "sessions");
+    // The session export and the audit keep their diagnostics machine-readable too.
+    let json = args
+        .first()
+        .is_some_and(|a| a == "sessions" || a == "audit");
     let handler = ctrlc::set_handler(move || {
         let phase = PHASE.lock().unwrap_or_else(PoisonError::into_inner);
         let message = match *phase {

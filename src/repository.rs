@@ -50,6 +50,24 @@ pub fn url(value: &str) -> Option<String> {
 /// None when `cwd` no longer exists or cannot be read, is in no checkout, or the checkout has
 /// no remote or an unreadable config. Fails only on Git metadata Git itself would reject.
 pub fn checkout(cwd: &str) -> Result<Option<Vec<String>>, ScanError> {
+    Ok(locate(cwd)?.and_then(|found| (!found.urls.is_empty()).then_some(found.urls)))
+}
+
+/// A Git checkout found from a directory in it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Checkout {
+    /// The resolved directory holding the repository's shared config, which every worktree
+    /// of one repository shares.
+    pub common: String,
+    /// Remote URLs without userinfo, in the order its config lists them; empty for none.
+    pub urls: Vec<String>,
+}
+
+/// The Git checkout containing `cwd`.
+///
+/// None when `cwd` no longer exists or cannot be read, is in no checkout, or has an
+/// unreadable config. Fails only on Git metadata Git itself would reject.
+pub fn locate(cwd: &str) -> Result<Option<Checkout>, ScanError> {
     // The repository is evidence beside the session's cost, so a directory this host cannot
     // read, such as another user's or a dropped network mount, leaves it unknown rather than
     // failing the export. Git finds the checkout from the resolved path, past any symlink.
@@ -89,7 +107,32 @@ pub fn checkout(cwd: &str) -> Result<Option<Vec<String>>, ScanError> {
             unique.push(found);
         }
     }
-    Ok((!unique.is_empty()).then_some(unique))
+    let common = realpath(&git.common).unwrap_or(git.common);
+    Ok(Some(Checkout {
+        common,
+        urls: unique,
+    }))
+}
+
+/// A remote URL reduced to what names the repository, so the HTTPS and SSH forms of one
+/// remote compare equal: no scheme, user, `.git` suffix or trailing slash, with the host in
+/// lowercase and an scp-style `host:path` read as `host/path`.
+pub fn canonical(url: &str) -> String {
+    let (rest, scp) = match url.find("://") {
+        Some(at) => (&url[at + 3..], false),
+        None => (url, true),
+    };
+    let rest = rest.rsplit_once('@').map_or(rest, |(_, after)| after);
+    let split = rest.find(|c| c == '/' || (scp && c == ':'));
+    let (host, path) = match split {
+        Some(at) => (&rest[..at], &rest[at + 1..]),
+        None => (rest, ""),
+    };
+    // A port names the same repository on its host.
+    let host = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
+    let path = path.trim_end_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path).trim_matches('/');
+    format!("{host}/{path}")
 }
 
 /// Whether this host lacks permission to read the `.git` pointer file at `root` or the

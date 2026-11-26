@@ -522,6 +522,24 @@ fn polling_loop(command: &str) -> bool {
     has("sleep") && has("do") && (has("while") || has("until") || has("for"))
 }
 
+/// The bytes of text a tool result holds, counted without keeping any of it: a string, or
+/// the `text` of each content block. Images and other media are not text and count nothing.
+fn text_bytes(value: &Value) -> u32 {
+    fn walk(value: &Value) -> u64 {
+        match value {
+            Value::String(text) => text.len() as u64,
+            Value::Array(items) => items.iter().map(walk).sum(),
+            Value::Object(block) => block
+                .get("text")
+                .or_else(|| block.get("content"))
+                .or_else(|| block.get("output"))
+                .map_or(0, walk),
+            _ => 0,
+        }
+    }
+    u32::try_from(walk(value)).unwrap_or(u32::MAX)
+}
+
 fn kind_name(kind: EventKind) -> &'static str {
     match kind {
         EventKind::Compaction => "compaction",
@@ -913,6 +931,7 @@ fn event(
         idle_attribution: IdleAttribution::Unknown,
         shell: None,
         file: None,
+        bytes: None,
         meta: EventMeta {
             harness: snapshot.harness,
             session: context.session.clone(),
@@ -1607,6 +1626,7 @@ impl Reader {
                         );
                         e.tool_id = opaque(b, "tool_use_id")?.map(Id::from);
                         e.file = (!is_true(b, "is_error")).then_some(crate::lsp::File::Done);
+                        e.bytes = Some(text_bytes(member(b, "content")));
                         if timed_out {
                             e.shell = Some(ShellCall {
                                 timed_out,
@@ -2006,6 +2026,9 @@ impl Reader {
                 );
                 e.tool = text(member(p, "name"));
                 e.tool_id = opaque(p, "call_id")?.map(Id::from);
+                if kind == EventKind::ToolEnd {
+                    e.bytes = Some(text_bytes(member(p, "output")));
+                }
                 self.add_event(e);
             }
         }

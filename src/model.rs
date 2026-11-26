@@ -697,6 +697,8 @@ pub struct StructuralEvent {
     /// The language a Claude file tool's start named, or that a tool's result wasn't an
     /// error; never the path.
     pub file: Option<crate::lsp::File>,
+    /// A tool result's text length in bytes, never the text; saturates at `u32::MAX`.
+    pub bytes: Option<u32>,
     pub meta: std::sync::Arc<EventMeta>,
 }
 

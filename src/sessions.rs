@@ -87,6 +87,20 @@ impl Sessions {
         self.facts.get(session)?.cwd.as_ref()
     }
 
+    /// A session's native ID and the native ID of the session it was spawned from.
+    pub(crate) fn native(&self, session: &str) -> (Option<&str>, Option<&str>) {
+        let facts = self.facts.get(session);
+        (
+            facts.and_then(|f| f.id.as_deref()),
+            facts.and_then(|f| f.parent.as_deref()),
+        )
+    }
+
+    /// The remote URL Codex recorded when the session started.
+    pub(crate) fn recorded_repository(&self, session: &str) -> Option<&str> {
+        self.facts.get(session)?.repository.as_deref()
+    }
+
     pub(crate) fn observe(&mut self, record: Record) {
         let index = match self.facts.get_index(self.last) {
             Some((key, _)) if key == record.session => self.last,

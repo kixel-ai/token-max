@@ -119,7 +119,3 @@ finalizing wording):
     overwrite modified files without `--force`,
   - a test asserting `skills/token-audit/SKILL.md` matches the embedded stub.
 - Update `src/cli.rs` help text and `docs/reference.md`.
-
-## Required
-
-- [Forensic audit subcommand](/quest/m1/token-audit/cli-audit.md) - provides the `token-max audit` JSON output and `(host, file, line)` pointers that `token-max skill audit` instructs the agent to run

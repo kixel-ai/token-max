@@ -671,6 +671,7 @@ mod tests {
             idle_attribution: crate::model::IdleAttribution::Unknown,
             shell: None,
             file: None,
+            bytes: None,
             meta: crate::model::EventMeta {
                 harness: Harness::Claude,
                 session: "session".into(),

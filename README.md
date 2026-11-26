@@ -140,7 +140,8 @@ for how to read each line, and its sections for each check.
 - [Reference](https://github.com/kixel-ai/token-max/blob/main/docs/reference.md):
   every flag, report section and check, including `--ssh`, T3 Code
   and the `token-max sessions` export of each session's cost, branches and
-  repositories, from this host or over SSH.
+  repositories, and the `token-max audit` hotspots of a repository's sessions,
+  from this host or over SSH.
 - [Replay semantics](https://github.com/kixel-ai/token-max/blob/main/docs/semantics.md):
   the accounting, assumptions, sources and limits.
 - [Plans](https://github.com/kixel-ai/token-max/tree/main/quest):

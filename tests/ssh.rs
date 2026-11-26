@@ -2120,3 +2120,117 @@ fn a_destination_takes_answers_only_for_the_profiles_it_listed() {
         "{stderr}"
     );
 }
+
+#[test]
+fn audits_from_every_host_rank_together_with_each_pointer_on_its_host() {
+    let hosts = Hosts::new();
+    let home = hosts.host("devbox");
+    // The destination's session ran in a checkout of the same repository as this host's, by
+    // its SSH remote.
+    let remote = |dir: &Path, url: &str| {
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(
+            dir.join(".git/config"),
+            format!("[remote \"origin\"]\n\turl = {url}\n"),
+        )
+        .unwrap();
+    };
+    let there = home.join("checkout");
+    remote(&there, "git@host:o/r.git");
+    let here = hosts.root.join("homes/local/checkout");
+    remote(&here, "https://host/o/r");
+    let session: String = std::fs::read_to_string(fixture("claude.jsonl"))
+        .unwrap()
+        .replace("session-a", "session-there")
+        .replace("message-", "there-message-")
+        .lines()
+        .map(|line| {
+            let mut record: Value = serde_json::from_str(line).unwrap();
+            record["cwd"] = there.to_str().unwrap().into();
+            format!("{record}\n")
+        })
+        .collect();
+    std::fs::write(
+        home.join(".claude/projects/my project/there.jsonl"),
+        session,
+    )
+    .unwrap();
+    let audit = |args: &[&str]| {
+        let (status, stdout, stderr) = run(hosts
+            .invoke(
+                "audit",
+                &[&["--since", "2026-11-01", "--ssh", "devbox"], args].concat(),
+            )
+            .current_dir(&here));
+        assert_eq!((status, &*stderr), (0, ""), "{stdout}");
+        assert!(!stdout.contains("SYNTHETIC_PRIVATE"), "{stdout}");
+        serde_json::from_str::<Value>(&stdout).unwrap()
+    };
+    let hosted = |found: &Value| -> Vec<(Value, String)> {
+        let list = &found["sessions"]["list"];
+        found["sessions"]["costliest"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| {
+                let at = &list[i.as_u64().unwrap() as usize]["at"];
+                (at["host"].clone(), at["file"].as_str().unwrap().to_string())
+            })
+            .collect()
+    };
+    // Every host's sessions, in one ranking, each pointer naming its host.
+    let all = audit(&["--all"]);
+    assert_eq!(all["hosts"], json!([null, "devbox"]));
+    assert_eq!(all["totals"]["sessions"], 3);
+    let mut found = hosted(&all);
+    found.sort_by_key(|(host, file)| (host.to_string(), file.clone()));
+    assert_eq!(found.len(), 3);
+    assert_eq!(found[0].0, json!("devbox"));
+    assert!(found[0].1.ends_with("main.jsonl"), "{found:?}");
+    assert!(found[1].1.ends_with("there.jsonl"), "{found:?}");
+    assert_eq!(found[2].0, Value::Null);
+    // The repository here, matched there by its remote in another form.
+    let scoped = audit(&[]);
+    assert_eq!(scoped["totals"]["sessions"], 1);
+    let found = hosted(&scoped);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].0, json!("devbox"));
+    assert!(found[0].1.ends_with("there.jsonl"), "{found:?}");
+
+    // A destination may send no more entries than this host asked for.
+    let header = hosts.header();
+    let shape = r#"{"harness":"claude","session":null,"parent":null,"subagent":false,"cwd":null,"requests":1,"costUsd":1,"complete":true,"inputTokens":0,"cacheReadTokens":0,"cacheHitRatio":null,"peakInputTokens":0,"startInputTokens":null,"compactions":0,"toolCalls":0,"toolErrors":null,"streak":null,"at":{"host":null,"file":"f","line":1},"earlyLines":[]}"#;
+    hosts.host("flood");
+    hosts.fake(
+        "flood",
+        &format!(
+            r#"echo '{header}'; echo '{{"audit":{{"since":1793491200000,"audit":{{"totals":{{"sessions":2,"requests":2,"costUsd":2,"unpriced":0}},"cacheMisses":{{"total":{{"events":0,"tokens":0,"costUsd":0,"unpriced":0}},"byCause":{{}},"hotspots":[]}},"toolOutputs":{{"byTool":[],"hotspots":[]}},"sessions":{{"costliest":[{shape},{shape}],"leastCached":[],"mostInput":[],"largestStart":[],"subagents":[],"mostToolCalls":[],"mostToolErrors":[],"longestStreaks":[]}}}}}}}}'; exec sleep 600"#
+        ),
+    );
+    let (status, stdout, stderr) = run(hosts
+        .invoke(
+            "audit",
+            &[
+                "--all",
+                "--since",
+                "2026-11-01",
+                "--limit",
+                "1",
+                "--ssh",
+                "flood",
+            ],
+        )
+        .current_dir(&here));
+    assert_eq!((status, &*stdout), (2, ""));
+    assert_eq!(
+        stderr,
+        "{\"error\":\"flood: token-max there sent a list longer than the 1 entries asked for\"}\n"
+    );
+    // A repository with no remote names nothing another host could match.
+    std::fs::write(here.join(".git/config"), "[core]\n").unwrap();
+    let (status, _, stderr) = run(hosts
+        .invoke("audit", &["--ssh", "devbox"])
+        .current_dir(&here));
+    assert_eq!(status, 2);
+    assert!(stderr.contains("has no remote"), "{stderr}");
+}

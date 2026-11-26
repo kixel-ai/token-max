@@ -1185,7 +1185,8 @@ content is stored or tested.
 commands, a configured remote command or a persisted control master, with
 stdin kept open (OpenSSH 8.7 or newer for those overrides), and asks
 the destination's `sh` to run `token-max doctor --ssh-scan`, or
-`token-max sessions --ssh-scan` for session lines, with this build on Linux or
+`token-max sessions --ssh-scan` for session lines or `token-max audit --ssh-scan`
+for an audit, with this build on Linux or
 macOS, x86_64 or arm64. The script first prints one short line:
 `run` before it execs the binary it found, or `copy` or `download <target>`
 when it found none. Then a second `ssh` streams this binary to the cache
@@ -1210,9 +1211,11 @@ destination's stdin: the price catalog and the job. For `doctor` and `vibes`
 the job is a report, which says whether to answer with `vibes`' cards instead,
 with `--max-cost-per-use` and the report format (this terminal's
 width, color and Unicode settings, `--details` and the host's label); for
-`sessions` it is the session export. The destination then writes its printed
-report and whether it recommends a change, or its session lines, either with
-its window, or its safe diagnostic, then ends the stream.
+`sessions` it is the session export; for `audit` it is the audit, with the
+repository's remotes and the list limit. The destination then writes its printed
+report and whether it recommends a change, its session lines, or its ranked
+findings, each with its window, or its safe diagnostic, then ends the stream.
+An audit with a list longer than the limit fails the run.
 
 When `doctor` walks on a terminal, the job says so and the stream stays open.
 The destination checks its changes against its own files, as a local walk
@@ -1266,6 +1269,78 @@ A signal at `vibes`' offer or questions after `doctor` wrote exits 2 like any
 cancelled question, saying no further settings were changed: every write was
 reported before the offer, so what was written stands, and a destination
 stopped there is not asked to end its audit.
+
+## Transcript audit
+
+`token-max audit` replays each session's requests in time order and compares
+each with the one before it. It reads the transcripts the window depends on, as
+the session export does, so a request just before the window can be the first
+one's predecessor; findings and totals count only requests in the window.
+
+**Lost cache reuse.** A request lost reuse when it read less of the cache than
+its predecessor left there. For Claude Code that is the predecessor's cached
+prompt, its reads plus its writes. For Codex, OpenAI caches a prompt from 1,024
+tokens in 128-token steps, and a prompt's rendered end differs once another
+message follows it, so a request can reuse at most its predecessor's prompt less
+128 tokens, rounded down to a step; on real transcripts nine in ten Codex
+requests that read less than the whole prompt missed exactly that one step.
+The tokens lost are that reusable prefix less what the request read, but never
+more than what it wrote or sent uncached, so a compacted prompt counts only
+what it sent again. Whether the prompt's total grew or shrank does not matter:
+a full rewrite after the cache expired keeps reads plus writes the same or
+larger and still counts whole. Those tokens are priced where the request's
+prompt placed them, cache writes and then ordinary input, less what reading
+them would have cost; a request without prices for its model, tier or cache
+lifetimes is counted and left unpriced.
+
+The cause is the first of these that holds:
+
+1. `control_change`: the model, the recorded reasoning effort or the recorded
+   speed differs from the predecessor's; a compaction was recorded between
+   them; or the prompt is shorter than the predecessor's reusable prefix
+   (`truncation`), as when old tool results are cleared.
+2. `tool_wait_ttl`: the gap from the predecessor's start passed the cache's
+   lifetime, and a tool call started in that gap returned after the lifetime
+   ended. Only Claude Code and Codex calls with a recorded result count.
+3. `idle_ttl`: the gap passed the lifetime with no such call.
+4. `prefix_bust`: within the lifetime, with nothing above changed. The prefix
+   itself changed, as when an instruction or memory file was edited mid-session
+   or a tool or MCP server's schema changed, or the provider dropped the cache
+   early; the transcript cannot tell which.
+
+A Claude Code request's lifetime is the one its predecessor wrote, else the one
+it wrote, else 5 minutes, the shortest. A Codex request's is 5 minutes, the
+shortest OpenAI documents keeping a prefix unused.
+
+**Tool results.** Transcripts record each request's input, not each tool
+result's, so a result's tokens are estimated as a quarter of its text's bytes:
+a string result, or the `text` of each content block. Images and other media
+count nothing, so screenshot-heavy tools are undercounted. A result sits in
+later prompts right after the request that called it, its predecessor's input
+and output, after any earlier result of the same request. Every later request
+in the session carries it until one's prompt is too short to hold it, as after
+a compaction or a cleared result; carrying stops there, even if the prompt
+grows past it again. Each carrying request pays for the result's tokens at the
+prices of the spans they sit in: cache reads, cache writes, then ordinary
+input, so a Codex request that read none of its prompt from the cache pays
+ordinary input for them. A result whose estimated span crosses from one price
+to another in a carrying prompt has no cost of its own (`costUsd` is null),
+since an estimated size cannot place the boundary; its tool's total still
+prices each part. A tool result's error flag is Claude Code's `is_error`;
+Codex records none.
+
+**Sessions.** A session's cost is every request's price in the window. Its
+first prompt counts only when the session began in the window. A streak is
+the most calls to one tool in a row, by start time, with no other tool
+between, and one call is no streak. A Claude subagent, or a Codex thread
+spawned from another, is a subagent.
+
+**Bounds.** Every list is ranked by its measure, priced findings first by
+dollars and unpriced ones after by tokens, and cut to the limit, dropping
+entries whose measure is zero. Each SSH destination sends lists cut the same
+way, so a tool or session that falls outside one host's top entries does not
+count toward the ranking across hosts. Tool names are kept only when they are
+short labels of letters, digits and `_.:/@<>+-`; anything else is `unrecorded`.
 
 ## Transcript retention
 

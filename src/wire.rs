@@ -1,13 +1,15 @@
 //! The private SSH audit stream between this host and a destination's
-//! `token-max doctor --ssh-scan` or `token-max sessions --ssh-scan`.
+//! `token-max doctor --ssh-scan`, `token-max sessions --ssh-scan` or
+//! `token-max audit --ssh-scan`.
 //!
 //! The destination writes a [`Header`]. For a report it then lists the Claude profiles whose
 //! billing picks their main TTL's default, in [`Outcome::Profiles`], and waits for this host's
-//! [`Paid`] answers, which arrive once the person has answered; a session export skips both.
+//! [`Paid`] answers, which arrive once the person has answered; a session export or an audit
+//! skips both.
 //! It then starts scanning. This host answers with one [`Request`] on the destination's stdin,
 //! carrying the price catalog and the [`Job`], and the destination analyzes its own scan and
-//! writes one [`Outcome`]: its finished report, its priced session lines, or a diagnostic,
-//! never the scan. Each value is one JSON line.
+//! writes one [`Outcome`]: its finished report, its priced session lines, its audit's ranked
+//! findings, or a diagnostic, never the scan. Each value is one JSON line.
 //!
 //! A job for a walk also carries the destination's offers and leaves the stream open: this
 //! host walks through them, sends the [`Answer`]s, and the destination replies to each with
@@ -21,6 +23,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::audit::{Audit, Filter};
 use crate::collections::IndexMap;
 use crate::doctor::{Event, Offers, Style, Written};
 use crate::model::{Billing, Millis};
@@ -43,6 +46,7 @@ pub fn build() -> String {
             include_str!("prices.rs"),
             include_str!("model.rs"),
             include_str!("sessions.rs"),
+            include_str!("audit.rs"),
             include_str!("repository.rs"),
             include_str!("totals.rs"),
             // Its `Credit` is a field of the totals a report carries.
@@ -106,6 +110,9 @@ pub enum Job {
     },
     /// `token-max sessions`' lines.
     Sessions,
+    /// `token-max audit`'s findings for the sessions `filter` selects, each list cut to `limit`.
+    #[serde(rename_all = "camelCase")]
+    Audit { filter: Filter, limit: usize },
 }
 
 /// How a host's report is printed for this host's terminal, under the host's name when the
@@ -202,6 +209,13 @@ pub enum Outcome {
         /// Its sessions, ordered by first request, each without a host.
         sessions: Vec<Session>,
     },
+    #[serde(rename_all = "camelCase")]
+    Audit {
+        /// The window the destination scanned, which must be the one requested.
+        since: Option<Millis>,
+        /// Its findings, each list ranked and cut to the job's limit, each pointer without a host.
+        audit: Box<Audit>,
+    },
     Error(ScanError),
 }
 
@@ -251,6 +265,9 @@ impl Limit {
     pub const ADVICE: Self = Self::new(16 << 20, "for its advice");
     /// Every session in the window, which over a long history is the largest value.
     pub const SESSIONS: Self = Self::new(256 << 20, "for its sessions");
+    /// An audit's ranked lists, each cut to the limit this host asked for: well under 1 MB
+    /// at the default of 10 entries, so this leaves room for a limit in the hundreds.
+    pub const AUDIT: Self = Self::new(64 << 20, "for its audit");
     /// The changed lines of the files a walk would write, with their context.
     pub const PREVIEW: Self = Self::new(16 << 20, "for its preview");
     pub const WROTE: Self = Self::new(1 << 20, "for the files it wrote");

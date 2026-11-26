@@ -1001,7 +1001,7 @@ files and their size, then the SSH destinations it adds, or how to add one with
 
 The report is for people and has no machine-readable form; `--json` was
 removed. Each machine output is its own sub-command with a named consumer, such
-as the session export below.
+as the session export and the transcript audit below.
 
 IDs in the report are opaque hashes. Shared histories are read once, and a
 request whose profile is ambiguous counts once on the line its profiles share
@@ -1076,7 +1076,77 @@ Every string prints with terminal controls and direction overrides escaped as
 host or a destination, cannot drive the terminal that shows the output.
 
 Native session IDs never reach the report, which hashes them. Over SSH, they
-cross only in a destination's session lines.
+cross only in a destination's session lines and audit findings.
+
+## Transcript audit
+
+`token-max audit` prints one JSON object of where a repository's Claude Code
+and Codex sessions, T3 Code's included, spent tokens they need not have, priced
+at public API prices, for the `token-audit` skill. Each finding points at its
+transcript as `host`, `file` and 1-based `line`, so an agent reads only those
+slices instead of whole transcripts. It prints no prompt, reply, tool input or
+tool output text, only tool names, counts, times, prices, session metadata and
+pointers. `token-max audit --help` lists every option.
+
+```sh
+token-max audit                  # the current directory's repository, last 14 days
+token-max audit --all --since 2026-11-01
+token-max audit --repo ~/src/other --ssh devbox --limit 20
+```
+
+It covers the sessions of the Git repository containing the current directory,
+or the checkout `--repo` names, or every session with `--all`; outside a
+checkout, it fails and says to pick one. A session belongs to the repository
+when Codex recorded one of its remotes, or when the checkout now containing the
+session's directory has one, compared without scheme, user, port, `.git` or
+trailing slash, so `git@host:o/r.git` matches `https://host/o/r`. A repository
+with no remote matches the sessions whose checkout shares its Git directory,
+any linked worktree included; that names a directory on this host alone, so it
+cannot be combined with `--ssh`. A session whose directory is gone or in no
+checkout, and that Codex recorded no remote for, is left out. Without `--since`
+the window is the last 14 days, and the object names the window it used.
+
+The object holds:
+
+- `since`, `scope` (`all`, the `remotes` matched, or the `gitDir` matched),
+  `hosts` (null for this host, then each `--ssh` destination) and `limit`.
+- `totals`: the sessions, requests and cost in scope.
+- `cacheMisses`: requests that lost cache reuse against the request before them
+  in the session, in all and `byCause`, and the costliest as `hotspots`, each
+  with its `cause`, the `change` for a control change, the tokens rewritten or
+  sent again, the gap and the cache lifetime it was compared with, the tools
+  called between the two requests, and pointers to both. The causes are
+  `tool_wait_ttl`, a tool call outlasting the cache; `idle_ttl`, a gap
+  outlasting it with no tool call that did; `control_change`, a model, effort,
+  speed, compaction or truncation `change`; and `prefix_bust`, a prefix that
+  changed within the cache's lifetime with nothing else changed, such as an
+  edited `CLAUDE.md` or a tool list that moved.
+- `toolOutputs`: each tool's results (`byTool`), with their estimated tokens and
+  what the requests that carried them paid for them, and the results carried
+  the most (`hotspots`), each pointing at its call and its result.
+- `sessions`: the sessions that stand out, each once in `list`, and one
+  ranking per measure as indexes into it: `costliest`, `leastCached` (input not
+  read from the cache), `mostInput` (input over every request), `largestStart`
+  (the first prompt: always-loaded instructions, tools and memory), `subagents`
+  (by cost), `mostToolCalls`, `mostToolErrors` and `longestStreaks` (the most
+  calls in a row to one tool). Each session names its tool calls and errors,
+  compactions, cache hit ratio and largest prompt, points `at` its first request,
+  and lists the lines of its first requests in that file (`earlyLines`), to
+  sample how it started.
+- `assumptions`: what the prices assume, which
+  [the semantics](semantics.md#transcript-audit) explain.
+
+Every list is ranked and keeps `--limit` entries, 10 by default, so the object
+fits an agent's context. A cost is a lower bound where `unpriced` counts
+findings whose prices are unknown; a single finding's unknown cost is null,
+never zero. Codex records no tool errors, so a Codex session's are null.
+
+Over `--ssh`, each destination audits its own sessions with this host's prices
+and the repository's remotes this host sent, ranks them and sends only its
+lists, each no longer than the limit; this host ranks every host's together and
+names each pointer's host. Any failed host fails the whole run. Errors go to
+stderr as JSON. Exit 0: printed. Exit 2: scan, pricing, argument or
+cancellation failure.
 
 ## Cache TTL
 
@@ -1346,7 +1416,8 @@ host, which every run audits. You install nothing
 there: each destination runs this build of token-max, which token-max puts
 there itself. Linux and macOS destinations on x86_64 or arm64 are supported.
 `token-max sessions` takes the same flags, and each destination sends only its
-priced session lines. `token-max vibes` takes them too, and each destination
+priced session lines; `token-max audit` too, and each destination sends only
+its ranked findings. `token-max vibes` takes them too, and each destination
 sends only its cards and, for a walk, the changes they offer.
 
 ```sh

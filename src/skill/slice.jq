@@ -7,10 +7,12 @@ def simple: ((to_entries | map(select(.value | test("^[A-Za-z_][A-Za-z0-9_]*=") 
     else [.[0] | prog] + (.[1:] | flags) end);
 def cmd: if type == "array" then map(tostring)
     | if length == 3 and (.[0] | test("(^|/)(ba|z|da)?sh$")) then .[2] | cmd else simple end
-  else [tostring | sub("<<[\\s\\S]*"; "") | gsub("(?<k>(^|[^\\\\])(\\\\\\\\)*)\\\\\n"; "\(.k)") | gsub("\u0027[^\u0027]*\u0027|\"(\\\\.|[^\"\\\\])*\"|\\\\[\\s\\S]"; "%")
+  else [tostring | sub("<<[\\s\\S]*"; "") | gsub("(?<k>(^|[^\\\\])(\\\\\\\\)*)\\\\\n"; "\(.k)") | until(test("\\$\\([^()]*\\)|`[^`]*`") | not; gsub("\\$\\([^()]*\\)|`[^`]*`"; "%")) | gsub("\u0027[^\u0027]*\u0027|\"(\\\\.|[^\"\\\\])*\"|\\\\[\\s\\S]"; "%")
     | splits("&&|\\|\\||[;|\\n]") | [splits("\\s+") | select(. != "")] | select(length > 0) | simple] | .[:4] end;
 def safe($tool): if type == "object" then
     del(.internal_chat_message_metadata_passthrough, .permission_profile, .sandbox_policy, .rate_limits, .encrypted_content, .signature, .betas, .annotations, .logprobs, .text_elements, .parentUuid, .uuid, .promptId)
+    # A tool's payload can key its data by text, as AskUserQuestion keys answers by question.
+    | with_entries(if $tool and (.key | test("^[A-Za-z_][A-Za-z0-9_]{0,40}$") | not) then .key = "<\(.key | length) chars>" else . end)
     | with_entries(.key as $k | ($tool or ($k | IN("input", "arguments", "output", "toolUseResult"))) as $in | .value |= (type as $t
       | if $k == "arguments" and $t == "string" then (. as $s | try (fromjson | safe(true)) catch "<\($s | length) chars>")
       elif ($k == "command" or $k == "cmd") and ($t == "string" or $t == "array") then cmd

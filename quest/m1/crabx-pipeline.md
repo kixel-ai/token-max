@@ -2,11 +2,11 @@
 
 ## Goal
 
-The next token-max release's binaries are built and attested by kixel-ai/crabx's pipeline, so
-crabx runs and installs it, and cargo-dist is gone from the repository. `run.sh`, `run.ps1`,
+token-max's release binaries are built and attested by kixel-ai/crabx's pipeline, so crabx runs
+and installs them, and cargo-dist is gone from the repository. `run.sh`, `run.ps1`,
 `doctor --ssh` and the upgrade offer work from the pipeline's assets, and max.kixel.me's
 `/install.sh` and `/install.ps1` install through crabx's installers. Non-goal: cutting the
-release itself, which [0.1.1](/quest/m1/release-0.1.1.md) does.
+release itself, which [0.1.0](/quest/m1/release-0.1.md) does.
 
 ## Plan
 
@@ -16,10 +16,12 @@ Decided 2026-11-25 (maintainer, /quest-plan in kixel-ai/crabx and here):
   accept; drop). "We want to dog food. If the crabx pipeline sucks then quest-plan
   improvements": a gap the pipeline has becomes a crabx quest, not a workaround here. Today
   crabx 0.2.0 refuses token-max@0.0.1, whose attestation signs from `refs/heads/main`.
-- ✅ 0.1.0 ships with cargo-dist as [planned](/quest/m1/release-0.1.md), and this switch lands
-  after it (rejected: holding 0.1.0 for the pipeline). The pipeline only builds versions published
-  after its caller is added, so 0.1.0 stays refused by crabx, and 0.1.1 is the first release
-  crabx runs.
+- ✅ 0.1.0 waits for this switch and is the first pipeline release (rejected: 0.1.0 with
+  cargo-dist and the pipeline from 0.1.1; teaching 0.1.0's upgrade the pipeline's names; every
+  pipeline release also publishing cargo-dist-named copies). This reverses the same day's first
+  pick, after this PR's review found that installed 0.1.0 binaries would upgrade by downloading
+  cargo-dist's names from the latest release (`stage` in `src/upgrade.rs`), so 0.1.1 would 404 for
+  them. 0.0.1 has no upgrade offer, so no installed binary needs cargo-dist's names.
 - ✅ Static musl Linux builds come from the pipeline, beside its glibc ones
   ([kixel-ai/crabx `quest/m1/pipeline-musl.md`](https://github.com/kixel-ai/crabx/blob/main/quest/m1/pipeline-musl.md))
   (rejected: shipping glibc only, which breaks `doctor --ssh` on Alpine and old-glibc hosts).
@@ -51,8 +53,11 @@ Recommendations:
   `[package.metadata.binstall]` in `Cargo.toml`, since the pipeline uses binstall's defaults.
   Rewrite `docs/releasing.md`'s Binaries section, and the README's and `docs/reference.md`'s
   installer lines.
-- The page deploys by hand, and the new `/install.sh` must not go live before a release has
-  pipeline assets. So this PR changes `site/` and leaves the deploy to 0.1.1's checks.
+- The page deploys by hand. The deployed run scripts request cargo-dist's names from the latest
+  release, and the new ones and `/install.sh` need a release with pipeline assets. So this PR
+  changes `site/` and leaves the deploy to 0.1.0's release, right after the pipeline uploads its
+  archives. Between the pipeline creating the release and that deploy, the old `run.sh` gets a
+  404, a window of minutes.
 - Validate with the pipeline's manual dispatch on this branch's head. It builds and attests
   every target without creating tags or releases. Point `run.sh` and the ssh download at a local
   copy of those archives (`TOKEN_MAX_RELEASES`) to check them end to end.
@@ -63,7 +68,3 @@ Recommendations:
   `git ls-remote --tags https://github.com/kixel-ai/crabx pipeline-v1.1.0`.
 - kixel-ai/crabx: crabx's installers taking crate names. Check that
   `curl -fsSL https://crabx.kixel.me/install.sh` mentions `CRABX_INSTALL`.
-
-## Required
-
-- [Release 0.1.0](/quest/m1/release-0.1.md) - ships with cargo-dist first, as decided

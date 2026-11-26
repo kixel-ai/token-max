@@ -2747,9 +2747,9 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     // A comment's apostrophe opens no quote, and a heredoc's body is data, even in `$(...)`.
     let comment = json!({"command": "# don't\ngit commit -m 'fix; synthetic-private word'"});
     let heredoc = json!({"command": "v=$(cat <<'EOF'\n)\nsynthetic-private-word\nEOF\n)"});
-    // An arithmetic command's operands are no commands, a character class's `]]` ends no
-    // conditional, and a short option's attached value is no flag.
-    let class = json!({"command": "(( x == 0 || synthetic_private == x )) && [[ $x =~ ^[[:digit:]]+$ || synthetic-private == $x ]] && git status -sb && mysql -psyntheticprivate -u"});
+    // An arithmetic command's operands are no commands, neither a character class's `]]` nor
+    // one a word goes on past ends a conditional, and a short option's attached value is no flag.
+    let class = json!({"command": "(( x == 0 || synthetic_private == x )) && [[ $x =~ ^[[:digit:]]+$ || $x == ]]a || synthetic-private == $x ]] && git status -sb && mysql -psyntheticprivate -u"});
     let inner = json!({"command": "KEY=$(# a key\nprintf x) cargo build; printf x release\\ #1 && cargo test"});
     // `$'...'` ends at an unescaped quote, and an array's or a process substitution's lines, or
     // a conditional's operands, are no commands.

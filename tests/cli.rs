@@ -2003,8 +2003,8 @@ mod unix {
             settings
         );
 
-        // Now that promptCacheTtl is already 1h, a second run shows it as already good (✓)
-        // and `--defaults` opens an interactive read-only preview that never writes.
+        // `--defaults` changes nothing, so on a terminal it prints the report and asks only
+        // how the profile pays, exiting 1 for the change it recommends.
         let mut defaults_cmd = command(
             &w,
             &[
@@ -2018,11 +2018,11 @@ mod unix {
             ],
         );
         defaults_cmd.env("LANG", "C.UTF-8");
-        let (status, stdout, stderr) = typed(&mut defaults_cmd, b"\rq");
-        assert_eq!(status, 0, "stdout={stdout}\nstderr={stderr}");
+        let (status, stdout, stderr) = typed(&mut defaults_cmd, b"a\n");
+        assert_eq!(status, 1, "stdout={stdout}\nstderr={stderr}");
         assert!(
-            stdout.contains("--defaults · read-only") && stdout.contains("Preview only"),
-            "expected interactive read-only --defaults TUI: {stdout}"
+            stdout.contains("as a default user (--defaults)"),
+            "{stdout}"
         );
         assert_eq!(
             std::fs::read_to_string(w.claude.join("settings.json")).unwrap(),

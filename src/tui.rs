@@ -51,8 +51,6 @@ pub(crate) struct Hero {
     pub caveats: Vec<String>,
     pub host_count: usize,
     pub vibes_pending: usize,
-    /// True under `--defaults`: interactive read-only preview that never edits files.
-    pub read_only: bool,
     /// Already-good settings (shown with green `✓` in the Measured scorecard).
     pub kept: Vec<KeptItem>,
     /// Count of remaining in-budget tools/skills folded into a single summary line.
@@ -799,9 +797,6 @@ impl App {
                     .flatten()
                     .map_or_else(String::new, |s| format!(" ({s} of spend)"));
                 let mut pills = vec![];
-                if self.hero.read_only {
-                    pills.push("--defaults · read-only".to_string());
-                }
                 if self.has_unset_main_ttl {
                     pills.push(format!("[b] Billing: {}", self.billing.label()));
                 }
@@ -815,11 +810,7 @@ impl App {
                     )
                 } else {
                     let save_str = if sel > 0.0 {
-                        if self.hero.read_only {
-                            format!("Potential ~{}/mo", about(sel))
-                        } else {
-                            format!("Save ~{}/mo", about(sel))
-                        }
+                        format!("Save ~{}/mo", about(sel))
                     } else {
                         "Select changes to preview".into()
                     };
@@ -1084,9 +1075,7 @@ impl App {
         let rule = if self.unicode { "─" } else { "-" };
         foot.push(self.style(DIM, &format!(" {}", rule.repeat(w.saturating_sub(2)))));
         let checked = self.checked_count();
-        let primary = if self.hero.read_only {
-            self.style(&format!("{BOLD}{BRAND}"), "[q] Exit preview")
-        } else if checked > 0 {
+        let primary = if checked > 0 {
             self.style(
                 &format!("{BOLD}{GREEN}"),
                 &format!("[Enter] Review diff ({checked})"),
@@ -1111,9 +1100,7 @@ impl App {
         } else {
             keys.push(self.style(DIM, &format!("[{}] details", self.arrow())));
         }
-        if !self.hero.read_only {
-            keys.push(self.style(DIM, "[q] quit"));
-        }
+        keys.push(self.style(DIM, "[q] quit"));
         foot.push(trim_ansi(&format!("  {}", keys.join("  ")), w));
 
         // Build body rows with focus tracking and vertical windowing.
@@ -2228,7 +2215,7 @@ pub(crate) fn run(
     }
 
     // All-clear fast path: print crisp Hero Card + already-good green checks + manual steps.
-    if app.is_all_clear() && !app.hero.read_only {
+    if app.is_all_clear() {
         let width = style.width.unwrap_or(80).clamp(48, 104);
         let mut stdout = io::stdout().lock();
         let failed = |_| ScanError::new("cannot use the terminal; no settings were changed");
@@ -2414,12 +2401,6 @@ pub(crate) fn run(
                     }
                 }
                 KeyCode::Enter => {
-                    if app.hero.read_only {
-                        app.status_error = Some(
-                            "Preview only (--defaults) — run without --defaults to apply.".into(),
-                        );
-                        continue;
-                    }
                     if app.checked_count() == 0 {
                         viewport.clear(&mut stdout).ok();
                         drop(_raw);
@@ -3266,7 +3247,6 @@ mod tests {
             caveats: vec!["Sample caveat".into()],
             host_count: 1,
             vibes_pending: 2,
-            read_only: false,
             kept: vec![
                 KeptItem {
                     host_label: None,
@@ -3336,14 +3316,6 @@ mod tests {
                 }
             }
         }
-
-        // Read-only `--defaults` preview mode renders read-only pill and exit hint.
-        app.unicode = true;
-        app.hero.read_only = true;
-        let ro_frame = app.render(90, 32).join("\n");
-        assert!(ro_frame.contains("--defaults · read-only"), "{ro_frame}");
-        assert!(ro_frame.contains("[q] Exit preview"), "{ro_frame}");
-        assert!(!ro_frame.contains("Review diff"), "{ro_frame}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

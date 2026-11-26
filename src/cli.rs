@@ -2380,12 +2380,11 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
         });
     let color = stdout && !values.plain && env_nonempty("NO_COLOR").is_none() && !term_dumb;
     let unicode = stdout && !values.plain && !term_dumb && unicode_locale;
-    // Use the interactive inline TUI on capable terminals (unless `--plain` or `TERM=dumb`),
-    // including `--defaults` in read-only preview mode.
-    let rich_tui = terminal && !values.plain && !term_dumb;
-    // Plain `--defaults` prints the static report without walking; rich terminals open the
-    // interactive TUI in read-only preview mode.
-    let walk = terminal && (!values.defaults || rich_tui);
+    // A report with the settings files pretended away has no changes to make.
+    let walk = terminal && !values.defaults;
+    // The walk is the inline TUI on a terminal that draws one, unless `--plain` asks for the
+    // line-by-line questions.
+    let rich_tui = walk && !values.plain && !term_dumb;
     let format = Format {
         width: width(),
         color,
@@ -2405,9 +2404,10 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
             (releases, check)
         })
     });
-    // On a terminal, offer a newer release before anything else. In plain / `--defaults`
-    // plain mode, print the opening list and ask how each Claude profile pays before scanning; in
-    // the rich TUI, launch the animated replay immediately and let `[b]` toggle Plan/API live.
+    // On a terminal, offer a newer release before anything else, then, unless the TUI walks,
+    // open with what the run is about to read and ask how each host's Claude profiles on the
+    // Anthropic API pay, which picks each one's main TTL default; the TUI's `[b]` toggles that
+    // live instead. Without a terminal the report names both defaults.
     let ask = if terminal {
         let found = discover(&discovery)?;
         // A run reporting as a default user would changes nothing, so it only says how.
@@ -2635,12 +2635,7 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
         let hero = rich_tui.then(|| {
             let mut h = Hero {
                 host_count: hosts.len(),
-                vibes_pending: if values.defaults {
-                    0
-                } else {
-                    hosts.iter().map(|h| vibes::pending(&h.items)).sum()
-                },
-                read_only: values.defaults,
+                vibes_pending: hosts.iter().map(|h| vibes::pending(&h.items)).sum(),
                 kept,
                 kept_features,
                 caveats: vec![

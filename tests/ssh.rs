@@ -2204,7 +2204,7 @@ fn audits_from_every_host_rank_together_with_each_pointer_on_its_host() {
     hosts.fake(
         "flood",
         &format!(
-            r#"echo '{header}'; echo '{{"audit":{{"since":1793491200000,"audit":{{"totals":{{"sessions":2,"requests":2,"costUsd":2,"incomplete":0}},"cacheMisses":{{"total":{{"events":0,"tokens":0,"costUsd":0,"unpriced":0}},"byCause":{{}},"hotspots":[]}},"toolOutputs":{{"byTool":[],"hotspots":[]}},"sessions":{{"costliest":[{shape},{shape}],"leastCached":[],"mostInput":[],"largestStart":[],"subagents":[],"mostToolCalls":[],"mostToolErrors":[],"longestStreaks":[]}}}}}}}}'; exec sleep 600"#
+            r#"echo '{header}'; read -r request; echo '{{"audit":{{"since":1793491200000,"audit":{{"totals":{{"sessions":2,"requests":2,"costUsd":2,"incomplete":0}},"cacheMisses":{{"total":{{"events":0,"tokens":0,"costUsd":0,"unpriced":0}},"byCause":{{}},"hotspots":[]}},"toolOutputs":{{"byTool":[],"hotspots":[]}},"sessions":{{"costliest":[{shape},{shape}],"leastCached":[],"mostInput":[],"largestStart":[],"subagents":[],"mostToolCalls":[],"mostToolErrors":[],"longestStreaks":[]}}}}}}}}'; exec sleep 600"#
         ),
     );
     let (status, stdout, stderr) = run(hosts

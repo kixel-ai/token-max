@@ -1215,7 +1215,9 @@ width, color and Unicode settings, `--details` and the host's label); for
 repository's remotes and the list limit. The destination then writes its printed
 report and whether it recommends a change, its session lines, or its ranked
 findings, each with its window, or its safe diagnostic, then ends the stream.
-An audit with a list longer than the limit fails the run.
+An audit with a ranked list longer than the limit fails the run. Each host
+sends every tool's total, since totals add across hosts, and the coordinator
+cuts them to the limit only after merging.
 
 When `doctor` walks on a terminal, the job says so and the stream stays open.
 The destination checks its changes against its own files, as a local walk

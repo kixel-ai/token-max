@@ -2743,11 +2743,13 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     let mcp = json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "mcp__notes__save", "input": {"name": "SYNTHETIC_PRIVATE_NAME", "status": "SYNTHETIC_PRIVATE_STATUS", "file_path": "/notes.md", "command": "echo synthetic-private-note A=1 B=2; NOTE=x\\ synthetic-private-word cat; RUST_LOG=debug \\\ncargo test --release; TOKEN=demo\\\nsynthetic-private-token rg -n"}}]}});
     // An escaped separator is no program name.
     let escaped = json!({"command": "api_key\\=synthetic-private-key; api_key\\=synthetic-private/git status; KEY=$(echo synthetic-private-sub x) cargo build; printf % 'literal $(' \"x); synthetic-private-word; y\""});
-    let answers = json!({"type": "user", "toolUseResult": {"answers": {"SYNTHETIC_PRIVATE_QUESTION text?": "SYNTHETIC_PRIVATE_ANSWER", "Enable CD?": "yes"}}});
+    let answers = json!({"type": "user", "toolUseResult": {"answers": {"SYNTHETIC_PRIVATE_QUESTION text?": "SYNTHETIC_PRIVATE_ANSWER", "SYNTHETIC_PRIVATE_WORD": "yes"}}});
     // A comment's apostrophe opens no quote, and a heredoc's body is data, even in `$(...)`.
     let comment = json!({"command": "# don't\ngit commit -m 'fix; synthetic-private word'"});
     let heredoc = json!({"command": "v=$(cat <<'EOF'\n)\nsynthetic-private-word\nEOF\n)"});
     let inner = json!({"command": "KEY=$(# a key\nprintf x) cargo build; printf x release\\ #1 && cargo test"});
+    // `$'...'` ends at an unescaped quote.
+    let ansi = json!({"command": "echo $'it\\'s; synthetic-private word' && git status"});
     // A torn line hides none after it; a server's result keeps no text, even under a field
     // the records use; a script's argument is no command.
     let torn = r#"{"type": "user", "message": {"content": "synthetic-private"#;
@@ -2755,7 +2757,7 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     let codex_mcp = json!({"type": "event_msg", "payload": {"type": "mcp_tool_call_end", "invocation": {"server": "notes", "tool": "save", "arguments": {"file_path": "/n.md"}}, "result": {"Ok": {"structuredContent": {"name": "SYNTHETIC_PRIVATE_NAME", "status": "SYNTHETIC_PRIVATE_STATUS"}}}}});
     let script = json!({"type": "response_item", "payload": {"type": "function_call", "name": "shell", "arguments": json!({"command": ["bash", "run.sh", "synthetic-private-arg"]}).to_string()}});
     let lines = format!(
-        "{}{codex}\n{codex_output}\n{mcp}\n{escaped}\n{answers}\n{comment}\n{heredoc}\n{inner}\n{torn}\n{mcp_meta}\n{codex_mcp}\n{script}\n",
+        "{}{codex}\n{codex_output}\n{mcp}\n{escaped}\n{answers}\n{comment}\n{heredoc}\n{inner}\n{ansi}\n{torn}\n{mcp_meta}\n{codex_mcp}\n{script}\n",
         audited_session("s", &w.home)
     );
     let mut jq = Command::new("jq")
@@ -2781,22 +2783,26 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    assert_eq!(records.len(), 16);
-    assert_eq!(records[12], json!({"unparsed": 58}));
+    assert_eq!(records.len(), 17);
     assert_eq!(
-        records[13]["mcpMeta"]["structuredContent"],
-        json!({"name": "<22 chars>", "path": "<18 chars>", "command": "<23 chars>"})
+        records[12],
+        json!({"command": [["echo"], ["git", "status"]]})
+    );
+    assert_eq!(records[13], json!({"unparsed": 58}));
+    assert_eq!(
+        records[14]["mcpMeta"],
+        json!({"<17 chars, #0>": {"<4 chars, #0>": "<22 chars>", "<4 chars, #1>": "<18 chars>", "<7 chars, #2>": "<23 chars>"}})
     );
     assert_eq!(
-        records[14]["payload"]["invocation"],
+        records[15]["payload"]["invocation"],
         json!({"server": "<5 chars>", "tool": "save", "arguments": {"file_path": "/n.md"}})
     );
     assert_eq!(
-        records[14]["payload"]["result"]["Ok"]["structuredContent"],
-        json!({"name": "<22 chars>", "status": "<24 chars>"})
+        records[15]["payload"]["result"],
+        json!({"<2 chars, #0>": {"<17 chars, #0>": {"<4 chars, #0>": "<22 chars>", "<6 chars, #1>": "<24 chars>"}}})
     );
     assert_eq!(
-        records[15]["payload"]["arguments"],
+        records[16]["payload"]["arguments"],
         json!({"command": ["bash"]})
     );
     assert_eq!(
@@ -2811,8 +2817,8 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     );
     // AskUserQuestion keys its answers by the question's text.
     assert_eq!(
-        records[8]["toolUseResult"]["answers"],
-        json!({"<32 chars, #0>": "<24 chars>", "<10 chars, #1>": "<3 chars>"})
+        records[8]["toolUseResult"],
+        json!({"<7 chars, #0>": {"<32 chars, #0>": "<24 chars>", "<22 chars, #1>": "<3 chars>"}})
     );
     // What the audit needs survives: models, tool names, commands' shape, sizes.
     assert_eq!(records[1]["message"]["model"], "claude-opus-5-5");
@@ -2947,15 +2953,29 @@ fn skill_install_writes_a_shared_skills_directory_once() {
     );
     assert!(shared.join("token-audit/SKILL.md").is_file());
 
-    // A symlinked SKILL.md names the file it points at, which --force would replace.
+    // A write through a linked SKILL.md would replace any file it names, so even --force refuses.
     let elsewhere = w.home.join("notes.md");
     std::fs::write(&elsewhere, "mine").unwrap();
     std::fs::remove_file(shared.join("token-audit/SKILL.md")).unwrap();
     std::os::unix::fs::symlink(&elsewhere, shared.join("token-audit/SKILL.md")).unwrap();
-    let (status, _, stderr) = run(&mut command(&w, &["skill", "install"]));
-    assert_eq!(status, 2);
-    let elsewhere = std::fs::canonicalize(&elsewhere).unwrap();
-    let target = format!("(a link to {:?})", native_path(&elsewhere));
-    assert!(stderr.contains(&target), "{stderr}");
+    for args in [&["skill", "install"][..], &["skill", "install", "--force"]] {
+        let (status, _, stderr) = run(&mut command(&w, args));
+        assert_eq!(status, 2);
+        assert!(stderr.contains("is a link to"), "{stderr}");
+    }
     assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), "mine");
+
+    // A checkout's skills directory linked outside it gets nothing from --project.
+    let project = w.home.join("project");
+    std::fs::create_dir_all(project.join(".agents")).unwrap();
+    std::os::unix::fs::symlink(&shared, project.join(".agents/skills")).unwrap();
+    std::fs::remove_file(shared.join("token-audit/SKILL.md")).unwrap();
+    let (status, _, stderr) =
+        run(command(&w, &["skill", "install", "--project"]).current_dir(&project));
+    assert_eq!(status, 2);
+    assert!(
+        stderr.contains("links outside the current directory"),
+        "{stderr}"
+    );
+    assert!(!shared.join("token-audit/SKILL.md").exists());
 }

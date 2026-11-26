@@ -44,22 +44,6 @@ struct Target {
     resolved: PathBuf,
 }
 
-impl Target {
-    /// The path, and for a symlinked `SKILL.md` the file it points at, which a write replaces.
-    fn shown(&self) -> String {
-        let path = display(&self.path.to_string_lossy());
-        let linked = fs::symlink_metadata(&self.path).is_ok_and(|m| m.file_type().is_symlink());
-        if linked && self.resolved.exists() {
-            format!(
-                "{path} (a link to {})",
-                display(&self.resolved.to_string_lossy())
-            )
-        } else {
-            path
-        }
-    }
-}
-
 /// What happened to one target.
 enum State {
     Current,
@@ -69,12 +53,27 @@ enum State {
 
 /// Write the stub into every selected skills directory, returning what each line did.
 pub fn install(options: &Install) -> Result<String, ScanError> {
+    // A checkout's own files can link a project's skills anywhere, so its install stays inside.
+    let inside = match &options.project {
+        Some(cwd) => Some(fs::canonicalize(cwd).map_err(|_| {
+            ScanError::new(format!("cannot read {}", display(&cwd.to_string_lossy())))
+        })?),
+        None => None,
+    };
     let mut targets: Vec<Target> = vec![];
     for root in roots(options)? {
         let path = root.join("skills").join("token-audit").join("SKILL.md");
-        let resolved = resolve(&path).map_err(|_| {
-            ScanError::new(format!("cannot read {}", display(&path.to_string_lossy())))
-        })?;
+        let shown = display(&path.to_string_lossy());
+        let resolved =
+            resolve(&path).map_err(|_| ScanError::new(format!("cannot read {shown}")))?;
+        if inside
+            .as_ref()
+            .is_some_and(|dir| !resolved.starts_with(dir))
+        {
+            return Err(ScanError::new(format!(
+                "{shown} links outside the current directory, so --project leaves it alone"
+            )));
+        }
         if !targets.iter().any(|t| t.resolved == resolved) {
             targets.push(Target { path, resolved });
         }
@@ -88,12 +87,23 @@ pub fn install(options: &Install) -> Result<String, ScanError> {
             Err(_) => return Err(cannot("read", &target.path)),
         });
     }
-    // Refuse before writing anything, so a refusal leaves every file as it was.
+    // Refuse before writing anything, so a refusal leaves every file as it was. A write
+    // replaces a linked SKILL.md's target, which can be any file, so --force never does.
+    for (target, state) in targets.iter().zip(&states) {
+        let linked = fs::symlink_metadata(&target.path).is_ok_and(|m| m.file_type().is_symlink());
+        if linked && matches!(state, State::Different) {
+            return Err(ScanError::new(format!(
+                "{} is a link to {}, which differs from this token-max's token-audit skill; replace the link with a copy of {SOURCE} or remove it",
+                display(&target.path.to_string_lossy()),
+                display(&target.resolved.to_string_lossy())
+            )));
+        }
+    }
     let refused: Vec<String> = targets
         .iter()
         .zip(&states)
         .filter(|(_, s)| matches!(s, State::Different) && !options.force)
-        .map(|(t, _)| t.shown())
+        .map(|(t, _)| display(&t.path.to_string_lossy()))
         .collect();
     if !refused.is_empty() {
         return Err(ScanError::new(format!(
@@ -103,7 +113,7 @@ pub fn install(options: &Install) -> Result<String, ScanError> {
     }
     let mut out = String::new();
     for (target, state) in targets.iter().zip(&states) {
-        let shown = target.shown();
+        let shown = display(&target.path.to_string_lossy());
         if matches!(state, State::Current) {
             out.push_str(&format!("up to date: {shown}\n"));
             continue;

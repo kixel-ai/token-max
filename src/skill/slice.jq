@@ -5,8 +5,8 @@ def simple: ((to_entries | map(select(.value | test("^[A-Za-z_][A-Za-z0-9_]*=") 
     elif length > 1 and (.[0] | prog | IN("git", "gh", "cargo", "rustup", "go", "npm", "pnpm", "yarn", "bun", "uv", "pip", "nix", "docker", "kubectl", "just", "quest", "token-max"))
       and (.[1] | test("^[a-z][a-z0-9-]{0,30}$")) then [(.[0] | prog), .[1]] + (.[2:] | flags)
     else [.[0] | prog] + (.[1:] | flags) end);
-# A command with everything quoted, escaped or substituted masked as `%`, tracking quotes and
-# `$(...)` as the shell nests them; a continuation is deleted, a comment dropped, and a heredoc
+# A command with everything quoted, escaped or substituted masked as `%`, tracking quotes,
+# `$'...'` with its escapes, and `$(...)` as the shell nests them; a continuation is deleted, a comment dropped, and a heredoc
 # ends it, since its body is data.
 def mask: reduce (explode[] | [.] | implode) as $c ({o: "", s: ["t"], e: false, p: "", x: false};
   if .x then .
@@ -15,11 +15,12 @@ def mask: reduce (explode[] | [.] | implode) as $c ({o: "", s: ["t"], e: false, 
     | if $t == "c" then (if $c == "\n" then .s |= .[:-1] | .o += (if .s[-1] == "t" then "\n" else "%" end) else . end)
       elif $t == "s" then (if $c == "'" then .s |= .[:-1] else . end) | .o += "%"
       elif $c == "\\" then .e = true
+      elif $t == "a" then (if $c == "'" then .s |= .[:-1] else . end) | .o += "%"
       elif $t == "d" then (if $c == "\"" then .s |= .[:-1] elif $c == "(" and .p == "$" then .s += ["u"] elif $c == "`" then .s += ["b"] else . end) | .o += "%"
       elif $t == "b" then (if $c == "`" then .s |= .[:-1] else . end) | .o += "%"
       elif $c == "<" and .p == "<" then .x = true
       elif $c == "#" and (.p | test("^$|[\\s;&|()]")) then .s += ["c"]
-      elif $c == "'" then .s += ["s"] | .o += "%"
+      elif $c == "'" then .s += [if .p == "$" then "a" else "s" end] | .o += "%"
       elif $c == "\"" then .s += ["d"] | .o += "%"
       elif $c == "`" then .s += ["b"] | .o += "%"
       elif $t == "u" then (if $c == "(" then .s += ["u"] elif $c == ")" then .s |= .[:-1] else . end) | .o += "%"
@@ -45,9 +46,10 @@ def kept: if . == ["attachment"] then "^(type|timestamp)$"
 def safe($at): ($at | kept) as $keep | ($at | envelope) as $env
   | if type == "object" then
     del(.internal_chat_message_metadata_passthrough, .permission_profile, .sandbox_policy, .rate_limits, .encrypted_content, .signature, .betas, .annotations, .logprobs, .text_elements, .parentUuid, .uuid, .promptId)
-    # A payload can key its data by text, as AskUserQuestion keys answers by question.
+    # Data can key itself by text, as AskUserQuestion keys answers by question, so only a
+    # record's or a tool input's identifier-shaped keys stay.
     | if $env then . else to_entries | to_entries | map(.key as $i | .value
-        | if .key | test("^[A-Za-z_][A-Za-z0-9_]{0,40}$") then . else .key = "<\(.key | length) chars, #\($i)>" end) | from_entries
+        | if $keep and (.key | test("^[A-Za-z_][A-Za-z0-9_]{0,40}$")) then . else .key = "<\(.key | length) chars, #\($i)>" end) | from_entries
       end
     | with_entries(.key as $k | .value |= (type as $t
       | if $k == "arguments" and $t == "string" then (. as $s | try (fromjson | safe($at + ["arguments"])) catch "<\($s | length) chars>")

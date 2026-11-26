@@ -19,8 +19,8 @@ Run `token-max audit` in the repository the user means. Pass `--all` when they a
 Read transcript lines only through the `jq` program `token-max skill filter` prints, without retyping or saving it, and only once it printed: an empty program would show the lines whole. Read several windows of one file in one command, since a harness may ask before each:
 
 ```sh
-f=$(token-max skill filter) && sed -n '120,140p;300,310p' FILE | jq -c "$f"
-f=$(token-max skill filter) && ssh HOST "sed -n '120,140p' 'FILE'" | jq -c "$f"
+f=$(token-max skill filter) && test -n "$f" && sed -n '120,140p;300,310p' FILE | jq -c "$f"
+f=$(token-max skill filter) && test -n "$f" && ssh HOST "sed -n '120,140p' 'FILE'" | jq -c "$f"
 ```
 
 Use the second form when a pointer's `host` is not null; the filter runs here, so the remote host needs no `jq`. The filter keeps record types, times, models, effort, tool names, each command's program, a known tool's subcommand, and flags, file paths, statuses, exit codes and sizes, and replaces all other text with its length.

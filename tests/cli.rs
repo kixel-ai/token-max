@@ -2721,7 +2721,7 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     let (status, prompt, stderr) = run(&mut command(&w, &["skill", "audit"]));
     assert_eq!((status, &*stderr), (0, ""));
     assert!(prompt.starts_with("# Token audit\n"));
-    assert!(prompt.contains("f=$(token-max skill filter) && sed -n"));
+    assert!(prompt.contains("f=$(token-max skill filter) && test -n \"$f\" && sed -n"));
     let (status, filter, stderr) = run(&mut command(&w, &["skill", "filter"]));
     assert_eq!((status, &*stderr), (0, ""));
     for args in [
@@ -2737,7 +2737,7 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     let (_, help, _) = run(&mut command(&w, &["--help"]));
     assert!(help.contains("\n  skill "), "{help}");
 
-    let codex = json!({"timestamp": "2026-11-02T00:00:00Z", "type": "response_item", "payload": {"type": "function_call", "name": "shell", "arguments": json!({"command": ["bash", "-lc", "SECRET=SYNTHETIC_PRIVATE_TOKEN cargo test --release --features=SYNTHETIC_PRIVATE_ARGS SYNTHETIC_PRIVATE_ARGS && git commit -m \"synthetic_private; prose words\" && rg synthetic_private_term src && cat <<EOF\nsynthetic_private prose\nEOF"], "workdir": "/w"}).to_string()}});
+    let codex = json!({"timestamp": "2026-11-02T00:00:00Z", "type": "response_item", "payload": {"type": "function_call", "name": "shell", "arguments": json!({"command": ["bash", "-lc", "SECRET=SYNTHETIC_PRIVATE_TOKEN cargo test --release --features=SYNTHETIC_PRIVATE_ARGS SYNTHETIC_PRIVATE_ARGS && git commit -m \"synthetic_private; prose words\" && claude synthetic_private_prompt && cat <<EOF\nsynthetic_private prose\nEOF"], "workdir": "/w"}).to_string()}});
     let codex_output = json!({"type": "response_item", "payload": {"type": "function_call_output", "output": "SYNTHETIC_PRIVATE_OUTPUT"}});
     let lines = format!("{}{codex}\n{codex_output}\n", audited_session("s", &w.home));
     let mut jq = Command::new("jq")
@@ -2770,7 +2770,7 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     assert_eq!(records[0]["message"]["content"], "<24 chars>");
     assert_eq!(
         records[4]["payload"]["arguments"],
-        json!({"command": [["SECRET=", "cargo", "test", "--release", "--features="], ["git", "commit", "-m"], ["rg"], ["cat"]], "workdir": "/w"})
+        json!({"command": [["SECRET=", "cargo", "test", "--release", "--features="], ["git", "commit", "-m"], ["claude"], ["cat"]], "workdir": "/w"})
     );
     assert_eq!(records[5]["payload"]["output"], "<24 chars>");
 }

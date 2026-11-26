@@ -90,7 +90,8 @@ across every settings file, recommended and worth considering alike, biggest
 monthly saving first. Each change is a card. Its first line is a counter, such
 as `[1/4]`, and the setting's name, with its saving per 30 days in dollars and
 as a percent of this host's spend over the window (the base the report's
-percents use) at the right. Next comes the current value and the offered one,
+percents use; with `--ssh`, every host's spend together, as
+[On SSH hosts](#on-ssh-hosts) says) at the right. Next comes the current value and the offered one,
 such as `5m -> 1h`, with whether it is recommended or worth considering.
 Then `What` gives one plain sentence on what the setting or
 feature does (see [What each line does](#what-each-line-does)), and `Why`
@@ -131,7 +132,9 @@ a check, is not asked: one dim line says how many changes were left out, and
 the list after the walk shows them among those not accepted. `vibes`' card
 that says the walk skips a change too small to ask, such as auto memory's,
 judges its section's total, not the one change's, leaving out a member whose
-file refuses its edit, which the walk lists as a step by hand.
+file refuses its edit, which the walk lists as a step by hand. Under `--ssh`
+that total sums every host's members, as the walk's section does, so another
+host's changes can leave the card to the walk.
 
 Each question takes `y`, `n` or `q`, and a section also `s`; anything else asks
 again. An answer only selects: after each yes, a running total sums the
@@ -311,13 +314,17 @@ section's row names the settings its members change, such as
 ### On SSH hosts
 
 With `--ssh`, the walk offers every host's changes in one list, biggest saving
-first across hosts. A card for another host's change, or any card when the run
-covers several hosts, names its host under `Host`, and a section only gathers one
-host's changes. Each host's last question offers to remove its servers that are
-off already. The running total sums the accepted changes of every host, as a
-percent of the hosts' spend together. Each host's report follows the walk,
-marked with its answers, and the confirm shows every host's diffs and names
-each file as `host:path`, such as `devbox:~/.claude/settings.json`.
+first across hosts. A section gathers its kind and reason's changes from every
+host, so never-used skills on two hosts are one question whose saving sums
+both, and its card names its hosts under `Hosts` (`Host` when it holds one
+host's changes). Splitting a section asks each member on its own, biggest
+saving first, naming its host, and a member whose name another host shares
+reads as `dataviz on devbox`. The last question offers to remove the servers
+that are off already on every host. The running total sums the accepted
+changes of every host, as a percent of the hosts' spend together. One report
+follows the walk, marked with each host's answers, and the confirm shows every
+host's diffs and names each file as `host:path`, such as
+`devbox:~/.claude/settings.json`.
 
 Each destination's own token-max reads, checks and writes its files, so the
 rules above hold there as they do here: which edits apply, the masked diff,
@@ -521,7 +528,7 @@ recommend off.
 Then the report gives every setting and feature one line. Each line names its verdict, the
 setting or feature, its current value (and the value to change to, for a
 change), what it saves per 30 days or costs over the window, that figure's
-share of this host's spend, the profile when several were read, and the
+share of this host's spend (every host's under `--ssh`), the profile when several were read, and the
 setting that changes it. A section's row names the settings its members
 change, such as `skillOverrides.*`, and `--details` lists each member under it.
 
@@ -579,8 +586,9 @@ dot for no verdict, either for lack of evidence or because nothing can be set.
 Without color a word replaces the dot: `change`, `consider`, `keep`,
 `unknown` or `info`.
 
-Every percent is of this host's spend over the window at API prices: every
-request it recorded, shared histories counted once. A cost's percent divides
+Every percent is of this host's spend over the window at API prices (with
+`--ssh`, of every host's spend together): every request it recorded, shared
+histories counted once. A cost's percent divides
 its total by the host's, since a profile's history lies within the host's
 window; a saving's compares its monthly rate with the host's. When some
 requests could not be priced, each profile's spend is extrapolated from the ones
@@ -590,6 +598,9 @@ request is never extrapolated below what it is known to cost, such as its tokens
 beside an unknown server fee. A profile that priced none of its requests adds
 only its known part, a lower bound, shown as `~$9,392 ± $4.72 plus at least
 $120`, so a share can read high; `--details`' line explaining the percents says so.
+A percent that would pass 100%, which only such a lower bound, an
+extrapolated figure, or a sum of overlapping savings can give, is left out;
+the line still ranks by it.
 
 A `~` marks any figure extrapolated over requests that could not be priced, such
 as a saving of `~$3,270/mo ± $410`, followed by its 95% margin of error under the
@@ -711,9 +722,8 @@ setting was found to differ from its Claude Code or Codex default." when none
 differs. A line whose current value is unknown gets no note, and that
 sentence does not claim it matches its default. On a terminal the same line
 also opens `doctor`'s walk, under its header, before the first question.
-With `--ssh`, the total that heads the run adds every host's savings before
-rounding into one such line, each percent of the hosts' spend together, while
-each host's section keeps its own.
+With `--ssh`, the one report adds every host's savings before rounding into
+one such line, each percent of the hosts' spend together.
 
 Each saving is priced like its line's own comparison, holding every other
 setting at its current value, so the sum adds savings that may count the same
@@ -991,7 +1001,7 @@ files and their size, then the SSH destinations it adds, or how to add one with
 
 The report is for people and has no machine-readable form; `--json` was
 removed. Each machine output is its own sub-command with a named consumer, such
-as the session export below.
+as the session export and the transcript audit below.
 
 IDs in the report are opaque hashes. Shared histories are read once, and a
 request whose profile is ambiguous counts once on the line its profiles share
@@ -1066,7 +1076,84 @@ Every string prints with terminal controls and direction overrides escaped as
 host or a destination, cannot drive the terminal that shows the output.
 
 Native session IDs never reach the report, which hashes them. Over SSH, they
-cross only in a destination's session lines.
+cross only in a destination's session lines and audit findings.
+
+## Transcript audit
+
+`token-max audit` prints one JSON object of where a repository's Claude Code
+and Codex sessions, T3 Code's included, spent tokens they need not have, priced
+at public API prices, for the `token-audit` skill. Each finding points at its
+transcript as `host`, `file` and 1-based `line`, so an agent reads only those
+slices instead of whole transcripts. It prints no prompt, reply, tool input or
+tool output text, only tool names, counts, times, prices, session metadata and
+pointers. `token-max audit --help` lists every option.
+
+```sh
+token-max audit                  # the current directory's repository, last 14 days
+token-max audit --all --since 2026-11-01
+token-max audit --repo ~/src/other --ssh devbox --limit 20
+```
+
+It covers the sessions of the Git repository containing the current directory,
+or the checkout `--repo` names, or every session with `--all`; outside a
+checkout, it fails and says to pick one. A session belongs to the repository
+when Codex recorded one of its remotes, or when the checkout now containing the
+session's directory has one, compared without scheme, user, port, `.git` or
+trailing slash, so `git@host:o/r.git` matches `https://host/o/r`. A repository
+with no remote matches the sessions whose checkout shares its Git directory,
+any linked worktree included; that names a directory on this host alone, so it
+cannot be combined with `--ssh`. A session whose directory is gone or in no
+checkout, and that Codex recorded no remote for, is left out. Without `--since`
+the window is the last 14 days, and the object names the window it used.
+
+The object holds:
+
+- `since`, `scope` (`all`, the `remotes` matched, or the `gitDir` matched),
+  `hosts` (null for this host, then each `--ssh` destination) and `limit`.
+- `totals`: the sessions, requests and cost in scope, and the sessions whose
+  cost is a lower bound (`incomplete`).
+- `cacheMisses`: requests that lost cache reuse against the request before them
+  in the session, in all and `byCause`, and the costliest as `hotspots`, each
+  with its `cause`, the `change` for a control change, the tokens rewritten or
+  sent again, the gap and the cache lifetime it was compared with, the tools
+  the earlier request's response called, and pointers to both. Claude records
+  those calls between the two requests; Codex records them before the earlier
+  request's usage, so they can sit before the `previous` pointer. The causes are
+  `tool_wait_ttl`, a tool call outlasting the cache; `idle_ttl`, a gap
+  outlasting it with no tool call that did; `control_change`, a model, effort,
+  speed, compaction or truncation `change`; and `prefix_bust`, a prefix that
+  changed within the cache's lifetime with nothing else changed, such as an
+  edited `CLAUDE.md` or a tool list that moved.
+- `toolOutputs`: each tool's results (`byTool`), with their estimated tokens and
+  what the requests that carried them paid for them, and the results carried
+  the most (`hotspots`), each pointing at its call and its result.
+- `sessions`: the sessions that stand out, each once in `list`, and one
+  ranking per measure as indexes into it: `costliest`, `leastCached` (input not
+  read from the cache), `mostInput` (input over every request), `largestStart`
+  (the first prompt: always-loaded instructions, tools and memory), `subagents`
+  (by cost), `mostToolCalls`, `mostToolErrors` and `longestStreaks` (the most
+  calls in a row to one tool). Each session names its tool calls and errors,
+  compactions, cache hit ratio and largest prompt, points `at` its first request,
+  and lists the lines of its first requests in that file (`earlyLines`), to
+  sample how it started.
+- `assumptions`: what the prices assume, which
+  [the semantics](semantics.md#transcript-audit) explain.
+
+Every list is ranked and keeps `--limit` entries, 10 by default, so the object
+fits an agent's context. A cost is a lower bound where `unpriced` counts
+findings whose prices are unknown; a single finding's unknown cost is null,
+never zero. A Codex session's tool errors are the commands, MCP calls and file
+edits Codex recorded as failed, and null when it recorded none finishing. Each
+counts once, for the thread its record names, even where another rollout, such
+as its parent's, records it too.
+
+Over `--ssh`, each destination audits its own sessions with this host's prices
+and the repository's remotes this host sent, ranks them and sends only its
+rankings, each no longer than the limit, and its tools' totals; this host adds
+the tools across hosts, ranks every host's findings together and names each
+pointer's host. Any failed host fails the whole run. Errors go to
+stderr as JSON. Exit 0: printed. Exit 2: scan, pricing, argument or
+cancellation failure.
 
 ## Cache TTL
 
@@ -1336,7 +1423,8 @@ host, which every run audits. You install nothing
 there: each destination runs this build of token-max, which token-max puts
 there itself. Linux and macOS destinations on x86_64 or arm64 are supported.
 `token-max sessions` takes the same flags, and each destination sends only its
-priced session lines. `token-max vibes` takes them too, and each destination
+priced session lines; `token-max audit` too, and each destination sends only
+its ranked findings. `token-max vibes` takes them too, and each destination
 sends only its cards and, for a walk, the changes they offer.
 
 ```sh
@@ -1350,6 +1438,12 @@ which runs every check there and sends back only its finished report. For
 session lines it runs `token-max sessions --ssh-scan`, which sends back only
 the priced session lines of that host's transcripts. Either way its transcripts
 and scan never leave it, and this host never holds more than its own scan.
+A destination may not be trustworthy, so this host reads at most 16 MiB of
+its report, its `vibes` advice or a walk's preview, 256 MiB of its session
+lines, 1 MiB of its profiles or of the files it wrote, and 1 KiB of its
+header. A destination that sends more fails the run, naming the limit it
+passed. For scale, a report from a host with ten gigabytes of transcripts is
+about 170 KB, and all of that host's session lines about 12 MB.
 
 Destinations connect while this host's profiles are asked about. For a report,
 each first sends the roots of the Claude profiles it asks about, waits for the
@@ -1385,8 +1479,13 @@ linked build to run here instead, such as the release installers'.
 
 `--claude-dir`, `--codex-dir` and `--t3-dir` select this host's profiles only.
 
-Each host is analyzed on its own and gets its own section, labeled with the
-destination, or `this host`. A run of several hosts heads its report with one
+Each host is analyzed on its own, and a run of several hosts prints one
+report whose rows span them: a row's tag names its host, as `[this host]`,
+`[devbox]` or, where a host read several profiles, `[devbox:~/.claude/settings.json]`,
+and a section's row sums its members on every host, each listed under
+`--details` with its own tag. Under `--details`, or when a host has a note
+such as a profile it could not read, each host's notes and evidence follow
+the rows, under a title naming the host. The report opens with one
 total: the hosts' requests, the input and output tokens they recorded (cache reads and writes included) and their sessions, their spend at API prices, and the sum of what the
 changes they offer save every 30 days and of what their settings save against
 the defaults, with each saving's percent of the hosts'
@@ -1403,8 +1502,8 @@ with exit 2 and no report, and Ctrl-C then stops every destination. After
 the reports, a failure during the walk, a Ctrl-C during its questions, or a
 Ctrl-C after the yes that leaves a host unwritten also exits 2. On a terminal,
 `doctor` walks through every host's changes and writes each on its own host, as
-[On SSH hosts](#on-ssh-hosts) describes. Each host's percents
-are of that host's own spend, and the total's of the hosts' spend together.
+[On SSH hosts](#on-ssh-hosts) describes. Every percent is of the hosts' spend
+together.
 
 ## Keepalive pings
 
@@ -1725,6 +1824,12 @@ the whole change is a step by hand naming each setting; so is a new model on
 a cloud provider, such as Bedrock, which spells model IDs its own way, whether
 the profile's or the project's settings turn it on. A Codex level with no model set or recorded has no card.
 
+A Claude pick that the [`availableModels` allowlist](#model-allowlist) blocks,
+for any profile on the card or any other whose model the edit would change,
+such as one that reads the edited file as its project's, is not offered: the card names the setting that excludes it and advises
+nothing. When token-max can't tell whether the list permits the pick, the
+change is still offered and the card says why it can't tell.
+
 ### Subagent default
 
 A profile that sets a default subagent effort, Claude Code's
@@ -2036,11 +2141,44 @@ rejects the pair; then it says so and offers no edit. The table is checked for
 a full model ID such as `claude-sonnet-5-5`, in any case and with or without a
 `[1m]` or `[2m]` suffix, as Claude Code reads it. An alias such as `opus` resolves
 to a version that changes with Claude Code releases, so only a Fable main
-model, which takes no other family, judges one. The card doesn't yet read an
-`availableModels` allowlist, which can disable a set advisor or block the one
-it suggests. A blocker in the settings read doesn't stop a session that set
-the advisor elsewhere, so the card names any advisor calls the window recorded
-beside it.
+model, which takes no other family, judges one. A blocker in the settings
+read doesn't stop a session that set the advisor elsewhere, so the card names
+any advisor calls the window recorded beside it.
+
+Claude Code disables a set `advisorModel` that the
+[`availableModels` allowlist](#model-allowlist) blocks, so the card says no
+advisor would load and names the setting that excludes it. A suggestion the
+list blocks is not offered, and the card says so. When the list permits only
+some versions of the suggested alias's family, such as `claude-opus-5` for
+`opus`, Claude Code runs the alias on the newest of them on the Anthropic API,
+so the card still offers it and says so, unless the pairing table takes none
+of those versions for the main model. A rebuilt card, after a yes to the
+Main-session default card's edit, follows the same rules, and a set alias
+narrowed to versions the table doesn't pair is advice with no edit.
+
+### Model allowlist
+
+Claude Code's [`availableModels`](https://code.claude.com/docs/en/model-config#restrict-model-selection)
+restricts the models a setting can name. The model cards read it where the
+advisor is read. A list in the managed settings file applies on its own;
+otherwise the user, project and local lists are concatenated. An empty list
+blocks every model a setting names. An entry is a family such as `sonnet`, a
+version prefix such as `claude-opus-5`, which also permits the IDs that
+extend it, such as `claude-opus-5-5`, or a full model ID; a version prefix or
+full ID in a family turns off that family's own entry. A family alias whose
+family the list narrows that way runs on the newest version the list permits.
+
+A list in the admin console's settings, which Claude Code caches in
+`remote-settings.json` in its config directory, outranks the managed file.
+token-max sees only that the cache sets one, and doesn't resolve it, since
+the cache may be stale, so the cards still offer their change and say the
+list is unknown. So do managed `deniedModels` and `availableModelsMatch`,
+which hold back models the list permits, or a cache that sets them, a cache
+that can't be read, a list that is not a
+list of model names, and an entry token-max can't match to a model, such as a
+provider's model ID, which the card never quotes, since it could be a pasted
+credential. MDM profiles, the registry and `managed-settings.d` are
+not read.
 
 T3 Code picks each thread's main model, so T3 instances get no card; when an
 enabled one reads the same settings file, the card says each of its threads whose model

@@ -1,10 +1,10 @@
 //! Audits of selected SSH destinations, each run by this build of `token-max` there.
 //!
 //! The coordinator runs `token-max doctor --ssh-scan`, or `token-max sessions --ssh-scan` for
-//! session lines, on each destination through the local OpenSSH client, with its configuration,
+//! session lines or `token-max audit --ssh-scan` for an audit's findings, on each destination through the local OpenSSH client, with its configuration,
 //! authentication and host keys. The destination reads its own histories and settings, prices
-//! them with the coordinator's catalog, and sends back only its printed report or its session
-//! lines (see [`crate::wire`]); its scan never leaves it.
+//! them with the coordinator's catalog, and sends back only its printed report, its session
+//! lines or its audit's ranked findings (see [`crate::wire`]); its scan never leaves it.
 //!
 //! For a walk through a report's changes, the audit stays open: the destination keeps the
 //! settings files it read, and this host sends it the person's answers and their confirm, so
@@ -23,6 +23,7 @@ use std::sync::{Mutex, OnceLock, PoisonError, mpsc};
 
 use sha2::{Digest, Sha256};
 
+use crate::audit::{Audit, Options, audit};
 use crate::cli::{Printed, Render, Rendered, render};
 use crate::discovery::{DiscoveryOptions, discover};
 use crate::doctor::{Event, Offers, Owner, Plan, Style, Written, preview, write as write_plan};
@@ -31,7 +32,7 @@ use crate::reader::{Reach, ScanOptions, scan};
 use crate::safe::{ScanError, iso, terminal_text};
 use crate::sessions::{self, export};
 use crate::vibes::Item;
-use crate::wire::{self, Answer, Header, Job, Outcome, Paid, Request, Stream};
+use crate::wire::{self, Answer, Header, Job, Limit, Outcome, Paid, Request, Stream};
 
 /// Reject a destination OpenSSH would read as an option or that cannot be printed whole.
 pub fn destination(value: &str) -> Result<(), ScanError> {
@@ -149,6 +150,8 @@ pub enum Scope {
     Report { defaults: bool },
     /// Session lines.
     Sessions,
+    /// An audit's findings.
+    Audit,
 }
 
 impl Scope {
@@ -157,6 +160,27 @@ impl Scope {
         match self {
             Scope::Report { .. } => Reach::History,
             Scope::Sessions => Reach::Window,
+            Scope::Audit => Reach::Replay,
+        }
+    }
+
+    /// The most this host reads of the destination's stream: each value the audit reads,
+    /// once, and a walk's two reviews and writes, `doctor`'s and then `vibes`'.
+    fn stream(self) -> Limit {
+        match self {
+            Scope::Report { .. } => Limit::stream(&[
+                Limit::HEADER,
+                Limit::PROFILES,
+                Limit::REPORT,
+                Limit::PREVIEW,
+                Limit::WROTE,
+                Limit::ADVICE,
+                Limit::PREVIEW,
+                Limit::WROTE,
+                Limit::END,
+            ]),
+            Scope::Sessions => Limit::stream(&[Limit::HEADER, Limit::SESSIONS, Limit::END]),
+            Scope::Audit => Limit::stream(&[Limit::HEADER, Limit::AUDIT, Limit::END]),
         }
     }
 }
@@ -166,6 +190,7 @@ fn run_command(binary: &Binary, since: Option<Millis>, scope: Scope) -> String {
     let command = match scope {
         Scope::Report { .. } => "doctor",
         Scope::Sessions => "sessions",
+        Scope::Audit => "audit",
     };
     let mut args = vec![
         std::env::consts::OS,
@@ -226,7 +251,7 @@ enum Step {
     /// The destination's outcome, which may come before the request when it fails, and the
     /// stream it came on, which a walk goes on reading.
     Outcome(
-        Result<Outcome, serde_json::Error>,
+        Result<Outcome, wire::Error>,
         Box<Stream<BufReader<ChildStdout>>>,
     ),
 }
@@ -302,6 +327,8 @@ pub enum Reply {
     Vibes(Advice),
     /// Its sessions, ordered by first request, each without a host.
     Sessions(Vec<sessions::Session>),
+    /// Its audit's findings, each pointer without a host.
+    Audit(Box<Audit>),
 }
 
 /// What `vibes` has on a destination.
@@ -463,6 +490,7 @@ pub struct Connected {
     session: Session,
     stream: Stream<BufReader<ChildStdout>>,
     since: Option<Millis>,
+    scope: Scope,
     profiles: Option<Profiles>,
 }
 
@@ -512,18 +540,21 @@ pub fn connect(
         provision(destination, &found)?;
         provisioned = true;
     };
-    let mut stream = Stream::new(stdout);
-    let header = match stream.header() {
+    let mut stream = Stream::new(stdout, scope.stream());
+    let header = match stream.value::<Header>(Limit::HEADER) {
         Ok(header) => header,
         Err(error) => {
             // Anything but an empty stdout is not a token-max stream, which may never end.
-            return Err(session.fail(!error.is_eof(), |status| match status {
-                Some(SSH_FAILED) => connection_failed(destination),
-                status => format!(
-                    "token-max there did not start an SSH audit ({})",
-                    exit(status)
-                ),
-            }));
+            return Err(
+                session.fail(!error.is_eof(), |status| match (status, &error) {
+                    (Some(SSH_FAILED), _) => connection_failed(destination),
+                    (_, wire::Error::Exceeded(_)) => invalid_stream(&error, status, None),
+                    (status, _) => format!(
+                        "token-max there did not start an SSH audit ({})",
+                        exit(status)
+                    ),
+                }),
+            );
         }
     };
     let local = wire::build();
@@ -539,7 +570,7 @@ pub fn connect(
         }));
     }
     let profiles = match scope {
-        Scope::Report { .. } => match stream.value::<Outcome>() {
+        Scope::Report { .. } => match stream.value::<Outcome>(Limit::PROFILES) {
             Ok(Outcome::Profiles { home, roots }) => Some(Profiles { home, roots }),
             Ok(Outcome::Error(error)) => return Err(session.remote_error(error)),
             Ok(_) => return Err(session.wrong_result(None)),
@@ -550,12 +581,13 @@ pub fn connect(
                 }));
             }
         },
-        Scope::Sessions => None,
+        Scope::Sessions | Scope::Audit => None,
     };
     Ok(Connected {
         session,
         stream,
         since,
+        scope,
         profiles,
     })
 }
@@ -576,6 +608,7 @@ impl Connected {
             mut session,
             mut stream,
             since,
+            scope,
             profiles,
         } = self;
         if profiles.is_some()
@@ -592,18 +625,29 @@ impl Connected {
             // Dropped without a request when this host fails first, and then stops every destination.
             let _ = forward.send(request.recv().map_or(Step::Cancelled, Step::Request));
         });
+        let limit = match scope {
+            Scope::Report { .. } => Limit::REPORT,
+            Scope::Sessions => Limit::SESSIONS,
+            Scope::Audit => Limit::AUDIT,
+        };
         std::thread::spawn(move || {
-            let outcome = stream.value();
+            let outcome = stream.value(limit);
             let _ = steps.send(Step::Outcome(outcome, Box::new(stream)));
         });
-        // What the job asked for, once it is sent: sessions, or whether it is walked and
-        // whether it is `vibes`' advice instead of the report.
+        // What the job asked for, once it is sent: sessions or an audit, or whether it is
+        // walked and whether it is `vibes`' advice instead of the report.
         let mut requested = None;
+        // The most entries an audit's list may hold.
+        let mut entries = 0;
         let (outcome, mut stream) = loop {
             match arrived.recv() {
                 Ok(Step::Request(request)) => {
                     requested = Some(match request.job {
                         Job::Sessions => None,
+                        Job::Audit { limit, .. } => {
+                            entries = limit;
+                            None
+                        }
                         Job::Report { walk, vibes, .. } => Some((walk, vibes)),
                     });
                     if let Some(stdin) = session.stdin.as_mut() {
@@ -617,7 +661,7 @@ impl Connected {
                 }
             }
         };
-        let invalid = |session: &mut Session, error: serde_json::Error| {
+        let invalid = |session: &mut Session, error: wire::Error| {
             session.fail(true, |status| match status {
                 Some(SSH_FAILED) => "SSH connection lost during the audit".into(),
                 _ => invalid_stream(&error, status, None),
@@ -627,7 +671,7 @@ impl Connected {
         let (scanned, reply, offers, vibes) = match outcome {
             Ok(Outcome::Report {
                 since,
-                text,
+                listing,
                 change,
                 totals,
                 offers,
@@ -635,7 +679,7 @@ impl Connected {
             }) => (
                 since,
                 Reply::Report(Printed {
-                    text,
+                    listing,
                     change,
                     totals,
                     vibes,
@@ -659,6 +703,7 @@ impl Connected {
             Ok(Outcome::Sessions { since, sessions }) => {
                 (since, Reply::Sessions(sessions), None, false)
             }
+            Ok(Outcome::Audit { since, audit }) => (since, Reply::Audit(audit), None, false),
             Ok(Outcome::Profiles { .. } | Outcome::Reviewed { .. } | Outcome::Wrote { .. }) => {
                 return Err(session.wrong_result(None));
             }
@@ -701,7 +746,14 @@ impl Connected {
                     _ => unreachable!("matched a report or advice"),
                 });
             }
-            (Some(None), Reply::Sessions(_), None) => {}
+            (Some(None), Reply::Sessions(_), None) if scope == Scope::Sessions => {}
+            (Some(None), Reply::Audit(audit), None) if scope == Scope::Audit => {
+                if !audit.within(entries) {
+                    return Err(session.fail(true, |_| {
+                        format!("token-max there sent a list longer than the {entries} entries asked for")
+                    }));
+                }
+            }
             (Some(Some((false, asked))), Reply::Report(_) | Reply::Vibes(_), None)
                 if asked == vibes => {}
             _ => return Err(session.wrong_result(None)),
@@ -734,14 +786,19 @@ pub struct Remote {
 impl Remote {
     /// Send `answer` and read the destination's reply to it, failing with what `doing` was
     /// cut short when the stream breaks.
-    fn exchange(&mut self, answer: &Answer, doing: &str) -> Result<Outcome, ScanError> {
+    fn exchange(
+        &mut self,
+        answer: &Answer,
+        limit: Limit,
+        doing: &str,
+    ) -> Result<Outcome, ScanError> {
         let sent = self
             .session
             .stdin
             .as_mut()
             .map(|stdin| wire::write(&mut BufWriter::new(stdin), answer));
         let outcome = match sent {
-            Some(Ok(())) => self.stream.value(),
+            Some(Ok(())) => self.stream.value(limit),
             _ => {
                 return Err(self
                     .session
@@ -762,9 +819,9 @@ impl Remote {
         }
     }
 
-    /// The destination's report with the walk's `events` marked on it, and its preview of
-    /// each file the accepted changes would write; nothing is written there yet.
-    pub fn review(&mut self, events: &[Event]) -> Result<(String, String), ScanError> {
+    /// The destination's preview of each file the walk's `events` would write, once it
+    /// checked them against its files; nothing is written there yet.
+    pub fn review(&mut self, events: &[Event]) -> Result<String, ScanError> {
         let answer = Answer::Review {
             events: events.to_vec(),
         };
@@ -772,8 +829,8 @@ impl Remote {
             true => "during the walk; no further settings were changed there",
             false => "during the walk; no settings were changed there",
         };
-        match self.exchange(&answer, doing)? {
-            Outcome::Reviewed { report, preview } => Ok((report, preview)),
+        match self.exchange(&answer, Limit::PREVIEW, doing)? {
+            Outcome::Reviewed { preview } => Ok(preview),
             _ => Err(self.session.wrong_result(None)),
         }
     }
@@ -782,7 +839,7 @@ impl Remote {
     /// stays open for [`Remote::vibes`] or [`Remote::end`].
     pub fn write(&mut self) -> Result<Vec<Written>, ScanError> {
         self.wrote = true;
-        match self.exchange(&Answer::Write, WRITING)? {
+        match self.exchange(&Answer::Write, Limit::WROTE, WRITING)? {
             Outcome::Wrote { written } => Ok(written),
             _ => Err(self.session.wrong_result(Some(WRITING))),
         }
@@ -792,7 +849,7 @@ impl Remote {
     /// changes it offers against its files as they are now.
     pub fn vibes(&mut self) -> Result<(Vec<Item>, Box<Offers>), ScanError> {
         let doing = "before its advice arrived; no further settings were changed there";
-        match self.exchange(&Answer::Vibes, doing)? {
+        match self.exchange(&Answer::Vibes, Limit::ADVICE, doing)? {
             Outcome::Vibes {
                 since,
                 items,
@@ -849,13 +906,20 @@ impl Remote {
 const WRITING: &str = "while it was writing, so it may have changed its settings files; check them and their .token-max.bak backups";
 
 /// A destination's stream that is not what this build writes, and the step it cut short.
-fn invalid_stream(error: &serde_json::Error, status: Option<i32>, doing: Option<&str>) -> String {
-    let (line, column) = (error.line(), error.column());
+fn invalid_stream(error: &wire::Error, status: Option<i32>, doing: Option<&str>) -> String {
     let after = doing.map_or(String::new(), |doing| format!(" {doing}"));
-    format!(
-        "invalid SSH audit stream at line {line}, column {column} ({}){after}",
-        exit(status)
-    )
+    match error {
+        wire::Error::Exceeded(limit) => format!(
+            "token-max sent more than {limit}, the most this host reads ({}){after}",
+            exit(status)
+        ),
+        wire::Error::Json(error) => format!(
+            "invalid SSH audit stream at line {}, column {} ({}){after}",
+            error.line(),
+            error.column(),
+            exit(status)
+        ),
+    }
 }
 
 fn exit(status: Option<i32>) -> String {
@@ -873,11 +937,9 @@ enum Incoming {
     Answer(Answer),
 }
 
-/// A destination's side of a walk: its files as it read them, its report, and how to print.
+/// A destination's side of a walk: its files as it read them, and how to print.
 struct Walked {
     owner: Owner,
-    /// The report `doctor`'s walk reviews; none once the walk is `vibes`'.
-    listing: Option<Box<crate::report::Listing>>,
     style: Style,
     /// What `vibes` has here, from the same scan.
     vibes: Vec<Item>,
@@ -895,7 +957,6 @@ impl Walked {
     fn advise(&mut self) -> Outcome {
         self.vibes = crate::vibes::settled(std::mem::take(&mut self.vibes), &self.written);
         self.owner = crate::vibes::owner(&self.vibes, self.home.clone(), self.monthly);
-        self.listing = None;
         self.advice()
     }
 
@@ -927,14 +988,14 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
     let (sender, incoming) = mpsc::channel();
     std::thread::spawn(move || {
         let mut stdin = BufReader::new(io::stdin());
-        let mut stream = Stream::new(&mut stdin);
-        if scope != Scope::Sessions {
-            let Ok(paid) = stream.value::<Paid>() else {
+        let mut stream = Stream::new(&mut stdin, Limit::NONE);
+        if matches!(scope, Scope::Report { .. }) {
+            let Ok(paid) = stream.value::<Paid>(Limit::NONE) else {
                 std::process::exit(2);
             };
             let _ = sender.send(Incoming::Paid(paid));
         }
-        let Ok(request) = stream.request() else {
+        let Ok(request) = stream.value::<Request>(Limit::NONE) else {
             // Not this build's coordinator, or it is gone.
             std::process::exit(2);
         };
@@ -943,7 +1004,7 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
         if walk {
             // Ends when the coordinator is done, or exits once stdin closes.
             loop {
-                let Ok(answer) = stream.value::<Answer>() else {
+                let Ok(answer) = stream.value::<Answer>(Limit::NONE) else {
                     // Once asked to write, the write finishes even if the coordinator goes:
                     // the walk then finds this channel closed.
                     if WRITES.load(Ordering::SeqCst) > 0 {
@@ -978,7 +1039,7 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
             discovery.pretend_defaults();
         }
         let home = std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned());
-        if scope != Scope::Sessions {
+        if matches!(scope, Scope::Report { .. }) {
             let roots = discover(&discovery)?.billing_roots();
             let profiles = Outcome::Profiles {
                 home: home.clone(),
@@ -1008,7 +1069,12 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
         let Ok(Incoming::Request(request)) = incoming.recv() else {
             unreachable!("the request comes next")
         };
-        if matches!(request.job, Job::Sessions) != (scope == Scope::Sessions) {
+        let asked = match request.job {
+            Job::Report { .. } => matches!(scope, Scope::Report { .. }),
+            Job::Sessions => scope == Scope::Sessions,
+            Job::Audit { .. } => scope == Scope::Audit,
+        };
+        if !asked {
             return Err(ScanError::new(
                 "the coordinator asked for another job than this host scanned for",
             ));
@@ -1024,19 +1090,35 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
                 let sessions = export(&scan, &request.catalog)?;
                 return Ok((Outcome::Sessions { since, sessions }, None));
             }
+            Job::Audit {
+                filter,
+                limit,
+                since: cutoff,
+            } => {
+                if since != Some(*cutoff) {
+                    return Err(ScanError::new(
+                        "the coordinator asked for another window than this host scanned",
+                    ));
+                }
+                let options = Options {
+                    filter,
+                    since: *cutoff,
+                    limit: *limit,
+                };
+                let audit = Box::new(audit(&scan, &request.catalog, &options)?);
+                return Ok((Outcome::Audit { since, audit }, None));
+            }
         };
         let Rendered {
             printed:
                 Printed {
-                    text,
+                    listing,
                     change,
                     totals,
-                    vibes: pending,
+                    vibes,
                 },
             fixes,
-            listing,
             turned_off,
-            vibes,
         } = render(
             scan,
             Render {
@@ -1056,7 +1138,6 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
         };
         let walked = walk.then(|| Walked {
             owner: owner(home.clone()),
-            listing: (!advice).then_some(listing),
             style: format.style(home.clone()),
             vibes: vibes.clone(),
             home: home.clone(),
@@ -1074,11 +1155,11 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
             },
             (false, walked) => Outcome::Report {
                 since,
-                text,
+                listing,
                 change,
                 totals,
                 offers: walked.as_ref().map(|w| Box::new(w.owner.offers().clone())),
-                vibes: pending,
+                vibes,
             },
         };
         Ok((outcome, walked))
@@ -1117,18 +1198,12 @@ fn walk_here(
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| match answer {
             Answer::Done => Ok(None),
             Answer::Review { events } => {
+                // Checked against the files as they were read, which the coordinator's report
+                // of the answers leaves to this host.
                 let reviewed = walked.owner.plan(&events)?;
-                // Under its own header, which this host prints only for its own report.
-                let report = walked.listing.as_ref().map_or_else(String::new, |listing| {
-                    format!(
-                        "{}{}",
-                        listing.title(),
-                        listing.review(reviewed.choices(), &reviewed.total("Accepted"))
-                    )
-                });
                 let preview = preview(&reviewed, &walked.style);
                 plan = Some(reviewed);
-                Ok(Some(Outcome::Reviewed { report, preview }))
+                Ok(Some(Outcome::Reviewed { preview }))
             }
             Answer::Write => match plan.take() {
                 Some(plan) => write_plan(&plan).map(|written| {

@@ -10,7 +10,7 @@ use crate::report::{approx, monthly, tokens};
 use serde::{Deserialize, Serialize};
 
 /// A setting whose current value differs from its default, and what that saves.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Baseline {
     /// The default as a line shows it, such as `5m` or `on`.
     pub default: String,
@@ -20,7 +20,7 @@ pub struct Baseline {
 }
 
 /// What a current value saves every 30 days against its default; negative when it costs more.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Saving {
     /// Replayed like the line's own comparison.
     Saves(f64),
@@ -497,14 +497,10 @@ impl Sum {
         } else {
             about_word
         };
-        let share = if monthly > 0.0 {
-            format!(
-                ", {} of {whose} spend",
-                crate::report::share_text(usd / monthly)
-            )
-        } else {
-            String::new()
-        };
+        let share = (monthly > 0.0)
+            .then(|| crate::report::share_text(usd / monthly))
+            .flatten()
+            .map_or_else(String::new, |s| format!(", {s} of {whose} spend"));
         let verb = if lead {
             format!("{verb} ")
         } else {

@@ -319,7 +319,7 @@ mod windows {
         assert!(stdout.contains("\ntoken-max: devbox  "), "{stdout}");
         assert!(stdout.contains("; 2 requests;"), "{stdout}");
         assert!(
-            stdout.contains("each percent is of devbox's spend"),
+            stdout.contains("each percent is of these hosts' spend"),
             "{stdout}"
         );
     }

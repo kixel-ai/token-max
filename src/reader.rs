@@ -55,6 +55,11 @@ pub enum Reach {
     History,
     /// Only transcripts the window's requests and sessions depend on.
     Window,
+    /// The transcripts [`Reach::Window`] reads, with every record in them kept as if in the
+    /// window, so an audit can compare the window's first request with the one before it
+    /// however old. A malformed record before the window cannot fail the scan; it becomes a
+    /// request of unknown usage, so no comparison crosses it.
+    Replay,
 }
 
 /// How far a scan has read its transcripts and what it has counted, which another thread may
@@ -522,6 +527,24 @@ fn polling_loop(command: &str) -> bool {
     has("sleep") && has("do") && (has("while") || has("until") || has("for"))
 }
 
+/// The bytes of text a tool result holds, counted without keeping any of it: a string, or
+/// the `text` of each content block. Images and other media are not text and count nothing.
+fn text_bytes(value: &Value) -> u32 {
+    fn walk(value: &Value) -> u64 {
+        match value {
+            Value::String(text) => text.len() as u64,
+            Value::Array(items) => items.iter().map(walk).sum(),
+            Value::Object(block) => block
+                .get("text")
+                .or_else(|| block.get("content"))
+                .or_else(|| block.get("output"))
+                .map_or(0, walk),
+            _ => 0,
+        }
+    }
+    u32::try_from(walk(value)).unwrap_or(u32::MAX)
+}
+
 fn kind_name(kind: EventKind) -> &'static str {
     match kind {
         EventKind::Compaction => "compaction",
@@ -535,6 +558,7 @@ fn kind_name(kind: EventKind) -> &'static str {
         EventKind::PeerTurn => "peer-turn",
         EventKind::PeerMessage => "peer-message",
         EventKind::AutoTurn => "auto-turn",
+        EventKind::ToolDone => "tool-done",
     }
 }
 
@@ -913,6 +937,7 @@ fn event(
         idle_attribution: IdleAttribution::Unknown,
         shell: None,
         file: None,
+        bytes: None,
         meta: EventMeta {
             harness: snapshot.harness,
             session: context.session.clone(),
@@ -928,6 +953,7 @@ fn event(
             usable_window: context.usable_window,
             tool: None,
             t3: None,
+            thread: None,
             pricing: context.pricing.clone(),
         }
         .into(),
@@ -1126,6 +1152,8 @@ impl Requests {
 /// State shared across every file of one scan.
 struct Reader {
     since: Option<Millis>,
+    /// Keep records before `since` too, as [`Reach::Replay`] reads them.
+    replay: bool,
     exposure: ExposureCollector,
     strings: Interner,
     requests: Requests,
@@ -1254,9 +1282,31 @@ impl Reader {
                 "invalid pre-window component metadata; subsequent exposure is incomplete".into(),
             );
         }
-        match snapshot.harness {
-            Harness::Claude => self.claude(snapshot, file, raw, location, time, selected)?,
-            Harness::Codex => self.codex(snapshot, file, raw, location, time, selected)?,
+        let kept = selected || self.replay;
+        let read = match snapshot.harness {
+            Harness::Claude => self.claude(snapshot, file, raw, location, time, kept),
+            Harness::Codex => self.codex(snapshot, file, raw, location, time, kept),
+        };
+        if let Err(error) = read {
+            // Only a replay keeps records before the window; any other scan fails on one as
+            // it always has.
+            if selected || !self.replay {
+                return Err(error);
+            }
+            // A record with no time is selected, so this one has a time.
+            let time = time.expect("a record before the window has a time");
+            let mut r = request(
+                snapshot,
+                location,
+                &file.context,
+                time,
+                identity(&line_key(snapshot, location)),
+            );
+            r.parts = vec![part(&Map::new(), None, PartKind::Unknown)?];
+            r.evidence = RequestEvidence::Unknown;
+            r.issues
+                .push("pre-window record is invalid; cache predecessor remains unknown".into());
+            self.add(r);
         }
         self.sessions.observe(Record {
             harness: snapshot.harness,
@@ -1607,6 +1657,7 @@ impl Reader {
                         );
                         e.tool_id = opaque(b, "tool_use_id")?.map(Id::from);
                         e.file = (!is_true(b, "is_error")).then_some(crate::lsp::File::Done);
+                        e.bytes = Some(text_bytes(member(b, "content")));
                         if timed_out {
                             e.shell = Some(ShellCall {
                                 timed_out,
@@ -1827,6 +1878,8 @@ impl Reader {
             if let Some(window) = info.get("model_context_window").and_then(Value::as_i64) {
                 context.usable_window = Some(window).filter(|w| *w > 0);
             }
+            // A replay reads past a failure here, so the baseline never spans this record: a
+            // delta across it would bill usage from before it.
             let total = match usage(member(info, "total_token_usage"), Harness::Codex) {
                 Ok(total) => total,
                 Err(_) if !selected => {
@@ -1834,7 +1887,10 @@ impl Reader {
                     self.earlier(snapshot, file, location, time);
                     return Ok(());
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    file.previous_total = None;
+                    return Err(error);
+                }
             };
             let total_json = serde_json::to_string(&total).expect("usage serializes");
             let total_key = format!("{}:{total_json}", context.session);
@@ -1845,7 +1901,10 @@ impl Reader {
                 return Ok(());
             }
             let mut u = if !nested(info, "last_token_usage").is_empty() {
-                Some(usage(member(info, "last_token_usage"), Harness::Codex)?)
+                Some(
+                    usage(member(info, "last_token_usage"), Harness::Codex)
+                        .inspect_err(|_| file.previous_total = Some(total))?,
+                )
             } else if let Some(previous) = file.previous_total {
                 let delta = |a: Option<i64>, b: Option<i64>| Some(a? - b?);
                 let difference = Usage {
@@ -1979,6 +2038,40 @@ impl Reader {
                 e.settings = structural_settings(if settings_applied { applied } else { p }).into();
                 self.add_event(e);
             }
+        } else if kind == Some("event_msg")
+            && payload_kind == Some("item_completed")
+            && selected
+            && let Some(time) = time
+        {
+            // A finished tool's status, the only error flag Codex records; its ID names the
+            // process or call, never the tool call the model made.
+            let item = nested(p, "item");
+            if matches!(
+                string(item, "type"),
+                Some("CommandExecution" | "McpToolCall" | "FileChange")
+            ) {
+                let failed = string(item, "status") == Some("failed")
+                    || item
+                        .get("exit_code")
+                        .and_then(Value::as_i64)
+                        .is_some_and(|code| code != 0)
+                    || nested(item, "result").get("isError") == Some(&Value::Bool(true));
+                let mut e = event(
+                    snapshot,
+                    location,
+                    context,
+                    time,
+                    EventKind::ToolDone,
+                    string(item, "id"),
+                );
+                e.file = (!failed).then_some(crate::lsp::File::Done);
+                // A rollout may also record another thread's completion, such as a
+                // subagent's, so the thread it names owns it rather than the earliest holder.
+                if let Some(thread) = p.get("thread_id").filter(|t| !t.is_null()) {
+                    e.thread = Some(id(thread)?.into());
+                }
+                self.add_event(e);
+            }
         } else if kind == Some("response_item")
             && selected
             && let Some(time) = time
@@ -2004,8 +2097,15 @@ impl Reader {
                     kind,
                     string(p, "call_id"),
                 );
-                e.tool = text(member(p, "name"));
+                // Named as its MCP server or namespace qualifies it, as exposure names it.
+                e.tool = string(p, "name").and_then(|bare| {
+                    let name = crate::exposure::codex_tool_name(bare, string(p, "namespace"));
+                    text(&Value::from(name))
+                });
                 e.tool_id = opaque(p, "call_id")?.map(Id::from);
+                if kind == EventKind::ToolEnd {
+                    e.bytes = Some(text_bytes(member(p, "output")));
+                }
                 self.add_event(e);
             }
         }
@@ -2201,7 +2301,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         mut t3,
     } = discover(&options.discovery)?;
     let snapshot_finished_at = iso(now());
-    if let (Reach::Window, Some(since)) = (options.reach, since) {
+    if let (Reach::Window | Reach::Replay, Some(since)) = (options.reach, since) {
         let mut reads = crate::window::reads(&snapshots, since)?.into_iter();
         snapshots.retain(|_| reads.next().expect("one per snapshot"));
     }
@@ -2214,6 +2314,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     let has_t3 = profiles.iter().any(|p| p.t3.is_some());
     let mut reader = Reader {
         since,
+        replay: options.reach == Reach::Replay,
         exposure: ExposureCollector::new(since),
         strings: Interner::default(),
         requests: Requests {
@@ -2440,6 +2541,10 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         refs,
         ref_to_request,
     ));
+    // A replay keeps every record it read, so nothing after reading splits at the window,
+    // except instruction discovery, which reads only the window's directories.
+    let window = since;
+    let since = since.filter(|_| options.reach != Reach::Replay);
     // Every request and event stays in memory, so sort in place: a stable slice sort would
     // buffer half of them, and splitting at the window keeps the selected part where it is.
     // Request IDs are a harness name and a hex digest, where byte order is locale order.
@@ -2480,7 +2585,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         &requests,
     )?;
     crate::discovery::discover_latest_codex_controls(&options.discovery, &mut profiles, &requests)?;
-    crate::discovery::discover_instructions(&mut profiles, &requests, since)?;
+    crate::discovery::discover_instructions(&mut profiles, &requests, window)?;
     // What T3 changed holds its own copy of the shared fields; share them again.
     for r in &mut requests {
         if Arc::strong_count(&r.meta) == 1 {
@@ -3424,7 +3529,14 @@ mod tests {
     fn legacy_totals_before_the_window_start_the_first_delta_inside_it() {
         let w = Workspace::new();
         let u = |input: Value| json!({ "input_tokens": input, "cached_input_tokens": 0, "output_tokens": 1 });
-        let inputs = |totals: &[(&str, Value)]| {
+        let total = |time: &str, input: Value| {
+            json!({
+                "type": "event_msg",
+                "timestamp": time,
+                "payload": { "type": "token_count", "info": { "total_token_usage": u(input) } },
+            })
+        };
+        let inputs = |later: &[Value]| {
             let mut records = vec![
                 json!({
                     "type": "session_meta",
@@ -3437,35 +3549,118 @@ mod tests {
                     "payload": { "model": "gpt-5.4", "service_tier": "standard" },
                 }),
             ];
-            for (time, input) in totals {
-                records.push(json!({
-                    "type": "event_msg",
-                    "timestamp": time,
-                    "payload": { "type": "token_count", "info": { "total_token_usage": u(input.clone()) } },
-                }));
-            }
+            records.extend_from_slice(later);
             write(w.codex.join("sessions/legacy.jsonl"), jsonl(&records));
-            let data = scan(&since(options(&w), "2026-11-01T00:02:00Z")).unwrap();
-            data.requests
-                .iter()
-                .map(|r| r.parts[0].usage.input)
-                .collect::<Vec<_>>()
+            let window = since(options(&w), "2026-11-01T00:02:00Z");
+            let start = window.since.unwrap();
+            [Reach::History, Reach::Replay].map(|reach| {
+                let data = scan(&ScanOptions {
+                    reach,
+                    ..window.clone()
+                })
+                .unwrap();
+                data.requests
+                    .iter()
+                    .filter(|r| r.time >= start)
+                    .map(|r| r.parts[0].usage.input)
+                    .collect::<Vec<_>>()
+            })
         };
-        let before = ("2026-11-01T00:01:00Z", json!(100));
-        let inside = [
-            ("2026-11-01T00:03:00Z", json!(250)),
-            ("2026-11-01T00:04:00Z", json!(400)),
-        ];
+        let before = total("2026-11-01T00:01:00Z", json!(100));
+        let first = total("2026-11-01T00:03:00Z", json!(250));
+        let second = total("2026-11-01T00:04:00Z", json!(400));
         // The first request in the window bills only what it added to the earlier total.
+        let both = |inputs: [Option<i64>; 2]| [inputs.to_vec(), inputs.to_vec()];
+        let valid = both([Some(150), Some(150)]);
         assert_eq!(
-            inputs(&[before.clone(), inside[0].clone(), inside[1].clone()]),
-            [Some(150), Some(150)]
+            inputs(&[before.clone(), first.clone(), second.clone()]),
+            valid
         );
-        // A malformed total before the window leaves the next delta unknown, not the whole total.
-        let malformed = ("2026-11-01T00:01:30Z", json!("bad"));
+        // A malformed total before the window leaves the next delta unknown, not the whole
+        // total, and a replay bills nothing across it either.
+        let malformed = total("2026-11-01T00:01:30Z", json!("bad"));
         assert_eq!(
-            inputs(&[before, malformed, inside[0].clone(), inside[1].clone()]),
-            [None, Some(150)]
+            inputs(&[before.clone(), malformed, first.clone(), second.clone()]),
+            both([None, Some(150)])
+        );
+        // A malformed request usage beside a valid total moves the baseline to that total.
+        let mut last = total("2026-11-01T00:01:30Z", json!(200));
+        last["payload"]["info"]["last_token_usage"] = u(json!("bad"));
+        assert_eq!(
+            inputs(&[before.clone(), last, first.clone(), second.clone()]),
+            both([Some(50), Some(150)])
+        );
+        // A malformed record holding no usage keeps the total before it.
+        let tool = json!({
+            "type": "response_item",
+            "timestamp": "2026-11-01T00:01:30Z",
+            "payload": { "type": "function_call", "call_id": "", "name": "shell" },
+        });
+        assert_eq!(inputs(&[before, tool, first, second]), valid);
+    }
+
+    #[test]
+    fn only_a_replay_reads_past_a_malformed_record_before_the_window() {
+        let w = Workspace::new();
+        let records = [
+            json!({
+                "type": "session_meta",
+                "timestamp": "2026-11-01T00:00:00Z",
+                "payload": { "id": 5, "source": "cli", "model_provider": "openai" },
+            }),
+            json!({
+                "type": "turn_context",
+                "timestamp": "2026-11-01T00:03:00Z",
+                "payload": { "model": "gpt-5.4", "service_tier": "standard" },
+            }),
+        ];
+        write(w.codex.join("sessions/bad.jsonl"), jsonl(&records));
+        let window = since(options(&w), "2026-11-01T00:02:00Z");
+        let reach = |reach| {
+            scan(&ScanOptions {
+                reach,
+                ..window.clone()
+            })
+            .map(|_| ())
+            .map_err(|e| e.message)
+        };
+        let failed = Err("missing request or session identity".to_string());
+        assert_eq!(reach(Reach::Window), failed);
+        assert_eq!(reach(Reach::History), failed);
+        assert_eq!(reach(Reach::Replay), Ok(()));
+    }
+
+    #[test]
+    fn a_replay_discovers_instructions_only_for_the_window() {
+        let w = Workspace::new();
+        let old = w.home.join("old");
+        let new = w.home.join("new");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        let path = |p: &Path| p.to_str().unwrap().to_string();
+        let mut before = assistant("session", "a");
+        before["cwd"] = json!(path(&old));
+        let mut inside = assistant("session", "b");
+        inside["cwd"] = json!(path(&new));
+        inside["timestamp"] = json!("2026-11-01T00:03:00Z");
+        write(
+            w.claude.join("projects/project/session.jsonl"),
+            jsonl(&[before, inside]),
+        );
+        let data = scan(&ScanOptions {
+            reach: Reach::Replay,
+            ..since(options(&w), "2026-11-01T00:02:00Z")
+        })
+        .unwrap();
+        assert_eq!(data.requests.len(), 2);
+        let memory = data
+            .profiles
+            .iter()
+            .find_map(|p| p.memory.as_ref())
+            .unwrap();
+        assert_eq!(
+            memory.instructed.keys().cloned().collect::<Vec<_>>(),
+            [path(&new)]
         );
     }
 

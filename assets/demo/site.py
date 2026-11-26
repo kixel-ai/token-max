@@ -241,31 +241,29 @@ def roots(api: set[str], host: str | None) -> set[str]:
 
 
 def changes(transcript: str, api: set[str], api_rates: bool) -> dict[str, list]:
-    """Each setting's offered saving summed over every host's CHANGES section of a WIDE run, as
+    """Each setting's offered saving summed over every host's changes in a WIDE run, as
     [measured $/mo, $/mo that depends on how a profile pays, whether any part has a ~,
     how many lines, the measured $/mo outside the profiles in `api`, whether any part is
     a lower bound]. `api_rates` says
     every profile doctor asked about was answered as API."""
     rows: dict[str, list] = {}
-    # Each change row with the profiles its host answered as API. Under --details a section's
-    # members follow its row two cells in, so the members count and the section's row doesn't.
-    found: list[tuple[str, set[str]]] = []
-    section, here = None, set()
+    # Each change row. Under --details a section's members follow its row two cells in, so
+    # the members count and the section's row doesn't.
+    found: list[str] = []
+    section = None
     for plain in plain_lines(transcript):
         if TITLE.match(plain):
-            host = re.match(r"token-max: (this host|\S+)  ", plain)
-            name = host[1] if host and host[1] != "this host" else None
-            section, here = None, roots(api, name)
+            section = None
         elif HEADING.match(plain):
             section = plain.split()[0]
         elif section == "CHANGES" and plain.startswith("    ● "):
-            if not found or found[-1][0].startswith("    "):
-                found.append((plain, here))
+            if not found or found[-1].startswith("    "):
+                found.append(plain)
             else:
-                found[-1] = (plain, here)
+                found[-1] = plain
         elif section == "CHANGES" and plain.startswith("  ● "):
-            found.append((plain, here))
-    for plain, here in found:
+            found.append(plain)
+    for plain in found:
         plain = plain.removeprefix("  ") if plain.startswith("    ") else plain
         # A change whose saving was not measured, or one priced only as what it costs,
         # such as a Codex catalog skill's listing, promises no saving.
@@ -281,10 +279,21 @@ def changes(transcript: str, api: set[str], api_rates: bool) -> dict[str, list]:
         # API's 5m is only for a change to 1h.
         if api_rates and up_to and m["to"] != "1h":
             sys.exit(f"cannot price {plain.strip()!r} at API rates without that profile's billing")
-        # After its saving, a change names the file it edits, such as
-        # [~/.claude/settings.json], unless its host has one profile.
-        path = re.match(r"[^\[]*?\s{2}\[([^\]]+)\]", plain[m.end():])
-        paid = any(path[1].startswith(root + "/") for root in here) if path else bool(here)
+        # After its saving, a change's tag names its host under --ssh and the file it edits
+        # when its host has several profiles: [this host], [desktop], [~/.claude/settings.json]
+        # or [desktop:~/.claude/settings.json].
+        tag = re.match(r"[^\[]*?\s{2}\[([^\]]+)\]", plain[m.end():])
+        host, path = None, None
+        if tag and tag[1] != "this host":
+            name, _, file = tag[1].partition(":")
+            if tag[1].startswith(("~", "/")):
+                path = tag[1]
+            elif file.startswith(("~", "/")):
+                host, path = name, file
+            else:
+                host = tag[1]
+        here = roots(api, host)
+        paid = any(path.startswith(root + "/") for root in here) if path else bool(here)
         # "<$0.01" counts as nothing.
         usd = 0.0 if m["lt"] else dollars(m["usd"])
         row = rows.setdefault(m["name"], [0.0, 0.0, False, 0, 0.0, False])
@@ -298,29 +307,32 @@ def changes(transcript: str, api: set[str], api_rates: bool) -> dict[str, list]:
     return rows
 
 
-# The hosts' total, which --ssh prints, with what they spent at API prices, then what their
-# changes offer.
+# The hosts' total, which --ssh prints, with what they spent at API prices; what their changes
+# offer follows under the headline.
 TOTAL_LINE = re.compile(
     r"token-max: total over (\d+) hosts\s+([\d,]+) requests and ([\d,]+) tokens in [\d,]+ sessions?, "
     r"(.*?) at API prices"
 )
 # A whole spend, as doctor prints it without unpriced requests: an amount, perhaps with a margin.
 SPENT = re.compile(r"(~?)\$([\d,.]+)(?: ± <?\$[\d,.]+|, margin unknown)?")
-# One part of the "Changes offered" sentence: its amount and its percent of the hosts' spend.
+# One part of the sentence on what the changes save: its amount and its percent of the hosts'
+# spend.
 AMOUNT = re.compile(r"^(?:up to )?(?:about )?(~?)(<?)\$([\d,.]+)/mo.*?, (<?)(\d+)% of these hosts' spend")
 
 
 def offered(transcript: str) -> tuple[re.Match, dict[str, tuple[float, bool, int, bool]]]:
     """The hosts' total, and what their changes offer as (usd, has a ~, percent, is a lower
     bound) for "measured"
-    and "up to"; a run with nothing to offer prints no "Changes offered" sentence."""
+    and "up to"; a run with nothing to offer prints no sentence on what its changes save."""
     plain = " ".join(line.strip() for line in plain_lines(transcript))
     total = TOTAL_LINE.search(plain)
     if not total:
         sys.exit("the results need the hosts' total that --ssh prints")
     offer = {"measured": (0.0, False, 0, False), "up to": (0.0, False, 0, False)}
-    sentence = re.search(r"Changes offered: (.*?)\.(?: |$)", plain[total.end():])
-    unmeasured = False
+    rest = plain[total.end():]
+    sentence = re.search(r"(?:From the defaults|Together), these changes save (.*?)\.(?: |$)", rest)
+    # Changes none of whose savings were measured get a sentence of their own.
+    unmeasured = bool(re.search(r"(?:From the defaults, no|No) change's saving was measured\.", rest))
     for part in sentence[1].split(", plus ") if sentence else []:
         if re.search(r"not measured(; overlapping changes may save less)?$", part):
             unmeasured = True

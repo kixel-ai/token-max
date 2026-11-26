@@ -2508,7 +2508,7 @@ impl ExposureCollector {
 }
 
 /// A Codex tool's full name from its bare name and namespace.
-fn codex_tool_name(bare: &str, namespace: Option<&str>) -> String {
+pub(crate) fn codex_tool_name(bare: &str, namespace: Option<&str>) -> String {
     if bare.starts_with("mcp__") {
         bare.to_string()
     } else if let Some(namespace) = namespace.filter(|n| n.starts_with("mcp__")) {

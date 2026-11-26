@@ -98,7 +98,8 @@ pub fn control(scopes: &[SettingsScope], env: &Env, user_file: &str) -> AdvisorC
 }
 
 /// What puts a profile on an advisor line: the `advisorModel` owner, and the main-session
-/// default and control the line's card reads. None without an advisor control.
+/// default, control and model allowlist the line's card reads. None without an advisor
+/// control.
 pub(crate) fn owner(p: &Profile) -> Option<String> {
     let a = p.advisor.as_ref()?;
     let main = p
@@ -106,8 +107,8 @@ pub(crate) fn owner(p: &Profile) -> Option<String> {
         .as_ref()
         .map(|e| (&e.model, &e.model_owner, &e.unresolved));
     Some(format!(
-        "{}\nmain {main:?}\n{:?} {:?} {:?}",
-        a.owner, a.model, a.blocked, a.gateway
+        "{}\nmain {main:?}\n{:?} {:?} {:?}\n{:?}",
+        a.owner, a.model, a.blocked, a.gateway, p.allowlist
     ))
 }
 
@@ -128,7 +129,7 @@ fn parse(id: &str) -> Option<(&str, (u32, u32))> {
 
 /// An advisor name as Claude Code resolves it: lowercased, without a `[1m]` or `[2m]`
 /// context-window suffix, which it drops before checking the advisor.
-fn normalize(name: &str) -> String {
+pub(crate) fn normalize(name: &str) -> String {
     let name = name.trim().to_ascii_lowercase();
     match name
         .strip_suffix("[1m]")
@@ -142,7 +143,7 @@ fn normalize(name: &str) -> String {
 /// Whether `name` is, in full, an alias or a Claude model ID of a family that can advise:
 /// `claude-<family>-<major>`, then an optional one- or two-digit minor and an optional
 /// eight-digit date, in any case and with an optional context-window suffix.
-fn recognized(name: &str) -> bool {
+pub(crate) fn recognized(name: &str) -> bool {
     let name = normalize(name);
     let family = |f: &str| ["fable", "opus", "sonnet", "haiku"].contains(&f);
     if family(&name) {

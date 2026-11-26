@@ -1983,6 +1983,36 @@ mod unix {
         );
     }
 
+    #[test]
+    fn vibes_offers_no_model_the_allowlist_blocks() {
+        let w = Workspace::new();
+        w.fixture();
+        let mut base = vec!["vibes".to_string()];
+        base.extend(prices_args(&w));
+        let base: Vec<&str> = base.iter().map(String::as_str).collect();
+        let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        // Sonnet only: no Opus default, and no Opus advisor.
+        w.settings(r#"{"model":"claude-sonnet-5-5","availableModels":["sonnet"]}"#);
+        let (_, stdout, _) = run(&mut command(&w, &base));
+        let stdout = words(&stdout);
+        assert!(
+            stdout.contains("The maintainer's pick, claude-opus-5-5 at medium, is not offered: ~/.claude/settings.json:availableModels excludes it.")
+                && stdout.contains("No advisor is suggested: Opus ranks one above claude-sonnet-5-5")
+                && !stdout.contains("-> opus")
+                && !stdout.contains("-> claude-opus-5-5"),
+            "{stdout}"
+        );
+        // A set advisor the list blocks is disabled.
+        w.settings(
+            r#"{"model":"claude-sonnet-5-5","availableModels":["sonnet"],"advisorModel":"opus"}"#,
+        );
+        let (_, stdout, _) = run(&mut command(&w, &base));
+        assert!(
+            words(&stdout).contains("Set to opus in ~/.claude/settings.json, but none would load from these settings: ~/.claude/settings.json:availableModels excludes it."),
+            "{stdout}"
+        );
+    }
+
     /// Every name in `dir`.
     fn names(dir: &Path) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(dir)
@@ -2576,4 +2606,110 @@ fn defaults_report_pretends_the_settings_files_away_and_writes_nothing() {
     // The flag only shapes doctor's report.
     let (status, _, stderr) = run(&mut command(&w, &["sessions", "--defaults"]));
     assert_eq!(status, 2, "{stderr}");
+}
+
+/// A Claude transcript in `cwd` with a tool call, every text field holding a sentinel.
+fn audited_session(session: &str, cwd: &Path) -> String {
+    let cwd = native_path(cwd);
+    let usage = |read: i64, write: i64| json!({"input_tokens": 0, "output_tokens": 10, "cache_read_input_tokens": read, "cache_creation_input_tokens": write, "cache_creation": {"ephemeral_5m_input_tokens": write, "ephemeral_1h_input_tokens": 0}, "service_tier": "standard", "speed": "standard", "inference_geo": "global"});
+    [
+        json!({"type": "user", "sessionId": session, "cwd": cwd, "timestamp": "2026-11-02T00:00:00Z", "message": {"content": "SYNTHETIC_PRIVATE_PROMPT"}}),
+        json!({"type": "assistant", "sessionId": session, "cwd": cwd, "timestamp": "2026-11-02T00:00:01Z", "message": {"id": format!("{session}-a"), "model": "claude-opus-5-5", "content": [{"type": "text", "text": "SYNTHETIC_PRIVATE_REPLY"}, {"type": "tool_use", "id": format!("{session}-call"), "name": "Bash", "input": {"command": "SYNTHETIC_PRIVATE_ARGS"}}], "usage": usage(0, 20_000)}}),
+        json!({"type": "user", "sessionId": session, "cwd": cwd, "timestamp": "2026-11-02T00:00:02Z", "message": {"content": [{"type": "tool_result", "tool_use_id": format!("{session}-call"), "content": "SYNTHETIC_PRIVATE_OUTPUT"}]}, "toolUseResult": {"stdout": "SYNTHETIC_PRIVATE_OUTPUT"}}),
+        // Nothing read within the cache's lifetime: a prefix bust.
+        json!({"type": "assistant", "sessionId": session, "cwd": cwd, "timestamp": "2026-11-02T00:00:03Z", "message": {"id": format!("{session}-b"), "model": "claude-opus-5-5", "content": [{"type": "text", "text": "SYNTHETIC_PRIVATE_REPLY"}], "usage": usage(0, 20_100)}}),
+    ]
+    .iter()
+    .map(|record| format!("{record}\n"))
+    .collect()
+}
+
+#[test]
+fn audit_covers_the_current_repository_and_prints_no_transcript_text() {
+    let w = Workspace::new();
+    let checkout = w.home.join("checkout");
+    std::fs::create_dir_all(checkout.join(".git")).unwrap();
+    std::fs::create_dir_all(checkout.join("sub")).unwrap();
+    std::fs::write(
+        checkout.join(".git/config"),
+        "[remote \"origin\"]\n\turl = https://user:SYNTHETIC_PRIVATE_TOKEN@Host/o/r.git\n",
+    )
+    .unwrap();
+    let elsewhere = w.home.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let project = w.claude.join("projects/project");
+    std::fs::write(project.join("in.jsonl"), audited_session("in", &checkout)).unwrap();
+    std::fs::write(
+        project.join("out.jsonl"),
+        audited_session("out", &elsewhere),
+    )
+    .unwrap();
+    let base = prices_args(&w);
+    let invoke = |dir: &Path, extra: &[&str]| {
+        let mut all = vec!["audit", "--since", "2026-11-01"];
+        all.extend(base.iter().map(String::as_str).chain(extra.iter().copied()));
+        run(command(&w, &all).current_dir(dir))
+    };
+    let parse = |(status, stdout, stderr): (i32, String, String)| -> Value {
+        assert_eq!((status, &*stderr), (0, ""), "{stdout}");
+        assert!(!stdout.contains("SYNTHETIC_PRIVATE"), "{stdout}");
+        assert!(stdout.ends_with("}\n") && stdout.matches('\n').count() == 1);
+        serde_json::from_str(&stdout).unwrap()
+    };
+    // The current directory picks the repository, by its remote without the credential.
+    let here = parse(invoke(&checkout.join("sub"), &[]));
+    assert_eq!(here["scope"]["remotes"], json!(["host/o/r"]));
+    assert_eq!(here["since"], "2026-11-01T00:00:00.000Z");
+    assert_eq!(here["hosts"], json!([null]));
+    assert_eq!(here["totals"]["sessions"], 1);
+    let miss = &here["cacheMisses"]["hotspots"][0];
+    assert_eq!(
+        (&miss["cause"], &miss["tokens"]),
+        (&json!("prefix_bust"), &json!(20_000))
+    );
+    assert_eq!(miss["at"]["file"], native_path(project.join("in.jsonl")));
+    assert_eq!(miss["at"]["line"], 4);
+    assert_eq!(miss["tools"], json!(["Bash"]));
+    assert_eq!(here["toolOutputs"]["byTool"][0]["tool"], "Bash");
+    assert!(
+        here["assumptions"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty())
+    );
+    assert_eq!(
+        parse(invoke(&elsewhere, &["--repo", &native_path(&checkout)])),
+        here
+    );
+    let all = parse(invoke(&elsewhere, &["--all", "--limit", "1"]));
+    assert_eq!(all["totals"]["sessions"], 2);
+    assert_eq!(all["scope"]["all"], true);
+    assert_eq!(all["sessions"]["costliest"].as_array().unwrap().len(), 1);
+
+    // Outside any checkout, it says how to choose.
+    let outside = std::env::temp_dir();
+    let (status, stdout, stderr) = invoke(&outside, &[]);
+    assert_eq!((status, &*stdout), (2, ""));
+    assert_eq!(
+        stderr,
+        "{\"error\":\"the current directory is not in a Git checkout; use --all or --repo DIR\"}\n"
+    );
+    for extra in [
+        &["--all", "--repo", "."][..],
+        &["--limit", "0"],
+        &["--details"],
+        &["--max-cost-per-use", "1"],
+    ] {
+        let (status, stdout, stderr) = invoke(&checkout, extra);
+        assert_eq!((status, &*stdout), (2, ""), "{extra:?}");
+        assert!(stderr.starts_with("{\"error\":"), "{extra:?}: {stderr}");
+    }
+    // Only audit takes its options.
+    for name in ["doctor", "vibes", "sessions"] {
+        let (status, _, stderr) = run(&mut command(&w, &[name, "--all"]));
+        assert_eq!(status, 2, "{name}: {stderr}");
+    }
+    let (status, help, _) = invoke(&checkout, &["--help"]);
+    assert!(status == 0 && help.starts_with("token-max audit:"));
+    let (_, help, _) = run(&mut command(&w, &["--help"]));
+    assert!(help.contains("\n  audit "), "{help}");
 }

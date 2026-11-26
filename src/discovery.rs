@@ -15,9 +15,9 @@ use crate::controls::{
 };
 use crate::effort::{claude_effort, codex_catalog, codex_effort, latest_model};
 use crate::model::{
-    Agent, BackgroundControl, Billing, Control, ControlValue, Harness, IdleControl, InboundControl,
-    Location, MemoryControl, PerBucket, Profile, Request, RootOrigin, RootState, RootStatus,
-    Scalar, Snapshot, SpeedControl, Ttl, TtlControl,
+    Agent, Allowlist, BackgroundControl, Billing, Control, ControlValue, Harness, IdleControl,
+    InboundControl, Location, MemoryControl, PerBucket, Profile, Request, RootOrigin, RootState,
+    RootStatus, Scalar, Snapshot, SpeedControl, Ttl, TtlControl,
 };
 use crate::safe::{ScanError, identity, label};
 
@@ -1205,9 +1205,9 @@ fn claude_project_configs(
     Ok(configs)
 }
 
-/// Resolve each native Claude profile's auto memory, main-session effort and advisor at its
-/// latest main-session request's directory; without an existing one, the user and managed
-/// files decide. It runs once T3 has attributed requests, so a T3 thread that shares the
+/// Resolve each native Claude profile's auto memory, main-session effort, advisor and model
+/// allowlist at its latest main-session request's directory; without an existing one, the
+/// user and managed files decide. It runs once T3 has attributed requests, so a T3 thread that shares the
 /// profile's history never decides them, nor does a request whose owner T3 can't settle.
 pub fn discover_latest_claude_controls(
     options: &DiscoveryOptions,
@@ -1262,11 +1262,31 @@ pub fn discover_latest_claude_controls(
         note_unsettled_model(&mut effort, profile, requests);
         profile.effort = Some(effort);
         // Read where effort is: the advisor card ranks against that main-session default.
-        profile.advisor = Some(crate::advisor::control(
-            &scopes,
-            local_env,
-            &profile.settings_file,
-        ));
+        let mut advisor = crate::advisor::control(&scopes, local_env, &profile.settings_file);
+        // Claude Code's own cache, which may be mid-write, decides only these cards, so one
+        // that can't be read leaves the allowlist unknown rather than failing the scan.
+        let remote_file = join(&[&profile.root, "remote-settings.json"]);
+        profile.allowlist = match settings(&remote_file, Harness::Claude) {
+            Ok(remote) => {
+                let remote = SettingsScope {
+                    config: &remote,
+                    file: &remote_file,
+                };
+                crate::allowlist::control(&scopes, managed_file, remote)
+            }
+            Err(_) => Some(Allowlist::Unknown(format!(
+                "the admin console's settings, cached in {remote_file}, can't be read"
+            ))),
+        };
+        // Claude Code disables an advisor the allowlist blocks for the whole session.
+        if advisor.blocked.is_none()
+            && let (Some(model), Some(list)) = (&advisor.model, &profile.allowlist)
+            && let crate::allowlist::Verdict::Blocked(why) = list.verdict(model)
+        {
+            advisor.blocked = Some(why);
+        }
+        profile.advisor = Some(advisor);
+        profile.project_files = project.into_iter().map(|(file, _)| file).collect();
     }
     Ok(())
 }
@@ -2243,9 +2263,18 @@ fn ancestors_setting_codex_memory(
     ancestor_codex_configs(options, cwd, user, home, sets_codex_memory)
 }
 
-/// Whether two paths name one file, as recorded or once resolved.
+/// Whether two paths name one file, as recorded or once resolved; a file that does not
+/// exist yet, such as one an edit would create, resolves through its directory.
 pub(crate) fn same_file(a: &str, b: &str) -> bool {
-    a == b || realpath(a).is_ok_and(|a| realpath(b).is_ok_and(|b| a == b))
+    let resolve = |path: &str| {
+        realpath(path).ok().or_else(|| {
+            let path = std::path::Path::new(path);
+            let dir = path.parent().filter(|d| !d.as_os_str().is_empty())?;
+            let dir = realpath(dir.to_str()?).ok()?;
+            Some(join(&[&dir, path.file_name()?.to_str()?]))
+        })
+    };
+    a == b || resolve(a).is_some_and(|a| resolve(b).is_some_and(|b| a == b))
 }
 
 /// Every `.codex/config.toml` from `cwd` up to the user's home, or the filesystem root
@@ -2832,6 +2861,8 @@ pub(crate) fn profile(
         turn_end,
         effort: None,
         advisor: None,
+        allowlist: None,
+        project_files: vec![],
         speed_directories: None,
         idle_directories: None,
         background,
@@ -5038,6 +5069,96 @@ mod tests {
         assert_eq!(
             profile.effort.as_ref().unwrap().model_owner,
             format!("{}:model", profile.settings_file)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_missing_file_matches_through_a_symlinked_directory() {
+        let w = Workspace::new();
+        let real = w.home.join("real");
+        fs::create_dir_all(&real).unwrap();
+        let link = w.home.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let path = |dir: &Path| native_path(dir.join("settings.json"));
+        assert!(same_file(&path(&link), &path(&real)));
+        assert!(!same_file(
+            &path(&link),
+            &native_path(real.join("other.json"))
+        ));
+    }
+
+    #[test]
+    fn the_allowlist_joins_user_and_project_lists_and_disables_an_advisor_it_blocks() {
+        use crate::model::Allowlist;
+        let w = Workspace::new();
+        write(
+            w.claude.join("settings.json"),
+            r#"{"availableModels":["sonnet"],"advisorModel":"opus"}"#,
+        );
+        let repo = w.home.join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        let local = join(&[&native_path(&repo), ".claude", "settings.local.json"]);
+        write(&local, r#"{"availableModels":["haiku","sonnet"]}"#);
+        let mut data = discover(&options(&w)).unwrap();
+        let requests = [request(claude(&data), Some(&repo))];
+        let resolve = |data: &mut Discovery| {
+            discover_latest_claude_controls(&options(&w), &mut data.profiles, &requests).unwrap();
+            claude(data).clone()
+        };
+        let profile = resolve(&mut data);
+        let user = profile.settings_file.clone();
+        // The default card checks the files it read beside its own.
+        assert!(
+            profile.project_files.contains(&local),
+            "{:?}",
+            profile.project_files
+        );
+        assert_eq!(
+            profile.allowlist,
+            Some(Allowlist::Read {
+                entries: vec!["sonnet".into(), "haiku".into()],
+                owners: vec![
+                    format!("{user}:availableModels"),
+                    format!("{local}:availableModels")
+                ],
+            })
+        );
+        assert_eq!(
+            profile.advisor.unwrap().blocked,
+            Some(format!(
+                "availableModels, set in {user} and {local}, excludes it"
+            ))
+        );
+        // A managed list alone applies.
+        let managed = native_path(w.managed_settings_file());
+        write(&managed, r#"{"availableModels":["opus"]}"#);
+        let profile = resolve(&mut data);
+        assert_eq!(
+            profile.allowlist,
+            Some(Allowlist::Read {
+                entries: vec!["opus".into()],
+                owners: vec![format!("{managed}:availableModels")],
+            })
+        );
+        assert_eq!(profile.advisor.unwrap().blocked, None);
+        // The admin console's list, cached beside the user's settings, outranks it unread.
+        let remote = join(&[&profile.root, "remote-settings.json"]);
+        write(&remote, r#"{"availableModels":["haiku"]}"#);
+        let profile = resolve(&mut data);
+        assert!(
+            matches!(&profile.allowlist, Some(Allowlist::Unknown(why)) if why.contains(&remote)),
+            "{:?}",
+            profile.allowlist
+        );
+        assert_eq!(profile.advisor.unwrap().blocked, None);
+        // So does a cache that can't be read, rather than failing the scan.
+        write(&remote, "");
+        let profile = resolve(&mut data);
+        assert!(
+            matches!(&profile.allowlist, Some(Allowlist::Unknown(why)) if why.ends_with("can't be read")),
+            "{:?}",
+            profile.allowlist
         );
     }
 

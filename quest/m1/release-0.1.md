@@ -62,5 +62,3 @@ main.
 ## Required
 
 - [crabx's pipeline](/quest/m1/crabx-pipeline.md) - builds and attests this release
-
-- [Short doctor output](/quest/m1/short/README.md) - the short report and walk the page and first release show

@@ -2748,9 +2748,9 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     let comment = json!({"command": "# don't\ngit commit -m 'fix; synthetic-private word'"});
     let heredoc = json!({"command": "v=$(cat <<'EOF'\n)\nsynthetic-private-word\nEOF\n)"});
     let inner = json!({"command": "KEY=$(# a key\nprintf x) cargo build; printf x release\\ #1 && cargo test"});
-    // `$'...'` ends at an unescaped quote, and an array's or a process substitution's lines are
-    // no commands.
-    let ansi = json!({"command": "echo $'it\\'s; synthetic-private word' && git status\nlist=(\n  synthetic-private\n)\ndiff <(\nsynthetic-private\n) b"});
+    // `$'...'` ends at an unescaped quote, and an array's or a process substitution's lines, or
+    // a conditional's operands, are no commands.
+    let ansi = json!({"command": "echo $'it\\'s; synthetic-private word'\nlist=(\n  synthetic-private\n)\ndiff <(\nsynthetic-private\n) b\n[[ $x == a || synthetic-private == $x ]] && cargo build"});
     // A torn line hides none after it; a server's result keeps no text, even under a field
     // the records use; a script's argument is no command.
     let torn = r#"{"type": "user", "message": {"content": "synthetic-private"#;
@@ -2787,7 +2787,7 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     assert_eq!(records.len(), 17);
     assert_eq!(
         records[12],
-        json!({"command": [["echo"], ["git", "status"], ["list="], ["diff"]]})
+        json!({"command": [["echo"], ["list="], ["diff"], ["?"]]})
     );
     assert_eq!(records[13], json!({"unparsed": 58}));
     assert_eq!(
@@ -2836,7 +2836,7 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     assert_eq!(records[5]["payload"]["output"], "<24 chars>");
     assert_eq!(
         records[6]["message"]["content"][0]["input"],
-        json!({"name": "<22 chars>", "status": "<24 chars>", "file_path": "/notes.md", "tags": {"<21 chars, #0>": true}, "command": [["echo"], ["NOTE=", "cat"], ["RUST_LOG=", "cargo", "test", "--release"], ["TOKEN=", "rg", "-n"]]})
+        json!({"<4 chars, #0>": "<22 chars>", "<6 chars, #1>": "<24 chars>", "file_path": "/notes.md", "<4 chars, #3>": {"<21 chars, #0>": true}, "command": [["echo"], ["NOTE=", "cat"], ["RUST_LOG=", "cargo", "test", "--release"], ["TOKEN=", "rg", "-n"]]})
     );
 }
 

@@ -6,8 +6,8 @@ def simple: ((to_entries | map(select(.value | test("^[A-Za-z_][A-Za-z0-9_]*=") 
       and (.[1] | test("^[a-z][a-z0-9-]{0,30}$")) then [(.[0] | prog), .[1]] + (.[2:] | flags)
     else [.[0] | prog] + (.[1:] | flags) end);
 # A command with everything quoted, escaped or substituted masked as `%`, tracking quotes,
-# `$'...'` with its escapes, and `$(...)`, `<(...)` and an array's `=(...)` as the shell
-# nests them; a continuation is deleted, a comment dropped, and a heredoc ends it, since its
+# `$'...'` with its escapes, `[[ ... ]]`, whose `&&` and `||` join no commands, and `$(...)`,
+# `<(...)` and an array's `=(...)` as the shell nests them; a continuation is deleted, a comment dropped, and a heredoc ends it, since its
 # body is data.
 def mask: reduce (explode[] | [.] | implode) as $c ({o: "", s: ["t"], e: false, p: "", x: false};
   if .x then .
@@ -25,6 +25,8 @@ def mask: reduce (explode[] | [.] | implode) as $c ({o: "", s: ["t"], e: false, 
       elif $c == "\"" then .s += ["d"] | .o += "%"
       elif $c == "`" then .s += ["b"] | .o += "%"
       elif $t == "u" then (if $c == "(" then .s += ["u"] elif $c == ")" then .s |= .[:-1] else . end) | .o += "%"
+      elif $t == "k" then (if $c == "]" and .p == "]" then .s |= .[:-1] else . end) | .o += "%"
+      elif $c == "[" and .p == "[" then .s += ["k"] | .o += "%"
       elif $c == "(" and (.p | IN("$", "=", "<", ">")) then .s += ["u"] | .o += "%"
       else .o += $c end
     | if .e then . else .p = $c end
@@ -44,13 +46,15 @@ def kept: if . == ["attachment"] then "^(type|timestamp)$"
     ["payload", "invocation", "arguments"], ["payload", "item", "parsed_cmd"])
   then "^(file_path|path|notebook_path|cwd|workdir)$"
   else null end;
+# Claude Code's and Codex's built-in tool parameters, which a tool input may show by name.
+def params: test("^(file_path|path|notebook_path|cwd|workdir|command|cmd|description|timeout|timeout_ms|yield_time_ms|max_output_tokens|run_in_background|offset|limit|pages|pattern|glob|type|output_mode|head_limit|multiline|-[A-Za-z]|old_string|new_string|replace_all|content|edits|cell_id|new_source|edit_mode|url|query|max_results|prompt|subagent_type|model|skill|args|questions|todos|plan|explanation|input|justification|sandbox_permissions|shell|session_id|chars)$");
 def safe($at): ($at | kept) as $keep | ($at | envelope) as $env
   | if type == "object" then
     del(.internal_chat_message_metadata_passthrough, .permission_profile, .sandbox_policy, .rate_limits, .encrypted_content, .signature, .betas, .annotations, .logprobs, .text_elements, .parentUuid, .uuid, .promptId)
-    # Data can key itself by text, as AskUserQuestion keys answers by question, so only a
-    # record's or a tool input's identifier-shaped keys stay.
+    # Data can key itself by text, as AskUserQuestion keys answers by question, and a tool's
+    # schema can take any key, so only a record's keys and known parameter names stay.
     | if $env then . else to_entries | to_entries | map(.key as $i | .value
-        | if $keep and (.key | test("^[A-Za-z_][A-Za-z0-9_]{0,40}$")) then . else .key = "<\(.key | length) chars, #\($i)>" end) | from_entries
+        | if $keep and (.key | params) then . else .key = "<\(.key | length) chars, #\($i)>" end) | from_entries
       end
     | with_entries(.key as $k | .value |= (type as $t
       | if $k == "arguments" and $t == "string" then (. as $s | try (fromjson | safe($at + ["arguments"])) catch "<\($s | length) chars>")

@@ -1,16 +1,16 @@
 # Flags without values; a short option's letters past three may be an attached value, as in
 # `mysql -pSECRET`, so only its first letter stays.
-def flags: map(select(test("^-{1,2}[A-Za-z][A-Za-z0-9-]*($|=)")) | sub("=.*"; "=")
+def flags: map(select(test("^-{1,2}[A-Za-z][A-Za-z0-9-]*($|=)")) | sub("=[\\s\\S]*"; "=")
   | if test("^-[A-Za-z][A-Za-z0-9-]{3,}") then .[:2] else . end);
 def prog: if contains("%") then "?" else (split("/") | last | if test("^[a-z0-9][a-z0-9_.+-]{0,39}$") then . else "?" end) end;
 def simple: ((to_entries | map(select(.value | test("^[A-Za-z_][A-Za-z0-9_]*=") | not)) | first.key) // length) as $n
-  | (.[:$n] | map(sub("=.*"; "="))) + (.[$n:] | if length == 0 then []
+  | (.[:$n] | map(sub("=[\\s\\S]*"; "="))) + (.[$n:] | if length == 0 then []
     elif length > 1 and (.[0] | prog | IN("git", "gh", "cargo", "rustup", "go", "npm", "pnpm", "yarn", "bun", "uv", "pip", "nix", "docker", "kubectl", "just", "quest", "token-max"))
       and (.[1] | test("^[a-z][a-z0-9-]{0,30}$")) then [(.[0] | prog), .[1]] + (.[2:] | flags)
     else [.[0] | prog] + (.[1:] | flags) end);
 # A command with everything quoted, escaped or substituted masked as `%`, tracking quotes,
 # `$'...'` with its escapes, `[[ ... ]]` to its own `]]` word, whose `&&` and `||` join no
-# commands, and `$(...)`, `<(...)` and an array's `=(...)` as the shell nests them; a
+# commands, and `$(...)`, `((...))`, `<(...)` and an array's `=(...)` as the shell nests them; a
 # continuation is deleted, a comment dropped, and a heredoc ends it, since its body is data.
 def mask: reduce (explode[] | [.] | implode) as $c ({o: "", s: ["t"], e: false, p: "", q: "", x: false};
   if .x then .
@@ -30,7 +30,7 @@ def mask: reduce (explode[] | [.] | implode) as $c ({o: "", s: ["t"], e: false, 
       elif $t == "u" then (if $c == "(" then .s += ["u"] elif $c == ")" then .s |= .[:-1] else . end) | .o += "%"
       elif $t == "k" then (if $c == "]" and .p == "]" and (.q | test("^\\s$")) then .s |= .[:-1] else . end) | .o += "%"
       elif $c == "[" and .p == "[" then .s += ["k"] | .o += "%"
-      elif $c == "(" and (.p | IN("$", "=", "<", ">")) then .s += ["u"] | .o += "%"
+      elif $c == "(" and (.p | IN("$", "=", "<", ">", "(")) then .s += ["u"] | .o += "%"
       else .o += $c end
     | if .e then . else .q = .p | .p = $c end
   end) | .o;

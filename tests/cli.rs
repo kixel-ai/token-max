@@ -2747,19 +2747,19 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     // A comment's apostrophe opens no quote, and a heredoc's body is data, even in `$(...)`.
     let comment = json!({"command": "# don't\ngit commit -m 'fix; synthetic-private word'"});
     let heredoc = json!({"command": "v=$(cat <<'EOF'\n)\nsynthetic-private-word\nEOF\n)"});
-    // A character class's `]]` ends no conditional, and a short option's attached value is
-    // no flag.
-    let class = json!({"command": "[[ $x =~ ^[[:digit:]]+$ || synthetic-private == $x ]] && git status -sb && mysql -psyntheticprivate -u"});
+    // An arithmetic command's operands are no commands, a character class's `]]` ends no
+    // conditional, and a short option's attached value is no flag.
+    let class = json!({"command": "(( x == 0 || synthetic_private == x )) && [[ $x =~ ^[[:digit:]]+$ || synthetic-private == $x ]] && git status -sb && mysql -psyntheticprivate -u"});
     let inner = json!({"command": "KEY=$(# a key\nprintf x) cargo build; printf x release\\ #1 && cargo test"});
     // `$'...'` ends at an unescaped quote, and an array's or a process substitution's lines, or
     // a conditional's operands, are no commands.
     let ansi = json!({"command": "echo $'it\\'s; synthetic-private word'\nlist=(\n  synthetic-private\n)\ndiff <(\nsynthetic-private\n) b\n[[ $x == a || synthetic-private == $x ]] && cargo build"});
     // A torn line hides none after it; a server's result keeps no text, even under a field
-    // the records use; a script's argument is no command.
+    // the records use; a script's argument is no command, and a value keeps none of its lines.
     let torn = r#"{"type": "user", "message": {"content": "synthetic-private"#;
     let mcp_meta = json!({"type": "user", "mcpMeta": {"structuredContent": {"name": "SYNTHETIC_PRIVATE_NAME", "path": "/synthetic-private", "command": "synthetic-private-cmd x"}}});
     let codex_mcp = json!({"type": "event_msg", "payload": {"type": "mcp_tool_call_end", "invocation": {"server": "notes", "tool": "save", "arguments": {"file_path": "/n.md"}}, "result": {"Ok": {"structuredContent": {"name": "SYNTHETIC_PRIVATE_NAME", "status": "SYNTHETIC_PRIVATE_STATUS"}}}}});
-    let script = json!({"type": "response_item", "payload": {"type": "function_call", "name": "shell", "arguments": json!({"command": ["bash", "run.sh", "synthetic-private-arg"]}).to_string()}});
+    let script = json!({"type": "response_item", "payload": {"type": "function_call", "name": "shell", "arguments": json!({"command": ["bash", "run.sh", "synthetic-private-arg"], "cmd": ["KEY=x\nsynthetic-private", "upload", "--payload=x\nsynthetic-private"]}).to_string()}});
     let lines = format!(
         "{}{codex}\n{codex_output}\n{mcp}\n{escaped}\n{answers}\n{comment}\n{heredoc}\n{inner}\n{ansi}\n{class}\n{torn}\n{mcp_meta}\n{codex_mcp}\n{script}\n",
         audited_session("s", &w.home)
@@ -2794,7 +2794,7 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     );
     assert_eq!(
         records[13],
-        json!({"command": [["?"], ["git", "status", "-sb"], ["mysql", "-p", "-u"]]})
+        json!({"command": [["?"], ["?"], ["git", "status", "-sb"], ["mysql", "-p", "-u"]]})
     );
     assert_eq!(records[14], json!({"unparsed": 58}));
     assert_eq!(
@@ -2811,7 +2811,7 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     );
     assert_eq!(
         records[17]["payload"]["arguments"],
-        json!({"command": ["bash"]})
+        json!({"command": ["bash"], "cmd": ["KEY=", "upload", "--payload="]})
     );
     assert_eq!(
         records[11],

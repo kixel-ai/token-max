@@ -2747,9 +2747,9 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     // A comment's apostrophe opens no quote, and a heredoc's body is data, even in `$(...)`.
     let comment = json!({"command": "# don't\ngit commit -m 'fix; synthetic-private word'"});
     let heredoc = json!({"command": "v=$(cat <<'EOF'\n)\nsynthetic-private-word\nEOF\n)"});
-    // A character class's `]]` ends no conditional.
-    let class =
-        json!({"command": "[[ $x =~ ^[[:digit:]]+$ || synthetic-private == $x ]] && git status"});
+    // A character class's `]]` ends no conditional, and a short option's attached value is
+    // no flag.
+    let class = json!({"command": "[[ $x =~ ^[[:digit:]]+$ || synthetic-private == $x ]] && git status -sb && mysql -psyntheticprivate -u"});
     let inner = json!({"command": "KEY=$(# a key\nprintf x) cargo build; printf x release\\ #1 && cargo test"});
     // `$'...'` ends at an unescaped quote, and an array's or a process substitution's lines, or
     // a conditional's operands, are no commands.
@@ -2792,7 +2792,10 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
         records[12],
         json!({"command": [["echo"], ["list="], ["diff"], ["?"]]})
     );
-    assert_eq!(records[13], json!({"command": [["?"], ["git", "status"]]}));
+    assert_eq!(
+        records[13],
+        json!({"command": [["?"], ["git", "status", "-sb"], ["mysql", "-p", "-u"]]})
+    );
     assert_eq!(records[14], json!({"unparsed": 58}));
     assert_eq!(
         records[15]["mcpMeta"],

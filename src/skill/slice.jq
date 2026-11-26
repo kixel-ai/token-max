@@ -10,9 +10,9 @@ def simple: ((to_entries | map(select(.value | test("^[A-Za-z_][A-Za-z0-9_]*=") 
 # ends it, since its body is data.
 def mask: reduce (explode[] | [.] | implode) as $c ({o: "", s: ["t"], e: false, p: "", x: false};
   if .x then .
-  elif .e then .e = false | if $c == "\n" then . else .o += "%%" | .p = "" end
+  elif .e then .e = false | if $c == "\n" then . else .o += "%%" | .p = "%" end
   else .s[-1] as $t
-    | if $t == "c" then (if $c == "\n" then .s |= .[:-1] | .o += "\n" else . end)
+    | if $t == "c" then (if $c == "\n" then .s |= .[:-1] | .o += (if .s[-1] == "t" then "\n" else "%" end) else . end)
       elif $t == "s" then (if $c == "'" then .s |= .[:-1] else . end) | .o += "%"
       elif $c == "\\" then .e = true
       elif $t == "d" then (if $c == "\"" then .s |= .[:-1] elif $c == "(" and .p == "$" then .s += ["u"] elif $c == "`" then .s += ["b"] else . end) | .o += "%"

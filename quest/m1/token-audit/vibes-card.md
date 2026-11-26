@@ -31,7 +31,7 @@ Implements the `vibes` discovery surface decided in the
     stating concisely what `/token-audit` finds beyond settings (cache-busting
     commands/actions, bloated/repetitive tool calls, useless and missing
     context), citing the maintainer's pick as source, and naming
-    `token-max skill install` (with `npx skills add kixel-ai/token-max -g` as an
+    `token-max skill install` (with `npx skills add kixel-ai/token-max --skill token-audit -g` as an
     alternative) as the step by hand. Include `--claude-dir` when a non-default
     Claude profile is missing it, matching how `Code intelligence` scopes its
     install command; `skill install` takes no `--codex-dir`, since Codex reads

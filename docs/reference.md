@@ -1166,7 +1166,7 @@ left to `doctor`.
 
 ```sh
 token-max skill install          # this host's Claude Code and Codex homes
-npx skills add kixel-ai/token-max -g
+npx skills add kixel-ai/token-max --skill token-audit -g
 ```
 
 Then ask for `/token-audit` in Claude Code, `$token-audit` in Codex, or a

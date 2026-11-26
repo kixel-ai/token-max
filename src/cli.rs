@@ -261,7 +261,8 @@ The token-audit skill has an agent such as Claude Code or Codex run token-max au
 the transcript lines it points at through a jq filter that drops their text, and report what
 wasted tokens, ranked by dollars, offering each fix as an edit to approve. Its SKILL.md
 only runs token-max skill audit, which prints the instructions from this build, so an
-installed skill never goes stale. npx skills add kixel-ai/token-max installs it too.
+installed skill never goes stale. npx skills add kixel-ai/token-max --skill token-audit
+installs it too.
 
 skill audit prints those instructions. skill filter prints the jq program the agent reads
 transcript lines through, which keeps record types, times, models, tool names, file paths,

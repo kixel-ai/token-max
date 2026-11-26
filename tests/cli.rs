@@ -2737,7 +2737,7 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     let (_, help, _) = run(&mut command(&w, &["--help"]));
     assert!(help.contains("\n  skill "), "{help}");
 
-    let codex = json!({"timestamp": "2026-11-02T00:00:00Z", "type": "response_item", "payload": {"type": "function_call", "name": "shell", "arguments": json!({"command": ["bash", "-lc", "SECRET=SYNTHETIC_PRIVATE_TOKEN cargo test --release --features=SYNTHETIC_PRIVATE_ARGS SYNTHETIC_PRIVATE_ARGS && git commit -m \"synthetic_private; prose words\" && claude synthetic_private_prompt && cat <<EOF\nsynthetic_private prose\nEOF"], "workdir": "/w"}).to_string()}});
+    let codex = json!({"timestamp": "2026-11-02T00:00:00Z", "type": "response_item", "payload": {"type": "function_call", "name": "shell", "arguments": json!({"command": ["bash", "-lc", "SECRET=SYNTHETIC_PRIVATE_TOKEN cargo test --release --features=SYNTHETIC_PRIVATE_ARGS SYNTHETIC_PRIVATE_ARGS && git commit -m \"synthetic_private; prose words\" && claude synthetic-private-prompt && cat <<EOF\nsynthetic_private prose\nEOF"], "workdir": "/w"}).to_string()}});
     let codex_output = json!({"type": "response_item", "payload": {"type": "function_call_output", "output": "SYNTHETIC_PRIVATE_OUTPUT"}});
     let lines = format!("{}{codex}\n{codex_output}\n", audited_session("s", &w.home));
     let mut jq = Command::new("jq")
@@ -2754,7 +2754,11 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     let out = jq.wait_with_output().unwrap();
     assert!(out.status.success());
     let out = String::from_utf8(out.stdout).unwrap();
-    assert!(!out.to_lowercase().contains("synthetic_private"), "{out}");
+    let lower = out.to_lowercase();
+    assert!(
+        !lower.contains("synthetic_private") && !lower.contains("synthetic-private"),
+        "{out}"
+    );
     let records: Vec<Value> = out
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())

@@ -7,7 +7,7 @@ def simple: ((to_entries | map(select(.value | test("^[A-Za-z_][A-Za-z0-9_]*=") 
     else [.[0] | prog] + (.[1:] | flags) end);
 def cmd: if type == "array" then map(tostring)
     | if length == 3 and (.[0] | test("(^|/)(ba|z|da)?sh$")) then .[2] | cmd else simple end
-  else [tostring | sub("<<[\\s\\S]*"; "") | gsub("\u0027[^\u0027]*\u0027|\"(\\\\.|[^\"\\\\])*\"|\\\\[\\s\\S]"; "_")
+  else [tostring | sub("<<[\\s\\S]*"; "") | gsub("\\\\\n"; " ") | gsub("\u0027[^\u0027]*\u0027|\"(\\\\.|[^\"\\\\])*\"|\\\\[\\s\\S]"; "_")
     | splits("&&|\\|\\||[;|\\n]") | [splits("\\s+") | select(. != "")] | select(length > 0) | simple] | .[:4] end;
 def safe($tool): if type == "object" then
     del(.internal_chat_message_metadata_passthrough, .permission_profile, .sandbox_policy, .rate_limits, .encrypted_content, .signature, .betas, .annotations, .logprobs, .text_elements, .parentUuid, .uuid, .promptId)

@@ -1291,10 +1291,10 @@ fn shape(
         .copied()
         .filter(|e| e.time >= since && events.owns(e))
         .collect();
-    let failed: Vec<&Location> = finished
+    let failed: Vec<&StructuralEvent> = finished
         .iter()
+        .copied()
         .filter(|e| e.file.is_none())
-        .map(|e| &e.location)
         .collect();
     let errors =
         (harness == Harness::Claude || !finished.is_empty()).then_some(failed.len() as u64);
@@ -1335,9 +1335,15 @@ fn shape(
             .take(EARLY)
             .map(|l| l.line)
             .collect(),
+        // A failure another rollout also records keeps the first-read copy's location, and
+        // the rest among its origins, so each points at the copy in this session's file.
         error_lines: failed
             .iter()
-            .filter(|l| l.file == first.file)
+            .filter_map(|e| {
+                std::iter::once(&e.location)
+                    .chain(e.origins.iter().map(|o| &o.location))
+                    .find(|l| l.file == first.file)
+            })
             .take(EARLY)
             .map(|l| l.line)
             .collect(),
@@ -1856,9 +1862,10 @@ mod tests {
             .sessions
             .most_tool_errors
             .iter()
-            .map(|s| (s.session.as_deref(), s.tool_errors))
+            .map(|s| (s.session.as_deref(), s.tool_errors, s.error_lines.clone()))
             .collect();
-        assert_eq!(errors, [(Some("child"), Some(1))]);
+        // It points at the child's own copy, though the parent's was read first.
+        assert_eq!(errors, [(Some("child"), Some(1), vec![4])]);
     }
 
     #[test]

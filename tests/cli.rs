@@ -2761,8 +2761,11 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     let mcp_meta = json!({"type": "user", "mcpMeta": {"structuredContent": {"name": "SYNTHETIC_PRIVATE_NAME", "path": "/synthetic-private", "command": "synthetic-private-cmd x"}}});
     let codex_mcp = json!({"type": "event_msg", "payload": {"type": "mcp_tool_call_end", "invocation": {"server": "notes", "tool": "save", "arguments": {"file_path": "/n.md"}}, "result": {"Ok": {"structuredContent": {"name": "SYNTHETIC_PRIVATE_NAME", "status": "SYNTHETIC_PRIVATE_STATUS"}}}}});
     let script = json!({"type": "response_item", "payload": {"type": "function_call", "name": "shell", "arguments": json!({"command": ["bash", "run.sh", "synthetic-private-arg"], "cmd": ["KEY=x\nsynthetic-private", "upload", "--payload=x\nsynthetic-private"]}).to_string()}});
+    // `@"` opens a PowerShell here-string only at its line's end, and a PowerShell path's
+    // trailing backslash, read as an escape, leaves no here-string body exposed.
+    let powershell = json!({"command": "scp f user@\"$host\":d && git status\n$p = \"C:\\dir\\\"; $t = @\"\nit\"s synthetic-private\nsynthetic-private words\n\"@"});
     let lines = format!(
-        "{}{codex}\n{codex_output}\n{mcp}\n{escaped}\n{answers}\n{comment}\n{heredoc}\n{inner}\n{ansi}\n{class}\n{torn}\n{mcp_meta}\n{codex_mcp}\n{script}\n",
+        "{}{codex}\n{codex_output}\n{mcp}\n{escaped}\n{answers}\n{comment}\n{heredoc}\n{inner}\n{ansi}\n{class}\n{torn}\n{mcp_meta}\n{codex_mcp}\n{script}\n{powershell}\n",
         audited_session("s", &w.home)
     );
     let mut jq = Command::new("jq")
@@ -2788,7 +2791,11 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    assert_eq!(records.len(), 18);
+    assert_eq!(records.len(), 19);
+    assert_eq!(
+        records[18],
+        json!({"command": [["scp"], ["git", "status"], ["?"]]})
+    );
     assert_eq!(
         records[12],
         json!({"command": [["echo"], ["list="], ["diff"], ["?"]]})

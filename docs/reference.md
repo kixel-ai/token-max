@@ -598,6 +598,8 @@ request is never extrapolated below what it is known to cost, such as its tokens
 beside an unknown server fee. A profile that priced none of its requests adds
 only its known part, a lower bound, shown as `~$9,392 ± $4.72 plus at least
 $120`, so a share can read high; `--details`' line explaining the percents says so.
+A percent that would pass 100%, which only such a lower bound or an
+extrapolated figure can give, is left out; the line still ranks by it.
 
 A `~` marks any figure extrapolated over requests that could not be priced, such
 as a saving of `~$3,270/mo ± $410`, followed by its 95% margin of error under the

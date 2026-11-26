@@ -27,6 +27,14 @@ Decided 2026-11-24 (maintainer, /quest-plan):
   maintainer announces shows these tabs (rejected: m2 without gating
   anything). The 0.1.0 release doesn't wait for it.
 
+Decided 2026-11-25 (maintainer, /quest-plan): ✅ token-max moves to crabx's pipeline
+([the switch](/quest/m1/crabx-pipeline.md)), and its first release crabx runs is 0.1.1. The
+crabx release this quest waited on (musl fallback and `crabx install`) shipped as crabx 0.2.0,
+which also refuses an author attestation signed from a branch, as 0.0.1's and cargo-dist's 0.1.0
+are. The run-script tabs stay, but their "Or install it" lines become max.kixel.me's
+`/install.sh` and `/install.ps1`, which now install through crabx's installers, so their
+directory and `PATH` handling are crabx's, not cargo-dist's. Validate on 0.1.1 instead of 0.1.0.
+
 Found while planning: on 2026-11-24, `npx @kixel/crabx token-max --version`
 on x86_64 glibc Linux failed with `no usable prebuilt release for
 token-max@0.0.1 on x86_64-unknown-linux-gnu`. crabx 0.1.0 only tries the
@@ -71,13 +79,6 @@ Recommendations:
   `crabx token-max` run but not a plain `token-max` one, so word the line for
   both.
 
-## Waiting
-
-- kixel-ai/crabx: a crabx release that falls back to musl Linux builds and
-  has `crabx install`, planned in that repository's quest tree. Check with
-  `npx @kixel/crabx@latest token-max --version` on glibc Linux and
-  `npx @kixel/crabx@latest install --help`.
-
 ## Required
 
-- [Release 0.1.0](/quest/m1/release-0.1.md) - the page this edits is the one 0.1.0 deploys, and crabx runs the newest crates.io version
+- [Release 0.1.1](/quest/m1/release-0.1.1.md) - the first release crabx runs, since crabx 0.2.0 refuses the branch-signed 0.0.1 and 0.1.0

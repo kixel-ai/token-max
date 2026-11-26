@@ -1293,8 +1293,6 @@ impl Reader {
             }
             // A record with no time is selected, so this one has a time.
             let time = time.expect("a record before the window has a time");
-            // A Codex delta across this record would bill usage from before the window.
-            file.previous_total = None;
             let mut r = request(
                 snapshot,
                 location,
@@ -1878,6 +1876,8 @@ impl Reader {
             if let Some(window) = info.get("model_context_window").and_then(Value::as_i64) {
                 context.usable_window = Some(window).filter(|w| *w > 0);
             }
+            // A replay reads past a failure here, so the baseline never spans this record: a
+            // delta across it would bill usage from before it.
             let total = match usage(member(info, "total_token_usage"), Harness::Codex) {
                 Ok(total) => total,
                 Err(_) if !selected => {
@@ -1885,7 +1885,10 @@ impl Reader {
                     self.earlier(snapshot, file, location, time);
                     return Ok(());
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    file.previous_total = None;
+                    return Err(error);
+                }
             };
             let total_json = serde_json::to_string(&total).expect("usage serializes");
             let total_key = format!("{}:{total_json}", context.session);
@@ -1896,7 +1899,10 @@ impl Reader {
                 return Ok(());
             }
             let mut u = if !nested(info, "last_token_usage").is_empty() {
-                Some(usage(member(info, "last_token_usage"), Harness::Codex)?)
+                Some(
+                    usage(member(info, "last_token_usage"), Harness::Codex)
+                        .inspect_err(|_| file.previous_total = Some(total))?,
+                )
             } else if let Some(previous) = file.previous_total {
                 let delta = |a: Option<i64>, b: Option<i64>| Some(a? - b?);
                 let difference = Usage {
@@ -3487,7 +3493,14 @@ mod tests {
     fn legacy_totals_before_the_window_start_the_first_delta_inside_it() {
         let w = Workspace::new();
         let u = |input: Value| json!({ "input_tokens": input, "cached_input_tokens": 0, "output_tokens": 1 });
-        let inputs = |totals: &[(&str, Value)]| {
+        let total = |time: &str, input: Value| {
+            json!({
+                "type": "event_msg",
+                "timestamp": time,
+                "payload": { "type": "token_count", "info": { "total_token_usage": u(input) } },
+            })
+        };
+        let inputs = |later: &[Value]| {
             let mut records = vec![
                 json!({
                     "type": "session_meta",
@@ -3500,13 +3513,7 @@ mod tests {
                     "payload": { "model": "gpt-5.4", "service_tier": "standard" },
                 }),
             ];
-            for (time, input) in totals {
-                records.push(json!({
-                    "type": "event_msg",
-                    "timestamp": time,
-                    "payload": { "type": "token_count", "info": { "total_token_usage": u(input.clone()) } },
-                }));
-            }
+            records.extend_from_slice(later);
             write(w.codex.join("sessions/legacy.jsonl"), jsonl(&records));
             let window = since(options(&w), "2026-11-01T00:02:00Z");
             let start = window.since.unwrap();
@@ -3523,24 +3530,37 @@ mod tests {
                     .collect::<Vec<_>>()
             })
         };
-        let before = ("2026-11-01T00:01:00Z", json!(100));
-        let inside = [
-            ("2026-11-01T00:03:00Z", json!(250)),
-            ("2026-11-01T00:04:00Z", json!(400)),
-        ];
+        let before = total("2026-11-01T00:01:00Z", json!(100));
+        let first = total("2026-11-01T00:03:00Z", json!(250));
+        let second = total("2026-11-01T00:04:00Z", json!(400));
         // The first request in the window bills only what it added to the earlier total.
         let both = |inputs: [Option<i64>; 2]| [inputs.to_vec(), inputs.to_vec()];
+        let valid = both([Some(150), Some(150)]);
         assert_eq!(
-            inputs(&[before.clone(), inside[0].clone(), inside[1].clone()]),
-            both([Some(150), Some(150)])
+            inputs(&[before.clone(), first.clone(), second.clone()]),
+            valid
         );
         // A malformed total before the window leaves the next delta unknown, not the whole
         // total, and a replay bills nothing across it either.
-        let malformed = ("2026-11-01T00:01:30Z", json!("bad"));
+        let malformed = total("2026-11-01T00:01:30Z", json!("bad"));
         assert_eq!(
-            inputs(&[before, malformed, inside[0].clone(), inside[1].clone()]),
+            inputs(&[before.clone(), malformed, first.clone(), second.clone()]),
             both([None, Some(150)])
         );
+        // A malformed request usage beside a valid total moves the baseline to that total.
+        let mut last = total("2026-11-01T00:01:30Z", json!(200));
+        last["payload"]["info"]["last_token_usage"] = u(json!("bad"));
+        assert_eq!(
+            inputs(&[before.clone(), last, first.clone(), second.clone()]),
+            both([Some(50), Some(150)])
+        );
+        // A malformed record holding no usage keeps the total before it.
+        let tool = json!({
+            "type": "response_item",
+            "timestamp": "2026-11-01T00:01:30Z",
+            "payload": { "type": "function_call", "call_id": "", "name": "shell" },
+        });
+        assert_eq!(inputs(&[before, tool, first, second]), valid);
     }
 
     #[test]

@@ -1360,6 +1360,12 @@ which runs every check there and sends back only its finished report. For
 session lines it runs `token-max sessions --ssh-scan`, which sends back only
 the priced session lines of that host's transcripts. Either way its transcripts
 and scan never leave it, and this host never holds more than its own scan.
+A destination may not be trustworthy, so this host reads at most 16 MiB of
+its report, its `vibes` advice or a walk's preview, 256 MiB of its session
+lines, 1 MiB of its profiles or of the files it wrote, and 1 KiB of its
+header. A destination that sends more fails the run, naming the limit it
+passed. For scale, a report from a host with ten gigabytes of transcripts is
+about 170 KB, and all of that host's session lines about 12 MB.
 
 Destinations connect while this host's profiles are asked about. For a report,
 each first sends the roots of the Claude profiles it asks about, waits for the

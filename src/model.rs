@@ -188,6 +188,7 @@ impl Interner {
             &mut meta.client,
             &mut meta.cwd,
             &mut meta.tool,
+            &mut meta.thread,
         ] {
             self.share(slot);
         }
@@ -648,6 +649,8 @@ pub enum EventKind {
     /// A turn Claude Code started without a prompt, such as for a subagent's report or a
     /// scheduled task; it only ends the turn before it.
     AutoTurn,
+    /// Codex's record that a tool finished, with whether it failed; it names no call.
+    ToolDone,
 }
 
 /// What tied an idle period to its cause, when anything did.
@@ -697,6 +700,8 @@ pub struct StructuralEvent {
     /// The language a Claude file tool's start named, or that a tool's result wasn't an
     /// error; never the path.
     pub file: Option<crate::lsp::File>,
+    /// A tool result's text length in bytes, never the text; saturates at `u32::MAX`.
+    pub bytes: Option<u32>,
     pub meta: std::sync::Arc<EventMeta>,
 }
 
@@ -720,6 +725,9 @@ pub struct EventMeta {
     /// Preceding metadata from this file, retained even before the selected window.
     pub pricing: Option<std::sync::Arc<Pricing>>,
     pub t3: Option<std::sync::Arc<T3Request>>,
+    /// The session key of the Codex thread a tool's completion names, which differs from
+    /// `session` when a rollout copies another thread's record.
+    pub thread: Option<Text>,
 }
 
 impl std::ops::Deref for StructuralEvent {
@@ -942,6 +950,20 @@ pub struct AdvisorControl {
     pub gateway: Option<String>,
 }
 
+/// Claude Code's `availableModels` allowlist as the settings read now give it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Allowlist {
+    /// The list Claude Code applies, read from settings files.
+    Read {
+        /// Its entries, as written, duplicates dropped.
+        entries: Vec<String>,
+        /// Each `{file}:availableModels` that contributes them, lowest precedence first.
+        owners: Vec<String>,
+    },
+    /// Why token-max can't tell what the list permits, such as one the admin console sets.
+    Unknown(String),
+}
+
 /// What a line of Claude profiles' advisor calls cost over the window.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AdvisorUse {
@@ -1084,6 +1106,12 @@ pub struct Profile {
     pub effort: Option<EffortControl>,
     /// Claude Code's advisor model; None for Codex and T3, whose threads pick their own model.
     pub advisor: Option<AdvisorControl>,
+    /// Claude Code's `availableModels` allowlist, read where the advisor is; None when no
+    /// settings file sets one.
+    pub allowlist: Option<Allowlist>,
+    /// The project and local settings files Claude reads at its latest session's directory,
+    /// besides its own, where an edit to another profile's file can still reach it.
+    pub project_files: Vec<String>,
     pub speed_directories: Option<IndexMap<String, SpeedControl>>,
     /// Current project controls observed at recorded working directories.
     pub idle_directories: Option<IndexMap<String, IdleControl>>,
@@ -1686,7 +1714,7 @@ pub enum Action {
 }
 
 /// A dollar figure, extrapolated from the items that could be priced when some could not.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Estimate {
     pub usd: f64,
     /// How far an extrapolated figure may be off; None when every item was priced.

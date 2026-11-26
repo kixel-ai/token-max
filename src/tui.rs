@@ -632,11 +632,10 @@ impl App {
             Tab::Measured => {
                 let sel = self.selected_usd();
                 let avail = self.total_available_usd();
-                let pct = if self.hero.monthly_spend > 0.0 && sel > 0.0 {
-                    format!(" ({} of spend)", share_text(sel / self.hero.monthly_spend))
-                } else {
-                    String::new()
-                };
+                let pct = (self.hero.monthly_spend > 0.0 && sel > 0.0)
+                    .then(|| share_text(sel / self.hero.monthly_spend))
+                    .flatten()
+                    .map_or_else(String::new, |s| format!(" ({s} of spend)"));
                 let mut pills = vec![];
                 if self.hero.read_only {
                     pills.push("--defaults · read-only".to_string());

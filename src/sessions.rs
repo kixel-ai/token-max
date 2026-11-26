@@ -87,6 +87,35 @@ impl Sessions {
         self.facts.get(session)?.cwd.as_ref()
     }
 
+    /// A session's native ID and the native ID of the session it was spawned from.
+    pub(crate) fn native(&self, session: &str) -> (Option<&str>, Option<&str>) {
+        let facts = self.facts.get(session);
+        (
+            facts.and_then(|f| f.id.as_deref()),
+            facts.and_then(|f| f.parent.as_deref()),
+        )
+    }
+
+    /// When a session began: its first record, or for Codex its `session_meta`.
+    pub(crate) fn created(&self, session: &str) -> Option<Millis> {
+        self.facts.get(session)?.created
+    }
+
+    /// Every session's key, in the order first observed.
+    pub(crate) fn keys(&self) -> impl Iterator<Item = &Text> {
+        self.facts.keys()
+    }
+
+    /// The transcript files a session's records came from.
+    pub(crate) fn files(&self, session: &str) -> &[Text] {
+        self.facts.get(session).map_or(&[], |f| &f.files)
+    }
+
+    /// The remote URL Codex recorded when the session started.
+    pub(crate) fn recorded_repository(&self, session: &str) -> Option<&str> {
+        self.facts.get(session)?.repository.as_deref()
+    }
+
     pub(crate) fn observe(&mut self, record: Record) {
         let index = match self.facts.get_index(self.last) {
             Some((key, _)) if key == record.session => self.last,
@@ -249,9 +278,99 @@ pub struct Session {
     pub files: Vec<String>,
 }
 
+/// Which session owns each request.
+pub(crate) struct Owners<'s> {
+    facts: &'s IndexMap<Text, Facts>,
+    /// The sessions whose files hold each file.
+    held: HashMap<&'s str, Vec<&'s Text>>,
+    ids: HashMap<&'s str, &'s Facts>,
+}
+
+impl<'s> Owners<'s> {
+    pub(crate) fn new(sessions: &'s Sessions) -> Self {
+        let facts = &sessions.facts;
+        let mut held: HashMap<&str, Vec<&Text>> = HashMap::default();
+        for (key, f) in facts {
+            for file in &f.files {
+                held.entry(file).or_default().push(key);
+            }
+        }
+        let ids = facts
+            .values()
+            .filter_map(|f| Some((f.id.as_deref()?, f)))
+            .collect();
+        Self { facts, held, ids }
+    }
+
+    /// Sources rank before their forks. A fork's `session_meta` is written when it is forked,
+    /// after its source began, so time decides even when an intermediate fork's rollout is
+    /// missing. Lineage depth breaks only an exact tie: where the recorded chain connects two
+    /// forks, the descendant's depth is greater.
+    fn rank(&self, key: &Text) -> (Millis, usize) {
+        let mut f = self.facts.get(key);
+        let created = f.and_then(|f| f.created).unwrap_or(Millis::MAX);
+        let mut depth = 0;
+        // Bounded so a cycle in recorded lineage cannot loop.
+        while depth < self.facts.len()
+            && let Some(source) = f.and_then(|f| self.ids.get(f.forked_from.as_deref()?))
+        {
+            f = Some(source);
+            depth += 1;
+        }
+        (created, depth)
+    }
+
+    /// The session among `keys` that owns what they share: the earliest source.
+    pub(crate) fn first<'k>(&self, keys: impl IntoIterator<Item = &'k Text>) -> Option<&'k Text> {
+        keys.into_iter().min_by_key(|key| self.rank(key))
+    }
+
+    /// Every session whose files hold a copy of `r`, its own first.
+    pub(crate) fn holding<'r>(&self, r: &'r Request) -> Vec<&'r Text>
+    where
+        's: 'r,
+    {
+        let mut found = vec![&r.session];
+        if r.harness == Harness::Codex {
+            for key in r
+                .locations
+                .iter()
+                .filter_map(|l| self.held.get(&*l.file))
+                .flatten()
+            {
+                if !found.contains(key) {
+                    found.push(key);
+                }
+            }
+        }
+        found
+    }
+
+    /// The session `r` belongs to. A Codex fork copies its source's records under its own
+    /// `session_meta`, so a request in several rollouts belongs to the source, whichever the
+    /// reader read first. Claude records name their own session, which the reader already keeps.
+    pub(crate) fn of<'r>(&self, r: &'r Request) -> &'r Text
+    where
+        's: 'r,
+    {
+        if r.harness != Harness::Codex || r.locations.len() < 2 {
+            return &r.session;
+        }
+        let own = self.rank(&r.session);
+        r.locations
+            .iter()
+            .filter_map(|l| self.held.get(&*l.file))
+            .flatten()
+            .map(|key| (self.rank(key), *key))
+            .min_by_key(|(rank, _)| *rank)
+            .filter(|(rank, _)| *rank < own)
+            .map_or(&r.session, |(_, key)| key)
+    }
+}
+
 /// Price each session with a selected request, ordered by its first request, and resolve
 /// its repositories on this host.
-pub fn export<'s>(scan: &'s Scan, catalog: &Catalog) -> Result<Vec<Session>, ScanError> {
+pub fn export(scan: &Scan, catalog: &Catalog) -> Result<Vec<Session>, ScanError> {
     struct Totals<'a> {
         harness: Harness,
         start: Millis,
@@ -259,54 +378,10 @@ pub fn export<'s>(scan: &'s Scan, catalog: &Catalog) -> Result<Vec<Session>, Sca
         rows: IndexMap<(Option<&'a str>, Option<&'a str>), ModelUsage>,
     }
     let facts = &scan.sessions.facts;
-    let mut held: HashMap<&str, Vec<&Text>> = HashMap::default();
-    for (key, f) in facts {
-        for file in &f.files {
-            held.entry(file).or_default().push(key);
-        }
-    }
-    let ids: HashMap<&str, &Facts> = facts
-        .values()
-        .filter_map(|f| Some((f.id.as_deref()?, f)))
-        .collect();
-    // Sources rank before their forks. A fork's `session_meta` is written when it is forked,
-    // after its source began, so time decides even when an intermediate fork's rollout is
-    // missing. Lineage depth breaks only an exact tie: where the recorded chain connects two
-    // forks, the descendant's depth is greater.
-    let rank = |key: &Text| {
-        let mut f = facts.get(key);
-        let created = f.and_then(|f| f.created).unwrap_or(Millis::MAX);
-        let mut depth = 0;
-        // Bounded so a cycle in recorded lineage cannot loop.
-        while depth < facts.len()
-            && let Some(source) = f.and_then(|f| ids.get(f.forked_from.as_deref()?))
-        {
-            f = Some(source);
-            depth += 1;
-        }
-        (created, depth)
-    };
-    // A Codex fork copies its source's records under its own `session_meta`, so a request in
-    // several rollouts belongs to the source, whichever the reader read first. Claude records
-    // name their own session, which the reader already keeps.
-    let owner = |r: &'s Request| -> &'s Text {
-        let own = rank(&r.session);
-        r.locations
-            .iter()
-            .filter_map(|l| held.get(&*l.file))
-            .flatten()
-            .map(|key| (rank(key), *key))
-            .min_by_key(|(rank, _)| *rank)
-            .filter(|(rank, _)| *rank < own)
-            .map_or(&r.session, |(_, key)| key)
-    };
+    let owners = Owners::new(&scan.sessions);
     let mut sessions: IndexMap<&Text, Totals> = IndexMap::default();
     for r in &scan.requests {
-        let key = if r.harness == Harness::Codex && r.locations.len() > 1 {
-            owner(r)
-        } else {
-            &r.session
-        };
+        let key = owners.of(r);
         let totals = sessions.entry(key).or_insert_with(|| Totals {
             harness: r.harness,
             start: r.time,

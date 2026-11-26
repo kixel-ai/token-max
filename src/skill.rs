@@ -88,14 +88,17 @@ pub fn install(options: &Install) -> Result<String, ScanError> {
         });
     }
     // Refuse before writing anything, so a refusal leaves every file as it was. A write
-    // replaces a linked SKILL.md's target, which can be any file, so --force never does.
+    // replaces a linked SKILL.md's target, which can be any file, or a dangling link itself,
+    // so --force never does.
     for (target, state) in targets.iter().zip(&states) {
-        let linked = fs::symlink_metadata(&target.path).is_ok_and(|m| m.file_type().is_symlink());
-        if linked && matches!(state, State::Different) {
+        let Ok(link) = fs::read_link(&target.path) else {
+            continue;
+        };
+        if !matches!(state, State::Current) {
             return Err(ScanError::new(format!(
-                "{} is a link to {}, which differs from this token-max's token-audit skill; replace the link with a copy of {SOURCE} or remove it",
+                "{} is a link to {}, which is not this token-max's token-audit skill; replace the link with a copy of {SOURCE} or remove it",
                 display(&target.path.to_string_lossy()),
-                display(&target.resolved.to_string_lossy())
+                display(&link.to_string_lossy())
             )));
         }
     }

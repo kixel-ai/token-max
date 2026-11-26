@@ -2744,13 +2744,14 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     // An escaped separator is no program name.
     let escaped = json!({"command": "api_key\\=synthetic-private-key; api_key\\=synthetic-private/git status; KEY=$(echo synthetic-private-sub x) cargo build; printf % 'literal $(' \"x); synthetic-private-word; y\""});
     let answers = json!({"type": "user", "toolUseResult": {"answers": {"SYNTHETIC_PRIVATE_QUESTION text?": "SYNTHETIC_PRIVATE_ANSWER", "SYNTHETIC_PRIVATE_WORD": "yes"}}});
-    // A comment's apostrophe opens no quote, and a heredoc's body is data, even in `$(...)`.
-    let comment = json!({"command": "# don't\ngit commit -m 'fix; synthetic-private word'"});
+    // A comment's apostrophe opens no quote, and a heredoc's body is data, even in `$(...)`,
+    // as are a PowerShell here-string's and block comment's.
+    let comment = json!({"command": "# don't\ngit commit -m 'fix; synthetic-private word'\n$t = @'\nit's synthetic-private\nsynthetic-private words\n'@"});
     let heredoc = json!({"command": "v=$(cat <<'EOF'\n)\nsynthetic-private-word\nEOF\n)"});
     // An arithmetic command's operands are no commands, neither a character class's `]]` nor
     // one a word goes on past ends a conditional, and a short option's attached value is no flag.
     let class = json!({"command": "(( x == 0 || synthetic_private == x )) && [[ $x =~ ^[[:digit:]]+$ || $x == ]]a || synthetic-private == $x ]] && git status -sb && mysql -psyntheticprivate -u"});
-    let inner = json!({"command": "KEY=$(# a key\nprintf x) cargo build; printf x release\\ #1 && cargo test"});
+    let inner = json!({"command": "KEY=$(# a key\nprintf x) cargo build; printf x release\\ #1 && cargo test\n<#\nsynthetic-private\n#>"});
     // `$'...'` ends at an unescaped quote, and an array's or a process substitution's lines, or
     // a conditional's operands, are no commands.
     let ansi = json!({"command": "echo $'it\\'s; synthetic-private word'\nlist=(\n  synthetic-private\n)\ndiff <(\nsynthetic-private\n) b\n[[ $x == a || synthetic-private == $x ]] && cargo build"});
@@ -2815,9 +2816,12 @@ fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text()
     );
     assert_eq!(
         records[11],
-        json!({"command": [["KEY=", "cargo", "build"], ["printf"], ["cargo", "test"]]})
+        json!({"command": [["KEY=", "cargo", "build"], ["printf"], ["cargo", "test"], ["?"]]})
     );
-    assert_eq!(records[9], json!({"command": [["git", "commit", "-m"]]}));
+    assert_eq!(
+        records[9],
+        json!({"command": [["git", "commit", "-m"], ["?"]]})
+    );
     assert_eq!(records[10], json!({"command": [["v="]]}));
     assert_eq!(
         records[7],
@@ -2972,6 +2976,16 @@ fn skill_install_writes_a_shared_skills_directory_once() {
         assert!(stderr.contains("is a link to"), "{stderr}");
     }
     assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), "mine");
+    // A dangling link, such as one into a checkout that is away, stays a link.
+    std::fs::remove_file(&elsewhere).unwrap();
+    let (status, _, stderr) = run(&mut command(&w, &["skill", "install"]));
+    assert_eq!(status, 2);
+    assert!(stderr.contains("is a link to"), "{stderr}");
+    assert!(
+        std::fs::symlink_metadata(shared.join("token-audit/SKILL.md"))
+            .unwrap()
+            .is_symlink()
+    );
 
     // A checkout's skills directory linked outside it gets nothing from --project.
     let project = w.home.join("project");

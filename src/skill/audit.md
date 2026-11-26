@@ -35,17 +35,17 @@ Look at, in order of cost:
 
 - each `cacheMisses` hotspot, from its `previous` line to its `at` line; for a Codex hotspot, start a few dozen lines before `previous`, since Codex records a response's tool calls before its usage;
 - each `toolOutputs` hotspot's `call` and `at` lines;
-- a window around the `streak.at` of the `longestStreaks` and `mostToolErrors` sessions;
-- the `earlyLines` of the `costliest` and `largestStart` sessions, for what each had to discover before working.
+- a window around the `streak.at` of the `longestStreaks` sessions, and around the `errorLines` of the `mostToolErrors` sessions;
+- the `earlyLines` of the `costliest` and `largestStart` sessions, starting a few lines before the first, where the opening user message sits, for what each had to discover before working.
 
 Keep windows to tens of lines and stop reading once a cause is clear.
 
 ## 3. Diagnose
 
-- Cache busts. `tool_wait_ttl`: a command outlasted the cache; run it in the background, speed it up, or cap it. `idle_ttl`: the session sat past the cache's lifetime; when a long session resumes after a break, `/clear` with a short summary can cost less than rereading the whole history. `control_change`: a model, effort or speed switch mid-session rewrote the cache. `prefix_bust`: the prompt's prefix changed, such as an instruction or memory file edited mid-session, tools or MCP servers connecting, or a hook injecting changing text.
+- Cache busts. `tool_wait_ttl`: a command outlasted the cache; run it in the background, speed it up, or cap it. `idle_ttl`: the session sat past the cache's lifetime; when a long session resumes after a break, `/clear` with a short summary can cost less than rereading the whole history. `control_change`: the hotspot's `change` (a model, effort or speed switch, a compaction or a truncation) rewrote the cache. `prefix_bust`: the prompt's prefix changed, such as an instruction or memory file edited mid-session, tools or MCP servers connecting, or a hook injecting changing text.
 - Tool output bloat: large results that many later requests carried. Look for noisy build, test or log output (quiet flags, only failures, output written to a file and its tail read), whole files read where a range would do, and the same file read again.
 - Loops: long runs of one tool, a failing command retried, repeated errors. Name what would have stopped them, such as a missing command in the instruction file, a broken script, or a hook.
-- Unused context: a large `startInputTokens` is a lead, not a cause: it counts the first prompt whole, the user's first message included. Blame always-loaded instruction files, memory and tool definitions only when the `earlyLines` show the first user message is small, or several sessions start equally large. Then read the repository's `AGENTS.md`, `CLAUDE.md` and what they import: a rule the inspected sessions never needed can move to a skill, a nested `AGENTS.md` or a path-scoped rule, or be deleted.
+- Unused context: a large `startInputTokens` is a lead, not a cause: it counts the first prompt whole, the user's first message included. Blame always-loaded instruction files, memory and tool definitions only when the window before the first of the `earlyLines` shows the opening user message is small; several sessions can start equally large from one long task brief. When that message falls outside the window, leave the cause unresolved. Then read the repository's `AGENTS.md`, `CLAUDE.md` and what they import: a rule the inspected sessions never needed can move to a skill, a nested `AGENTS.md` or a path-scoped rule, or be deleted.
 - Missing context: what sessions rediscover in their first requests, such as the same build or test command found by trial, the same files read to learn the layout, or the same failure worked around. Check the instruction files first so nothing is duplicated; a line earns its place when it costs less than the rediscovery, since every session pays for it.
 
 ## 4. Report and fix

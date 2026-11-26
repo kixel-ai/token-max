@@ -235,7 +235,7 @@ within the cache's lifetime. toolOutputs lists tool results by tool and the ones
 requests carried the most, with what carrying them cost. sessions lists the sessions that
 stand out by cost, uncached input, total input, first prompt, subagent cost, tool calls,
 tool errors and repeated calls to one tool, each once with the lines of its first
-requests, and ranks them per measure by index. assumptions names what the prices assume.
+requests and first failed tool results, and ranks them per measure by index. assumptions names what the prices assume.
 Each ranking keeps --limit entries.
 
 This host is always audited, and directory flags select its profiles only. Each SSH

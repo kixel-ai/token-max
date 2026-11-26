@@ -12,7 +12,8 @@ def simple: ((to_entries | map(select(.value | test("^[A-Za-z_][A-Za-z0-9_]*=") 
 # `$'...'` with its escapes, `[[ ... ]]` to its own `]]` word (reopened when a word goes on
 # past it), whose `&&` and `||` join no commands, and `$(...)`, `((...))`, `<(...)` and an
 # array's `=(...)` as the shell nests them; a continuation is deleted, a comment dropped, and a
-# heredoc ends it, since its body is data.
+# heredoc ends it, since its body is data, as do PowerShell's here-string (`@'`, `@"`) and block
+# comment (`<#`), whose quotes this reader would misread.
 def mask: reduce (explode[] | [.] | implode) as $c ({o: "", s: ["t"], e: false, p: "", q: "", x: false, r: false};
   if .x then .
   elif .e then .e = false | if $c == "\n" then . else .o += "%%" | .p = "%" end
@@ -23,7 +24,7 @@ def mask: reduce (explode[] | [.] | implode) as $c ({o: "", s: ["t"], e: false, 
       elif $t == "a" then (if $c == "'" then .s |= .[:-1] else . end) | .o += "%"
       elif $t == "d" then (if $c == "\"" then .s |= .[:-1] elif $c == "(" and .p == "$" then .s += ["u"] elif $c == "`" then .s += ["b"] else . end) | .o += "%"
       elif $t == "b" then (if $c == "`" then .s |= .[:-1] else . end) | .o += "%"
-      elif $c == "<" and .p == "<" then .x = true
+      elif ($c == "<" and .p == "<") or ($c == "#" and .p == "<") or (($c == "'" or $c == "\"") and .p == "@") then .x = true
       elif $c == "#" and (.p | test("^$|[\\s;&|()]")) then .s += ["c"]
       elif $c == "'" then .s += [if .p == "$" then "a" else "s" end] | .o += "%"
       elif $c == "\"" then .s += ["d"] | .o += "%"

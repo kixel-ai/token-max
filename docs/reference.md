@@ -1135,7 +1135,7 @@ The object holds:
   calls in a row to one tool). Each session names its tool calls and errors,
   compactions, cache hit ratio and largest prompt, points `at` its first request,
   and lists the lines of its first requests in that file (`earlyLines`), to
-  sample how it started.
+  sample how it started, and of its first failed tool results (`errorLines`).
 - `assumptions`: what the prices assume, which
   [the semantics](semantics.md#transcript-audit) explain.
 

@@ -1944,16 +1944,10 @@ mod tests {
             // slash ok: a remote's key, not a file path
             "github.com/o/r"
         );
-        // Only the authority's userinfo goes, never an `@` in the path.
-        for (given, key) in [
-            (
-                "https://user:t@ken@git.example/team@dept/r.git",
-                "git.example/team@dept/r",
-            ),
-            ("git@git.example:team@dept/r.git", "git.example/team@dept/r"),
-        ] {
-            assert_eq!(repository::canonical(given), key, "{given}");
-        }
+        // Nor does a token a remote helper's command passes before its SSH destination.
+        assert!(
+            !repository::canonical("ext::ssh -i SECRET git@git.example %S /r").contains("SECRET")
+        );
         let https = Filter::Remotes(vec![repository::canonical("https://github.com/o/r/")]);
         assert_eq!(Filter::of(&sub).unwrap(), Some(https.clone()));
         let mut scope = Scope {

@@ -5899,7 +5899,10 @@ fn advisor_row(u: &AdvisorUse, control: Option<&AdvisorControl>, out: &Out<'_>) 
                 (Some(m), Some(b)) => {
                     format!("Set to {m}, but none would load from these settings: {b}.")
                 }
-                (None, _) => "No settings file read sets it now; a session's --advisor flag or /advisor turns it on.".into(),
+                (None, None) => "No settings file read sets it now; a session's --advisor flag or /advisor turns it on.".into(),
+                (None, Some(b)) => format!(
+                    "No settings file read sets it now, and none would load from these settings: {b}."
+                ),
             };
             (set, out.home(&control.owner))
         }
@@ -13311,6 +13314,28 @@ pub(crate) mod tests {
                 "but none would load from these settings: CLAUDE_CODE_DISABLE_ADVISOR_TOOL"
             )
         );
+        // With no advisorModel, the line (shown for a recorded call) names the blocker, not
+        // the flag that cannot turn the advisor on.
+        let line = |report: &mut Report, blocked: Option<&str>| {
+            set(report, None, blocked, Some("claude-sonnet-5-5"));
+            report.advisor[0].calls = 1;
+            let details = text(report, None, true);
+            report_lines(&details)
+                .into_iter()
+                .find(|l| l.head.starts_with("Advisor model"))
+                .unwrap()
+                .evidence
+        };
+        let blocker =
+            "CLAUDE_CODE_DISABLE_ADVISOR_TOOL, set in the environment, turns the advisor tool off";
+        let evidence = line(&mut report, Some(blocker));
+        assert!(
+            evidence.contains(&format!("none would load from these settings: {blocker}"))
+                && !evidence.contains("--advisor"),
+            "{evidence}"
+        );
+        assert!(line(&mut report, None).contains("--advisor"));
+        report.advisor[0].calls = 0;
         // Profiles reading one settings file share a card, unless their main-session
         // defaults differ.
         set(&mut report, None, None, Some("claude-sonnet-5-5"));

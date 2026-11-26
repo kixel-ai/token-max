@@ -257,7 +257,7 @@ cross-session messages, as their own line
 measured; cited provider guidance that applies to a setting goes in Warnings
 (rejected: a `vibes` command; a later quest for it), as
 [#192](https://github.com/kixel-ai/token-max/pull/192) decided; superseded
-later that day by the [vibes epic](/quest/m1/vibes/README.md). ✅ no
+later that day by the [`vibes` command](/docs/reference.md#vibes). ✅ no
 main-session reprice on Sonnet, since the effort line already shows cost by
 model (rejected: a reprice as evidence; a reprice with a warning). ✅ no
 README comparison with `/usage` (rejected: an XS quest for it). Agent teams,

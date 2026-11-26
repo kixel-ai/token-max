@@ -5644,7 +5644,7 @@ fn advisor_item(
             )),
             Pick::Advisor(pick) if let Some(why) = allowlist_refusal(p, pick, Some(main)) => {
                 quiet(format!(
-                    "No advisor is suggested: {} ranks one above {main}, the main-session default ({owner}), but {why}.",
+                    "No advisor is suggested: {} ranks one above {main}, the main-session default ({owner}), but {why}.{recorded}",
                     capitalize(pick)
                 ))
             }
@@ -12764,6 +12764,19 @@ mod tests {
             "{}",
             c.text
         );
+        // So does one whose suggestion the allowlist blocks.
+        set(&mut report, None, None, Some("claude-sonnet-5-5"));
+        report.scan.profiles[0].allowlist = Some(crate::model::Allowlist::Read {
+            entries: vec!["sonnet".into()],
+            owners: vec!["/synthetic/home/.claude/settings.json:availableModels".into()],
+        });
+        let c = card(&report);
+        assert!(
+            c.text.ends_with("excludes it. 4 advisor calls on 3 requests ran on claude-opus-5-5, costing $2.50 at API prices over the window."),
+            "{}",
+            c.text
+        );
+        report.scan.profiles[0].allowlist = None;
         set(&mut report, Some("opus"), None, Some("claude-sonnet-5-5"));
         // A set advisor the main model can't take is advice with no edit, naming where the
         // main model comes from.

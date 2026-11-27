@@ -486,9 +486,13 @@ Profiles that share a settings file but take different switches get lines of
 their own. A subagent model line credits a definition only when the run's
 model came through the provider it names. Subagent model lines name `agents.<name>.model`, whose variant (a
 `#variant` suffix, or `variant` in its object form) sets the effort, or
-OpenCode 1's `agent.<name>.model` and `variant`. The cache TTL, compaction, keepalive,
-audit and effort checks replay only Claude Code and Codex, so an OpenCode
-profile's spend counts in the report's totals but gets none of those lines.
+OpenCode 1's `agent.<name>.model` and `variant`. Requests OpenCode sent
+straight to Anthropic (provider `anthropic`) get an Anthropic prompt cache TTL
+line, which replays 5m against 1h and edits
+`providers.anthropic.settings.cache.ttl` (see [Cache TTL](#cache-ttl)). The
+compaction, keepalive, audit and effort checks replay only Claude Code and
+Codex, so an OpenCode profile's spend counts in the report's totals but gets
+none of those lines.
 See [Replay semantics](semantics.md#opencode) for what each piece assumes.
 
 ### Antigravity
@@ -1416,6 +1420,24 @@ within one five-minute cache lifetime, with their IDs and assumptions reported;
 original usage and historical billing stay unknown. Unsupported inputs leave their
 own parts unpriced. Sensitivity scenarios accompany the aggregate
 winner, and unknown fixed charges can cancel without pretending they cost zero.
+
+OpenCode sends the Anthropic provider's `settings.cache.ttl` as given on every
+cache marker of its requests to Anthropic, main agent, subagents and summaries
+alike, so its line covers all of them at once and is named "Anthropic prompt
+cache TTL". Unset, OpenCode sends no lifetime and Anthropic keeps its 5m
+default. A value an Anthropic model sets for itself under
+`providers.anthropic.models`, a value other than `5m` or `1h`, which Anthropic
+rejects, a project file that changes the lifetime an Anthropic session there
+ran with or the file that sets it, `warming` left on where an Anthropic session
+ran, whose unrecorded pings keep caches warm on a schedule timed from
+`cache.ttl`, or a latest session that ran OpenCode older than 2.2.0, which added
+the setting, leaves the line advisory. A project file that cannot be read where
+an Anthropic session ran may do either, so it does too. `OPENCODE_CONFIG_CONTENT`, which OpenCode reads after
+every file, project files included, outranks them: the lifetime and warming it
+sets are the ones every session runs with, and its lifetime is changed there.
+Requests to any other provider, including OpenCode's own
+gateways, are not replayed: their cache lifetimes and write prices are not
+documented the same way.
 
 Cache replay preserves known, estimated and unknown predecessor states, including
 unsupported attempts before the selected window. Missing cohort metadata spans

@@ -1233,11 +1233,24 @@ one of the same name, and a name two such servers could own credits neither. A s
 has only partly migrated is read from both session tables, OpenCode 2's row
 winning for a session in both.
 
-OpenCode's cache lifetime, compaction and keepalive behavior are not
-replayed, and its requests are left out of the transcript audit, so none of
-those checks makes a claim about an OpenCode profile. Its spend still counts
-in every total, and its skills, MCP servers and instruction files get their
-measured lines.
+OpenCode 2 records a compaction as a message of its own, holding the summary
+request's usage and model; each one with recorded usage is a request, priced
+like a step. One still running has none yet.
+
+A request OpenCode sent straight to Anthropic replays its cache TTL through the
+same cache chain as Claude Code's, with every agent's requests on one line,
+since OpenCode sends one lifetime per provider. OpenCode records one write
+count without its lifetime, so each replay writes every request at the
+lifetime it compares, and the current setting is applied to the whole history.
+A compaction, whichever provider wrote its summary, starts the session's
+conversation over, so no later request reads what was cached before it.
+OpenCode lists a fast mode as a model of its own, so its unrecorded speed is
+taken as standard and the model ID keeps cohorts apart.
+
+OpenCode's compaction and warming are not replayed, and its requests are left
+out of the transcript audit, so those checks make no claim about an OpenCode
+profile. Its spend still counts in every total, and its skills, MCP servers and
+instruction files get their measured lines.
 
 ## Antigravity
 

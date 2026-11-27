@@ -2965,6 +2965,7 @@ pub(crate) fn profile(
         switched_off: switched_off(harness, &user),
         pretended_on: vec![],
         policy_off: vec![],
+        cache_stack: None,
     };
     // What the real file turns off, which --defaults shows on unless policy keeps it off.
     if options.defaults {

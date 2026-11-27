@@ -166,6 +166,7 @@ pub(crate) fn profile(canonical: String, alias: String, key: &str) -> Result<Pro
         switched_off: vec![],
         pretended_on: vec![],
         policy_off: vec![],
+        cache_stack: None,
     })
 }
 

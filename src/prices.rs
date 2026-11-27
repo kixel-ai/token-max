@@ -1473,7 +1473,13 @@ pub fn prefix_spans(catalog: &Catalog, r: &Request, p: &BillingPart) -> Option<V
     } else if matches!(r.harness, Harness::OpenCode | Harness::Antigravity) {
         let written = u.write?;
         if written > 0 {
-            spans.push((written as f64, rates.write? / 1e6));
+            match (u.write5m, u.write1h) {
+                (Some(short), Some(long)) => {
+                    spans.push((long as f64, input * 2.0));
+                    spans.push((short as f64, rates.write? / 1e6));
+                }
+                _ => spans.push((written as f64, rates.write? / 1e6)),
+            }
         }
     } else if write_billing(p.model.as_deref()?)? {
         // Only a model that bills writes needs them recorded; otherwise uncached
@@ -1613,12 +1619,35 @@ pub fn price_components(catalog: &Catalog, r: &Request, p: &BillingPart) -> Comp
             _ => None,
         };
         ordinary_charge(&mut ordinary_cost, ordinary, rates.input);
-        charge(
-            &mut result,
-            u.write,
-            rates.write,
-            "cache writes/rate unknown",
-        );
+        match (u.write5m, u.write1h) {
+            // A TTL replay of an Anthropic request splits its writes by lifetime.
+            (Some(short), Some(long)) => {
+                charge(
+                    &mut result,
+                    Some(short),
+                    rates.write,
+                    "cache writes/rate unknown",
+                );
+                charge(
+                    &mut result,
+                    Some(long),
+                    rates.input.map(|i| i * 2.0),
+                    "1h write rate unknown",
+                );
+                if long > 0 {
+                    result.assumptions.push(
+                        "1h total write price derived as 2x ordinary input from provider documentation"
+                            .to_string(),
+                    );
+                }
+            }
+            _ => charge(
+                &mut result,
+                u.write,
+                rates.write,
+                "cache writes/rate unknown",
+            ),
+        }
     } else {
         let billing = p
             .model

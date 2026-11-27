@@ -351,7 +351,10 @@ fn base<'a, V>(
 fn common(result: &CheckResult) -> Common<'_> {
     match result {
         CheckResult::Ttl(c) => base(
-            "claude-cache-ttl",
+            match c.harness {
+                Harness::OpenCode => "anthropic-cache-ttl",
+                _ => "claude-cache-ttl",
+            },
             c.bucket.as_str(),
             &c.base,
             &c.usage_estimates,
@@ -3825,6 +3828,9 @@ fn reason(result: &CheckResult, r: &Common<'_>) -> String {
 /// Plain name for the setting a check is about.
 fn setting_name(result: &CheckResult) -> String {
     match result {
+        CheckResult::Ttl(t) if t.harness == Harness::OpenCode => {
+            "Anthropic prompt cache TTL".into()
+        }
         CheckResult::Ttl(t) => match t.bucket {
             crate::model::Bucket::Main => "Main-agent prompt cache TTL".into(),
             crate::model::Bucket::Subagent => "Subagent prompt cache TTL".into(),
@@ -9539,6 +9545,7 @@ pub(crate) mod tests {
         CheckResult::Ttl(TtlCheck {
             base,
             window_basis_kind: WindowBasisKind::Explicit,
+            harness: crate::model::Harness::Claude,
             bucket,
             one_hour_savings_usd: one_hour,
             comparison_estimate: PerTtl::default(),

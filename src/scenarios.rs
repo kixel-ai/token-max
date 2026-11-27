@@ -9,6 +9,12 @@ use crate::model::{
 };
 use crate::prices::{Catalog, Components, price_components, unknown_cost};
 
+/// Whether a request's cache follows Anthropic's 5m and 1h lifetimes, which the cache chain
+/// replays: Claude Code's, and OpenCode's sent straight to Anthropic.
+pub(crate) fn anthropic_cache(r: &Request) -> bool {
+    r.harness == Harness::Claude || crate::opencode::anthropic(r)
+}
+
 /// Cache policy bucket for a billed iteration; None when its attribution is unresolved.
 pub fn cache_bucket(r: &Request, p: &BillingPart) -> Option<Bucket> {
     if r.agent == Agent::Subagent {
@@ -169,7 +175,7 @@ impl<'b, 'o> PartReplay<'b, 'o> {
             let bucket = cache_bucket(r, p);
             let ttl = options.ttls.get(bucket);
             let selected = r.time >= options.since;
-            let replayed = if r.harness == Harness::Claude {
+            let replayed = if anthropic_cache(r) {
                 self.chain.replay(&Touch {
                     request: r,
                     p,
@@ -196,7 +202,7 @@ impl<'b, 'o> PartReplay<'b, 'o> {
             };
             if estimate.is_some()
                 && options.attempt_scenario == AttemptScenario::ColdCache
-                && r.harness == Harness::Claude
+                && anthropic_cache(r)
             {
                 let u = &mut replayed.p.usage;
                 let write = u.write.unwrap_or(0) + u.read.unwrap_or(0);
@@ -210,8 +216,7 @@ impl<'b, 'o> PartReplay<'b, 'o> {
                 u.write1h = Some(if ttl == Some(Ttl::OneHour) { write } else { 0 });
             }
             let mut cache_unknown = None;
-            if r.harness == Harness::Claude && (p.usage.read != Some(0) || p.usage.write != Some(0))
-            {
+            if anthropic_cache(r) && (p.usage.read != Some(0) || p.usage.write != Some(0)) {
                 if bucket.is_none() {
                     cache_unknown = Some("cache TTL bucket is not established for this part");
                 } else if ttl.is_none() {
@@ -234,6 +239,12 @@ impl<'b, 'o> PartReplay<'b, 'o> {
                 cache_unknown,
                 evidence: replayed.evidence,
             });
+        }
+        // OpenCode records no boundary event: a summary, whichever provider wrote it, starts
+        // the conversation over, so later requests read nothing cached before it.
+        if r.harness == Harness::OpenCode && r.parts.iter().any(|p| p.kind == PartKind::Compaction)
+        {
+            self.chain.boundary(&r.session, r.time);
         }
         result
     }

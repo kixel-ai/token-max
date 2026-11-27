@@ -251,8 +251,9 @@ impl Harness {
         }
     }
 
-    /// Whether token-max replays its cache and compaction settings: Claude Code's and
-    /// Codex's are, OpenCode's and Antigravity's not.
+    /// Whether token-max replays its compaction and keepalive settings and audits its
+    /// transcripts: Claude Code's and Codex's are, Antigravity's not; of OpenCode's, only the
+    /// Anthropic cache TTL is replayed, by its own check.
     pub fn replayed(self) -> bool {
         match self {
             Harness::Claude | Harness::Codex => true,
@@ -1195,6 +1196,9 @@ pub struct Profile {
     /// Under `doctor --defaults`, the switches policy turns off, with the policy file, which
     /// keep a feature off whatever `pretended_on` restores; empty otherwise.
     pub policy_off: Vec<(String, Control)>,
+    /// An OpenCode profile's config layers for the Anthropic prompt cache, read with its own
+    /// environment, which each project's files join; None for other harnesses.
+    pub(crate) cache_stack: Option<crate::opencode::CacheStack>,
 }
 
 impl Profile {
@@ -1923,6 +1927,9 @@ pub struct TtlSensitivity {
 pub struct TtlCheck {
     pub base: CheckBase<Ttl>,
     pub window_basis_kind: WindowBasisKind,
+    /// Claude Code's TTL for one bucket, or OpenCode's one Anthropic TTL, which covers every
+    /// agent and is reported as the main bucket's.
+    pub harness: Harness,
     pub bucket: Bucket,
     /// How much less 1h costs than 5m on the parts both replays price; negative when 5m is cheaper.
     pub one_hour_savings_usd: f64,

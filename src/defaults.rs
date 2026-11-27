@@ -91,6 +91,8 @@ pub fn check(result: &CheckResult, profile: Option<&Profile>) -> Option<Baseline
                 .filter(|_| measured)
                 .map(|m| m.scale(monthly(1.0, b.since, b.until)));
             let default = match profile.and_then(|p| p.billing) {
+                // OpenCode sends no lifetime by default, so Anthropic keeps its 5m.
+                _ if t.harness == crate::model::Harness::OpenCode => Ttl::FiveMinutes,
                 Some(billing) if t.bucket == Bucket::Main => billing.main_ttl(),
                 None if t.bucket == Bucket::Main && !cloud => {
                     return baseline(

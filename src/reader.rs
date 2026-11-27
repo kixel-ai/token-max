@@ -1265,11 +1265,9 @@ impl Reader {
             let mut projects: HashMap<&str, Vec<crate::opencode::Server>> = HashMap::default();
             let mut unresolved: Vec<&str> = vec![];
             let mut reallowed = false;
-            // A project that sets the Anthropic cache lifetime runs at its own, which no
-            // global edit reaches.
-            let mut ttl_varies = false;
-            // A project that turns warming on pings sessions no replay prices.
-            let mut warms = false;
+            // Each project's files, which sit between the global ones and the shell's inline
+            // config for the Anthropic cache lifetime and warming.
+            let mut cache_projects = vec![];
             for cwd in history.sessions.iter().filter_map(|s| s.cwd.as_deref()) {
                 if projects.contains_key(cwd) || unresolved.contains(&cwd) {
                     continue;
@@ -1277,13 +1275,12 @@ impl Reader {
                 match crate::opencode::project_layers(options, cwd) {
                     Ok(layers) => {
                         reallowed |= layers.iter().any(|l| crate::opencode::reallows(&l.config));
-                        ttl_varies |= layers.iter().any(|l| crate::opencode::sets_ttl(&l.config));
-                        warms |= layers
-                            .iter()
-                            .any(|l| crate::opencode::warms_anthropic(&l.config));
                         // A project's declaration replaces the global one by name.
                         let declared = crate::opencode::project_servers(&layers);
                         projects.insert(cwd, declared);
+                        if !layers.is_empty() {
+                            cache_projects.push(layers);
+                        }
                     }
                     Err(_) => unresolved.push(cwd),
                 }
@@ -1312,11 +1309,15 @@ impl Reader {
                             .all(|s| !projects.values().flatten().any(|n| n.name == s.name))
                     });
                 }
-                if ttl_varies || !unresolved.is_empty() {
+                // A project that changes the Anthropic cache lifetime, or the file that sets
+                // it, runs at its own, which no global edit reaches; one that leaves warming
+                // on pings sessions no replay prices.
+                let cache = crate::opencode::CacheStack::new(options, &p.root, &p.settings_file)?;
+                if !unresolved.is_empty() || cache_projects.iter().any(|l| cache.ttl_varies(l)) {
                     p.ttl.main.varies = true;
                     p.ttl.subagent.varies = true;
                 }
-                if warms {
+                if !unresolved.is_empty() || cache_projects.iter().any(|l| cache.warms(l)) {
                     p.settings.insert(
                         crate::opencode::WARMING.into(),
                         crate::model::Scalar::Bool(true),

@@ -631,7 +631,7 @@ fn anthropic_lifetime(value: &Value) -> Option<Ttl> {
 }
 
 /// Whether a config sets an Anthropic model's own `cache.ttl`, which outranks the provider's.
-pub(crate) fn model_ttl(config: &Map<String, Value>) -> bool {
+fn model_ttl(config: &Map<String, Value>) -> bool {
     let anthropic = members(config.get("providers")).get(ANTHROPIC);
     members(anthropic.and_then(|a| a.get("models")))
         .values()
@@ -642,23 +642,124 @@ pub(crate) fn model_ttl(config: &Map<String, Value>) -> bool {
         })
 }
 
-/// Whether a config may turn warming on for Anthropic sessions: the top-level `warming`, or
-/// the Anthropic provider's or one of its models' `settings.cache.warming`, set to anything
-/// but `false`.
-pub(crate) fn warms_anthropic(config: &Map<String, Value>) -> bool {
-    let on =
-        |value: Option<&Value>| value.is_some_and(|v| !v.is_null() && *v != Value::Bool(false));
-    let anthropic = members(config.get("providers")).get(ANTHROPIC);
-    on(config.get("warming"))
-        || on(anthropic.and_then(|a| a.pointer("/settings/cache/warming")))
-        || members(anthropic.and_then(|a| a.get("models")))
-            .values()
-            .any(|model| on(model.pointer("/settings/cache/warming")))
+/// Whether the layers leave warming on for some Anthropic model: the last `warming` each
+/// level sets, a model's outranking the provider's and the provider's the top-level one,
+/// set to anything but `false`.
+fn warms_anthropic(layers: &[Layer]) -> bool {
+    let last = |pointer: &str| {
+        layers.iter().rev().find_map(|l| {
+            let anthropic = members(l.config.get("providers")).get(ANTHROPIC);
+            let value = match pointer.strip_prefix("/models/") {
+                Some(model) => anthropic?
+                    .get("models")?
+                    .get(model)?
+                    .pointer("/settings/cache/warming"),
+                None if pointer.is_empty() => l.config.get("warming"),
+                None => anthropic?.pointer(pointer),
+            };
+            value.filter(|v| !v.is_null())
+        })
+    };
+    let on = |value: Option<&Value>| value.is_some_and(|v| *v != Value::Bool(false));
+    let provider = last("/settings/cache/warming").or_else(|| last(""));
+    on(provider)
+        || layers
+            .iter()
+            .flat_map(|l| {
+                let anthropic = members(l.config.get("providers")).get(ANTHROPIC);
+                members(anthropic.and_then(|a| a.get("models"))).keys()
+            })
+            .any(|model| on(last(&format!("/models/{model}"))))
 }
 
-/// Whether a config sets the Anthropic provider's `cache.ttl` or one of its models'.
-pub(crate) fn sets_ttl(config: &Map<String, Value>) -> bool {
-    provider_ttl(config).is_some() || model_ttl(config)
+/// The environment OpenCode runs with for the data directory at `root`: the shell's overrides
+/// belong only to the directory this shell's OpenCode uses.
+fn shell_env(options: &crate::discovery::DiscoveryOptions, root: &str) -> Env {
+    let active = data_dir(&options.home, &options.env);
+    let active = realpath(&active).unwrap_or(active);
+    if active == root {
+        options.env.clone()
+    } else {
+        Env::default()
+    }
+}
+
+/// The layers a data directory's shell reads for the Anthropic prompt cache, around whichever
+/// project's files a session's directory adds.
+pub(crate) struct CacheStack {
+    files: Vec<Layer>,
+    /// `OPENCODE_CONFIG_CONTENT`'s layer, read after every file; None when it is not a JSONC
+    /// object, so what it sets is unknown.
+    inline: Option<Vec<Layer>>,
+    settings_file: String,
+}
+
+impl CacheStack {
+    /// The stack of the data directory at `root`, whose user settings are `settings_file`.
+    pub(crate) fn new(
+        options: &crate::discovery::DiscoveryOptions,
+        root: &str,
+        settings_file: &str,
+    ) -> Result<Self, ScanError> {
+        let env = shell_env(options, root);
+        Ok(Self::of(layers(options, &env)?, &env, settings_file))
+    }
+
+    fn of(files: Vec<Layer>, env: &Env, settings_file: &str) -> Self {
+        let content = env.get("OPENCODE_CONFIG_CONTENT").filter(|c| !c.is_empty());
+        let inline = match content.map(|c| parse_config(c)) {
+            Some(Some(Value::Object(config))) => Some(vec![Layer {
+                file: "OPENCODE_CONFIG_CONTENT".into(),
+                config,
+            }]),
+            Some(_) => None,
+            None => Some(vec![]),
+        };
+        Self {
+            files,
+            inline,
+            settings_file: settings_file.into(),
+        }
+    }
+
+    /// Every layer in OpenCode's order with `project`'s between the files and the inline one.
+    fn with(&self, project: &[Layer]) -> Option<Vec<Layer>> {
+        let inline = self.inline.as_ref()?;
+        Some(
+            self.files
+                .iter()
+                .chain(project)
+                .chain(inline)
+                .cloned()
+                .collect(),
+        )
+    }
+
+    /// The Anthropic cache lifetime sessions under `project` run with.
+    pub(crate) fn ttl(&self, project: &[Layer]) -> TtlControl {
+        match self.with(project) {
+            Some(layers) => anthropic_ttl(&layers, &self.settings_file),
+            None => TtlControl {
+                value: None,
+                owner: "OPENCODE_CONFIG_CONTENT".into(),
+                reason: "OPENCODE_CONFIG_CONTENT is not a JSONC object, so the cache.ttl it may set is unknown".into(),
+                varies: false,
+            },
+        }
+    }
+
+    /// Whether `project` changes the lifetime or the setting that owns it, which an edit
+    /// outside it would then not reach.
+    pub(crate) fn ttl_varies(&self, project: &[Layer]) -> bool {
+        let (here, global) = (self.ttl(project), self.ttl(&[]));
+        here.value != global.value || here.owner != global.owner
+    }
+
+    /// Whether warming may ping sessions under `project`; unknown inline content may.
+    pub(crate) fn warms(&self, project: &[Layer]) -> bool {
+        self.with(project)
+            .is_none_or(|layers| warms_anthropic(&layers))
+    }
 }
 
 /// The Anthropic provider's `cache.ttl` a config sets.
@@ -716,15 +817,7 @@ pub(crate) fn profile(
     alias: String,
     key: &str,
 ) -> Result<Profile, ScanError> {
-    // Shell overrides belong only to the data directory this shell's OpenCode uses.
-    let active = data_dir(&options.home, &options.env);
-    let active = realpath(&active).unwrap_or(active);
-    let empty = Env::default();
-    let env = if active == canonical {
-        &options.env
-    } else {
-        &empty
-    };
+    let env = &shell_env(options, &canonical);
     let layers = layers(options, env)?;
     let config = merged(&layers);
     let settings_file = settings_file(&options.home, env);
@@ -749,31 +842,10 @@ pub(crate) fn profile(
         }
     };
     // `OPENCODE_CONFIG_CONTENT` is read after every file, so it outranks them.
-    let mut cache_layers = layers.clone();
-    let content = env.get("OPENCODE_CONFIG_CONTENT").filter(|c| !c.is_empty());
-    let unreadable_content = match content.map(|c| parse_config(c)) {
-        Some(Some(Value::Object(config))) => {
-            cache_layers.push(Layer {
-                file: "OPENCODE_CONFIG_CONTENT".into(),
-                config,
-            });
-            false
-        }
-        Some(_) => true,
-        None => false,
-    };
+    let cache = CacheStack::of(layers.clone(), env, &settings_file);
     // One lifetime covers every agent, so both buckets hold it; the TTL line reads the main.
-    let ttl = if unreadable_content {
-        TtlControl {
-            value: None,
-            owner: "OPENCODE_CONFIG_CONTENT".into(),
-            reason: "OPENCODE_CONFIG_CONTENT is not a JSONC object, so the cache.ttl it may set is unknown".into(),
-            varies: false,
-        }
-    } else {
-        anthropic_ttl(&cache_layers, &settings_file)
-    };
-    let warms = unreadable_content || cache_layers.iter().any(|l| warms_anthropic(&l.config));
+    let ttl = cache.ttl(&[]);
+    let warms = cache.warms(&[]);
     let ttl = PerBucket {
         main: ttl.clone(),
         subagent: ttl,
@@ -1983,9 +2055,16 @@ mod tests {
 
     /// The report's Anthropic TTL check for a scan of `w`'s home.
     fn anthropic_check(w: &Workspace) -> (crate::model::Report, crate::model::TtlCheck) {
+        scanned_anthropic_check(&w.scan_options())
+    }
+
+    /// The report's Anthropic TTL check for a scan with `options`.
+    fn scanned_anthropic_check(
+        options: &crate::reader::ScanOptions,
+    ) -> (crate::model::Report, crate::model::TtlCheck) {
         let catalog = prices();
         let report = crate::replay::analyze(crate::replay::AnalyzeOptions {
-            scan: crate::reader::scan(&w.scan_options()).unwrap(),
+            scan: crate::reader::scan(options).unwrap(),
             catalog: &catalog,
             since: None,
             now: OPENCODE_START + 3_600_000,
@@ -2080,45 +2159,35 @@ mod tests {
     }
 
     #[test]
-    fn config_content_sets_the_anthropic_ttl_and_warming_leaves_it_advisory() {
+    fn config_content_outranks_project_files_and_warming_leaves_the_line_advisory() {
         let w = Workspace::new();
         let file = opencode_database(&w.home);
-        anthropic_session(&file, "/work/repo", &[(0, 0, 10_000), (20, 0, 10_500)]);
+        let repo = w.home.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        anthropic_session(&file, &text(&repo), &[(0, 0, 10_000), (20, 0, 10_500)]);
+        std::fs::write(
+            repo.join("opencode.json"),
+            r#"{"providers": {"anthropic": {"settings": {"cache": {"ttl": "5m"}}}}}"#,
+        )
+        .unwrap();
         let config = w.home.join(".config/opencode/opencode.json");
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
-        // The shell's config content outranks the file an edit would change.
+        std::fs::write(&config, r#"{"warming": {"duration": "30 minutes"}}"#).unwrap();
+        // Warming pings no replay prices, so its line only advises.
+        let (_, check) = anthropic_check(&w);
+        assert_eq!(check.base.action, crate::model::Action::Advisory);
+        assert!(check.base.uncertainty.iter().any(|u| u.contains("warming")));
+        // The shell's config content is read after every file, the project's included, so
+        // what it sets is the current lifetime and warming everywhere.
         let mut options = w.scan_options();
         options.discovery.env.insert(
             "OPENCODE_CONFIG_CONTENT".into(),
-            r#"{"providers": {"anthropic": {"settings": {"cache": {"ttl": "1h"}}}}}"#.into(),
+            r#"{"warming": false, "providers": {"anthropic": {"settings": {"cache": {"ttl": "1h"}}}}}"#.into(),
         );
-        let catalog = prices();
-        let report = crate::replay::analyze(crate::replay::AnalyzeOptions {
-            scan: crate::reader::scan(&options).unwrap(),
-            catalog: &catalog,
-            since: None,
-            now: OPENCODE_START + 3_600_000,
-            max_cost_per_use_usd: 1.0,
-            reading: None,
-        })
-        .unwrap();
-        let check = report
-            .checks
-            .iter()
-            .find_map(|c| match c {
-                crate::model::CheckResult::Ttl(t) if t.harness == Harness::OpenCode => Some(t),
-                _ => None,
-            })
-            .unwrap();
+        let (_, check) = scanned_anthropic_check(&options);
         assert_eq!(check.base.current, Some(Ttl::OneHour));
         assert!(check.base.owner.starts_with("OPENCODE_CONFIG_CONTENT:"));
         assert_eq!(check.base.action, crate::model::Action::Keep);
-        // Warming pings no replay prices, so its line only advises.
-        std::fs::write(&config, r#"{"warming": {"duration": "30 minutes"}}"#).unwrap();
-        let (_, check) = anthropic_check(&w);
-        assert_eq!(check.base.current, Some(Ttl::FiveMinutes));
-        assert_eq!(check.base.action, crate::model::Action::Advisory);
-        assert!(check.base.uncertainty.iter().any(|u| u.contains("warming")));
     }
 
     #[test]

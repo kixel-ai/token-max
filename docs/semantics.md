@@ -115,9 +115,10 @@ checked 2026-11-14); replays keep the API write rate, and Codex compaction and
 keepalive lines say so. The
 [OpenAI caching guide](https://developers.openai.com/api/docs/guides/prompt-caching),
 checked 2026-11-07, documents the subset and lifetime rules. For catalog entries
-with the legacy `context_over_200k` field, the GPT models `threshold` in
-`src/prices.rs` lists use the documented 272,000-input threshold, including reads and writes. A
-contradictory explicit tier fails pricing. The full request is repriced when a
+with the legacy `context_over_200k` field and no `tiers`, the GPT models `threshold` in
+`src/prices.rs` lists use the documented 272,000-input threshold, including reads and writes. Where
+the entry also has `tiers`, as most OpenCode and Gemini ones do, the tiers price
+the request. A tier that contradicts a documented threshold fails pricing. The full request is repriced when a
 counterfactual crosses a tier. See [OpenAI pricing](https://developers.openai.com/api/docs/pricing).
 
 Claude ordinary input, reads, and writes are disjoint in the wire format; the

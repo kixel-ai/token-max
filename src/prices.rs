@@ -1317,7 +1317,8 @@ fn selected_rates(
         let Some(input) = p.usage.input else {
             return Err("context tier requires total input");
         };
-        if model.legacy.is_some() && documented.is_none() {
+        // The legacy field alone names no threshold; beside `tiers`, those name it.
+        if model.legacy.is_some() && model.tiers.is_empty() && documented.is_none() {
             return Err("legacy context threshold is undocumented for this model");
         }
         if let Some(documented) = documented
@@ -1335,10 +1336,9 @@ fn selected_rates(
             && input > documented
         {
             selected = legacy;
-        }
-        if model.legacy.is_some() {
-            assumptions
-                .push("legacy context_over_200k resolved at documented 272000 input tokens".into());
+            assumptions.push(format!(
+                "legacy context_over_200k resolved at documented {documented} input tokens"
+            ));
         }
     }
     let mut factor = 1.0;
@@ -2830,7 +2830,7 @@ mod tests {
         assert!(
             long.assumptions
                 .iter()
-                .any(|a| a.contains("documented 272000")),
+                .any(|a| a.contains("documented 272000 input")),
             "{long:?}"
         );
         assert!(close(usd(long), 272_001.0 * 10.0 / 1e6));
@@ -2852,6 +2852,52 @@ mod tests {
                 "{model}: {cost:?}"
             );
         }
+    }
+
+    /// models.dev lists the legacy field beside a `tiers` entry on many OpenCode and Gemini
+    /// models; the tier names the threshold, so the request is priced instead of refused.
+    #[test]
+    fn a_legacy_field_beside_tiers_prices_by_the_tiers() {
+        let fixture = crate::test_support::fixture_path("prices.json");
+        let mut catalog: Value =
+            serde_json::from_str(&fs::read_to_string(fixture).unwrap()).unwrap();
+        catalog["openai"]["models"]["gpt-4.1"] = json!({
+            "family": "gpt",
+            "release_date": "2026-04-23",
+            "tool_call": true,
+            "modalities": {"output": ["text"]},
+            "cost": {
+                "input": 3, "output": 15, "cache_read": 0.3,
+                "tiers": [{"tier": {"type": "context", "size": 200000}, "input": 6, "output": 22.5, "cache_read": 0.6}],
+                "context_over_200k": {"input": 6, "output": 22.5, "cache_read": 0.6},
+            },
+        });
+        let Ok(catalog) = parse_catalog(catalog.to_string().as_bytes()) else {
+            panic!("the catalog parses");
+        };
+        let r = codex_request();
+        let at = |input: i64| {
+            let p = BillingPart {
+                model: Some("gpt-4.1".into()),
+                tier: Some("default".into()),
+                usage: codex(json!({
+                    "input_tokens": input,
+                    "output_tokens": 0,
+                    "cached_input_tokens": 0,
+                })),
+                ..r.parts[0].clone()
+            };
+            price_part(&catalog, &r, &p)
+        };
+        let usd = |input: i64| at(input).total_usd.map(Usd::to_f64).unwrap();
+        assert!((usd(200_000) - 200_000.0 * 3.0 / 1e6).abs() < 1e-9);
+        assert!((usd(200_001) - 200_001.0 * 6.0 / 1e6).abs() < 1e-9);
+        assert!(
+            at(200_001)
+                .assumptions
+                .iter()
+                .all(|a| !a.contains("legacy"))
+        );
     }
 
     // GPT-6.2 fast is 2x at any context size; ultrafast is 3x until 2027-03-01 Pacific, then 6x.

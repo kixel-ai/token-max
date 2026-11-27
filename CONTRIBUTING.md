@@ -9,7 +9,8 @@ newer push replaces a pending run, so an intermediate merge may go untested. A
 branch only behind `main` needs no merge; merge `main` only when the PR
 conflicts or the queue refuses its head.
 
-Run local checks and the independent review before requesting landing.
+CI runs no checks on pull requests, so run `just check` before pushing, and
+the independent review before requesting landing.
 Then use `quest merge <pr> --squash --land <full-head-sha>`, which enqueues
 the reviewed head, or arms auto-merge bound to it while checks are pending.
 Never bypass the required checks or use `--direct`.

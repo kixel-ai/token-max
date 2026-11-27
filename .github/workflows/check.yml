@@ -3,13 +3,11 @@ name: Check
 permissions:
   contents: read
 
-# No push trigger: main moves only to commits the merge queue already tested.
-# No `edited`: a body or base edit changes no code, and the queue tests every
-# entry against the current base anyway.
+# The merge queue tests each entry against the current base before it lands.
+# Pull requests run nothing: authors run `just check` before pushing, and the
+# queue catches the rest. No push trigger: main moves only to commits the queue
+# already tested.
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-  # The merge queue tests each entry against the current base before it lands.
   merge_group:
   workflow_call:
 
@@ -25,32 +23,22 @@ env:
   CARGO_PROFILE_DEV_DEBUG: "0"
 
 jobs:
-  # Read the draft state when the run starts, not from the event payload: a run
-  # created out of order can still carry draft: true after the PR is ready, and
-  # GitHub judges the PR by its newest run, so it must validate a PR ready now.
   # A change only to quests and agent docs cannot affect the Rust build or tests,
   # so it runs `quest check` alone. The compare API lists at most 300 files, so a
-  # longer list builds everything.
+  # longer list builds everything. A release has no base and builds everything.
   state:
     name: Plan
     runs-on: ubuntu-24.04
     outputs:
-      draft: ${{ steps.read.outputs.draft }}
       build: ${{ steps.read.outputs.build }}
     steps:
       - id: read
         env:
           GH_TOKEN: ${{ github.token }}
-          EVENT: ${{ github.event_name }}
-          PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
-          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
-          HEAD: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+          BASE: ${{ github.event.merge_group.base_sha }}
+          HEAD: ${{ github.event.merge_group.head_sha }}
         run: |
-          draft=false
-          if [ "$EVENT" = pull_request ]; then
-            draft=$(gh api "repos/$REPO/pulls/$PR" --jq .draft)
-          fi
           build=true
           if [ -n "$BASE" ]; then
             # A rename counts its old path too, so moving code into quest/ still builds.
@@ -59,13 +47,11 @@ jobs:
                   | all(test("^(quest/|(AGENTS|CLAUDE|CONTRIBUTING)\\.md$)")))
                 then "false" else "true" end')
           fi
-          echo "draft=$draft" >> "$GITHUB_OUTPUT"
           echo "build=$build" >> "$GITHUB_OUTPUT"
 
   source:
     name: Source
     needs: state
-    if: needs.state.outputs.draft == 'false'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -86,14 +72,14 @@ jobs:
   platform:
     name: Tests (${{ matrix.os }})
     needs: state
-    if: needs.state.outputs.draft == 'false' && needs.state.outputs.build == 'true'
+    if: needs.state.outputs.build == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         # A called workflow sees its caller's event, so a release reads as neither.
-        os: ${{ fromJSON((github.event_name == 'pull_request' || github.event_name == 'merge_group') && '["windows-2025"]' || '["windows-2025", "macos-15"]') }}
+        os: ${{ fromJSON(github.event_name == 'merge_group' && '["windows-2025"]' || '["windows-2025", "macos-15"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -109,8 +95,7 @@ jobs:
   check:
     name: Check
     needs: [state, source, platform]
-    # Draft jobs are skipped, so fail this gate until real validation passes.
-    # A prior skipped Check must not satisfy protection while a ready run is pending.
+    # A failed, cancelled, or skipped job fails the gate.
     if: always()
     runs-on: ubuntu-24.04
     steps:

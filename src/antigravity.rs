@@ -468,10 +468,12 @@ fn read_transcript(
             }
             // A finished line that doesn't parse, such as a fragment a crash left that the
             // next write continued, is skipped as the transcript reader skips one, leaving
-            // the conversation's export incomplete.
+            // the conversation's export incomplete. It may have held a request on another
+            // model, so it too ends the proof that one model filled the cache.
             Err(_) => {
                 snapshot.lines = line_number;
                 snapshot.skipped_lines += 1;
+                only = Some(None);
                 continue;
             }
         };
@@ -712,8 +714,16 @@ mod tests {
         ]
         .join("\n")
             + "\n";
-        let ids = ["cold", "mixed", "gap"];
-        for (id, text) in ids.into_iter().zip([cold, mixed, gap]) {
+        // So could a line that doesn't parse.
+        let skipped = [
+            step(Some("gemini-4-neon-high"), 0),
+            "{\"type\":".into(),
+            step(None, 100),
+        ]
+        .join("\n")
+            + "\n";
+        let ids = ["cold", "mixed", "gap", "skipped"];
+        for (id, text) in ids.into_iter().zip([cold, mixed, gap, skipped]) {
             std::fs::create_dir_all(crate::discovery::dirname(&file(id))).unwrap();
             std::fs::write(file(id), text).unwrap();
         }
@@ -724,7 +734,7 @@ mod tests {
             .iter()
             .filter(|r| r.model.is_none())
             .collect();
-        assert_eq!(unknown.len(), 4);
+        assert_eq!(unknown.len(), 5);
         let catalog = crate::test_support::prices();
         for r in unknown {
             assert_eq!(crate::prices::price_request(&catalog, r).total_usd, None);

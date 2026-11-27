@@ -1268,8 +1268,9 @@ write, so every request records zero writes.
 
 A step that records no model is priced at the conversation's model only when
 it read the conversation's cache and every earlier request in the conversation
-ran one model, by its record or by this same rule: Gemini keeps an implicit cache per model, so only that model
-could serve the read. On the maintainer's host every `CHECKPOINT` records no
+ran one model, by its record or by this same rule, with no skipped line among
+them: Gemini keeps an implicit cache per model, so only that model could serve
+the read, and a skipped line may have held a request on another. On the maintainer's host every `CHECKPOINT` records no
 model and reads hundreds of thousands of cached tokens, so this prices them;
 any other such step stays unpriced and is extrapolated over.
 

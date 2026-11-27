@@ -28,7 +28,7 @@ run found crossterm's `derive-more` feature pulling in six unused crates).
 
 ## Required
 
-- [After m1](/quest/m2/README.md) - the audit runs once per milestone, after m2's work
+- [m2](/quest/m2/README.md) - the audit runs once per milestone, after m2's work
 
 ## Scheduled
 

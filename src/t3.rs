@@ -74,6 +74,15 @@ fn readable_variable(name: &str) -> bool {
             .any(|p| p.variable == name)
 }
 
+/// The variables that move OpenCode's data directory or config, which only an OpenCode
+/// instance reads.
+const OPENCODE_LOCATIONS: [&str; 4] = [
+    "XDG_DATA_HOME",
+    "XDG_CONFIG_HOME",
+    "OPENCODE_CONFIG",
+    "OPENCODE_DB",
+];
+
 /// The variables only subagent discovery reads, whose secret value leaves just the subagent
 /// controls unresolved.
 pub(crate) const SUBAGENT_ENVIRONMENT: &[&str] = &[
@@ -415,7 +424,9 @@ impl<'de> Deserialize<'de> for Environment {
                 value,
             });
         }
-        let allowed = readable_variable(&entry.name) && readable;
+        let allowed = (readable_variable(&entry.name)
+            || OPENCODE_LOCATIONS.contains(&entry.name.as_str()))
+            && readable;
         let value = if allowed {
             entry
                 .value
@@ -1043,17 +1054,10 @@ fn opencode_instance(
             unsupported: true,
         }));
     }
-    // The variables that move OpenCode's data directory or config.
-    const LOCATIONS: [&str; 4] = [
-        "XDG_DATA_HOME",
-        "XDG_CONFIG_HOME",
-        "OPENCODE_CONFIG",
-        "OPENCODE_DB",
-    ];
     let mut env = options.env.clone();
     let mut own_environment = vec![];
     for entry in instance.environment {
-        if !LOCATIONS.contains(&entry.name.as_str()) {
+        if !OPENCODE_LOCATIONS.contains(&entry.name.as_str()) {
             continue;
         }
         let Some(value) = entry.value else {
@@ -5112,6 +5116,40 @@ mod tests {
                 .exclusions
                 .iter()
                 .any(|e| e.starts_with("T3 instance remote connects to an OpenCode server"))
+        );
+    }
+
+    #[test]
+    fn a_t3_opencode_instance_reads_its_own_database() {
+        use crate::test_support::opencode_database;
+        let w = Workspace::new();
+        let native = opencode_database(&w.home);
+        let moved = w.home.join("moved.db");
+        std::fs::copy(&native, &moved).unwrap();
+        std::fs::remove_file(&native).unwrap();
+        state(
+            &w,
+            json!({"providerInstances": {"opencode": {"driver": "opencode", "enabled": true,
+                "environment": [{"name": "OPENCODE_DB", "value": moved.to_str().unwrap()}]}}}),
+        );
+        let scan = scan(&w.scan_options()).unwrap();
+        assert!(
+            !scan.t3[0]
+                .exclusions
+                .iter()
+                .any(|e| e.starts_with("T3 instance opencode")),
+            "{:?}",
+            scan.t3[0].exclusions
+        );
+        let instance = scan
+            .profiles
+            .iter()
+            .find(|p| p.t3.as_ref().is_some_and(|t| t.instance == "opencode"))
+            .unwrap();
+        assert!(
+            scan.requests
+                .iter()
+                .any(|r| r.profiles.contains(&instance.id))
         );
     }
 }

@@ -161,6 +161,20 @@
           "cache_read": 0.1,
           "cache_write": 1.25
         }
+      },
+      "zen-plain": {
+        "family": "zen",
+        "release_date": "2026-09-01",
+        "tool_call": true,
+        "modalities": {
+          "output": [
+            "text"
+          ]
+        },
+        "cost": {
+          "input": 1,
+          "output": 4
+        }
       }
     }
   }

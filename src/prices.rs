@@ -1378,7 +1378,13 @@ pub fn output_rate(catalog: &Catalog, r: &Request, p: &BillingPart) -> Option<f6
 pub fn prefix_spans(catalog: &Catalog, r: &Request, p: &BillingPart) -> Option<Vec<(f64, f64)>> {
     let u = &p.usage;
     let rates = selected_rates(catalog, r, p).ok()?.rates;
-    let (input, read) = (rates.input? / 1e6, rates.read? / 1e6);
+    let input = rates.input? / 1e6;
+    // A model priced without cache reads still prices a request that made none.
+    let read = match (rates.read, u.read?) {
+        (Some(read), _) => read / 1e6,
+        (None, 0) => 0.0,
+        (None, _) => return None,
+    };
     let mut spans = vec![(u.read? as f64, read)];
     if r.harness == Harness::Claude {
         if u.write? > 0 {

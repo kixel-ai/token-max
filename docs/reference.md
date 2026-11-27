@@ -443,7 +443,8 @@ the global `config.json`, `opencode.json` and `opencode.jsonc` under
 `$XDG_CONFIG_HOME/opencode` or `~/.config/opencode`, merged in that order, and
 the file `OPENCODE_CONFIG` names when the shell's OpenCode uses that data
 directory. A session's project files are each `opencode.json` and
-`opencode.jsonc` from its repository root down to its directory. A confirmed
+`opencode.jsonc` from its repository root down to its directory, then the same
+files in each of those directories' `.opencode/`, which outrank them. A confirmed
 change is written to the global file with the highest precedence that exists,
 or a new `opencode.json`, keeping its comments, key order and layout; a change
 the file's shape cannot take, such as a key under a value that is no object,
@@ -467,7 +468,8 @@ otherwise. When a rule OpenCode reads later could allow the skill again, an
 agent's own `permissions`, a file `OPENCODE_CONFIG` names or a project the
 sessions ran in, the skill's line offers no switch. An MCP server is turned off with `disabled: true` under
 `mcp.servers.<name>`, or `enabled: false` under OpenCode 1's `mcp.<name>`, in
-the shape its file declares it. A server a project the sessions ran in
+the shape its file declares it; a file may mix both, and `mcp.servers` wins a
+name both declare. A server a project the sessions ran in
 declares, which replaces the global declaration there, gets a line with no
 switch, and so do OpenCode's built-in Code Mode namespaces, `browser` and
 `opencode`. A project whose settings cannot be read leaves every OpenCode

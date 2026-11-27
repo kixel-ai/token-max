@@ -75,7 +75,7 @@ pub(crate) fn config_dir(home: &str, env: &Env) -> String {
 const GLOBAL_FILES: [&str; 3] = ["config.json", "opencode.json", "opencode.jsonc"];
 
 /// The project config files OpenCode reads in each directory from a session's worktree root
-/// down to its working directory.
+/// down to its working directory, and then in each of those directories' `.opencode/`.
 const PROJECT_FILES: [&str; 2] = ["opencode.json", "opencode.jsonc"];
 
 /// The syntax OpenCode's own parser accepts: comments and trailing commas, nothing looser.
@@ -154,12 +154,18 @@ pub(crate) fn project_layers(
         return Ok(result);
     }
     let directories = crate::discovery::project_directories(cwd, &[".git".into()])?;
-    for directory in directories.iter().rev() {
-        for name in PROJECT_FILES {
-            let file = join(&[directory, name]);
-            if std::fs::metadata(&file).is_ok() {
-                let config = options.settings(&file, Harness::OpenCode)?;
-                result.push(Layer { file, config });
+    // Every `.opencode/` directory's files outrank every direct one, in the same order.
+    for nested in [None, Some(".opencode")] {
+        for directory in directories.iter().rev() {
+            for name in PROJECT_FILES {
+                let file = match nested {
+                    Some(nested) => join(&[directory, nested, name]),
+                    None => join(&[directory, name]),
+                };
+                if std::fs::metadata(&file).is_ok() {
+                    let config = options.settings(&file, Harness::OpenCode)?;
+                    result.push(Layer { file, config });
+                }
             }
         }
     }
@@ -196,31 +202,34 @@ pub(crate) struct Server {
     pub path: Vec<String>,
 }
 
-/// The MCP servers a config declares, in either shape OpenCode accepts: `mcp.servers.<name>`,
-/// or `mcp.<name>` beside `mcp.timeout`.
+/// The MCP servers a config declares, in both shapes OpenCode 2 accepts side by side:
+/// `mcp.servers.<name>`, which wins a name both declare, and OpenCode 1's `mcp.<name>`.
 pub(crate) fn servers(config: &Map<String, Value>) -> Vec<Server> {
     let mcp = members(config.get("mcp"));
-    let (entries, prefix): (&Map<String, Value>, &[&str]) = match mcp.get("servers") {
-        Some(Value::Object(servers)) => (servers, &["mcp", "servers"]),
-        _ => (mcp, &["mcp"]),
-    };
-    entries
+    let native = members(mcp.get("servers"));
+    let legacy = mcp
         .iter()
-        .filter(|(_, server)| server.is_object())
-        .map(|(name, server)| Server {
+        .filter(|(name, _)| !matches!(name.as_str(), "servers" | "timeout"))
+        .filter(|(name, _)| !native.contains_key(*name));
+    native
+        .iter()
+        .map(|entry| (entry, true))
+        .chain(legacy.map(|entry| (entry, false)))
+        .filter(|((_, server), _)| server.is_object())
+        .map(|((name, server), native)| Server {
             name: name.clone(),
             // OpenCode 2 switches `mcp.servers` entries with `disabled` alone, OpenCode 1's
             // `mcp` entries with `enabled` alone.
-            enabled: if prefix.len() == 2 {
+            enabled: if native {
                 server.get("disabled") != Some(&Value::Bool(true))
             } else {
                 server.get("enabled") != Some(&Value::Bool(false))
             },
-            path: prefix
-                .iter()
-                .map(|p| p.to_string())
-                .chain([name.clone()])
-                .collect(),
+            path: if native {
+                vec!["mcp".into(), "servers".into(), name.clone()]
+            } else {
+                vec!["mcp".into(), name.clone()]
+            },
         })
         .collect()
 }
@@ -1570,6 +1579,16 @@ mod tests {
         assert_eq!(path(&v1), [["mcp", "docs", "enabled"]]);
         // OpenCode 2 ignores `enabled` under `mcp.servers`.
         assert_eq!(path(&v2), [["mcp", "servers", "docs", "disabled"]]);
+        // It reads OpenCode 1's entries beside its own, and its own wins a shared name.
+        let mixed = json!({"mcp": {"timeout": {"catalog": 5}, "servers": {"docs": {"type": "remote"}},
+            "docs": {"type": "local", "enabled": false}, "old": {"type": "local"}}});
+        assert_eq!(
+            path(&mixed),
+            [
+                vec!["mcp", "servers", "docs", "disabled"],
+                vec!["mcp", "old", "enabled"]
+            ]
+        );
         assert_eq!(
             switched_off(v2.as_object().unwrap()),
             [Control {
@@ -1754,6 +1773,53 @@ mod tests {
             [realpath(&text(&data.join("other.db"))).unwrap()]
         );
         assert!(histories(":memory:").is_empty());
+    }
+
+    #[test]
+    fn a_project_s_opencode_directories_outrank_its_direct_files() {
+        let w = Workspace::new();
+        let repo = w.home.join("repo");
+        let sub = repo.join("sub");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        let mut want = vec![];
+        for nested in [false, true] {
+            for directory in [&repo, &sub] {
+                let directory = if nested {
+                    directory.join(".opencode")
+                } else {
+                    directory.clone()
+                };
+                std::fs::create_dir_all(&directory).unwrap();
+                let file = directory.join("opencode.json");
+                std::fs::write(&file, "{}").unwrap();
+                want.push(text(&file));
+            }
+        }
+        let options = w.scan_options().discovery;
+        let found: Vec<String> = project_layers(&options, &text(&sub))
+            .unwrap()
+            .into_iter()
+            .map(|l| l.file)
+            .collect();
+        assert_eq!(found, want);
+    }
+
+    #[test]
+    fn a_model_priced_without_cache_reads_prices_a_request_that_read_none() {
+        let catalog = prices();
+        let mut r = crate::test_support::make_request();
+        r.harness = Harness::OpenCode;
+        r.provider = Some("opencode".into());
+        let part = |read| crate::model::BillingPart {
+            model: Some("zen-plain".into()),
+            usage: usage([Some(1000), Some(10), Some(0), Some(read), Some(0)]),
+            ..r.parts[0].clone()
+        };
+        assert_eq!(
+            crate::prices::prefix_spans(&catalog, &r, &part(0)),
+            Some(vec![(0.0, 0.0), (f64::INFINITY, 1.0 / 1e6)])
+        );
+        assert_eq!(crate::prices::prefix_spans(&catalog, &r, &part(5)), None);
     }
 
     #[test]

@@ -241,14 +241,20 @@ impl DiscoveryOptions {
         if harness == Harness::OpenCode {
             // A declared MCP server is something installed, so it stays, switched on.
             if let Some(Value::Object(mut mcp)) = real.remove("mcp") {
-                let servers = match mcp.get_mut("servers") {
-                    Some(Value::Object(servers)) => servers,
-                    _ => &mut mcp,
-                };
-                for server in servers.values_mut() {
+                fn switch_on(server: &mut Value) {
                     if let Value::Object(server) = server {
                         server.remove("enabled");
                         server.remove("disabled");
+                    }
+                }
+                // OpenCode 2 reads OpenCode 1's `mcp.<name>` entries beside `mcp.servers`.
+                for (name, server) in mcp.iter_mut() {
+                    match (name.as_str(), server) {
+                        ("servers", Value::Object(servers)) => {
+                            servers.values_mut().for_each(switch_on)
+                        }
+                        ("timeout", _) => {}
+                        (_, server) => switch_on(server),
                     }
                 }
                 pretended.insert("mcp".into(), Value::Object(mcp));

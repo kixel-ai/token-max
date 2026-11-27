@@ -3032,6 +3032,9 @@ fn run_tui(walk: Walk) -> Result<(), ScanError> {
         /// Independent vibes owners for local hosts so peeking at Vibes never overwrites
         /// the Measured `Owner`.
         vibes_owners: Vec<Option<Owner>>,
+        /// The cards those owners were built from, as they read before anything is written;
+        /// `host.items` keeps the variants that follow a measured write.
+        vibes_items: Vec<Option<Vec<Item>>>,
         vibes_loaded: bool,
         measured_plans: Vec<Option<crate::doctor::Plan>>,
         measured_work: Vec<bool>,
@@ -3254,10 +3257,12 @@ fn run_tui(walk: Walk) -> Result<(), ScanError> {
         fn load_vibes(&mut self) -> Result<Vec<VibeRow>, ScanError> {
             if !self.vibes_loaded {
                 self.vibes_owners = vec![];
+                self.vibes_items = vec![];
                 for host in self.hosts.iter_mut() {
                     if self.start_vibes {
                         // Already in `vibes` command: `host.side` holds the vibes owner directly.
                         self.vibes_owners.push(None);
+                        self.vibes_items.push(None);
                         continue;
                     }
                     match &mut host.side {
@@ -3266,13 +3271,16 @@ fn run_tui(walk: Walk) -> Result<(), ScanError> {
                         } => {
                             let items = vibes::settled(host.items.clone(), written);
                             let owner = vibes::owner(&items, host.style.home.clone(), *monthly);
-                            host.items = items;
                             self.vibes_owners.push(Some(owner));
+                            self.vibes_items.push(Some(items));
                         }
                         // Asking a destination for `vibes` swaps its walk to `vibes`' offers,
                         // which would leave Measured's answers naming the wrong changes there,
                         // so its cards show read-only until `token-max vibes` asks for them.
-                        Side::There { .. } => self.vibes_owners.push(None),
+                        Side::There { .. } => {
+                            self.vibes_owners.push(None);
+                            self.vibes_items.push(None);
+                        }
                     }
                 }
                 self.vibes_loaded = true;
@@ -3285,7 +3293,8 @@ fn run_tui(walk: Walk) -> Result<(), ScanError> {
                     (Side::There { .. }, None) if !self.start_vibes => None,
                     _ => Some(host.offers()),
                 };
-                for (item_idx, item) in host.items.iter().enumerate() {
+                let items = self.vibes_items.get(host_idx).and_then(Option::as_ref);
+                for (item_idx, item) in items.unwrap_or(&host.items).iter().enumerate() {
                     // Each version as `vibes`' walk would ask it, with the change it offers.
                     let version = |item: &Item, origin: Origin, after: Vec<Origin>| {
                         let change = offers
@@ -3360,19 +3369,22 @@ fn run_tui(walk: Walk) -> Result<(), ScanError> {
                     style: &h.style,
                 })
                 .collect();
-            tui::App::new(
+            let mut app = tui::App::new(
                 &walking,
                 std::mem::take(&mut hero),
                 start_tab,
                 style.color,
                 style.unicode,
-            )
+            );
+            app.wrote = hosts.iter().any(|h| h.wrote);
+            app
         };
         let mut bridge = WalkBridge {
             hosts: &mut hosts,
             style: &style,
             start_vibes: phase == Command::Vibes,
             vibes_owners: vec![],
+            vibes_items: vec![],
             vibes_loaded: false,
             measured_plans: vec![],
             measured_work: vec![],
@@ -3385,8 +3397,13 @@ fn run_tui(walk: Walk) -> Result<(), ScanError> {
         }
         let wrote = hosts.iter().any(|h| h.wrote);
         let more = vibes_after(&mut hosts).and_then(|pending| {
-            if pending == 0 || !tui::offer_vibes(pending, &style).map_err(|_| unusable(wrote))? {
+            if pending == 0 {
                 return Ok(None);
+            }
+            match tui::offer_vibes(pending, &style).map_err(|_| unusable(wrote))? {
+                Some(true) => {}
+                Some(false) => return Ok(None),
+                None => return Err(cancelled(wrote)),
             }
             open_vibes(&mut hosts)?;
             Ok(Some(pending))
@@ -3405,6 +3422,7 @@ fn run_tui(walk: Walk) -> Result<(), ScanError> {
         }
     };
 
+    let wrote = hosts.iter().any(|h| h.wrote);
     let mut ended = Ok(());
     for host in hosts {
         if let (Side::There { remote, .. }, true) = (host.side, host.wrote)
@@ -3416,9 +3434,18 @@ fn run_tui(walk: Walk) -> Result<(), ScanError> {
     }
     match outcome {
         Ok(ExitKind::Done) => ended,
-        Ok(ExitKind::Cancelled) => Err(ScanError::new("cancelled; no settings were changed")),
+        Ok(ExitKind::Cancelled) => Err(cancelled(wrote)),
         Err(error) => Err(error),
     }
+}
+
+/// A walk cancelled after `wrote` says whether settings were written.
+fn cancelled(wrote: bool) -> ScanError {
+    ScanError::new(if wrote {
+        "cancelled; no further settings were changed"
+    } else {
+        "cancelled; no settings were changed"
+    })
 }
 
 /// The terminal failed under a walk, after `wrote` says whether settings were written.

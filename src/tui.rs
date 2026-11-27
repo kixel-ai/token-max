@@ -304,6 +304,8 @@ pub(crate) struct App {
     block_scroll: std::cell::Cell<usize>,
     /// Whether the last frame fit the terminal whole, keys included.
     whole: std::cell::Cell<bool>,
+    /// Whether an earlier checklist in this run wrote settings, so leaving says none further.
+    pub(crate) wrote: bool,
     diff_tab: Tab,
     status_error: Option<String>,
     host_count: usize,
@@ -440,6 +442,7 @@ impl App {
             diff_scroll: 0,
             block_scroll: std::cell::Cell::new(0),
             whole: std::cell::Cell::new(false),
+            wrote: false,
             diff_tab: start_tab,
             status_error: None,
             host_count: hosts.len(),
@@ -471,6 +474,15 @@ impl App {
         }
         resolve_vibes(&mut rows);
         self.vibes = Some(rows);
+    }
+
+    /// How leaving now reads: no settings changed, or none further after an earlier write.
+    fn unchanged(&self) -> &'static str {
+        if self.wrote {
+            "no further settings were changed"
+        } else {
+            "no settings were changed"
+        }
     }
 
     /// Whether there are zero interactive items to prompt on in Measured mode.
@@ -868,33 +880,65 @@ impl App {
                     pills.push(format!("[b] Billing: {}", self.billing.label()));
                 }
                 let right_pill = pills.join("  ");
-                let left_headline = if self.groups.is_empty() && self.cleanups.is_empty() {
+                let left: Vec<String> = if self.groups.is_empty() && self.cleanups.is_empty() {
                     let ok = if self.unicode { "✓" } else { "OK" };
-                    format!(
+                    vec![format!(
                         "{} {}",
                         self.style(&format!("{BOLD}{GREEN}"), &format!("{ok} All clear")),
                         self.style(DIM, "no changes recommended")
-                    )
+                    )]
                 } else {
-                    let save_str = self
+                    let one = self
                         .savings_text("Save")
                         .unwrap_or_else(|| "Select changes to preview".into());
-                    format!(
-                        "{}{}",
-                        self.style(&format!("{BOLD}{GREEN}"), &save_str),
-                        self.style(DIM, &pct)
-                    )
-                };
-                if right_pill.is_empty() {
-                    body_lines.push(left_headline);
-                } else {
-                    let right = self.style(BRAND, &right_pill);
-                    if ansi_cells(&left_headline) + ansi_cells(&right) + 2 <= inner {
-                        let gap = inner - ansi_cells(&left_headline) - ansi_cells(&right);
-                        body_lines.push(format!("{left_headline}{}{right}", " ".repeat(gap)));
+                    // Too wide for one line, the measured figure and its share keep the first
+                    // and the billing one takes the next, so neither loses its margin.
+                    let (first, rest) = match self.selected_total().figures() {
+                        (Some(measured), Some(up_to)) if cells(&one) + cells(&pct) > inner => (
+                            format!("Save {measured}"),
+                            Some(format!("up to {up_to} more by billing")),
+                        ),
+                        _ => (one, None),
+                    };
+                    let wrap = |text: &str| -> Vec<String> {
+                        wrap_text(
+                            text,
+                            WrapOptions {
+                                width: Some(inner),
+                                ..Default::default()
+                            },
+                        )
+                        .lines()
+                        .map(str::to_string)
+                        .collect()
+                    };
+                    let green = format!("{BOLD}{GREEN}");
+                    let mut lines: Vec<String> = if cells(&first) + cells(&pct) <= inner {
+                        vec![format!(
+                            "{}{}",
+                            self.style(&green, &first),
+                            self.style(DIM, &pct)
+                        )]
                     } else {
-                        body_lines.push(left_headline);
-                        body_lines.push(right);
+                        let mut lines: Vec<String> =
+                            wrap(&first).iter().map(|l| self.style(&green, l)).collect();
+                        lines.extend(wrap(pct.trim()).iter().map(|l| self.style(DIM, l)));
+                        lines
+                    };
+                    for line in rest.iter().flat_map(|r| wrap(r)) {
+                        lines.push(self.style(&green, &line));
+                    }
+                    lines
+                };
+                let right = (!right_pill.is_empty()).then(|| self.style(BRAND, &right_pill));
+                match (left.as_slice(), right) {
+                    ([only], Some(right)) if ansi_cells(only) + ansi_cells(&right) + 2 <= inner => {
+                        let gap = inner - ansi_cells(only) - ansi_cells(&right);
+                        body_lines.push(format!("{only}{}{right}", " ".repeat(gap)));
+                    }
+                    (_, right) => {
+                        body_lines.extend(left.iter().cloned());
+                        body_lines.extend(right);
                     }
                 }
 
@@ -2093,7 +2137,11 @@ impl App {
         ));
 
         let raw_lines: Vec<String> = diff.text.lines().flat_map(|l| wrap_ansi(l, w)).collect();
-        let budget = max_rows.saturating_sub(head.len() + foot.len()).max(4);
+        let mut budget = max_rows.saturating_sub(head.len() + foot.len()).max(4);
+        // A diff that scrolls gives one of its rows to the scroll line, so the keys stay on screen.
+        if raw_lines.len() > budget {
+            budget = budget.saturating_sub(1).max(1);
+        }
         let max_scroll = raw_lines.len().saturating_sub(budget);
         let scroll = self.diff_scroll.min(max_scroll);
         let slice = &raw_lines[scroll..(scroll + budget).min(raw_lines.len())];
@@ -2144,7 +2192,7 @@ pub(crate) fn run(
     if app.is_all_clear() {
         let width = style.width.unwrap_or(80).clamp(48, 104);
         let mut stdout = io::stdout().lock();
-        let failed = |_| ScanError::new("cannot use the terminal; no settings were changed");
+        let failed = |_| ScanError::new(format!("cannot use the terminal; {}", app.unchanged()));
         for line in app.render_hero(width) {
             writeln!(stdout, "{line}").map_err(failed)?;
         }
@@ -2179,7 +2227,7 @@ pub(crate) fn run(
         let frame = app.render(cols as usize, (rows as usize).saturating_sub(1));
         viewport
             .draw(&mut stdout, &frame)
-            .map_err(|_| ScanError::new("cannot draw to terminal; no settings were changed"))?;
+            .map_err(|_| ScanError::new(format!("cannot draw to terminal; {}", app.unchanged())))?;
 
         let Ok(ev) = event::read() else {
             viewport.clear(&mut stdout).ok();
@@ -2233,7 +2281,7 @@ pub(crate) fn run(
                     let _ = writeln!(
                         stdout,
                         "{}",
-                        app.style(DIM, "  Nothing written; no settings were changed.")
+                        app.style(DIM, &format!("  Nothing written; {}.", app.unchanged()))
                     );
                     let _ = stdout.flush();
                     return Ok(ExitKind::Done);
@@ -2249,7 +2297,7 @@ pub(crate) fn run(
                         let _ = writeln!(
                             stdout,
                             "{}",
-                            app.style(DIM, "  Nothing written; no settings were changed.")
+                            app.style(DIM, &format!("  Nothing written; {}.", app.unchanged()))
                         );
                         let _ = stdout.flush();
                         return Ok(ExitKind::Done);
@@ -2334,7 +2382,7 @@ pub(crate) fn run(
                         let _ = writeln!(
                             stdout,
                             "{}",
-                            app.style(DIM, "  Nothing selected; no settings were changed.")
+                            app.style(DIM, &format!("  Nothing selected; {}.", app.unchanged()))
                         );
                         let _ = write_by_hand(&mut stdout, &app.by_hand, app.color);
                         let _ = stdout.flush();
@@ -2373,7 +2421,7 @@ pub(crate) fn run(
                     let _ = writeln!(
                         stdout,
                         "{}",
-                        app.style(DIM, "  Cancelled; no settings were changed.")
+                        app.style(DIM, &format!("  Cancelled; {}.", app.unchanged()))
                     );
                     let _ = stdout.flush();
                     return Ok(ExitKind::Done);
@@ -2442,8 +2490,8 @@ pub(crate) fn run(
 
 /// Ask whether to show `vibes`' `count` pieces of advice once `doctor`'s checklist closes,
 /// reading one key as the checklist does, since its keys typed ahead wait in the same queue;
-/// `y` is a yes and any other key a no.
-pub(crate) fn offer_vibes(count: usize, style: &Style) -> io::Result<bool> {
+/// `y` is a yes, Ctrl-C None, and any other key a no.
+pub(crate) fn offer_vibes(count: usize, style: &Style) -> io::Result<Option<bool>> {
     let show = if count == 1 { "Show it?" } else { "Show them?" };
     let prompt = style.ask(
         &format!("{} {show}", crate::vibes::hint(count)),
@@ -2457,15 +2505,26 @@ pub(crate) fn offer_vibes(count: usize, style: &Style) -> io::Result<bool> {
         loop {
             match event::read()? {
                 TermEvent::Key(KeyEvent {
+                    code: KeyCode::Char('c' | 'C'),
+                    modifiers,
+                    kind: KeyEventKind::Press,
+                    ..
+                }) if modifiers.contains(KeyModifiers::CONTROL) => break None,
+                TermEvent::Key(KeyEvent {
                     code,
                     kind: KeyEventKind::Press,
                     ..
-                }) => break matches!(code, KeyCode::Char('y' | 'Y')),
+                }) => break Some(matches!(code, KeyCode::Char('y' | 'Y'))),
                 _ => continue,
             }
         }
     };
-    writeln!(stdout, " {}", if yes { "y" } else { "n" })?;
+    let answer = match yes {
+        Some(true) => "y",
+        Some(false) => "n",
+        None => "^C",
+    };
+    writeln!(stdout, " {answer}")?;
     Ok(yes)
 }
 
@@ -3585,6 +3644,100 @@ mod tests {
         assert_eq!(app.groups[0].members.len(), 2);
         assert!(!app.groups[0].minor);
         assert_eq!(app.groups[0].host_label, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_scrolling_diff_keeps_its_keys_on_screen() {
+        let mut app = App::new(&[], Hero::default(), Tab::Measured, false, false);
+        app.screen = Screen::Diff;
+        let text: Vec<String> = (0..40).map(|n| format!("+ line {n}")).collect();
+        app.diff = Some(DiffPreview {
+            text: text.join("\n"),
+            file_count: 1,
+            change_count: 1,
+            backups: vec!["Backs up ~/.claude/settings.json first.".into()],
+        });
+        for scroll in [0, 1000] {
+            app.diff_scroll = scroll;
+            let out = app.render(80, 23);
+            assert!(app.whole.get(), "{out:?}");
+            assert!(
+                out.last().unwrap().contains("[y] Write settings"),
+                "{out:?}"
+            );
+            assert!(out.iter().any(|l| l.contains("of 40)")), "{out:?}");
+        }
+        assert!(app.render(80, 23).iter().any(|l| l == "+ line 39"));
+    }
+
+    #[test]
+    fn both_savings_keep_their_margins_in_a_narrow_headline() {
+        let dir = std::env::temp_dir().join(format!("token-max-tui-narrow-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = dir.join("settings.json");
+        std::fs::write(&settings, "{}\n").unwrap();
+        let file = settings.to_string_lossy().into_owned();
+        let section = |kind, member: &str| Section {
+            kind,
+            label: member.into(),
+            member: member.into(),
+            location: None,
+        };
+        let fixes = vec![
+            Fix {
+                margin: Some(crate::model::Margin::Usd(123.0)),
+                ..sample_fix(
+                    "Fast mode",
+                    "on -> off",
+                    1234.0,
+                    true,
+                    section(Kind::Setting, "Fast mode"),
+                    &file,
+                )
+            },
+            Fix {
+                verb: UP_TO,
+                margin: Some(crate::model::Margin::Usd(91.0)),
+                ..sample_fix(
+                    "Main-agent prompt cache TTL",
+                    "unset -> 1h",
+                    913.0,
+                    false,
+                    section(Kind::CacheTtl, "main"),
+                    &file,
+                )
+            },
+        ];
+        let owner = Owner::new(fixes, vec![], None, 3000.0);
+        let style = Style {
+            width: Some(48),
+            color: false,
+            unicode: false,
+            home: None,
+            host: None,
+        };
+        let hosts = [Walking {
+            label: None,
+            offers: owner.offers(),
+            style: &style,
+        }];
+        let hero = Hero {
+            monthly_spend: 3000.0,
+            ..Hero::default()
+        };
+        let mut app = App::new(&hosts, hero, Tab::Measured, false, false);
+        for member in app.groups.iter_mut().flat_map(|g| g.members.iter_mut()) {
+            member.checked = true;
+        }
+        let out = app.render(48, 40);
+        assert!(out.iter().all(|l| ansi_cells(l) <= 48), "{out:#?}");
+        let text = out.join("\n");
+        assert!(text.contains("Save ~$1,234/mo ± $123"), "{text}");
+        assert!(
+            text.contains("up to ~$913/mo ± $91 more by billing"),
+            "{text}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

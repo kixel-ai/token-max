@@ -1752,9 +1752,9 @@ mod unix {
         // open until the child exits, as a person's would.
         let mut keyboard = std::fs::File::from(master);
         // A plan pays, then yes to the TTL and to writing it; then yes to seeing `vibes`'
-        // advice, yes to its Bash cap, no to its window and its advisor, and yes to writing
-        // the cap.
-        keyboard.write_all(b"p\ny\ny\ny\ny\nn\nn\ny\n").unwrap();
+        // advice, whose Bash cap asks nothing once the TTL it compares with is written, yes
+        // to its window, no to its advisor, and yes to writing the window.
+        keyboard.write_all(b"p\ny\ny\ny\ny\nn\ny\n").unwrap();
         let status = child.wait().unwrap().code().unwrap();
         let (stdout, stderr) = (out.join().unwrap(), err.join().unwrap());
         assert_eq!(status, 0, "{stderr}");
@@ -1848,13 +1848,11 @@ mod unix {
         let memory = at("\n  [2/5] Auto memory ");
         assert!(card < memory && memory < window, "{stdout}");
         let entry = words(&stdout[card..memory]);
-        assert!(
-            entry.starts_with("[1/5] Bash timeout cap not measured 2h -> 4m What The longest Claude waits on a foreground Bash command before Claude Code moves it to the background. Advice A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess."),
-            "{entry}"
-        );
-        assert!(
-            entry.ends_with(r#"Source Kixel's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching Change "env": {"BASH_MAX_TIMEOUT_MS": "240000"} in ~/.claude/settings.json Accept? [y]es, [n]o, [q]uit:"#),
-            "{entry}"
+        // The card's cap was compared with the 5m TTL doctor just replaced, which the scan
+        // can't replay, so it asks for a fresh run rather than offering a cap under 5m.
+        assert_eq!(
+            entry,
+            "[1/5] Bash timeout cap not measured What The longest Claude waits on a foreground Bash command before Claude Code moves it to the background. Advice doctor's walk just wrote a main-agent cache TTL change, which moves the TTL this cap is compared with. Run token-max vibes again to compare the cap with the settings as they are now. Source Kixel's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching"
         );
         assert!(!entry.contains("Recommended") && !entry.contains("Worth considering"));
         // The window card names doctor's verdict beside its own cap, which is declined.
@@ -1882,12 +1880,11 @@ mod unix {
             words(&stdout[advisor..again]).ends_with(r#"Change "advisorModel": "fable" in ~/.claude/settings.json Accept? [y]es, [n]o, [q]uit:"#),
             "{stdout}"
         );
-        // The card is from the scan before doctor wrote 1h, so its cap is for the 5m cache
-        // set then; the next run moves it to 55m.
-        // Its edit is checked against the file as doctor just wrote it, and confirmed alone.
+        // The window's edit is checked against the file as doctor just wrote it, and
+        // confirmed alone.
         let tail = &stdout[again..];
         assert!(
-            tail.contains("  @@ -3,3 +3,3 @@\n      \"env\": {\n  -     \"BASH_MAX_TIMEOUT_MS\": \"7200000\"\n  +     \"BASH_MAX_TIMEOUT_MS\": \"240000\"\n"),
+            tail.contains("  +   \"modelSettings\": {\n  +     \"claude-opus-5-5\": {\n  +       \"autoCompactWindow\": 400000\n"),
             "{tail}"
         );
         assert!(
@@ -1910,10 +1907,12 @@ mod unix {
             std::fs::read_to_string(w.claude.join("settings.json.token-max.bak")).unwrap(),
             raised
         );
-        assert_eq!(
-            std::fs::read_to_string(w.claude.join("settings.json")).unwrap(),
-            raised.replace("7200000", "240000")
-        );
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(w.claude.join("settings.json")).unwrap())
+                .unwrap();
+        let mut expected: Value = serde_json::from_str(&raised).unwrap();
+        expected["modelSettings"] = json!({ "claude-opus-5-5": { "autoCompactWindow": 400000 } });
+        assert_eq!(written, expected);
         drop(keyboard);
     }
 
@@ -1989,11 +1988,25 @@ mod unix {
         let mut c = command(&w, &args);
         c.env("LANG", "C.UTF-8");
         // Peek at Vibes (`v`), return to Measured (`v`), then Enter (diff) and `y` (write),
-        // so peeking at Vibes never clobbers the Measured offers; then decline vibes.
-        let steps = [paid, ("Review diff", b"vv\ry"), ("Show them?", b"n")];
+        // so peeking at Vibes never clobbers the Measured offers or the cards a write
+        // rebuilds. Then open vibes' advice, the Bash cap's card first, and Ctrl-C.
+        let steps = [
+            paid,
+            ("Review diff", b"vv\ry"),
+            ("Show them?", b"y"),
+            ("unmeasured tips", b"\x1b[C"),
+            ("compare the cap with", b"\x03"),
+        ];
         let (status, stdout, stderr) = typed_after(&mut c, &steps);
-        assert_eq!(status, 0, "stdout={stdout}\nstderr={stderr}");
+        assert_eq!(status, 2, "stdout={stdout}\nstderr={stderr}");
         assert!(stdout.contains("updated 1 file"), "{stdout}");
+        // The cap compared with the 5m TTL it replaced is not offered after the 1h write.
+        let after = &stdout[stdout.find("Show them?").unwrap()..];
+        assert!(!after.contains("10m \u{2192} 4m"), "{after}");
+        assert!(
+            stderr.contains("cancelled; no further settings were changed"),
+            "{stderr}"
+        );
         let written = std::fs::read_to_string(w.claude.join("settings.json")).unwrap();
         assert!(written.contains("\"promptCacheTtl\": \"1h\""), "{written}");
         assert_eq!(

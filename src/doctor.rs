@@ -510,8 +510,10 @@ fn proof(report: &Report, line: &Recommendation<'_>) -> Option<Proof> {
                 requests: m.base.requests,
             })
         }
+        // A Codex skill's catalog shows only some uses, so none seen is not "0 uses": its
+        // evidence says what was observed instead.
         Source::Piece(c) => match (c.calls, c.cost_per_use_usd) {
-            (Some(0), _) => Some(Proof::Unused {
+            (Some(0), _) if c.skill.is_none() => Some(Proof::Unused {
                 requests: c.requests,
                 tokens: c.tokens,
             }),

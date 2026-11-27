@@ -1741,10 +1741,9 @@ rewrites the whole prefix.
 The card compares the cap with the main-agent TTL in effect now: the current
 setting, else the lifetime the latest main-agent request wrote. It never uses
 a TTL `doctor` recommends changing to. The card `doctor` hands off to comes
-from the scan made before `doctor` wrote anything, so right after a TTL change
-is written it still advises the cap for the old TTL: accepted after a change
-from 1h to 5m, a 55m cap outlasts the new cache until the next run advises 4m.
-Run `token-max vibes` again after changing the TTL. It advises 240000 ms
+from the scan made before `doctor` wrote anything, so once its walk writes a
+main-agent TTL change for the profile, the card offers no edit and asks for
+`token-max vibes` again, which compares the cap with the new TTL. It advises 240000 ms
 under a 5m cache and 3300000 ms under 1h, a margin that leaves room for the
 model's reply on either side of the wait, whenever the cap is anything else: a
 higher cap comes down, and a lower one goes up. That margin is the maintainer's pick, not a measurement, and the card

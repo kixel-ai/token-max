@@ -4414,7 +4414,7 @@ fn catalog_evidence(c: &ContextCost) -> String {
 
 fn catalog_control(c: &ContextCost) -> String {
     match c.skill.as_ref().and_then(|s| s.path.as_ref()) {
-        Some(path) => format!("Disable in config.toml with [[skills.config]], path = {}, enabled = false", toml::Value::String(path.clone())),
+        Some(path) => format!("Disable in config.toml with [[skills.config]], path = {}, enabled = false, which also removes explicit requests", toml::Value::String(path.clone())),
         None => "Disable control unavailable: the recorded catalog does not resolve an absolute SKILL.md path".into(),
     }
 }
@@ -8131,7 +8131,35 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
             .find(|p| p.id == cap.profile)
             .and_then(|profile| crate::doctor::bash_how(cap, profile));
         let profile = tag(&cap.profiles, &|_| cap.owner.clone(), out);
-        vibes.push(bash_item(cap, &profile, how, out));
+        let mut item = bash_item(cap, &profile, how, out);
+        // A main-agent TTL change the walk writes moves the TTL this cap is compared with,
+        // which the scan can't replay, so the card asks for a fresh one.
+        let ttl_changes: Vec<Origin> = checks
+            .iter()
+            .filter(|(i, result, _)| {
+                matches!(result, CheckResult::Ttl(t)
+                    if t.bucket == crate::model::Bucket::Main
+                        && cap.profiles.contains(&t.base.profile))
+                    && fixes.iter().any(|f| {
+                        f.origins.contains(&Origin::Check(*i)) && matches!(f.how, How::Edit(_))
+                    })
+            })
+            .map(|(i, _, _)| Origin::Check(*i))
+            .collect();
+        if !ttl_changes.is_empty() {
+            let rescan = Item {
+                value: String::new(),
+                text: "doctor's walk just wrote a main-agent cache TTL change, which moves the TTL this cap is compared with. Run token-max vibes again to compare the cap with the settings as they are now.".into(),
+                how: None,
+                quiet: false,
+                ..item.clone()
+            };
+            item.after.push(crate::vibes::After {
+                origins: ttl_changes,
+                item: Box::new(rescan),
+            });
+        }
+        vibes.push(item);
     }
     let owned = |p: &Profile| {
         p.retention

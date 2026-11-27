@@ -351,7 +351,10 @@ fn base<'a, V>(
 fn common(result: &CheckResult) -> Common<'_> {
     match result {
         CheckResult::Ttl(c) => base(
-            "claude-cache-ttl",
+            match c.harness {
+                Harness::OpenCode => "anthropic-cache-ttl",
+                _ => "claude-cache-ttl",
+            },
             c.bucket.as_str(),
             &c.base,
             &c.usage_estimates,

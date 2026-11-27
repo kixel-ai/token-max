@@ -827,7 +827,11 @@ fn ttl_check(
                 "available history; no recorded setting change, current settings applied to history"
             }
             .into(),
-            baseline: format!("current {} TTL for {}", bucket.as_str(), profile.root),
+            baseline: format!(
+                "current {} TTL for {}",
+                if opencode { "Anthropic" } else { bucket.as_str() },
+                profile.root
+            ),
             requests: selected.len() as u64,
             coverage: Some(Coverage {
                 priced: paired.priced,
@@ -1295,7 +1299,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
             "unlogged or unresumed summary generation is unknown; a missing final boundary does not establish zero cost",
             "Claude prompt suggestions and session recaps, and Codex automatic recaps, are not logged; every other check's recorded baseline omits them and their cache refreshes",
             "Codex has no user cache-TTL control; its usage is priced but no TTL change is recommended",
-            "OpenCode's cache, compaction and keepalive behavior is not replayed; its usage is priced but none of those changes is recommended for it",
+            "OpenCode's cache TTL is replayed only for requests it sent straight to Anthropic, and its compaction and warming are not replayed; the rest of its usage is priced but none of those changes is recommended for it",
             "no summed per-check or joint savings total",
         ]
         .into_iter()

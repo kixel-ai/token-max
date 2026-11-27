@@ -1551,5 +1551,24 @@ mod tests {
             let s = &history.snapshots[0];
             assert_eq!((s.deferred_bytes, s.skipped_lines), (0, 1));
         }
+        // A blank line is no record, and nothing is skipped.
+        std::fs::write(&file, format!("\n{text}")).unwrap();
+        let history = read(&root, std::slice::from_ref(&file), &["p".into()]).unwrap();
+        assert_eq!(history.requests.len(), 3);
+        assert_eq!(history.snapshots[0].skipped_lines, 0);
+        // A record that parses but counts tokens in no whole number fails the read at its line,
+        // rather than pricing a guess.
+        assert!(text.contains("\"input_tokens\":1000,"));
+        for count in ["1.5", "-1", "\"1000\""] {
+            let bad = text.replacen(
+                "\"input_tokens\":1000,",
+                &format!("\"input_tokens\":{count},"),
+                1,
+            );
+            std::fs::write(&file, bad).unwrap();
+            let error = read(&root, std::slice::from_ref(&file), &["p".into()]).unwrap_err();
+            assert_eq!(error.message, "invalid Antigravity token count", "{count}");
+            assert_eq!(error.location.unwrap().line, 2, "{count}");
+        }
     }
 }

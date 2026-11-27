@@ -2782,6 +2782,78 @@ mod tests {
         }
     }
 
+    /// models.dev's older `context_over_200k` field, alone, prices a long request only where the
+    /// provider documents the threshold it stands for; a tier that contradicts that
+    /// documentation leaves the request unpriced rather than trusting either.
+    #[test]
+    fn a_legacy_context_rate_applies_only_above_a_documented_threshold() {
+        let fixture = crate::test_support::fixture_path("prices.json");
+        let mut catalog: Value =
+            serde_json::from_str(&fs::read_to_string(fixture).unwrap()).unwrap();
+        for model in ["gpt-5.5", "gpt-4.1"] {
+            catalog["openai"]["models"][model] = json!({
+                "family": "gpt",
+                "release_date": "2026-04-23",
+                "tool_call": true,
+                "modalities": {"output": ["text"]},
+                "cost": {
+                    "input": 5, "output": 30, "cache_read": 0.5,
+                    "context_over_200k": {"input": 10, "output": 45, "cache_read": 1},
+                },
+            });
+        }
+        // OpenAI documents 272k for gpt-5.4, not 200k.
+        catalog["openai"]["models"]["gpt-5.4"]["cost"]["tiers"] = json!([
+            {"tier": {"type": "context", "size": 200000}, "input": 5, "output": 22.5, "cache_read": 0.5}
+        ]);
+        let Ok(catalog) = parse_catalog(catalog.to_string().as_bytes()) else {
+            panic!("the catalog parses");
+        };
+        let r = codex_request();
+        let at = |model: &str, input: i64| {
+            let p = BillingPart {
+                model: Some(model.into()),
+                tier: Some("default".into()),
+                usage: codex(json!({
+                    "input_tokens": input,
+                    "output_tokens": 0,
+                    "cached_input_tokens": 0,
+                })),
+                ..r.parts[0].clone()
+            };
+            price_part(&catalog, &r, &p)
+        };
+        let usd = |cost: Cost| cost.total_usd.map(Usd::to_f64).unwrap();
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert!(close(usd(at("gpt-5.5", 272_000)), 272_000.0 * 5.0 / 1e6));
+        let long = at("gpt-5.5", 272_001);
+        assert!(
+            long.assumptions
+                .iter()
+                .any(|a| a.contains("documented 272000")),
+            "{long:?}"
+        );
+        assert!(close(usd(long), 272_001.0 * 10.0 / 1e6));
+        for (model, reason) in [
+            (
+                "gpt-4.1",
+                "legacy context threshold is undocumented for this model",
+            ),
+            (
+                "gpt-5.4",
+                "catalog context threshold contradicts dated provider documentation",
+            ),
+        ] {
+            // Even a short request: the rates cannot be chosen without the threshold.
+            let cost = at(model, 1_000);
+            assert_eq!(cost.total_usd, None, "{model}");
+            assert!(
+                cost.unknown.iter().any(|u| u == reason),
+                "{model}: {cost:?}"
+            );
+        }
+    }
+
     // GPT-6.2 fast is 2x at any context size; ultrafast is 3x until 2027-03-01 Pacific, then 6x.
     #[test]
     fn gpt_6_2_ultrafast_multiplier_follows_the_request_date() {

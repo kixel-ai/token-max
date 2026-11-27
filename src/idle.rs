@@ -3551,6 +3551,56 @@ mod tests {
         }
     }
 
+    /// A member that reaches the lead's settings file through a link has every owner in that
+    /// file spelled as the lead's, so the line's owners compare equal; owners elsewhere, and a
+    /// member with a file of its own, are left as they are.
+    #[cfg(unix)]
+    #[test]
+    fn a_member_naming_the_leads_file_another_way_spells_its_owners_as_the_leads() {
+        let w = Workspace::new();
+        let file = |name: &str| w.home.join(name).display().to_string();
+        std::fs::write(file("settings.json"), "{}").unwrap();
+        std::fs::write(file("other.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(file("settings.json"), file("link.json")).unwrap();
+        let named = |name: &str| Profile {
+            settings_file: file(name),
+            ..profile()
+        };
+        let (lead, member, other) = (
+            named("settings.json"),
+            named("link.json"),
+            named("other.json"),
+        );
+        let base = profile();
+        let owners = |p: &Profile| {
+            let at = |key: &str| format!("{}:{key}", p.settings_file);
+            let mut control = base.idle.clone().unwrap();
+            control.owner = at("idleCompaction");
+            control.threshold_owner = at("autoCompactWindow");
+            let mut ttl = base.ttl.clone();
+            ttl.main.owner = at("promptCacheTtl");
+            ttl.subagent.owner = at("subagentPromptCacheTtl");
+            control.ttl = Some(ttl);
+            let mut compaction = base.compaction.clone();
+            compaction.default.owner = at("autoCompactWindow");
+            let mut window = compaction.default.clone();
+            window.owner = at("modelOverrides.opus");
+            compaction.models.insert("opus".into(), window);
+            control.compaction = Some(compaction);
+            control
+        };
+        let mut control = owners(&member);
+        assert_eq!(respell(&control, &member, &lead), owners(&lead));
+        // An owner that is not the member's file stays.
+        control.owner = "CLAUDE_CODE_IDLE_COMPACTION (default)".into();
+        assert_eq!(
+            respell(&control, &member, &lead).owner,
+            "CLAUDE_CODE_IDLE_COMPACTION (default)"
+        );
+        let control = owners(&other);
+        assert_eq!(respell(&control, &other, &lead), control);
+    }
+
     #[test]
     fn a_scenario_at_the_current_ttl_keeps_a_projects_own_default() {
         // A root answered as paid by a plan defaults to 1h; a project that sends its requests

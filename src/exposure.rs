@@ -1200,14 +1200,24 @@ impl ExposureCollector {
                         };
                         self.invocation(target("opencode-skill", id), invoke, call.time);
                     }
-                    // A namespace that is no MCP server's is OpenCode's own, one row.
-                    Use::Mcp { server, tool }
-                        if servers.contains(server) || server == "t3-code" =>
+                    // OpenCode's own namespaces are one row each.
+                    Use::Mcp { server, .. }
+                        if crate::opencode::BUILT_IN.contains(&server.as_str()) =>
                     {
+                        self.call(&call.id, &format!("{server} tools"), Some(call.time));
+                    }
+                    Use::Mcp { server, tool } => {
                         self.call(&call.id, &format!("mcp__{server}__{tool}"), Some(call.time));
                     }
-                    Use::Mcp { server, .. } => {
-                        self.call(&call.id, &format!("{server} tools"), Some(call.time));
+                    Use::Selected(id) => {
+                        let invoke = Invoke {
+                            kind: InvocationKind::SkillRequest,
+                            via: Via::Typed,
+                            status: InvocationStatus::Requested,
+                            call: call.id.clone(),
+                            group: None,
+                        };
+                        self.invocation(target("opencode-skill", id), invoke, call.time);
                     }
                     Use::Tool(name) => {
                         let owner = servers.iter().find_map(|server| {

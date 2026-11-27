@@ -1042,7 +1042,12 @@ fn opencode_instance(
         }));
     }
     // The variables that move OpenCode's data directory or config.
-    const LOCATIONS: [&str; 3] = ["XDG_DATA_HOME", "XDG_CONFIG_HOME", "OPENCODE_CONFIG"];
+    const LOCATIONS: [&str; 4] = [
+        "XDG_DATA_HOME",
+        "XDG_CONFIG_HOME",
+        "OPENCODE_CONFIG",
+        "OPENCODE_DB",
+    ];
     let mut env = options.env.clone();
     let mut own_environment = vec![];
     for entry in instance.environment {

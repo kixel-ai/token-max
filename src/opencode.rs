@@ -28,6 +28,13 @@ use crate::safe::{ScanError, identity, label};
 /// The database every OpenCode session is kept in, in its data directory.
 pub(crate) const DATABASE: &str = "opencode.db";
 
+/// The `Profile::settings` key present when a global config orders its permissions as an
+/// OpenCode 2 `permissions` list.
+pub(crate) const RULES: &str = "permissions";
+
+/// OpenCode's own Code Mode namespaces; any other is an MCP server's.
+pub(crate) const BUILT_IN: [&str; 2] = ["browser", "opencode"];
+
 /// What an OpenCode request's pricing assumes, since OpenCode records neither.
 const STANDARD_TIER: &str =
     "OpenCode records no service tier; priced at the provider's standard catalog rate";
@@ -176,7 +183,7 @@ pub(crate) fn settings_file(home: &str, env: &Env) -> String {
         .unwrap_or_else(|| join(&[&dir, "opencode.json"]))
 }
 
-/// One MCP server a config declares, and the path its `enabled` switch lives at.
+/// One MCP server a config declares, and the path its switch lives under.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Server {
     pub name: String,
@@ -198,7 +205,10 @@ pub(crate) fn servers(config: &Map<String, Value>) -> Vec<Server> {
         .filter(|(_, server)| server.is_object())
         .map(|(name, server)| Server {
             name: name.clone(),
-            enabled: server.get("enabled") != Some(&Value::Bool(false)),
+            // OpenCode 2 switches `mcp.servers` entries with `disabled`, OpenCode 1's with
+            // `enabled`.
+            enabled: server.get("enabled") != Some(&Value::Bool(false))
+                && server.get("disabled") != Some(&Value::Bool(true)),
             path: prefix
                 .iter()
                 .map(|p| p.to_string())
@@ -229,27 +239,43 @@ pub(crate) fn declared(entries: &[String]) -> Vec<Server> {
         .collect()
 }
 
-/// The control that turns an MCP server off.
+/// The control that turns an MCP server off: `disabled: true` in OpenCode 2's
+/// `mcp.servers`, `enabled: false` in OpenCode 1's `mcp`.
 pub(crate) fn server_off(server: &Server) -> Control {
+    let v2 = server.path.len() == 3 && server.path[1] == "servers";
+    let (key, value) = if v2 {
+        ("disabled", true)
+    } else {
+        ("enabled", false)
+    };
     Control {
-        path: server
-            .path
-            .iter()
-            .cloned()
-            .chain(["enabled".into()])
-            .collect(),
-        value: ControlValue::Bool(false),
+        path: server.path.iter().cloned().chain([key.into()]).collect(),
+        value: ControlValue::Bool(value),
         append: false,
     }
 }
 
-/// The control that hides a skill from every agent: OpenCode lists a skill only while its
-/// `skill` permission is not `deny`.
-pub(crate) fn skill_off(id: &str) -> Control {
-    Control {
-        path: vec!["permission".into(), "skill".into(), id.into()],
-        value: ControlValue::Text("deny".into()),
-        append: false,
+/// The control that hides a skill from every agent, which OpenCode lists only while its
+/// permission is not deny: a `deny` rule appended to OpenCode 2's ordered `permissions`,
+/// where the last matching rule wins, when the config keeps `rules` there; else OpenCode 1's
+/// `permission.skill.<id>`, which OpenCode 1 also reads.
+pub(crate) fn skill_off(id: &str, rules: bool) -> Control {
+    if rules {
+        Control {
+            path: vec![RULES.into()],
+            value: ControlValue::Rule {
+                action: "skill".into(),
+                resource: id.into(),
+                effect: "deny".into(),
+            },
+            append: true,
+        }
+    } else {
+        Control {
+            path: vec!["permission".into(), "skill".into(), id.into()],
+            value: ControlValue::Text("deny".into()),
+            append: false,
+        }
     }
 }
 
@@ -263,7 +289,24 @@ pub(crate) fn switched_off(config: &Map<String, Value>) -> Vec<Control> {
     let skills = config.get("permission").and_then(|p| p.get("skill"));
     for (id, value) in members(skills) {
         if value.as_str() == Some("deny") && !id.contains('*') {
-            result.push(skill_off(id));
+            result.push(skill_off(id, false));
+        }
+    }
+    // A skill whose last rule naming it denies it; a later wildcard may still allow it.
+    let mut last: IndexMap<&str, bool> = IndexMap::default();
+    let rules = config.get(RULES).and_then(Value::as_array);
+    for rule in rules.into_iter().flatten() {
+        let field = |key: &str| rule.get(key).and_then(Value::as_str);
+        if field("action") == Some("skill")
+            && let (Some(id), Some(effect)) = (field("resource"), field("effect"))
+            && !id.contains('*')
+        {
+            last.insert(id, effect == "deny");
+        }
+    }
+    for (id, denied) in last {
+        if denied {
+            result.push(skill_off(id, true));
         }
     }
     result
@@ -340,42 +383,58 @@ fn input(value: &Value) -> CstInputValue {
     }
 }
 
-/// The model an agent's config names, without its `provider/` prefix.
-fn agent_model(value: &Value) -> Option<String> {
-    let model = value.get("model")?.as_str()?;
-    Some(model.rsplit_once('/').map_or(model, |(_, m)| m).to_string())
+/// A model reference's model ID and variant: `provider/model#variant`, the variant only in
+/// OpenCode 2's shape.
+fn model_reference(value: &Value) -> Option<(String, Option<String>)> {
+    let reference = value.as_str()?;
+    let (model, variant) = match reference.split_once('#') {
+        Some((model, variant)) => (model, Some(variant.to_string())),
+        None => (reference, None),
+    };
+    Some((
+        model.rsplit_once('/').map_or(model, |(_, m)| m).to_string(),
+        variant,
+    ))
 }
 
-/// Subagent model and effort controls: each `agent.<name>` entry's `model` and `variant`, and
-/// the top-level `model` a subagent without one runs on when its parent's is unrecorded.
+/// Subagent model and effort controls: each `agents.<name>` (OpenCode 2) or `agent.<name>`
+/// (OpenCode 1) entry's `model` and variant, and the top-level `model` a subagent without
+/// one runs on when its parent's is unrecorded.
 fn agent_controls(layers: &[Layer]) -> AgentControls {
     let mut definitions: IndexMap<String, AgentDefinition> = IndexMap::default();
     let mut session = None;
     for layer in layers {
-        if let Some(model) = layer.config.get("model").and_then(Value::as_str) {
+        if let Some((model, _)) = layer.config.get("model").and_then(model_reference) {
             session = Some(Owned {
-                value: model.rsplit_once('/').map_or(model, |(_, m)| m).to_string(),
+                value: model,
                 owner: format!("{}:model", layer.file),
             });
         }
-        for (name, agent) in members(layer.config.get("agent")) {
-            let entry = definitions
-                .entry(name.clone())
-                .or_insert_with(|| AgentDefinition {
-                    name: name.clone(),
-                    file: layer.file.clone(),
-                    project: None,
-                    model: None,
-                    effort: None,
-                    modified: None,
-                });
-            if let Some(model) = agent_model(agent) {
-                entry.model = Some(model);
-                entry.file = layer.file.clone();
-                entry.modified = modified(&layer.file);
-            }
-            if let Some(variant) = agent.get("variant").and_then(Value::as_str) {
-                entry.effort = Some(variant.into());
+        for key in ["agent", "agents"] {
+            for (name, agent) in members(layer.config.get(key)) {
+                let entry = definitions
+                    .entry(name.clone())
+                    .or_insert_with(|| AgentDefinition {
+                        name: name.clone(),
+                        file: layer.file.clone(),
+                        project: None,
+                        model: None,
+                        effort: None,
+                        modified: None,
+                        key: Some(key.into()),
+                    });
+                if let Some((model, variant)) = agent.get("model").and_then(model_reference) {
+                    entry.model = Some(model);
+                    entry.file = layer.file.clone();
+                    entry.modified = modified(&layer.file);
+                    entry.key = Some(key.into());
+                    if variant.is_some() {
+                        entry.effort = variant;
+                    }
+                }
+                if let Some(variant) = agent.get("variant").and_then(Value::as_str) {
+                    entry.effort = Some(variant.into());
+                }
             }
         }
     }
@@ -412,14 +471,22 @@ pub(crate) fn profile(
     let layers = layers(options, env)?;
     let config = merged(&layers);
     let settings_file = settings_file(&options.home, env);
-    let database = join(&[&canonical, DATABASE]);
-    let histories = match realpath(&database) {
-        Ok(database) => vec![database],
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
-        Err(_) => {
+    // `OPENCODE_DB` names another database, relative to the data directory; `:memory:` keeps
+    // none.
+    let database = match env.get("OPENCODE_DB").filter(|d| !d.is_empty()) {
+        Some(d) if d == ":memory:" => None,
+        Some(d) if std::path::Path::new(d).is_absolute() => Some(d.clone()),
+        Some(d) => Some(join(&[&canonical, d])),
+        None => Some(join(&[&canonical, DATABASE])),
+    };
+    let histories = match database.as_deref().map(realpath) {
+        None => vec![],
+        Some(Ok(database)) => vec![database],
+        Some(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+        Some(Err(_)) => {
             return Err(crate::discovery::error(
                 "cannot inspect OpenCode database",
-                &database,
+                database.as_deref().unwrap_or_default(),
                 0,
             ));
         }
@@ -464,7 +531,12 @@ pub(crate) fn profile(
         ttl,
         provider: None,
         billing: None,
-        settings: IndexMap::default(),
+        settings: layers
+            .iter()
+            .any(|l| l.config.get(RULES).is_some_and(Value::is_array))
+            .then(|| (RULES.to_string(), crate::model::Scalar::Bool(true)))
+            .into_iter()
+            .collect(),
         mcp_servers: servers(&config)
             .iter()
             .filter(|s| s.enabled)
@@ -544,6 +616,8 @@ pub(crate) enum Use {
     Mcp { server: String, tool: String },
     /// Any other tool, which an MCP server configured as `server` owns when named `server_tool`.
     Tool(String),
+    /// A person picking a skill for a turn, with `@` or as a skill message, by its ID.
+    Selected(String),
 }
 
 /// One tool call, by name, and whether it failed.
@@ -745,6 +819,17 @@ const V2_SCRIPT_CALLS: &str = "SELECT m.session_id,
   WHERE m.type = 'assistant' AND json_extract(c.value, '$.type') = 'tool'
     AND json_extract(c.value, '$.name') = 'execute'";
 
+/// Skills a person picked: each `@` skill of a user message, and each skill message.
+const V2_SELECTED: &str = "SELECT m.session_id,
+    coalesce(json_extract(m.data, '$.time.created'), m.time_created),
+    m.id || ':' || s.key, json_extract(s.value, '$.id')
+  FROM session_message m, json_each(m.data, '$.skills') s
+  WHERE m.type = 'user'
+  UNION ALL
+  SELECT m.session_id, coalesce(json_extract(m.data, '$.time.created'), m.time_created),
+    m.id, json_extract(m.data, '$.skill')
+  FROM session_message m WHERE m.type = 'skill'";
+
 /// Tool parts in OpenCode 1's `part` table.
 const V1_CALLS: &str = "SELECT p.session_id, p.time_created,
     p.message_id || ':' || coalesce(json_extract(p.data, '$.callID'), p.id),
@@ -854,17 +939,19 @@ pub(crate) fn read(file: &str, profiles: &[String]) -> Result<History, ScanError
 fn read_snapshot(tx: &Transaction, file: &str, profiles: &[String]) -> rusqlite::Result<History> {
     let tables = tables(tx)?;
     let mut history = History::default();
-    let session_table = if tables.contains("session_v2") {
-        "session_v2"
-    } else if tables.contains("session") {
-        "session"
-    } else {
+    // A database OpenCode 2 is still migrating holds sessions in both tables; OpenCode 2's
+    // row wins for one in both.
+    let session_tables: Vec<&str> = ["session", "session_v2"]
+        .into_iter()
+        .filter(|t| tables.contains(*t))
+        .collect();
+    if session_tables.is_empty() {
         return Ok(history);
-    };
+    }
     let mut sessions: IndexMap<String, Session> = IndexMap::default();
-    {
+    for session_table in session_tables {
         let mut statement = tx.prepare(&format!(
-            "SELECT id, parent_id, directory, version, time_created FROM {session_table} ORDER BY time_created, id"
+            "SELECT id, parent_id, directory, version, time_created FROM {session_table}"
         ))?;
         let mut rows = statement.query([])?;
         while let Some(row) = rows.next()? {
@@ -883,6 +970,7 @@ fn read_snapshot(tx: &Transaction, file: &str, profiles: &[String]) -> rusqlite:
             );
         }
     }
+    sessions.sort_by(|_, a, _, b| (a.created, &a.id).cmp(&(b.created, &b.id)));
     let v2 = tables.contains("session_message");
     let v1 = tables.contains("message") && tables.contains("part");
     let mut steps: Vec<Step> = vec![];
@@ -1053,6 +1141,21 @@ fn read_snapshot(tx: &Transaction, file: &str, profiles: &[String]) -> rusqlite:
                 failed: row.get::<_, Option<String>>(4)?.as_deref() == Some("error"),
             });
         }
+        let mut statement = tx.prepare(V2_SELECTED)?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let session: String = row.get(0)?;
+            let Some(skill) = name(row, 3)? else {
+                continue;
+            };
+            history.calls.push(Call {
+                session: key(&session),
+                id: row.get(2)?,
+                time: number(row, 1)?.unwrap_or(0),
+                what: Use::Selected(skill),
+                failed: false,
+            });
+        }
     }
     if tables.contains("instruction_state") && tables.contains("instruction_blob") {
         let mut statement = tx.prepare(CONTEXTS)?;
@@ -1196,8 +1299,12 @@ mod tests {
              CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
                type TEXT NOT NULL, seq INTEGER NOT NULL, time_created INTEGER NOT NULL,
                data TEXT NOT NULL);
+             CREATE TABLE session_v2 (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL,
+               version TEXT NOT NULL, time_created INTEGER NOT NULL);
              INSERT INTO session VALUES ('ses_a', NULL, '/work', '1.14.0', 1),
-               ('ses_b', NULL, '/work', '1.14.0', 2);",
+               ('ses_b', NULL, '/work', '1.14.0', 2);
+             -- Mid-migration: OpenCode 2 has copied ses_a's session row, not ses_b's.
+             INSERT INTO session_v2 VALUES ('ses_a', NULL, '/work', '2.2.0', 1);",
         )
         .unwrap();
         let tokens =
@@ -1233,6 +1340,12 @@ mod tests {
         .unwrap();
         drop(db);
         let history = read(&text(&file), &["profile".into()]).unwrap();
+        let versions: Vec<Option<&str>> = history
+            .sessions
+            .iter()
+            .map(|s| s.version.as_deref())
+            .collect();
+        assert_eq!(versions, [Some("2.2.0"), Some("1.14.0")]);
         let sessions: Vec<&str> = history.requests.iter().map(|r| &*r.session).collect();
         assert_eq!(
             sessions,
@@ -1293,7 +1406,8 @@ mod tests {
     fn a_server_is_switched_off_in_the_shape_its_config_declares_it() {
         let v1 =
             json!({"mcp": {"timeout": 5, "docs": {"type": "local"}, "off": {"enabled": false}}});
-        let v2 = json!({"mcp": {"servers": {"docs": {"type": "remote"}}}});
+        let v2 =
+            json!({"mcp": {"servers": {"docs": {"type": "remote"}, "off": {"disabled": true}}}});
         let path = |config: &Value| -> Vec<Vec<String>> {
             let entries: Vec<String> = servers(config.as_object().unwrap())
                 .iter()
@@ -1306,7 +1420,21 @@ mod tests {
                 .collect()
         };
         assert_eq!(path(&v1), [["mcp", "docs", "enabled"]]);
-        assert_eq!(path(&v2), [["mcp", "servers", "docs", "enabled"]]);
+        // OpenCode 2 ignores `enabled` under `mcp.servers`.
+        assert_eq!(path(&v2), [["mcp", "servers", "docs", "disabled"]]);
+        assert_eq!(
+            switched_off(v2.as_object().unwrap()),
+            [Control {
+                path: vec![
+                    "mcp".into(),
+                    "servers".into(),
+                    "off".into(),
+                    "disabled".into()
+                ],
+                value: ControlValue::Bool(true),
+                append: false,
+            }]
+        );
         assert_eq!(
             switched_off(v1.as_object().unwrap()),
             [server_off(&Server {
@@ -1315,6 +1443,129 @@ mod tests {
                 path: vec!["mcp".into(), "off".into()],
             })]
         );
+    }
+
+    #[test]
+    fn a_skill_picked_with_at_or_a_skill_message_is_a_use() {
+        let w = Workspace::new();
+        let file = opencode_database(&w.home);
+        let db = Connection::open(&file).unwrap();
+        let picked = json!({"text": "SYNTHETIC_PROMPT", "skills": [{"id": "picked"}]});
+        let typed = json!({"skill": "typed", "name": "typed", "text": "SYNTHETIC_SKILL"});
+        for (id, kind, data) in [("msg_u2", "user", picked), ("msg_s", "skill", typed)] {
+            db.execute(
+                "INSERT INTO session_message VALUES (?1, 'ses_main', ?2, 9, 1, ?3)",
+                rusqlite::params![id, kind, data.to_string()],
+            )
+            .unwrap();
+        }
+        drop(db);
+        let history = read(&text(&file), &["profile".into()]).unwrap();
+        let selected: Vec<&Use> = history
+            .calls
+            .iter()
+            .map(|c| &c.what)
+            .filter(|u| matches!(u, Use::Selected(_)))
+            .collect();
+        assert_eq!(
+            selected,
+            [
+                &Use::Selected("picked".into()),
+                &Use::Selected("typed".into())
+            ]
+        );
+        assert!(!format!("{history:?}").contains("SYNTHETIC_"));
+    }
+
+    #[test]
+    fn opencode_2_rules_deny_a_skill_by_the_last_rule_naming_it() {
+        let config = json!({"permissions": [
+            {"action": "skill", "resource": "*", "effect": "allow"},
+            {"action": "skill", "resource": "a", "effect": "deny"},
+            {"action": "skill", "resource": "b", "effect": "deny"},
+            {"action": "skill", "resource": "b", "effect": "allow"},
+        ]});
+        assert_eq!(
+            switched_off(config.as_object().unwrap()),
+            [skill_off("a", true)]
+        );
+        // The rule is appended after the file's own, where it wins, once.
+        let off = skill_off("c", true);
+        let edits = [Edit {
+            path: off.path.clone(),
+            value: crate::context::json_value(&off.value),
+            op: Op::Append,
+        }];
+        let text = "{\n  // Mine.\n  \"permissions\": [\n    { \"action\": \"skill\", \"resource\": \"*\", \"effect\": \"allow\" },\n  ],\n}\n";
+        let edited = edit(text, &edits, &[]).unwrap();
+        assert!(edited.contains("// Mine."), "{edited}");
+        let rules = parse_config(&edited).unwrap()["permissions"].clone();
+        assert_eq!(
+            rules[1],
+            json!({"action": "skill", "resource": "c", "effect": "deny"})
+        );
+        assert_eq!(edit(&edited, &edits, &[]).unwrap(), edited);
+        assert_eq!(skill_off("c", false).path, ["permission", "skill", "c"]);
+    }
+
+    #[test]
+    fn opencode_2_agents_name_their_variant_after_the_model() {
+        let layers = [Layer {
+            file: "/g/opencode.json".into(),
+            config: json!({"model": "opencode/zen-flash#low",
+                    "agent": {"plan": {"model": "openai/m1", "variant": "high"}},
+                    "agents": {"explore": {"model": "opencode/zen-flash#max"}}})
+            .as_object()
+            .unwrap()
+            .clone(),
+        }];
+        let controls = agent_controls(&layers);
+        assert_eq!(controls.session.unwrap().value, "zen-flash");
+        let found: Vec<[Option<&str>; 4]> = controls
+            .definitions
+            .iter()
+            .map(|d| {
+                [
+                    Some(d.name.as_str()),
+                    d.model.as_deref(),
+                    d.effort.as_deref(),
+                    d.key.as_deref(),
+                ]
+            })
+            .collect();
+        assert_eq!(
+            found,
+            [
+                [Some("plan"), Some("m1"), Some("high"), Some("agent")],
+                [
+                    Some("explore"),
+                    Some("zen-flash"),
+                    Some("max"),
+                    Some("agents")
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn opencode_db_names_the_database_a_profile_reads() {
+        let w = Workspace::new();
+        let data = w.home.join(".local/share/opencode");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("other.db"), "").unwrap();
+        let canonical = realpath(&text(&data)).unwrap();
+        let histories = |database: &str| {
+            let mut options = w.scan_options().discovery;
+            options.env.insert("OPENCODE_DB".into(), database.into());
+            profile(&options, canonical.clone(), canonical.clone(), "k")
+                .unwrap()
+                .histories
+        };
+        assert_eq!(
+            histories("other.db"),
+            [realpath(&text(&data.join("other.db"))).unwrap()]
+        );
+        assert!(histories(":memory:").is_empty());
     }
 
     #[test]

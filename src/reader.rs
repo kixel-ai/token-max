@@ -2413,14 +2413,19 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
             reading.read.store(finished, Ordering::Relaxed);
         }
     }
+    // The transcript audit, the only replay-reach scan, covers Claude Code and Codex alone.
+    let opencode = options.reach != Reach::Replay;
     if let Some(reading) = &options.reading
+        && opencode
         && profiles
             .iter()
             .any(|p| p.harness == Harness::OpenCode && !p.histories.is_empty())
     {
         reading.step(Some("Reading OpenCode's database"));
     }
-    reader.opencode(&profiles, &mut native_ids)?;
+    if opencode {
+        reader.opencode(&profiles, &mut native_ids)?;
+    }
     if let Some(reading) = &options.reading {
         reading.step(None);
     }

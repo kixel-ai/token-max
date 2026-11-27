@@ -4357,7 +4357,8 @@ fn diff(pending: &Pending, after: &str, style: &Style) -> String {
     };
     let edited = shown(&pending.edits);
     let hide = |text: &str| match target.harness {
-        Harness::Claude | Harness::OpenCode => mask_json(text, mask, &edited),
+        Harness::Claude => mask_json(text, mask, |path| secret_json(path, &edited)),
+        Harness::OpenCode => mask_json(text, mask, secret_opencode),
         Harness::Codex => mask_toml(text, mask),
     };
     let (before, after) = (hide(target.before.as_deref().unwrap_or("")), hide(after));
@@ -4404,9 +4405,22 @@ fn secret_json(path: &[Option<&str>], edited: &[&[String]]) -> bool {
     }
 }
 
-/// `text` with each scalar value that [`secret_json`] names replaced by `mask` in quotes,
-/// keeping every other byte, so lines and their numbers stay as they are.
-fn mask_json(text: &str, mask: &str, edited: &[&[String]]) -> String {
+/// Whether the OpenCode config value at `path` may hold a secret: a provider's or MCP
+/// server's variables, headers, OAuth settings or API key.
+fn secret_opencode(path: &[Option<&str>]) -> bool {
+    matches!(path.first(), Some(Some("mcp" | "provider")))
+        && path.iter().any(|key| {
+            matches!(
+                key,
+                Some("environment" | "env" | "headers" | "oauth" | "apiKey" | "api_key")
+            )
+        })
+}
+
+/// `text` with each scalar value that `secret` names by its path replaced by `mask` in
+/// quotes, keeping every other byte, comments included, so lines and their numbers stay as
+/// they are.
+fn mask_json(text: &str, mask: &str, secret: impl Fn(&[Option<&str>]) -> bool) -> String {
     let b = text.as_bytes();
     // Each open container: whether it is an object, and its current key.
     let mut stack: Vec<(bool, Option<String>)> = vec![];
@@ -4430,6 +4444,21 @@ fn mask_json(text: &str, mask: &str, edited: &[&[String]]) -> String {
             b',' => {
                 want_key = matches!(stack.last(), Some((true, _)));
                 i += 1;
+                continue;
+            }
+            // A JSONC comment, which may quote anything.
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i < b.len() && !(b[i] == b'*' && b.get(i + 1) == Some(&b'/')) {
+                    i += 1;
+                }
+                i = (i + 2).min(b.len());
                 continue;
             }
             b'"' => {
@@ -4462,7 +4491,7 @@ fn mask_json(text: &str, mask: &str, edited: &[&[String]]) -> String {
             .iter()
             .map(|(object, key)| if *object { key.as_deref() } else { None })
             .collect();
-        if secret_json(&path, edited) {
+        if secret(&path) {
             out.push_str(&text[copied..start]);
             out.push_str(&format!("\"{mask}\""));
             copied = i;
@@ -7542,7 +7571,7 @@ mod tests {
         ];
         let text = "{\n  \"env\": {\"DISABLE_X\": \"1\", \"CLAUDE_CODE_AUTO_COMPACT_WINDOW\": \"sk-pasted\"}\n}\n";
         assert_eq!(
-            mask_json(text, "****", &shown(&edits)),
+            mask_json(text, "****", |path| secret_json(path, &shown(&edits))),
             "{\n  \"env\": {\"DISABLE_X\": \"1\", \"CLAUDE_CODE_AUTO_COMPACT_WINDOW\": \"****\"}\n}\n"
         );
     }
@@ -7553,8 +7582,17 @@ mod tests {
         let edited = [vec!["env".to_string(), "DISABLE_X".to_string()]];
         let edited: Vec<&[String]> = edited.iter().map(Vec::as_slice).collect();
         assert_eq!(
-            mask_json(text, "****", &edited),
+            mask_json(text, "****", |path| secret_json(path, &edited)),
             "{\n  \"env\": {\"API_KEY\": \"****\", \"DISABLE_X\": \"1\"},\n  \"mcpServers\": {\n    \"gh\": {\n      \"command\": \"gh\", \"args\": [\"a\"],\n      \"env\": {\"GITHUB_TOKEN\": \"****\", \"N\": \"****\"}\n    }\n  },\n  \"projects\": {\"/p\": {\"mcpServers\": {\"web\": {\"headers\": {\"Authorization\": \"****\"}, \"url\": \"https://x\"}}}}\n}\n"
+        );
+    }
+
+    #[test]
+    fn the_confirm_masks_opencode_credentials_past_its_comments() {
+        let text = "{\n  // a \"quoted\" \"mcp\": {\n  \"mcp\": {\"servers\": {\"gh\": {\"headers\": {\"Authorization\": \"Bearer t\"}, \"oauth\": {\"client_secret\": \"s\"}, \"environment\": {\"T\": \"1\"}, /* x\" */ \"url\": \"https://x\"}}},\n  \"provider\": {\"p\": {\"options\": {\"apiKey\": \"k\", \"baseURL\": \"u\"}}},\n  \"model\": \"m\"\n}\n";
+        assert_eq!(
+            mask_json(text, "****", secret_opencode),
+            "{\n  // a \"quoted\" \"mcp\": {\n  \"mcp\": {\"servers\": {\"gh\": {\"headers\": {\"Authorization\": \"****\"}, \"oauth\": {\"client_secret\": \"****\"}, \"environment\": {\"T\": \"****\"}, /* x\" */ \"url\": \"https://x\"}}},\n  \"provider\": {\"p\": {\"options\": {\"apiKey\": \"****\", \"baseURL\": \"u\"}}},\n  \"model\": \"m\"\n}\n"
         );
     }
 

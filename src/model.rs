@@ -1239,6 +1239,9 @@ pub struct AgentDefinition {
     pub effort: Option<String>,
     /// When the file last changed, so runs from before a change are not attributed to it.
     pub modified: Option<Millis>,
+    /// The key that names its model and effort, where a harness has more than one: OpenCode
+    /// 2's `agents` or OpenCode 1's `agent`.
+    pub key: Option<String>,
 }
 
 /// T3's three idle policies, independent of native Claude's interactive idle setting.
@@ -3057,7 +3060,16 @@ pub struct Calibration {
 pub enum ControlValue {
     Text(String),
     Bool(bool),
-    Skill { path: String, enabled: bool },
+    Skill {
+        path: String,
+        enabled: bool,
+    },
+    /// An OpenCode 2 `permissions` rule: `effect` for `action` on `resource`.
+    Rule {
+        action: String,
+        resource: String,
+        effect: String,
+    },
 }
 
 /// One settings.json change: set `path` to `value`, or add `value` to the list at `path`.

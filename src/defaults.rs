@@ -338,6 +338,10 @@ pub fn switch_name(control: &Control) -> String {
         (["projects", _, "disabledMcpServers"], ControlValue::Text(name)) => {
             format!("MCP server {name}")
         }
+        // OpenCode's switches.
+        (["permission", "skill", id], _) => format!("Skill {id}"),
+        (_, ControlValue::Rule { resource, .. }) => format!("Skill {resource}"),
+        (["mcp", .., name, "enabled" | "disabled"], _) => format!("MCP server {name}"),
         (_, ControlValue::Skill { path, .. }) => {
             let dir = path.rsplit_once(['/', '\\']).map_or("", |(dir, _)| dir);
             let name = dir.rsplit_once(['/', '\\']).map_or(dir, |(_, name)| name);
@@ -398,7 +402,10 @@ pub fn switch_kind(control: &Control) -> Option<crate::model::ContextKind> {
         (["mcp_servers", ..] | ["projects", _, "disabledMcpServers"], _) => {
             Some(ContextKind::McpServer)
         }
-        (["skillOverrides", _], _) | (_, ControlValue::Skill { .. }) => Some(ContextKind::Skill),
+        (["skillOverrides", _], _)
+        | (["permission", "skill", _], _)
+        | (_, ControlValue::Skill { .. } | ControlValue::Rule { .. }) => Some(ContextKind::Skill),
+        (["mcp", .., "enabled" | "disabled"], _) => Some(ContextKind::McpServer),
         (_, ControlValue::Text(rule)) => Some(match rule.strip_prefix("mcp__") {
             Some(_) if denied_server(rule).is_some() => ContextKind::McpServer,
             Some(rest) if rest.contains("__") => ContextKind::McpTool,

@@ -194,6 +194,7 @@ fn claude_definitions(dir: &str, project: Option<&str>) -> Result<Vec<AgentDefin
         };
         definitions.push(AgentDefinition {
             name,
+            key: None,
             modified: modified(&file),
             file,
             project: project.map(str::to_string),
@@ -250,6 +251,7 @@ fn codex_role_file(file: &str, declared: Option<&str>) -> Option<(String, bool, 
         model: role.get("model").and_then(label),
         effort: role.get("model_reasoning_effort").and_then(label),
         modified: modified(file),
+        key: None,
     };
     Some((name, described, definition))
 }
@@ -1004,7 +1006,11 @@ fn opencode_source(run: &Run<'_>, controls: &AgentControls, kind: &str) -> (Mode
     let (source, detail, expect) = match defined {
         Some((file, model)) => (
             ModelSource::Definition,
-            format!("agent.{kind}.model = {model} in {}", file.file),
+            format!(
+                "{}.{kind}.model = {model} in {}",
+                file.key.as_deref().unwrap_or("agents"),
+                file.file
+            ),
             Expect::Model(model),
         ),
         None => (
@@ -1045,11 +1051,18 @@ fn settings_text(
 ) -> (String, String) {
     let mut texts = match profile.harness {
         Harness::OpenCode => {
-            let file = definition(controls, kind).map_or(&*profile.settings_file, |d| &d.file);
-            (
-                format!("agent.{kind}.model in {file}"),
-                format!("agent.{kind}.variant in {file}"),
-            )
+            let defined = definition(controls, kind);
+            let file = defined.map_or(&*profile.settings_file, |d| &d.file);
+            match defined.and_then(|d| d.key.as_deref()) {
+                Some("agent") => (
+                    format!("agent.{kind}.model in {file}"),
+                    format!("agent.{kind}.variant in {file}"),
+                ),
+                _ => (
+                    format!("agents.{kind}.model in {file}"),
+                    format!("the #variant of agents.{kind}.model in {file}"),
+                ),
+            }
         }
         Harness::Claude if fork => (
             "none; a fork always runs on the main model".into(),
@@ -1549,6 +1562,7 @@ mod tests {
             model: model.map(str::to_string),
             effort: None,
             modified: Some(0),
+            key: None,
         }
     }
 

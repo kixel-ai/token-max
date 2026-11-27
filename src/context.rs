@@ -96,6 +96,11 @@ pub(crate) fn json_value(value: &ControlValue) -> Value {
         ControlValue::Skill { path, enabled } => {
             serde_json::json!({ "path": path, "enabled": enabled })
         }
+        ControlValue::Rule {
+            action,
+            resource,
+            effect,
+        } => serde_json::json!({ "action": action, "resource": resource, "effect": effect }),
     }
 }
 
@@ -735,6 +740,7 @@ fn codex_pieces(
 fn opencode_pieces(
     component: &Component,
     servers: &[&[String]],
+    rules: bool,
     components: &HashMap<&str, &Component>,
     interned: &mut Pieces<'_>,
 ) -> Vec<Split> {
@@ -758,7 +764,7 @@ fn opencode_pieces(
                     format!("opencode:skill:{}", m.name),
                     ContextKind::Skill,
                     m.name.clone(),
-                    Some(crate::opencode::skill_off(&m.name)),
+                    Some(crate::opencode::skill_off(&m.name, rules)),
                 );
                 interned
                     .skills
@@ -791,20 +797,21 @@ fn opencode_pieces(
                 }
                 _ => None,
             };
-            if control.is_some() || name == "t3-code" {
-                (
-                    format!("opencode:mcp:{name}"),
-                    ContextKind::McpServer,
-                    name.to_string(),
-                    control,
-                )
-            } else {
-                // OpenCode's own namespaces, such as its browser tools.
+            if crate::opencode::BUILT_IN.contains(&name) {
                 (
                     format!("opencode:tool:{name}"),
                     ContextKind::Tool,
                     format!("{name} tools"),
                     None,
+                )
+            } else {
+                // A server no profile's global config declares alike, such as a project's,
+                // has no switch of its own.
+                (
+                    format!("opencode:mcp:{name}"),
+                    ContextKind::McpServer,
+                    name.to_string(),
+                    control,
                 )
             }
         }
@@ -999,6 +1006,18 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
     ordered.sort_by_key(|(_, r)| r.time);
     // A request no selected profile owns, such as a removed T3 instance's, has no setting to change.
     ordered.retain(|(_, r)| r.profiles.iter().any(|p| files.contains_key(p.as_str())));
+    // OpenCode's system prompt leads its context pieces at a length it does not record; the
+    // prompt and the pieces both fit in the session's smallest input, which bounds it.
+    let mut smallest: HashMap<&str, i64> = HashMap::default();
+    for (_, r) in &ordered {
+        if r.harness == Harness::OpenCode
+            && let [part] = r.parts.as_slice()
+            && let Some(input) = part.usage.input
+        {
+            let n = smallest.entry(&*r.session).or_insert(input);
+            *n = (*n).min(input);
+        }
+    }
     for (exposure, r) in ordered {
         let mut source: Vec<&str> = r
             .profiles
@@ -1061,6 +1080,13 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             .filter(|p| p.harness == r.harness && r.profiles.contains(&p.id))
             .map(|p| p.mcp_servers.as_slice())
             .collect();
+        // Whether an OpenCode profile of this request orders its permissions as rules, which
+        // a legacy `permission` entry would not outrank.
+        let rules = input.profiles.iter().any(|p| {
+            p.harness == Harness::OpenCode
+                && r.profiles.contains(&p.id)
+                && p.settings.contains_key(crate::opencode::RULES)
+        });
         let component = |id: &str| {
             *components
                 .get(id)
@@ -1091,7 +1117,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 let mut split = match r.harness {
                     Harness::Codex => codex_pieces(component, &servers, &components, &mut interned),
                     Harness::OpenCode => {
-                        opencode_pieces(component, &servers, &components, &mut interned)
+                        opencode_pieces(component, &servers, rules, &components, &mut interned)
                     }
                     Harness::Claude => pieces(component, &components, &mut interned)
                         .into_iter()
@@ -1337,6 +1363,12 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 slots.len() - 1
             };
             let prefix_end: f64 = parts.iter().filter(|x| x.prefix).map(size).sum();
+            // How far an unrecorded system prompt may push the leading pieces.
+            let slack = (r.harness == Harness::OpenCode).then(|| {
+                smallest
+                    .get(&*r.session)
+                    .map_or(-1.0, |&n| n as f64 - prefix_end)
+            });
             let known = prior
                 .as_ref()
                 .filter(|prior| prior.prefix == prefix)
@@ -1358,7 +1390,18 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     continue;
                 }
                 if piece.prefix {
-                    entry.1 += charge(offset, tokens);
+                    match slack {
+                        None => entry.1 += charge(offset, tokens),
+                        // Priced only when every start the slack allows pays one rate.
+                        Some(slack) => {
+                            let first = slot(offset);
+                            if slack >= 0.0 && first == slot(offset + slack + tokens - 1e-9) {
+                                entry.1 += tokens * slots[first].1;
+                            } else {
+                                entry.2 = true;
+                            }
+                        }
+                    }
                     offset += tokens;
                     continue;
                 }

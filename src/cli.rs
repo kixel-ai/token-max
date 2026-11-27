@@ -220,7 +220,6 @@ Usage: token-max audit [options]
   --since YYYY-MM-DD|ISO  Select from midnight UTC or an instant with timezone (default: 14 days ago)
   --claude-dir DIR        Select a Claude profile (repeatable)
   --codex-dir DIR         Select a Codex home, including archived sessions (repeatable)
-  --opencode-dir DIR      Select an OpenCode data directory, which holds opencode.db (repeatable)
   --t3-dir DIR            Select a T3 state directory (repeatable)
   --ssh HOST              Also audit an SSH destination, putting this build there first if needed (repeatable)
   --offline               Use cached public prices without network access
@@ -1843,6 +1842,8 @@ fn forensics(args: &[String]) -> Result<(Output, u8), ScanError> {
         || values.version
         || values.max_cost_per_use.is_some()
         || install_only(&values)
+        // The audit reads Claude Code and Codex transcripts only.
+        || !values.opencode_dirs.is_empty()
         || (values.all && values.repo.is_some())
     {
         return Err(invalid());

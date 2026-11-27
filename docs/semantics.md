@@ -1198,12 +1198,16 @@ OpenCode keeps only each session's latest instructions, skill listing and Code
 Mode catalog (`instruction_state`), not what each request carried, so every
 request of a session is taken to have carried them, at the start of its
 messages, after the system prompt. They are sized at a quarter token per
-character, as Codex's are, and priced at the cache position that start
-occupies. A session OpenCode 1 wrote, or one OpenCode 2 recorded no
+character, as Codex's are. The system prompt's length is not recorded, but it
+and those pieces fit in the session's smallest input, so a piece is priced only
+when every start that bound allows pays one rate, and is otherwise unpriced
+and extrapolated over. A session OpenCode 1 wrote, or one OpenCode 2 recorded no
 instruction state for, prices no pieces; its requests still count. A Code
-Mode namespace is an MCP server's when a config declares a server by that
-name, or T3 Code's when it is `t3-code-` and an ID; any other namespace is
-OpenCode's own, such as `browser`, and gets a tool line with no switch.
+Mode namespace is OpenCode's own when it is `browser` or `opencode`, and gets a
+tool line with no switch; any other is an MCP server's, with T3 Code's
+`t3-code-` and an ID named `t3-code`. A session whose database rows OpenCode 2
+has only partly migrated is read from both session tables, OpenCode 2's row
+winning for a session in both.
 
 OpenCode's cache lifetime, compaction and keepalive behavior are not
 replayed, and its requests are left out of the transcript audit, so none of

@@ -436,7 +436,9 @@ files used.
 
 An OpenCode profile is a data directory, `$XDG_DATA_HOME/opencode` or
 `~/.local/share/opencode` on every platform, and its history is the
-`opencode.db` there. `--opencode-dir` takes such a directory. Its settings are
+`opencode.db` there, or the database `OPENCODE_DB` names when the shell's
+OpenCode uses that directory (`:memory:` keeps none). `--opencode-dir` takes
+such a directory. Its settings are
 the global `config.json`, `opencode.json` and `opencode.jsonc` under
 `$XDG_CONFIG_HOME/opencode` or `~/.config/opencode`, merged in that order, and
 the file `OPENCODE_CONFIG` names when the shell's OpenCode uses that data
@@ -445,8 +447,10 @@ directory. A session's project files are each `opencode.json` and
 change is written to the global file with the highest precedence that exists,
 or a new `opencode.json`, keeping its comments, key order and layout; a change
 the file's shape cannot take, such as a key under a value that is no object,
-is shown as a step by hand instead. The `sessions` export, T3's `opencode` instances and `--ssh` hosts read
-OpenCode the same way.
+is shown as a step by hand instead. Credentials in the file, an MCP server's
+or provider's headers, environment, OAuth settings and API key, show masked
+in the confirm's diff. The `sessions` export, T3's `opencode` instances and
+`--ssh` hosts read OpenCode the same way; `audit` does not.
 
 Every assistant step OpenCode recorded usage for is one request, priced from
 its recorded `providerID` and model ID (see [Prices](#prices)); OpenCode's own
@@ -454,11 +458,18 @@ its recorded `providerID` and model ID (see [Prices](#prices)); OpenCode's own
 spawned, such as `explore`, are split as Claude Code's are. Skills, MCP
 servers and instruction files are sized from the instructions, skill listing
 and Code Mode catalog OpenCode 2 recorded for each session, and judged by their
-recorded calls: a skill is turned off with `permission.skill.<id> = "deny"`,
-an MCP server with `enabled: false` in the shape its file declares it,
-`mcp.servers.<name>` or `mcp.<name>`. OpenCode's built-in Code Mode namespaces,
-such as `browser`, get a line with no switch. Subagent model lines name
-`agent.<name>.model` and `variant`. The cache TTL, compaction, keepalive,
+recorded uses: the `skill` tool's calls, a skill picked with `@` and a skill
+message count for a skill, and Code Mode calls for an MCP server. A skill is
+turned off with a `{"action": "skill", "resource": "<id>", "effect": "deny"}`
+rule appended to `permissions` when a global file orders its permissions there,
+since the last matching rule wins, and with `permission.skill.<id> = "deny"`
+otherwise. An MCP server is turned off with `disabled: true` under
+`mcp.servers.<name>`, or `enabled: false` under OpenCode 1's `mcp.<name>`, in
+the shape its file declares it. A server only a project declares gets a line
+with no switch, and so do OpenCode's built-in Code Mode namespaces, `browser`
+and `opencode`. Subagent model lines name `agents.<name>.model`, whose
+`#variant` sets the effort, or OpenCode 1's `agent.<name>.model` and
+`variant`. The cache TTL, compaction, keepalive,
 audit and effort checks replay only Claude Code and Codex, so an OpenCode
 profile's spend counts in the report's totals but gets none of those lines.
 See [Replay semantics](semantics.md#opencode) for what each piece assumes.

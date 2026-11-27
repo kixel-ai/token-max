@@ -100,9 +100,9 @@ limit the entire run. This host is always audited, and directory flags select it
 only. Each SSH destination discovers its own profiles with this build of token-max, copied
 there or downloaded there from this version's release and cached; it prices its own history
 with this host's prices, and only its report and its totals cross SSH, never its scan. Several hosts get one
-total, their figures added as they are. Its changes are listed to make there. Current
-settings are applied to the selected history; checks can use different windows and
-baselines. Independent savings do not add.
+total, their figures added as they are. Each destination's changes are offered with this
+host's and written there after the yes. Current settings are applied to the selected history;
+checks can use different windows and baselines. Independent savings do not add.
 
 Examples:
   token-max doctor --since 2026-11-01
@@ -312,7 +312,8 @@ static PROGRESS: Mutex<ProgressState> = Mutex::new(ProgressState { cells: 0, row
 
 /// Replace the progress line on stderr with `line`, whose text without color is `plain`.
 /// Spaces, not escapes, blank what a longer line left, so this works on any terminal and
-/// under `--plain`. A line too wide for one row shows `plain` cut to fit, since a carriage
+/// under `--plain`; only a panel shown before, which `--plain` never draws, is cleared with
+/// cursor escapes. A line too wide for one row shows `plain` cut to fit, since a carriage
 /// return cannot reach a row the line wrapped onto, and a cut could split a color escape.
 fn show_progress(line: &str, plain: &str) {
     let mut shown = PROGRESS.lock().unwrap_or_else(PoisonError::into_inner);
@@ -2986,8 +2987,8 @@ fn warn_upgrade(check: Check) {
     eprintln!("token-max: {}", crate::safe::terminal_text(&line));
 }
 
-/// Walk through every host's changes, print each host's report with the accepted ones first,
-/// then write them once the person confirms. After `doctor`'s walk, offer `vibes`' advice
+/// Walk through every host's changes, as the checklist or line by line; the line-by-line walk
+/// prints each host's report with the accepted ones first. Write them once the person confirms. After `doctor`'s walk, offer `vibes`' advice
 /// from the same scan and walk through it the same way.
 fn walk(walk: Walk) -> Result<(), ScanError> {
     if walk.rich_tui {

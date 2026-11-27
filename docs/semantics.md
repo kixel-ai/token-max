@@ -313,8 +313,10 @@ idle and keepalive read, are tuned under what sizes the model's context there.
 except an ID outside the table when `CLAUDE_CODE_MAX_CONTEXT_TOKENS` may size it.
 A window sized by either variable is owned by the row under that variable and
 value, so directories sized apart never share a replayed window.
-Otherwise the trigger of the profile's latest automatic, non-idle compaction on
-the model under the same sizing and no explicit window comes first, including
+Otherwise the trigger of the latest automatic, non-idle compaction between 100k
+and 1M on the model, across the profiles whose window one file sets, under the
+same sizing with no explicit window and no `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`,
+comes first, including
 one before `--since`, since the server can
 retune the default without a release. Failing that, the [documented defaults](https://code.claude.com/docs/en/model-config#default-auto-compact-thresholds),
 checked 2026-11-11, are an assumption: about 967k for native-1M models (Fable,
@@ -398,7 +400,11 @@ output when its unit rate changes. Full totals keep unknown charges even when th
 comparison is priced. Bracketed attempt estimates retain their witnesses and never
 turn original missing billing into measured usage.
 
-The largest estimated aggregate net saving selects the recommendation. Cohort
+The largest positive estimated aggregate net saving selects the recommendation,
+the current window winning ties; with none, the current window stands only
+when every candidate was priced. A replay priced at an assumed service tier
+decides only when no tier could reverse it. `vibes`' window cap is priced for
+its card but is never a candidate. Cohort
 maximum summary/prefix sizes and cold-summary charges are conditional sensitivities,
 not vetoes or guaranteed bounds. Extra work from lost detail, file re-reads, tool
 calls and changed reasoning is unmeasured. The report gives the extra dollar cost
@@ -417,8 +423,9 @@ are not additive. Dollars are API-price equivalents, not invoices.
 
 Current idle controls resolve user, project, local and managed settings, with
 the active profile's environment applied to environment controls. Project files
-use the nearest current Git root, or the recorded working directory for a
-non-Git project. Absent directories or working-directory metadata leave ownership
+are read at the recorded working directory; `settings.local.json` is also read
+at the main checkout of its Git root when that repository is user-owned and is
+not the home directory. Absent directories or working-directory metadata leave ownership
 unresolved. Project TTL/window owners are preserved when a profile-level change
 would not override them; a conversation with changing effective policies stays
 conditional. Unrecorded launch overrides and historical file contents are not
@@ -436,7 +443,8 @@ eligible band. SDK/headless/subagent/hosted-remote runs and active tool waits do
 not become interactive opportunities. `cli` needs `repl_main_thread` provenance;
 `claude-vscode` and `ssh-remote` identify supported native hosts. A Desktop label
 alone does not prove local execution. Unknown versions and pre-314 flag state
-stay unknown. T3 and SSH adapters are not introduced.
+stay unknown. T3 instances get their own idle comparison; an SSH host's
+sessions are checked by its own scan.
 
 The installed Anthropic v2.1.316 binary was inspected without opening transcript
 content. Its native notice constructor emits `type: system`, `subtype:
@@ -510,7 +518,9 @@ with an eligible, unresolved or applied idle period, extrapolate the difference
 to the unpriced sessions by their mean, with the same 95% margin as the TTL
 replay; a session where it could not act changes nothing and counts exactly,
 even when its replay failed, so its zero does not dilute the estimate.
-`coverage` counts priced and total sessions. The extra re-read break-even per
+`coverage` counts priced and total sessions, plus those T3 could not settle,
+which are left out and stand in at the line's share; when any were left out,
+keepalive does not compare against the idle alternative. The extra re-read break-even per
 resumed summary divides the priced sessions' saving by their own resumed
 summaries. The extrapolated delta decides whenever one session it could act
 on was priced; with none, the check stays unknown. The keepalive comparison adds
@@ -868,7 +878,8 @@ Controls checked against authoritative documentation on 2026-11-08:
   A small server used on most turns can be cheaper upfront. These controls are
   guidance only and never enter the automatic settings patch.
 - [Claude instruction guidance](https://code.claude.com/docs/en/memory#write-effective-instructions)
-  targets under 200 lines per CLAUDE.md. A recorded file reaching that length
+  targets under 200 lines per CLAUDE.md. A recorded CLAUDE.md or CLAUDE.local.md
+reaching that length
   gets a `vibes` card naming it beside what each 100 of its lines cost, without
   judging quality. Path-scoped rules can narrow loading; imports still load
   together.
@@ -879,6 +890,9 @@ Controls checked against authoritative documentation on 2026-11-08:
   source chain exceeded its budget. Project/CLI overrides and original
   source-file sizes are unresolved: the recorded chain may already be
   truncated. It does not claim to locate unseen files or recover lost text.
+  A recorded chain whose rendered bytes reach that budget gets a `vibes` card
+  naming the file that sets it, or Codex's default, beside what each 100 of its
+  lines cost; it says Codex may have cut the chain short, not that it did.
 
 Instruction sizes retain only byte and line counts for the latest recorded
 revision; no instruction content is retained. Skill-specific costs remain
@@ -1070,7 +1084,7 @@ conversation with `skipTranscript` and `skipCacheWrite`, so no transcript record
 them. Each is estimated at a recorded turn end: the last main-conversation
 response before the next user prompt, or the session's last response. Only
 interactive terminal turns count (`entrypoint` `cli`, `querySource`
-`repl_main_thread` or absent); SDK and desktop clients run suggestions only when
+absent or starting with `repl_main_thread`); SDK and desktop clients run suggestions only when
 they ask for them, which transcripts do not record, so those turns are counted
 in the uncertainty instead. A suggestion follows any turn after the session's first
 response when its last response sent and wrote at most 10,000 uncached tokens,
@@ -1132,7 +1146,9 @@ means unknown dollars, not zero.
 
 Claude's default is off; per-session opt-in suppresses a saved true preference
 at startup. Managed false, environment disable, unsupported selected models and
-project/local overrides take precedence. Only active-profile shell environment
+project/local overrides take precedence. A Claude cloud provider or custom
+`ANTHROPIC_BASE_URL`, or a Codex `model_provider` other than `openai`, leaves
+the current speed unresolved, with no verdict. Only active-profile shell environment
 is applied. The tool observes local files, not live session toggles, CLI
 `--settings`, server policy or availability checks. Codex gates default on in
 current documented versions; fast/priority and ultrafast use independent gates.
@@ -1152,9 +1168,10 @@ even where the general historical cost estimate labels a standard-speed
 assumption. Each sampling iteration keeps its own model and billing metadata.
 
 The [OpenAI API price table](https://developers.openai.com/api/docs/pricing),
-checked 2026-11-07, gives fast rates at 2x standard for GPT-6 and GPT-5.6 models,
+checked 2026-11-07, gives fast rates at 2x standard for the GPT-6, GPT-6.1 and GPT-5.6 models
+`premium_multiplier` lists,
 and GPT-5.5 at 2.5x and GPT-5.4 at 2x, each only at or below 272K input; ultrafast
-is 6x across context tiers. `premium_multiplier` in `src/prices.rs` lists the
+is 6x across context tiers on the models it lists for it. `premium_multiplier` in `src/prices.rs` lists the
 verified models. Older or
 unsupported combinations remain unknown. These API rates differ from
 a ChatGPT plan's multipliers, Fast at 2.5x and Ultrafast at 8x standard against
@@ -1205,7 +1222,11 @@ from the exit status of `ssh` (255), the platform check or the copy and
 download steps.
 
 The stream is private to one build. The destination writes a header naming the
-package version and a fingerprint of the stream's types, and starts scanning.
+package version and a fingerprint of the stream's types. For `sessions` and
+`audit` it then starts scanning; for `doctor` and `vibes` it first lists its
+Claude profiles whose unset main TTL defaults by how they pay, and scans once
+the coordinator sends back how each pays; an answer for a profile it didn't
+list fails the run.
 The coordinator loads prices meanwhile and writes one request on the
 destination's stdin: the price catalog and the job. For `doctor` and `vibes`
 the job is a report, which says whether to answer with `vibes`' cards instead,
@@ -1360,7 +1381,8 @@ bound (`complete` false, counted in `totals.incomplete`) when a request could
 not be priced or one of its files had unreadable or unfinished lines. A session
 in scope with no readable request in the window but such a line, which may have
 held one, counts in `totals.incomplete` alone. Its first prompt counts only when
-the session's recorded start is in the window. A streak is
+the session's recorded start is in the window and it holds no records copied
+from another session, as a Codex fork's first prompt is the history it copied. A streak is
 the most calls to one tool in a row, by start time, with no other tool
 between, and one call is no streak. A Claude subagent, or a Codex thread
 spawned from another, is a subagent.
@@ -1398,7 +1420,9 @@ room for the starting request's output and the reply (`safe_cap` in
 any other cap, lower or higher, is advised to it, and none changes `doctor`'s
 exit code.
 
-The compared TTL is the current `promptCacheTtl`, else the write lifetime of
+The compared TTL is the resolved current main-agent TTL (`promptCacheTtl`, its
+environment overrides, or a default from the cloud provider or from how
+`doctor` was told the profile pays), else the write lifetime of
 the latest selected main-agent request, and never the main-agent TTL check's
 verdict; with none, or when recorded projects set the main TTL
 differently, no cap is advised. Claude Code 2.1.319 moves
@@ -1579,7 +1603,7 @@ days, counted back from the report's time to the window's start (the analysis
 bound, else `--since`, else the earliest request read; earlier requests, and
 any after the report's time, are left out), so the oldest may be shorter; a
 request on a span's boundary belongs to the later span. Spans older than the
-profile's first Fable request are dropped, so a long history adds no empty
+line's first Fable request are dropped, so a long history adds no empty
 weeks. A model is Fable when its recorded ID contains `fable`. A request counts
 when any of its parts ran on Fable, such as an advisor iteration under another
 main model, and only those parts are priced; server-tool fees go with the

@@ -3142,7 +3142,8 @@ pub struct ContextCost {
     pub cost_per_use_usd: Option<f64>,
     /// "off" when never used, "consider" above the cost-per-use limit or when
     /// nonuse is unproven, else "keep"; None when unpriced, unswitchable, no
-    /// longer sent, tier-sensitive, or covered by a server-off verdict.
+    /// longer sent, tier-sensitive, covered by a server-off verdict, or auto memory, which its
+    /// own check judges.
     pub verdict: Option<Verdict>,
     /// Characters of the largest single result, for tool output.
     pub largest_characters: Option<i64>,

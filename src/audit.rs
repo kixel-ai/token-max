@@ -292,9 +292,7 @@ pub struct Shape {
     pub at: Pointer,
     /// The lines of the session's first requests in that file, to sample how it started.
     pub early_lines: Vec<u64>,
-    /// The lines of the session's first failed tool results in that file; absent from an
-    /// older token-max across SSH.
-    #[serde(default)]
+    /// The lines of the session's first failed tool results in that file.
     pub error_lines: Vec<u64>,
 }
 

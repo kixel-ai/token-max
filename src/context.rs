@@ -729,6 +729,96 @@ fn codex_pieces(
     vec![(interned.intern(key, kind, name, control), characters)]
 }
 
+/// Split one OpenCode context record into switchable pieces: each instruction file, each
+/// listed skill, which its `skill` permission hides, and each Code Mode namespace, which
+/// is an MCP server's when a profile's config declares it or T3 gives it.
+fn opencode_pieces(
+    component: &Component,
+    servers: &[&[String]],
+    components: &HashMap<&str, &Component>,
+    interned: &mut Pieces<'_>,
+) -> Vec<Split> {
+    let characters = component.size.characters;
+    let name = component.name.as_str();
+    let (key, kind, name, control) = match component.category {
+        Category::Instructions => (
+            format!("opencode:instructions:{name}"),
+            ContextKind::Instructions,
+            name.to_string(),
+            None,
+        ),
+        Category::SkillListing if !component.members.is_empty() => {
+            let mut result = vec![];
+            let mut listed = 0;
+            for member in &component.members {
+                let m = components[member.as_str()];
+                let n = m.size.characters.unwrap_or(0);
+                listed += n;
+                let key = interned.intern(
+                    format!("opencode:skill:{}", m.name),
+                    ContextKind::Skill,
+                    m.name.clone(),
+                    Some(crate::opencode::skill_off(&m.name)),
+                );
+                interned
+                    .skills
+                    .insert(identity(&format!("opencode-skill:{}", m.name)), key);
+                result.push((key, Some(n)));
+            }
+            let framing = interned.intern(
+                "opencode:other:skill-list-framing".into(),
+                ContextKind::Other,
+                "Skill list framing".into(),
+                None,
+            );
+            result.push((framing, characters.map(|c| (c - listed).max(0))));
+            return result;
+        }
+        Category::McpSchema => {
+            // Every profile the request belongs to must declare the server alike to share
+            // one switch.
+            let declared: Vec<Option<crate::opencode::Server>> = servers
+                .iter()
+                .map(|entries| {
+                    crate::opencode::declared(entries)
+                        .into_iter()
+                        .find(|s| s.name == name)
+                })
+                .collect();
+            let control = match declared.first() {
+                Some(Some(first)) if declared.iter().all(|d| d.as_ref() == Some(first)) => {
+                    Some(crate::opencode::server_off(first))
+                }
+                _ => None,
+            };
+            if control.is_some() || name == "t3-code" {
+                (
+                    format!("opencode:mcp:{name}"),
+                    ContextKind::McpServer,
+                    name.to_string(),
+                    control,
+                )
+            } else {
+                // OpenCode's own namespaces, such as its browser tools.
+                (
+                    format!("opencode:tool:{name}"),
+                    ContextKind::Tool,
+                    format!("{name} tools"),
+                    None,
+                )
+            }
+        }
+        Category::AppInstructions => (
+            format!("opencode:other:{name}"),
+            ContextKind::Other,
+            name.to_string(),
+            None,
+        ),
+        _ => return vec![],
+    };
+    vec![(interned.intern(key, kind, name, control), characters)]
+}
+
 /// The report name for Claude's auto memory.
 pub const CLAUDE_MEMORY: &str = "Auto memory";
 
@@ -935,12 +1025,20 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         let share = sources.insert_full(source).0;
         let view = &exposure.view;
         let codex = r.harness == Harness::Codex;
+        // Codex and OpenCode record no request's shape, so nothing is known to lead it.
+        let chronological = match r.harness {
+            Harness::Claude => false,
+            Harness::Codex | Harness::OpenCode => true,
+        };
         // Claude's recorded request shapes are exact. Codex records each change to
         // the context it sends, so its chronological state is what the model saw.
+        // OpenCode keeps each session's latest context, taken as every request's.
         // Any other request still prices its tool output, but cannot say what else it sent.
         let (shown, shaped): (Vec<&Text>, bool) = match (r.harness, view.linkage) {
             (Harness::Claude, Linkage::Wire) => (view.components.iter().collect(), true),
-            (Harness::Codex, Linkage::Chronological) => (view.candidates.iter().collect(), true),
+            (Harness::Codex | Harness::OpenCode, Linkage::Chronological) => {
+                (view.candidates.iter().collect(), true)
+            }
             _ => (vec![], false),
         };
         if shaped {
@@ -948,11 +1046,19 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             shaped_requests[owner] += 1;
         }
         let first = first_shaped.get(&(owner, share)) == Some(&&*r.id);
+        // The pieces at the start of the input: Claude's tools and system prompt. Codex
+        // records changes as they are appended. OpenCode renders its context records when
+        // a session starts, after its own system prompt, so they lead its messages.
+        let leading = match r.harness {
+            Harness::Claude => view.prefix,
+            Harness::Codex => 0,
+            Harness::OpenCode => shown.len(),
+        };
         // The MCP servers each of this request's own Codex profiles declares.
         let servers: Vec<&[String]> = input
             .profiles
             .iter()
-            .filter(|p| p.harness == Harness::Codex && r.profiles.contains(&p.id))
+            .filter(|p| p.harness == r.harness && r.profiles.contains(&p.id))
             .map(|p| p.mcp_servers.as_slice())
             .collect();
         let component = |id: &str| {
@@ -982,13 +1088,15 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 continue;
             }
             if !interned.of.contains_key(&(id, owner)) {
-                let mut split = if codex {
-                    codex_pieces(component, &servers, &components, &mut interned)
-                } else {
-                    pieces(component, &components, &mut interned)
+                let mut split = match r.harness {
+                    Harness::Codex => codex_pieces(component, &servers, &components, &mut interned),
+                    Harness::OpenCode => {
+                        opencode_pieces(component, &servers, &components, &mut interned)
+                    }
+                    Harness::Claude => pieces(component, &components, &mut interned)
                         .into_iter()
                         .map(|(key, characters)| (key, Some(characters)))
-                        .collect()
+                        .collect(),
                 };
                 for (key, _) in &mut split {
                     *key = mcp_detail(component, *key, &mut interned);
@@ -1005,7 +1113,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 interned.described.insert((id, owner), described);
                 interned.of.insert((id, owner), split);
             }
-            let prefix = !codex && index < view.prefix;
+            let prefix = index < leading;
             parts.extend(interned.of[&(id, owner)].iter().map(|&(key, characters)| {
                 Placed {
                     key,
@@ -1059,7 +1167,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         let ratio = calibration
             .get(&tokenizer)
             .copied()
-            .or(codex.then_some(CODEX_TOKENS_PER_CHARACTER));
+            .or(chronological.then_some(CODEX_TOKENS_PER_CHARACTER));
         let spans = p
             .filter(|_| ratio.is_some())
             .and_then(|p| prefix_spans(catalog, r, p));
@@ -1174,19 +1282,12 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         // The leading tools and system prompt by revision, and the tokenizer that
         // counted them: when either changes, the previous input no longer bounds
         // where messages start in this request's tokens.
-        let prefix = (
-            tokenizer,
-            if codex {
-                vec![]
-            } else {
-                shown.iter().take(view.prefix).copied().collect()
-            },
-        );
+        let prefix = (tokenizer, shown.iter().take(leading).copied().collect());
         // Claude Code marks the last message for caching, so only a few framing
         // tokens follow a request's cached prefix, unless the pieces measured in
         // it do not fit there. Elsewhere content can run to the end of the input.
         let content_end = u
-            .filter(|_| !codex)
+            .filter(|_| !chronological)
             .and_then(|u| u.cached_prefix())
             .filter(|&cached| cached > 0 && total <= cached as f64)
             .or(end);

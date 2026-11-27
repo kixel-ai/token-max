@@ -123,6 +123,7 @@ impl Summarizer<'_> {
         let schema = match snapshot.harness {
             Harness::Claude => &CLAUDE,
             Harness::Codex => &CODEX,
+            Harness::OpenCode => unreachable!("OpenCode has no transcript files"),
         };
         joins.clear();
         // Reading counts lines on the snapshot; the reader counts them again on its own.
@@ -407,6 +408,7 @@ mod tests {
         let schema = match harness {
             Harness::Claude => &CLAUDE,
             Harness::Codex => &CODEX,
+            Harness::OpenCode => unreachable!("OpenCode has no transcript files"),
         };
         let mut ids = vec![];
         let mut found = Found::new(harness);

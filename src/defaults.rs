@@ -632,7 +632,7 @@ impl Credit {
     pub fn text(&self, monthly: f64, whose: &str) -> String {
         let (measured, up_to, up_to_more) = (&self.measured, &self.up_to, &self.up_to_more);
         if self.priced() + self.unmeasured == 0 {
-            return "No setting was found to differ from its Claude Code or Codex default.".into();
+            return "No setting was found to differ from its Claude Code, Codex or OpenCode default.".into();
         }
         let settings = |n: usize| format!("{n} setting{}", if n == 1 { "" } else { "s" });
         // "saves" for one setting, "save" for several.
@@ -757,7 +757,7 @@ mod tests {
             |baselines: &[Baseline], monthly, whose| Credit::of(baselines).text(monthly, whose);
         assert_eq!(
             text(&[], 10_000.0, "this host's"),
-            "No setting was found to differ from its Claude Code or Codex default."
+            "No setting was found to differ from its Claude Code, Codex or OpenCode default."
         );
         assert_eq!(
             text(

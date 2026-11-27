@@ -1386,6 +1386,11 @@ pub fn prefix_spans(catalog: &Catalog, r: &Request, p: &BillingPart) -> Option<V
             spans.push((u.write1h? as f64, input * 2.0));
             spans.push((u.write5m? as f64, rates.write? / 1e6));
         }
+    } else if r.harness == Harness::OpenCode {
+        let written = u.write?;
+        if written > 0 {
+            spans.push((written as f64, rates.write? / 1e6));
+        }
     } else if write_billing(p.model.as_deref()?)? {
         // Only a model that bills writes needs them recorded; otherwise uncached
         // input is ordinary.
@@ -1516,6 +1521,20 @@ pub fn price_components(catalog: &Catalog, r: &Request, p: &BillingPart) -> Comp
                     .to_string(),
             );
         }
+    } else if r.harness == Harness::OpenCode {
+        // OpenCode records one write count for any provider, which its catalog prices at
+        // the cache-write rate; a provider without that rate records none.
+        let ordinary = match (u.input, u.read, u.write) {
+            (Some(input), Some(read), Some(write)) => Some(input - read - write),
+            _ => None,
+        };
+        ordinary_charge(&mut ordinary_cost, ordinary, rates.input);
+        charge(
+            &mut result,
+            u.write,
+            rates.write,
+            "cache writes/rate unknown",
+        );
     } else {
         let billing = p
             .model

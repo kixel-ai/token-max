@@ -562,6 +562,8 @@ pub fn discover(
                 }
                 agents
             }
+            // Discovery read the global layers; project layers do not change agents yet.
+            Harness::OpenCode => profile.agents.clone(),
             Harness::Codex => {
                 let system_file = options.codex_system_config_file.as_str();
                 let system = settings(system_file, Harness::Codex)?;
@@ -984,6 +986,48 @@ fn codex_source(run: &Run<'_>, controls: &AgentControls, kind: &str) -> (ModelSo
     }
 }
 
+/// Where an OpenCode subagent run's model came from: its agent's `model`, else the model of
+/// the session that started it.
+fn opencode_source(run: &Run<'_>, controls: &AgentControls, kind: &str) -> (ModelSource, String) {
+    let Some(recorded) = run.model else {
+        return (ModelSource::Unknown, "no model was recorded".into());
+    };
+    let defined = definition(controls, kind).and_then(|d| Some((d, d.model.as_deref()?)));
+    if let Some((file, _)) = defined
+        && file.modified.is_none_or(|m| m > run.start)
+    {
+        return (
+            ModelSource::Unknown,
+            format!("{} changed after this run started", file.file),
+        );
+    }
+    let (source, detail, expect) = match defined {
+        Some((file, model)) => (
+            ModelSource::Definition,
+            format!("agent.{kind}.model = {model} in {}", file.file),
+            Expect::Model(model),
+        ),
+        None => (
+            ModelSource::Inherited,
+            "inherits the model of the session that started it".into(),
+            Expect::Parent,
+        ),
+    };
+    if run.matches(&expect) {
+        (source, detail)
+    } else if matches!(expect, Expect::Parent) && run.parent.is_none() {
+        (
+            ModelSource::Unknown,
+            format!("{detail}, but the parent's model is not recorded"),
+        )
+    } else {
+        (
+            ModelSource::Unknown,
+            format!("ran on {recorded}, which current settings do not give ({detail})"),
+        )
+    }
+}
+
 /// The file a Codex setting's owner names, else `fallback`.
 fn owner_file<'a>(owned: Option<&'a Owned>, fallback: &'a str) -> &'a str {
     owned
@@ -1000,6 +1044,13 @@ fn settings_text(
     native: bool,
 ) -> (String, String) {
     let mut texts = match profile.harness {
+        Harness::OpenCode => {
+            let file = definition(controls, kind).map_or(&*profile.settings_file, |d| &d.file);
+            (
+                format!("agent.{kind}.model in {file}"),
+                format!("agent.{kind}.variant in {file}"),
+            )
+        }
         Harness::Claude if fork => (
             "none; a fork always runs on the main model".into(),
             "none; a fork runs at the main conversation's effort".into(),
@@ -1258,6 +1309,7 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
                         (Some(reason), _) => (ModelSource::Unknown, reason.clone()),
                         (None, Harness::Claude) => claude_source(&run, controls, kind),
                         (None, Harness::Codex) => codex_source(&run, controls, kind),
+                        (None, Harness::OpenCode) => opencode_source(&run, controls, kind),
                     }
                 }
             };

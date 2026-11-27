@@ -240,6 +240,7 @@ fn analysis(home: &Path, since: Option<i64>, max_cost_per_use_usd: f64) -> Repor
         env: Env::default(),
         claude_dirs: vec![],
         codex_dirs: vec![],
+        opencode_dirs: vec![],
         t3_dirs: vec![],
         managed_settings_file: format!("{home}/managed-settings.json"),
         codex_system_config_file: format!("{home}/system.toml"),

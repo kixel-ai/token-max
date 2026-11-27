@@ -215,7 +215,7 @@ impl Interner {
     }
 }
 
-/// The two locally supported transcript formats.
+/// The locally supported coding agents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Harness {
@@ -223,6 +223,8 @@ pub enum Harness {
     Claude,
     /// Codex.
     Codex,
+    /// OpenCode, whose history is one SQLite database rather than transcript files.
+    OpenCode,
 }
 
 impl Harness {
@@ -231,6 +233,7 @@ impl Harness {
         match self {
             Harness::Claude => "claude",
             Harness::Codex => "codex",
+            Harness::OpenCode => "opencode",
         }
     }
 
@@ -239,6 +242,16 @@ impl Harness {
         match self {
             Harness::Claude => "Claude Code",
             Harness::Codex => "Codex",
+            Harness::OpenCode => "OpenCode",
+        }
+    }
+
+    /// Whether token-max replays its cache and compaction settings: Claude Code's and
+    /// Codex's are, OpenCode's not yet.
+    pub fn replayed(self) -> bool {
+        match self {
+            Harness::Claude | Harness::Codex => true,
+            Harness::OpenCode => false,
         }
     }
 }
@@ -1092,7 +1105,8 @@ pub struct Profile {
     /// How a Claude profile pays, when doctor asked; None when unasked or for a cloud provider.
     pub billing: Option<Billing>,
     pub settings: IndexMap<String, Scalar>,
-    /// MCP server ids the settings file declares, which its own switches can turn off.
+    /// MCP server ids the settings file declares, which its own switches can turn off; for
+    /// OpenCode, each switched-on server's key path as a JSON list.
     pub mcp_servers: Vec<String>,
     pub compaction: CompactionControls,
     pub idle: Option<IdleControl>,

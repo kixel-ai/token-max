@@ -1040,6 +1040,7 @@ impl ExposureCollector {
                     parts.len() > 3 && parts[0] == "projects" && parts[2] == "memory"
                 }
                 Harness::Codex => parts.len() > 1 && matches!(parts[0], "memories" | "memories_v2"),
+                Harness::OpenCode => false,
             }
         })
     }
@@ -1088,6 +1089,136 @@ impl ExposureCollector {
             None => {
                 self.remove(Category::Memory, MEMORY_SECTION);
                 None
+            }
+        }
+    }
+
+    /// One OpenCode database's sessions: the context each last recorded, which every request
+    /// of the session is taken to have carried, and the skill and MCP calls each made.
+    /// `servers` names the configured MCP servers, whose direct tools OpenCode names
+    /// `server_tool`.
+    pub(crate) fn opencode(
+        &mut self,
+        file: &Text,
+        profiles: &[String],
+        servers: &[String],
+        history: &crate::opencode::History,
+    ) {
+        use crate::opencode::Use;
+        let snapshot = Snapshot {
+            file: file.to_string(),
+            harness: Harness::OpenCode,
+            profiles: profiles.to_vec(),
+            bytes: 0,
+            device: 0,
+            inode: 0,
+            deferred_bytes: 0,
+            skipped_lines: 0,
+            unreadable: Default::default(),
+            lines: 0,
+        };
+        let mut lines: HashMap<&Text, Vec<u64>> = HashMap::default();
+        for r in &history.requests {
+            lines
+                .entry(&r.session)
+                .or_default()
+                .extend(r.locations.iter().map(|l| l.line));
+        }
+        let mut calls: HashMap<&Text, Vec<&crate::opencode::Call>> = HashMap::default();
+        for call in &history.calls {
+            calls.entry(&call.session).or_default().push(call);
+        }
+        for session in &history.sessions {
+            self.switch(&snapshot);
+            self.session = session.key.clone();
+            self.version = session.version.as_deref().map(String::from);
+            let at = session.created;
+            if let Some(context) = history.contexts.get(&session.key) {
+                for (path, text) in &context.instructions {
+                    self.component(
+                        New::active(Category::Instructions, path, "opencode-instruction-state"),
+                        Content::Text(text),
+                        at,
+                    );
+                }
+                if let Some((body, entries)) = &context.skills {
+                    let aggregate = self.component(
+                        New::active(Category::SkillListing, "skills", "opencode-skill-guidance"),
+                        Content::Text(body),
+                        at,
+                    );
+                    let mut members = vec![];
+                    for (id, entry) in entries {
+                        self.know_skill(id);
+                        let new = New {
+                            role: Role::Member,
+                            ..New::active(Category::SkillListing, id, "opencode-skill-entry")
+                        };
+                        members.push(self.component(new, Content::Text(entry), at).to_string());
+                    }
+                    self.components[&*aggregate].members = members;
+                }
+                for (name, text) in &context.namespaces {
+                    self.component(
+                        New::active(Category::McpSchema, name, "opencode-code-mode-catalog"),
+                        Content::Text(text),
+                        at,
+                    );
+                }
+                for (key, text) in &context.apps {
+                    self.component(
+                        New::active(Category::AppInstructions, key, "opencode-app-instructions"),
+                        Content::Text(text),
+                        at,
+                    );
+                }
+            }
+            // The context is the session's latest, not what a request's start had.
+            self.uncertain = false;
+            for &line in lines.get(&session.key).into_iter().flatten() {
+                let view = self.chronological();
+                let held = self.held_results();
+                let observed = self.observations.entry(file.clone()).or_default();
+                observed.lines.insert(line, view);
+                observed.results.insert(line, held);
+                self.pending_removed.clear();
+            }
+            for call in calls.get(&session.key).into_iter().flatten() {
+                let status = if call.failed {
+                    InvocationStatus::Failed
+                } else {
+                    InvocationStatus::Completed
+                };
+                match &call.what {
+                    Use::Skill(id) => {
+                        let invoke = Invoke {
+                            kind: InvocationKind::SkillCall,
+                            via: Via::Tool,
+                            status,
+                            call: call.id.clone(),
+                            group: None,
+                        };
+                        self.invocation(target("opencode-skill", id), invoke, call.time);
+                    }
+                    // A namespace that is no MCP server's is OpenCode's own, one row.
+                    Use::Mcp { server, tool }
+                        if servers.contains(server) || server == "t3-code" =>
+                    {
+                        self.call(&call.id, &format!("mcp__{server}__{tool}"), Some(call.time));
+                    }
+                    Use::Mcp { server, .. } => {
+                        self.call(&call.id, &format!("{server} tools"), Some(call.time));
+                    }
+                    Use::Tool(name) => {
+                        let owner = servers.iter().find_map(|server| {
+                            let tool = name.strip_prefix(server.as_str())?.strip_prefix('_')?;
+                            Some((server, tool))
+                        });
+                        if let Some((server, tool)) = owner {
+                            self.call(&call.id, &format!("mcp__{server}__{tool}"), Some(call.time));
+                        }
+                    }
+                }
             }
         }
     }

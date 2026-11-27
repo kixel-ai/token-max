@@ -664,6 +664,7 @@ mod tests {
                 env: Env::default(),
                 claude_dirs: vec![],
                 codex_dirs: vec![],
+                opencode_dirs: vec![],
                 t3_dirs: vec![],
                 managed_settings_file: native_path(w.managed_settings_file()),
                 codex_system_config_file: native_path(w.home.join("system.toml")),

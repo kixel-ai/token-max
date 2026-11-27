@@ -129,6 +129,7 @@ fn options(w: &Workspace, since: Option<Millis>) -> ScanOptions {
             env: Env::default(),
             claude_dirs: vec![],
             codex_dirs: vec![],
+            opencode_dirs: vec![],
             t3_dirs: vec![],
             managed_settings_file: text(&w.managed_settings_file()),
             codex_system_config_file: text(&w.home.join("system.toml")),
@@ -152,6 +153,7 @@ fn transcript(
     let file = match harness {
         Harness::Codex => w.codex.join("sessions/main.jsonl"),
         Harness::Claude => w.claude.join("projects/project/main.jsonl"),
+        Harness::OpenCode => unreachable!("OpenCode has no transcript files"),
     };
     std::fs::write(file, jsonl(records)).unwrap();
     scan(&options(&w, since))

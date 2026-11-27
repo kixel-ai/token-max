@@ -623,6 +623,7 @@ impl Turn<'_> {
                     false => reusable - reusable % CODEX_CACHE_STEP,
                 })
             }
+            Harness::OpenCode => unreachable!("audits skip OpenCode"),
         }
     }
 
@@ -758,7 +759,9 @@ pub fn audit(scan: &Scan, catalog: &Catalog, options: &Options) -> Result<Audit,
     let owners = Owners::new(&scan.sessions);
     // Each session's requests, in the order read, which sorts below.
     let mut sessions: IndexMap<&str, Vec<&Request>> = IndexMap::default();
-    for r in &scan.requests {
+    // Audits read Claude Code's and Codex's tool and cache records, which OpenCode's history
+    // does not keep alike.
+    for r in scan.requests.iter().filter(|r| r.harness.replayed()) {
         for key in owners.holding(r) {
             sessions.entry(key).or_default().push(r);
         }
@@ -1032,6 +1035,7 @@ fn misses(
                     .unwrap_or(Ttl::FiveMinutes),
             ),
             Harness::Codex => codex_ttl,
+            Harness::OpenCode => unreachable!("audits skip OpenCode"),
         };
         let began = prev.request.time;
         let gap = r.time - began;
@@ -1047,6 +1051,7 @@ fn misses(
                     .map_or(Millis::MIN, |j| turns[j].request.time);
                 events.started(before + 1, began + 1)
             }
+            Harness::OpenCode => unreachable!("audits skip OpenCode"),
         };
         let waited = calls.iter().any(|start| {
             let end = start
@@ -1285,6 +1290,7 @@ fn shape(
     let finished = match harness {
         Harness::Claude => &events.ends,
         Harness::Codex => &events.done,
+        Harness::OpenCode => unreachable!("audits skip OpenCode"),
     };
     let finished: Vec<&StructuralEvent> = finished
         .iter()

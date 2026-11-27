@@ -586,6 +586,7 @@ fn default_item(e: &EffortCheck, profile: &str, how: Option<How>, out: &Out<'_>)
             "Kixel's pick of a default. OpenAI's guidance:",
             &[OPENAI_REASONING],
         ),
+        Harness::OpenCode => unreachable!("OpenCode has no effort control"),
     };
     Some(Item {
         name: tagged("Main-session default".into(), profile),
@@ -659,7 +660,7 @@ fn subagent_item(line: &SubagentLine<'_>, out: &Out<'_>) -> Option<Item> {
         Harness::Claude => {
             SUBAGENT_EFFORT_SINCE.unmet(crate::version::latest(&line.members, line.requests))
         }
-        Harness::Codex => None,
+        Harness::Codex | Harness::OpenCode => None,
     };
     if let Some(ignored) = &ignored {
         // An unrecorded or unreadable version may already read the variable.
@@ -708,6 +709,7 @@ fn subagent_item(line: &SubagentLine<'_>, out: &Out<'_>) -> Option<Item> {
             "Kixel's pick of a subagent default. OpenAI's guidance:".into(),
             OPENAI_REASONING.into(),
         ],
+        Harness::OpenCode => unreachable!("OpenCode has no subagent effort control"),
     };
     if ignored.is_some() {
         sources.push(CLAUDE_CHANGELOG.into());
@@ -1424,10 +1426,10 @@ impl<'a> Out<'a> {
                 Some(t) => format!(
                     "T3 {} {} ({})",
                     t.instance,
-                    label(&p.harness),
+                    p.harness.as_str(),
                     display(&p.root)
                 ),
-                None => format!("{} {}", label(&p.harness), display(&p.root)),
+                None => format!("{} {}", p.harness.as_str(), display(&p.root)),
             },
             None => self.removed_name(id).unwrap_or_else(|| display(id)),
         }
@@ -1462,10 +1464,10 @@ impl<'a> Out<'a> {
                 Some(t) => format!(
                     "T3 {} {} ({})",
                     t.instance,
-                    label(&p.harness),
+                    p.harness.as_str(),
                     self.home(&p.root)
                 ),
-                None => format!("{} {}", label(&p.harness), self.home(&p.root)),
+                None => format!("{} {}", p.harness.as_str(), self.home(&p.root)),
             },
             None => self.removed_name(id).unwrap_or_else(|| self.home(id)),
         }
@@ -2243,7 +2245,7 @@ fn details(report: &Report, out: &mut Out<'_>) {
         &format!(
             "{} selected requests in {} files; {measured} with measured usage; {} missing usage{skipped}",
             coverage.requests,
-            report.scan.snapshots.len(),
+            report.scan.snapshots.len() + databases(&report.scan),
             coverage.missing_usage
         ),
     );
@@ -2270,8 +2272,8 @@ fn details(report: &Report, out: &mut Out<'_>) {
         + setting_rows(&report.context)
             .filter(|c| c.verdict == Some(Verdict::Off))
             .count();
-    if report.scan.snapshots.is_empty() {
-        out.line("No transcript histories found. Select an existing profile with --claude-dir or --codex-dir; run after using that agent.", 0, PLAIN);
+    if no_history(&report.scan) {
+        out.line("No transcript histories found. Select an existing profile with --claude-dir, --codex-dir or --opencode-dir; run after using that agent.", 0, PLAIN);
     } else if coverage.requests == 0 {
         out.line(
             "No selected requests. Try an earlier --since or select another profile.",
@@ -2489,7 +2491,7 @@ fn details(report: &Report, out: &mut Out<'_>) {
             &format!(
                 "{} {} {} ({})",
                 label(&root.status),
-                label(&root.harness),
+                root.harness.as_str(),
                 display(&root.path),
                 label(&root.origin)
             ),
@@ -2687,11 +2689,12 @@ fn explore_item(c: &SubagentCost, profile: &str, out: &Out<'_>) -> Option<Item> 
 fn subagent_name(c: &SubagentCost) -> String {
     match (c.harness, c.kind.as_str()) {
         (_, crate::reader::UNRECORDED) => {
-            format!("{} subagents of unrecorded type", label(&c.harness))
+            format!("{} subagents of unrecorded type", c.harness.product())
         }
         (Harness::Claude, kind) => format!("{kind} subagent"),
         (Harness::Codex, kind) if c.native => format!("Codex {kind} subagent"),
         (Harness::Codex, kind) => format!("{kind} agent role"),
+        (Harness::OpenCode, kind) => format!("OpenCode {kind} agent"),
     }
 }
 
@@ -3840,6 +3843,7 @@ fn setting_name(result: &CheckResult) -> String {
         CheckResult::Memory(m) => match m.harness {
             Harness::Codex => CODEX_MEMORY.into(),
             Harness::Claude => CLAUDE_MEMORY.into(),
+            Harness::OpenCode => unreachable!("OpenCode has no memory check"),
         },
         CheckResult::Effort(_) => "Main-session effort".into(),
         CheckResult::Background(b) => match b.feature {
@@ -4385,6 +4389,9 @@ fn instructions_what(c: &ContextCost) -> String {
         Harness::Codex => {
             "Instructions Codex loads from this file into each session it applies to."
         }
+        Harness::OpenCode => {
+            "Instructions OpenCode loads from this file into each session it applies to."
+        }
     }
     .into()
 }
@@ -4563,6 +4570,7 @@ fn context_guidance(c: &ContextCost, profiles: &[Profile], name: &str) -> Vec<St
                     omission.append = true;
                     vec![format!("Exposure: {} omits this server's initial tools.", control_text(&omission, Harness::Codex))]
                 }).unwrap_or_default(),
+            Harness::OpenCode => vec![],
         };
     }
     if c.kind != ContextKind::Instructions {
@@ -4579,7 +4587,7 @@ fn context_guidance(c: &ContextCost, profiles: &[Profile], name: &str) -> Vec<St
             count(n as u64)
         ),
         (Harness::Codex, Err(reason)) => format!(" {reason}"),
-        (Harness::Claude, _) => String::new(),
+        (Harness::Claude | Harness::OpenCode, _) => String::new(),
     };
     vec![format!(
         "{name}: {}, {} UTF-8 bytes{}.{budget}",
@@ -4697,7 +4705,7 @@ fn output_cap(report: &Report, c: &ContextCost) -> Option<Cap> {
                 None,
             ),
         },
-        Harness::Claude => return None,
+        Harness::Claude | Harness::OpenCode => return None,
     })
 }
 
@@ -7324,6 +7332,22 @@ pub(crate) fn sessions(scan: &crate::model::Scan) -> u64 {
     roots.len() as u64
 }
 
+/// How many OpenCode databases the scan read, which are history files but no snapshots.
+fn databases(scan: &Scan) -> usize {
+    let files: HashSet<&str> = scan
+        .profiles
+        .iter()
+        .filter(|p| p.harness == Harness::OpenCode)
+        .flat_map(|p| p.histories.iter().map(String::as_str))
+        .collect();
+    files.len()
+}
+
+/// Whether the scan read no history: no transcript file, and no OpenCode database.
+fn no_history(scan: &Scan) -> bool {
+    scan.snapshots.is_empty() && databases(scan) == 0
+}
+
 /// What `--details` says before the headline: the `--defaults` pretence, the profiles read,
 /// T3 coverage, what the prices mean, and each request or line left out or assumed.
 /// `conditional` counts the requests priced at an assumed service tier.
@@ -7331,7 +7355,7 @@ fn preamble(report: &Report, conditional: u64, out: &mut Out<'_>) {
     let coverage = &report.scan.coverage;
     if report.scan.defaults {
         out.line(
-            "As a user with no settings files would see it (--defaults): every user, project and local settings file, T3 Code's settings and the shell's setting variables are pretended away, so each setting is at its Claude Code or Codex default and every tool, skill and MCP server is on. Managed and system policy still apply.",
+            "As a user with no settings files would see it (--defaults): every user, project and local settings file, T3 Code's settings and the shell's setting variables are pretended away, so each setting is at its Claude Code, Codex or OpenCode default and every tool, skill and MCP server is on. Managed and system policy still apply.",
             0,
             PLAIN,
         );
@@ -7529,8 +7553,8 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
     if out.options.details {
         preamble(report, conditional, out);
     }
-    if report.scan.snapshots.is_empty() {
-        out.line("No transcript histories found. Select a profile with --claude-dir or --codex-dir after using that agent.", 0, PLAIN);
+    if no_history(&report.scan) {
+        out.line("No transcript histories found. Select a profile with --claude-dir, --codex-dir or --opencode-dir after using that agent.", 0, PLAIN);
     } else if coverage.requests == 0 {
         out.line(
             "Try an earlier --since or select another profile.",

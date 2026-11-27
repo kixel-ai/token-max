@@ -1131,6 +1131,7 @@ pub(crate) fn subagent_effort_how(owner: &str, profile: &Profile, level: &str) -
             "agents.default_subagent_reasoning_effort",
             Edit::set("agents.default_subagent_reasoning_effort", level),
         ),
+        Harness::OpenCode => unreachable!("OpenCode has no subagent effort control"),
     };
     // T3 keeps an instance's variables as entries named in a list.
     let step = match owner.rsplit_once(".environment.") {
@@ -1168,6 +1169,7 @@ fn effort_edit(harness: Harness, key: &str, level: &str) -> Option<Edit> {
             ]))
         }
         Harness::Codex => (key == "model_reasoning_effort").then(|| set(vec![key.into()])),
+        Harness::OpenCode => None,
     }
 }
 
@@ -1243,6 +1245,7 @@ pub(crate) fn check_how(result: &CheckResult, profile: &Profile) -> How {
                     "service_tier".into(),
                     vec![Edit::set("service_tier", "default")],
                 )],
+                Harness::OpenCode => unreachable!("OpenCode has no speed control"),
             };
             owned(&s.base.owner, profile, candidates, s.replacement.clone())
         }
@@ -1316,6 +1319,7 @@ pub(crate) fn check_how(result: &CheckResult, profile: &Profile) -> How {
                     "features.memories".into(),
                     vec![Edit::set("features.memories", false)],
                 )],
+                Harness::OpenCode => unreachable!("OpenCode has no memory control"),
             };
             owned(
                 &m.base.owner,
@@ -1729,7 +1733,7 @@ fn keys(harness: Harness, edits: &[Edit]) -> Vec<String> {
     };
     let value = |value: &Value| -> String {
         match harness {
-            Harness::Claude => value.to_string(),
+            Harness::Claude | Harness::OpenCode => value.to_string(),
             Harness::Codex => toml::Value::try_from(value)
                 .expect("settings values are TOML values")
                 .to_string(),
@@ -4353,7 +4357,7 @@ fn diff(pending: &Pending, after: &str, style: &Style) -> String {
     };
     let edited = shown(&pending.edits);
     let hide = |text: &str| match target.harness {
-        Harness::Claude => mask_json(text, mask, &edited),
+        Harness::Claude | Harness::OpenCode => mask_json(text, mask, &edited),
         Harness::Codex => mask_toml(text, mask),
     };
     let (before, after) = (hide(target.before.as_deref().unwrap_or("")), hide(after));
@@ -4531,6 +4535,7 @@ fn apply(target: &Target, edits: &[Edit], removals: &[Entry]) -> Result<String, 
     match target.harness {
         Harness::Claude => apply_json(text, edits).and_then(|t| remove_json(&t, &paths)),
         Harness::Codex => apply_toml(text, edits).and_then(|t| remove_toml(&t, &paths)),
+        Harness::OpenCode => crate::opencode::edit(text, edits, &paths),
     }
     .map_err(|reason| format!("{reason} in {shown}"))
 }
@@ -4542,7 +4547,13 @@ fn removals_unchanged(walked: &Target, now: &Target, removals: &[Entry]) -> bool
     if removals.is_empty() {
         return true;
     }
-    let parse = |t: &Target| -> Option<Value> { serde_json::from_str(t.before.as_deref()?).ok() };
+    let parse = |t: &Target| -> Option<Value> {
+        let text = t.before.as_deref()?;
+        match t.harness {
+            Harness::OpenCode => crate::opencode::parse_config(text),
+            _ => serde_json::from_str(text).ok(),
+        }
+    };
     let (walked, now) = (parse(walked), parse(now));
     let at = |root: &Option<Value>, path: &[String]| {
         path.iter()
@@ -7581,6 +7592,7 @@ mod tests {
         match harness {
             Harness::Claude => crate::effort::claude_effort(&scopes, file, &env, None),
             Harness::Codex => crate::effort::codex_effort(&scopes, file, Some(&catalog), None),
+            Harness::OpenCode => unreachable!("OpenCode has no effort control"),
         }
         .unwrap()
     }

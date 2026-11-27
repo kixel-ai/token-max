@@ -60,6 +60,7 @@ Usage: token-max doctor [options]
   --since YYYY-MM-DD|ISO  Select from midnight UTC or an instant with timezone
   --claude-dir DIR        Select a Claude profile (repeatable)
   --codex-dir DIR         Select a Codex home, including archived sessions (repeatable)
+  --opencode-dir DIR      Select an OpenCode data directory, which holds opencode.db (repeatable)
   --t3-dir DIR            Select a T3 state directory (repeatable)
   --ssh HOST              Also audit an SSH destination, putting this build there first if needed (repeatable)
   --max-cost-per-use USD  Suggest turning off a used tool, skill or MCP server that cost more than this per use (default: 1)
@@ -91,11 +92,11 @@ per kind of feature or setting, and edits nothing; --details lists every line un
 row, and each edit's exact JSON or TOML.
 
 With --defaults it reads every user, project and local settings file, T3 Code's settings
-and the shell's setting variables as unset, so each setting is at its Claude Code or Codex
+and the shell's setting variables as unset, so each setting is at its Claude Code, Codex or OpenCode
 default and every tool, skill and MCP server is on; managed and system policy still apply.
 It prints that report and edits nothing, even on a terminal.
 
-Without profile flags, discover local Claude/Codex profiles and T3 instances. Explicit profiles
+Without profile flags, discover local Claude, Codex and OpenCode profiles and T3 instances. Explicit profiles
 limit the entire run. This host is always audited, and directory flags select its profiles
 only. Each SSH destination discovers its own profiles with this build of token-max, copied
 there or downloaded there from this version's release and cached; it prices its own history
@@ -137,6 +138,7 @@ Usage: token-max vibes [options]
   --since YYYY-MM-DD|ISO  Select from midnight UTC or an instant with timezone
   --claude-dir DIR        Select a Claude profile (repeatable)
   --codex-dir DIR         Select a Codex home, including archived sessions (repeatable)
+  --opencode-dir DIR      Select an OpenCode data directory, which holds opencode.db (repeatable)
   --t3-dir DIR            Select a T3 state directory (repeatable)
   --ssh HOST              Also read an SSH destination, putting this build there first if needed (repeatable)
   --plain                 Plain text without color or decorative Unicode, asking line by line
@@ -173,6 +175,7 @@ Usage: token-max sessions [options]
   --since YYYY-MM-DD|ISO  Count requests from midnight UTC or an instant with timezone
   --claude-dir DIR        Select a Claude profile (repeatable)
   --codex-dir DIR         Select a Codex home, including archived sessions (repeatable)
+  --opencode-dir DIR      Select an OpenCode data directory, which holds opencode.db (repeatable)
   --t3-dir DIR            Select a T3 state directory (repeatable)
   --ssh HOST              Also export an SSH destination's sessions, putting this build there first if needed (repeatable)
   --offline               Use cached public prices without network access
@@ -180,9 +183,9 @@ Usage: token-max sessions [options]
   --price-cache FILE      Cache path (default: ~/.cache/token-max/models.json)
   -h, --help              Show this help
 
-Prints one JSON object per line for each Claude Code or Codex session with a request in the
-window, ordered across hosts by its first request. A Claude subagent and a Codex review or
-spawned thread are sessions of their own. Fields: host, the --ssh destination as given, or
+Prints one JSON object per line for each Claude Code, Codex or OpenCode session with a
+request in the window, ordered across hosts by its first request. A Claude subagent, a Codex
+review or spawned thread and an OpenCode subagent are sessions of their own. Fields: host, the --ssh destination as given, or
 null for this host; harness; session, its native ID; parent, the session it was spawned
 from; review, whether Codex marked it a review; cwd; repositories, remote URLs without
 userinfo, resolved on the session's host, or null; repositoriesSource, recorded when Codex
@@ -202,8 +205,8 @@ Each SSH destination exports its own sessions with this host's prices, and only 
 lines cross SSH. A session found on several hosts is printed once per host. Any failed host
 fails the whole run.
 
-Costs are public API prices, not an invoice. Reads transcripts and Git config only
-and prints no prompt or reply text. Errors go to stderr as JSON.
+Costs are public API prices, not an invoice. Reads transcripts, OpenCode's database and Git
+config only, and prints no prompt or reply text. Errors go to stderr as JSON.
 Exit 0: printed. Exit 2: scan, pricing, argument or cancellation failure.
 ";
 
@@ -217,6 +220,7 @@ Usage: token-max audit [options]
   --since YYYY-MM-DD|ISO  Select from midnight UTC or an instant with timezone (default: 14 days ago)
   --claude-dir DIR        Select a Claude profile (repeatable)
   --codex-dir DIR         Select a Codex home, including archived sessions (repeatable)
+  --opencode-dir DIR      Select an OpenCode data directory, which holds opencode.db (repeatable)
   --t3-dir DIR            Select a T3 state directory (repeatable)
   --ssh HOST              Also audit an SSH destination, putting this build there first if needed (repeatable)
   --offline               Use cached public prices without network access
@@ -1104,6 +1108,7 @@ struct Values {
     force: bool,
     claude_dirs: Vec<String>,
     codex_dirs: Vec<String>,
+    opencode_dirs: Vec<String>,
     t3_dirs: Vec<String>,
     ssh: Vec<String>,
     /// Run as an SSH audit destination; the coordinator passes this, not people.
@@ -1122,6 +1127,7 @@ impl Values {
             "limit" => self.limit = Some(value),
             "claude-dir" => self.claude_dirs.push(value),
             "codex-dir" => self.codex_dirs.push(value),
+            "opencode-dir" => self.opencode_dirs.push(value),
             "t3-dir" => self.t3_dirs.push(value),
             "ssh" => self.ssh.push(value),
             "prices-file" => self.prices_file = Some(value),
@@ -1156,6 +1162,7 @@ impl Values {
                 | "limit"
                 | "claude-dir"
                 | "codex-dir"
+                | "opencode-dir"
                 | "t3-dir"
                 | "ssh"
                 | "prices-file"
@@ -1656,6 +1663,7 @@ fn chosen_here(values: &Values) -> bool {
         || values.price_cache.is_some()
         || !values.claude_dirs.is_empty()
         || !values.codex_dirs.is_empty()
+        || !values.opencode_dirs.is_empty()
         || !values.t3_dirs.is_empty()
         || !values.ssh.is_empty()
 }
@@ -2018,6 +2026,7 @@ fn hosts(values: &mut Values) -> Result<(DiscoveryOptions, Vec<String>), ScanErr
     let mut discovery = DiscoveryOptions::host()?;
     discovery.claude_dirs = std::mem::take(&mut values.claude_dirs);
     discovery.codex_dirs = std::mem::take(&mut values.codex_dirs);
+    discovery.opencode_dirs = std::mem::take(&mut values.opencode_dirs);
     discovery.t3_dirs = std::mem::take(&mut values.t3_dirs);
     Ok((discovery, std::mem::take(&mut values.ssh)))
 }

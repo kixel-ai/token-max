@@ -94,6 +94,7 @@ pub fn check(result: &CheckResult) -> &'static str {
             Harness::Codex => {
                 "Codex memories save what Codex learns in a session and load it into later ones."
             }
+            Harness::OpenCode => unreachable!("OpenCode has no memory check"),
         },
         CheckResult::Effort(_) => {
             "How much the main session's model reasons before it answers: a higher effort can do better on hard tasks and writes more output tokens."
@@ -242,6 +243,15 @@ pub fn subagent(c: &SubagentCost) -> &'static str {
         (Harness::Codex, _) if c.native => "Subagents Codex starts itself for this kind of work.",
         (Harness::Codex, _) => {
             "A Codex agent role: a subagent with its own model and instructions, set in config.toml."
+        }
+        (Harness::OpenCode, "general") => {
+            "OpenCode's built-in subagent for multi-step tasks that need both research and changes."
+        }
+        (Harness::OpenCode, "explore") => {
+            "OpenCode's built-in read-only subagent for searching and reading a codebase."
+        }
+        (Harness::OpenCode, _) => {
+            "An OpenCode agent run as a subagent, defined under agent in opencode.json or by an agent file."
         }
     }
 }

@@ -32,6 +32,8 @@ pub struct DiscoveryOptions {
     pub claude_dirs: Vec<String>,
     /// Explicit Codex home directories.
     pub codex_dirs: Vec<String>,
+    /// Explicit OpenCode data directories, each holding an `opencode.db`.
+    pub opencode_dirs: Vec<String>,
     /// Explicit T3 state directories: settings.json, and statev2.sqlite when it exists.
     pub t3_dirs: Vec<String>,
     /// The system managed Claude settings file; overridable for host adapters and synthetic tests.
@@ -64,6 +66,7 @@ impl DiscoveryOptions {
                 .collect(),
             claude_dirs: vec![],
             codex_dirs: vec![],
+            opencode_dirs: vec![],
             t3_dirs: vec![],
             managed_settings_file: managed_settings_path(std::env::consts::OS).into(),
             codex_system_config_file: "/etc/codex/config.toml".into(),
@@ -80,7 +83,11 @@ impl DiscoveryOptions {
         self.env.retain(|k, _| {
             matches!(
                 k.as_str(),
-                "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "T3CODE_HOME"
+                "CLAUDE_CONFIG_DIR"
+                    | "CODEX_HOME"
+                    | "T3CODE_HOME"
+                    | "XDG_DATA_HOME"
+                    | "XDG_CONFIG_HOME"
             ) || CLAUDE_PROVIDERS.iter().any(|p| p.variable == k)
         });
     }
@@ -112,6 +119,8 @@ impl DiscoveryOptions {
                 off.extend(allowlists(&system));
                 (&self.codex_system_config_file, off)
             }
+            // token-max reads no OpenCode policy file.
+            Harness::OpenCode => return Ok(vec![]),
         };
         Ok(off.into_iter().map(|k| (file.clone(), k)).collect())
     }
@@ -128,10 +137,15 @@ impl DiscoveryOptions {
             return Ok(());
         }
         let config = settings(file, harness)?;
-        let mut found = switched_off(harness, &config);
-        if harness == Harness::Codex {
-            found.extend(allowlists(&config));
-        }
+        let found = match harness {
+            Harness::Claude => switched_off(harness, &config),
+            Harness::Codex => {
+                let mut found = switched_off(harness, &config);
+                found.extend(allowlists(&config));
+                found
+            }
+            Harness::OpenCode => crate::opencode::switched_off(&config),
+        };
         self.pretend_switches_on(harness, on, file, found)
     }
 
@@ -198,6 +212,14 @@ impl DiscoveryOptions {
         Ok(())
     }
 
+    /// Whether directory flags chose the profiles, which limits the whole scan to them.
+    pub(crate) fn explicit(&self) -> bool {
+        !self.claude_dirs.is_empty()
+            || !self.codex_dirs.is_empty()
+            || !self.opencode_dirs.is_empty()
+            || !self.t3_dirs.is_empty()
+    }
+
     /// Read a settings file as this run sees it. Under `--defaults` a user, project or
     /// local file sets nothing, except that a Codex file keeps the MCP servers it
     /// declares, each on, since a server is something installed, not a setting's value,
@@ -212,6 +234,22 @@ impl DiscoveryOptions {
         }
         let mut real = settings(file, harness)?;
         let mut pretended = Map::new();
+        if harness == Harness::OpenCode {
+            // A declared MCP server is something installed, so it stays, switched on.
+            if let Some(Value::Object(mut mcp)) = real.remove("mcp") {
+                let servers = match mcp.get_mut("servers") {
+                    Some(Value::Object(servers)) => servers,
+                    _ => &mut mcp,
+                };
+                for server in servers.values_mut() {
+                    if let Value::Object(server) = server {
+                        server.remove("enabled");
+                    }
+                }
+                pretended.insert("mcp".into(), Value::Object(mcp));
+            }
+            return Ok(pretended);
+        }
         if harness == Harness::Claude {
             // Which cloud the requests went to, and so how they were billed.
             let env: Map<String, Value> = members(real.get("env"))
@@ -527,6 +565,7 @@ pub(crate) fn settings(file: &str, harness: Harness) -> Result<Map<String, Value
         Harness::Codex => toml::from_str::<toml::Table>(&text)
             .ok()
             .and_then(|table| toml_json(toml::Value::Table(table))),
+        Harness::OpenCode => crate::opencode::parse_config(&text),
     };
     match value {
         Some(Value::Object(map)) => Ok(map),
@@ -2217,6 +2256,10 @@ fn pretend_t3_projects_on(
                     .iter()
                     .map(|path| join(&[path, ".codex", "config.toml"]))
                     .collect(),
+                Harness::OpenCode => crate::opencode::project_layers(options, &cwd)?
+                    .into_iter()
+                    .map(|layer| layer.file)
+                    .collect(),
             };
             for file in &files {
                 options.pretend_on(harness, &mut profile.pretended_on, file)?;
@@ -2594,6 +2637,11 @@ pub(crate) fn profile(
     alias: String,
     key: &str,
 ) -> Result<Profile, ScanError> {
+    debug_assert_ne!(
+        harness,
+        Harness::OpenCode,
+        "OpenCode profiles are its own module's"
+    );
     let claude = harness == Harness::Claude;
     let settings_file = join(&[
         &canonical,
@@ -3018,9 +3066,7 @@ fn allowlists(config: &Map<String, Value>) -> Vec<Control> {
 pub fn discover(options: &DiscoveryOptions) -> Result<Discovery, ScanError> {
     let home = options.home.as_str();
     let env = &options.env;
-    let explicit = !options.claude_dirs.is_empty()
-        || !options.codex_dirs.is_empty()
-        || !options.t3_dirs.is_empty();
+    let explicit = options.explicit();
     let mut candidates = IndexMap::default();
     let add = |candidates: &mut IndexMap<String, RootStatus>, harness, path: &str, origin| {
         add_root(candidates, explicit, harness, path, origin)
@@ -3034,6 +3080,13 @@ pub fn discover(options: &DiscoveryOptions) -> Result<Discovery, ScanError> {
             RootOrigin::Default,
         );
     }
+    let empty = Env::default();
+    add(
+        &mut candidates,
+        Harness::OpenCode,
+        &crate::opencode::data_dir(home, &empty),
+        RootOrigin::Default,
+    );
     for (harness, variable) in [
         (Harness::Claude, "CLAUDE_CONFIG_DIR"),
         (Harness::Codex, "CODEX_HOME"),
@@ -3041,6 +3094,15 @@ pub fn discover(options: &DiscoveryOptions) -> Result<Discovery, ScanError> {
         if let Some(dir) = env.get(variable).filter(|d| !d.is_empty()) {
             add(&mut candidates, harness, dir, RootOrigin::Environment);
         }
+    }
+    if env.get("XDG_DATA_HOME").is_some_and(|d| !d.is_empty()) {
+        let dir = crate::opencode::data_dir(home, env);
+        add(
+            &mut candidates,
+            Harness::OpenCode,
+            &dir,
+            RootOrigin::Environment,
+        );
     }
     let unreadable = || error("cannot discover home directory", home, 0);
     let mut entries = Vec::new();
@@ -3084,6 +3146,14 @@ pub fn discover(options: &DiscoveryOptions) -> Result<Discovery, ScanError> {
     for path in &options.codex_dirs {
         add(&mut candidates, Harness::Codex, path, RootOrigin::Explicit);
     }
+    for path in &options.opencode_dirs {
+        add(
+            &mut candidates,
+            Harness::OpenCode,
+            path,
+            RootOrigin::Explicit,
+        );
+    }
     let mut roots: Vec<RootStatus> = candidates.into_values().collect();
     roots.sort_by(|a, b| locale_compare(&a.path, &b.path));
     let mut profiles: IndexMap<String, Profile> = IndexMap::default();
@@ -3125,13 +3195,24 @@ pub fn discover(options: &DiscoveryOptions) -> Result<Discovery, ScanError> {
             previous.aliases.push(root.path.clone());
             continue;
         }
-        let profile = profile(options, root.harness, canonical, root.path.clone(), &key)?;
+        let profile = match root.harness {
+            Harness::Claude | Harness::Codex => {
+                profile(options, root.harness, canonical, root.path.clone(), &key)?
+            }
+            Harness::OpenCode => {
+                crate::opencode::profile(options, canonical, root.path.clone(), &key)?
+            }
+        };
         profiles.insert(key, profile);
     }
     let mut profiles: Vec<Profile> = profiles.into_values().collect();
     let t3 = crate::t3::discover(options, &mut profiles)?;
     let mut walk = Walk::default();
+    // OpenCode's history is its database, which the reader opens itself.
     for (index, profile) in profiles.iter().enumerate() {
+        if profile.harness == Harness::OpenCode {
+            continue;
+        }
         for history in &profile.histories {
             walk.history(history, index, profile)?;
         }
@@ -3294,6 +3375,7 @@ mod tests {
             env: Env::default(),
             claude_dirs: vec![],
             codex_dirs: vec![],
+            opencode_dirs: vec![],
             t3_dirs: vec![],
             managed_settings_file: native_path(w.managed_settings_file()),
             codex_system_config_file: native_path(w.home.join("system.toml")),

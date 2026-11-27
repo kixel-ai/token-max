@@ -68,7 +68,8 @@ The page's terminal is the maintainer's own `token-max doctor --defaults` over
 the last 30 days across their hosts, run from `nixos` with `--ssh` for the
 others, as HTML, with each host's EVERYTHING ELSE section cut to one line,
 since that section is long and names project files that can belong to private
-repositories. The results section below it comes from the same run's total and
+repositories, and each EDITS section cut the same way, since it names every
+skill and tool an edit turns off, a project's own among them. The results section below it comes from the same run's total and
 two more runs on a terminal too wide to wrap a change's row, since a wrapped row
 can't be parsed reliably: the same answers again, for each setting's saving on
 the subscription, and every profile answered as API. The shown run gives the usage boxes

@@ -16,7 +16,8 @@ totals, which --ssh prints, and their changes fill the results section between i
 saving at API rates, and both wide runs' changes ranked by setting. The
 EVERYTHING ELSE section is cut to one line: a kind or setting with a single line, such as a
 project's only instruction file or subagent, still names its project files, which can belong
-to private repositories. Read the result before committing it.
+to private repositories. So is each EDITS section, which names every skill and tool an edit
+turns off, a project's own among them. Read the result before committing it.
 """
 
 import html
@@ -39,7 +40,12 @@ SGR = re.compile(r"\x1b\[([0-9;]*)m")
 CLASSES = {"1": "b", "2": "d", "31": "r", "32": "g", "33": "y", "35": "p"}
 # A report section opens with its bold uppercase heading.
 HEADING = re.compile(r"^  [A-Z][A-Z ]+[A-Z]  ")
-CUT = "EVERYTHING ELSE"
+# The sections cut to a count of their lines, by heading, with what the count says was cut:
+# both can name a project's own files, skills or tools, from repositories that may be private.
+CUT = {
+    "EVERYTHING ELSE": "lines on every other setting and feature",
+    "EDITS": "lines naming each edit",
+}
 # The lines closing a report, which follow its last section and stay on the page.
 FOOTER = re.compile(r"^  Prices: ")
 # A report, and each host's report under --ssh, opens with its title.
@@ -149,15 +155,18 @@ def steps(transcript: str) -> tuple[list[list[str]], int]:
             if lines:
                 out.append(lines + [""])
             lines = [line]
-            if plain.strip().startswith(CUT):
+            what = next((w for h, w in CUT.items() if plain.strip().startswith(h)), None)
+            if what:
                 # Skip to the next section or the report's footer, keeping only a count of
                 # what was cut.
                 j = i + 1
                 while j < len(raws) and not (starts(plains[j]) or FOOTER.match(plains[j])):
                     j += 1
                 cut = sum(1 for r in raws[i + 1 : j] if r.strip())
+                if cut == 1:
+                    what = what.replace("lines", "line", 1)
                 lines.append(
-                    f'<span class="elided">  … {cut} lines on every other setting and feature, cut from this page</span>'
+                    f'<span class="elided">  … {cut} {what}, cut from this page</span>'
                 )
                 if j < len(raws) and FOOTER.match(plains[j]):
                     lines.append("")

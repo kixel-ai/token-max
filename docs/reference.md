@@ -447,8 +447,8 @@ directory. A session's project files are each `opencode.json` and
 change is written to the global file with the highest precedence that exists,
 or a new `opencode.json`, keeping its comments, key order and layout; a change
 the file's shape cannot take, such as a key under a value that is no object,
-is shown as a step by hand instead. Credentials in the file, an MCP server's
-or provider's headers, environment, OAuth settings and API key, show masked
+is shown as a step by hand instead. Credentials in the file, anything under
+a `headers`, `env`, `environment` or `oauth` key and any API key, show masked
 in the confirm's diff. The `sessions` export, T3's `opencode` instances and
 `--ssh` hosts read OpenCode the same way; `audit` does not.
 
@@ -463,13 +463,16 @@ message count for a skill, and Code Mode calls for an MCP server. A skill is
 turned off with a `{"action": "skill", "resource": "<id>", "effect": "deny"}`
 rule appended to `permissions` when a global file orders its permissions there,
 since the last matching rule wins, and with `permission.skill.<id> = "deny"`
-otherwise. An MCP server is turned off with `disabled: true` under
+otherwise. When a rule OpenCode reads later could allow the skill again, an
+agent's own `permissions` or a file `OPENCODE_CONFIG` names, the skill's line
+offers no switch. An MCP server is turned off with `disabled: true` under
 `mcp.servers.<name>`, or `enabled: false` under OpenCode 1's `mcp.<name>`, in
-the shape its file declares it. A server only a project declares gets a line
-with no switch, and so do OpenCode's built-in Code Mode namespaces, `browser`
-and `opencode`. Subagent model lines name `agents.<name>.model`, whose
-`#variant` sets the effort, or OpenCode 1's `agent.<name>.model` and
-`variant`. The cache TTL, compaction, keepalive,
+the shape its file declares it. A server a project the sessions ran in
+declares, which replaces the global declaration there, gets a line with no
+switch, and so do OpenCode's built-in Code Mode namespaces, `browser` and
+`opencode`. Subagent model lines name `agents.<name>.model`, whose variant (a
+`#variant` suffix, or `variant` in its object form) sets the effort, or
+OpenCode 1's `agent.<name>.model` and `variant`. The cache TTL, compaction, keepalive,
 audit and effort checks replay only Claude Code and Codex, so an OpenCode
 profile's spend counts in the report's totals but gets none of those lines.
 See [Replay semantics](semantics.md#opencode) for what each piece assumes.

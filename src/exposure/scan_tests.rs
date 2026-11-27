@@ -130,6 +130,7 @@ fn options(w: &Workspace, since: Option<Millis>) -> ScanOptions {
             claude_dirs: vec![],
             codex_dirs: vec![],
             opencode_dirs: vec![],
+            opencode: true,
             t3_dirs: vec![],
             managed_settings_file: text(&w.managed_settings_file()),
             codex_system_config_file: text(&w.home.join("system.toml")),

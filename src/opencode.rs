@@ -32,6 +32,10 @@ pub(crate) const DATABASE: &str = "opencode.db";
 /// OpenCode 2 `permissions` list.
 pub(crate) const RULES: &str = "permissions";
 
+/// The `Profile::settings` key present when a rule OpenCode reads after the profile's
+/// settings file could allow a skill that file denies, so no skill switch is offered.
+pub(crate) const REALLOWED: &str = "permissions.reallowed";
+
 /// OpenCode's own Code Mode namespaces; any other is an MCP server's.
 pub(crate) const BUILT_IN: [&str; 2] = ["browser", "opencode"];
 
@@ -205,10 +209,13 @@ pub(crate) fn servers(config: &Map<String, Value>) -> Vec<Server> {
         .filter(|(_, server)| server.is_object())
         .map(|(name, server)| Server {
             name: name.clone(),
-            // OpenCode 2 switches `mcp.servers` entries with `disabled`, OpenCode 1's with
-            // `enabled`.
-            enabled: server.get("enabled") != Some(&Value::Bool(false))
-                && server.get("disabled") != Some(&Value::Bool(true)),
+            // OpenCode 2 switches `mcp.servers` entries with `disabled` alone, OpenCode 1's
+            // `mcp` entries with `enabled` alone.
+            enabled: if prefix.len() == 2 {
+                server.get("disabled") != Some(&Value::Bool(true))
+            } else {
+                server.get("enabled") != Some(&Value::Bool(false))
+            },
             path: prefix
                 .iter()
                 .map(|p| p.to_string())
@@ -292,24 +299,81 @@ pub(crate) fn switched_off(config: &Map<String, Value>) -> Vec<Control> {
             result.push(skill_off(id, false));
         }
     }
-    // A skill whose last rule naming it denies it; a later wildcard may still allow it.
-    let mut last: IndexMap<&str, bool> = IndexMap::default();
-    let rules = config.get(RULES).and_then(Value::as_array);
-    for rule in rules.into_iter().flatten() {
-        let field = |key: &str| rule.get(key).and_then(Value::as_str);
-        if field("action") == Some("skill")
-            && let (Some(id), Some(effect)) = (field("resource"), field("effect"))
-            && !id.contains('*')
-        {
-            last.insert(id, effect == "deny");
-        }
-    }
-    for (id, denied) in last {
-        if denied {
+    // A skill the last rule matching it denies, a wildcard's included.
+    let rules = skill_rules(config.get(RULES));
+    let named: IndexMap<&str, ()> = rules
+        .iter()
+        .filter(|(resource, _)| !resource.contains('*'))
+        .map(|(resource, _)| (*resource, ()))
+        .collect();
+    for id in named.keys() {
+        if effect(&rules, id) == Some("deny") {
             result.push(skill_off(id, true));
         }
     }
     result
+}
+
+/// Each `skill` rule of a `permissions` list: its resource pattern and effect, in order.
+fn skill_rules(rules: Option<&Value>) -> Vec<(&str, &str)> {
+    let rules = rules.and_then(Value::as_array);
+    rules
+        .into_iter()
+        .flatten()
+        .filter(|rule| rule.get("action").and_then(Value::as_str) == Some("skill"))
+        .filter_map(|rule| {
+            let field = |key: &str| rule.get(key).and_then(Value::as_str);
+            Some((field("resource")?, field("effect")?))
+        })
+        .collect()
+}
+
+/// The effect of the last rule whose pattern matches `id`; OpenCode's last match wins.
+fn effect<'a>(rules: &[(&str, &'a str)], id: &str) -> Option<&'a str> {
+    rules
+        .iter()
+        .rev()
+        .find(|(pattern, _)| glob(pattern, id))
+        .map(|(_, effect)| *effect)
+}
+
+/// Whether `text` matches `pattern`, where `*` matches any run of characters.
+fn glob(pattern: &str, text: &str) -> bool {
+    match pattern.split_once('*') {
+        None => pattern == text,
+        Some((head, rest)) => {
+            let Some(text) = text.strip_prefix(head) else {
+                return false;
+            };
+            (0..=text.len())
+                .filter(|&i| text.is_char_boundary(i))
+                .any(|i| glob(rest, &text[i..]))
+        }
+    }
+}
+
+/// Whether a rule after the one a change appends to `file`'s `permissions` could allow a
+/// skill again: an agent's own rules, which OpenCode appends after the global ones, or a
+/// layer `layers` reads after `file`. A skill switch is then left to the person.
+pub(crate) fn skills_reallowed(layers: &[Layer], file: &str) -> bool {
+    let allows = |rules: Option<&Value>| {
+        skill_rules(rules)
+            .iter()
+            .any(|(_, effect)| *effect != "deny")
+    };
+    let agents = layers.iter().any(|layer| {
+        ["agent", "agents"].iter().any(|key| {
+            members(layer.config.get(*key))
+                .values()
+                .any(|agent| allows(agent.get(RULES)))
+        })
+    });
+    let later = layers
+        .iter()
+        .skip_while(|l| l.file != file)
+        .skip(1)
+        .any(|l| allows(l.config.get(RULES)));
+    agents || later
 }
 
 /// An OpenCode config with `edits` applied and the keys at `removals` deleted, keeping its
@@ -355,10 +419,24 @@ pub(crate) fn edit(text: &str, edits: &[Edit], removals: &[&[String]]) -> Result
                 let list = node
                     .array_value_or_create(last)
                     .ok_or_else(|| format!("{} is not a list", edit.path.join(".")))?;
-                let held = list
+                // A permission rule already in force is the last one naming its action and
+                // resource; anything else is held anywhere in the list.
+                let same = |v: &Value| {
+                    v == &edit.value
+                        || (edit.value.get("action").is_some()
+                            && v.get("action") == edit.value.get("action")
+                            && v.get("resource") == edit.value.get("resource"))
+                };
+                let elements: Vec<Value> = list
                     .elements()
                     .iter()
-                    .any(|e| parse_config(&e.to_string()).as_ref() == Some(&edit.value));
+                    .filter_map(|e| parse_config(&e.to_string()))
+                    .collect();
+                let held = elements
+                    .iter()
+                    .rev()
+                    .find(|v| same(v))
+                    .is_some_and(|v| v == &edit.value);
                 if !held {
                     list.append(input(&edit.value));
                 }
@@ -383,16 +461,21 @@ fn input(value: &Value) -> CstInputValue {
     }
 }
 
-/// A model reference's model ID and variant: `provider/model#variant`, the variant only in
-/// OpenCode 2's shape.
+/// A model selection's model ID and variant, in either form OpenCode 2 accepts:
+/// `provider/model#variant`, where the model ID may hold more slashes and the variant is
+/// optional, or `{"providerID", "model", "variant"}`.
 fn model_reference(value: &Value) -> Option<(String, Option<String>)> {
+    if let Some(selection) = value.as_object() {
+        let field = |key: &str| selection.get(key).and_then(Value::as_str).map(String::from);
+        return Some((field("model")?, field("variant")));
+    }
     let reference = value.as_str()?;
     let (model, variant) = match reference.split_once('#') {
         Some((model, variant)) => (model, Some(variant.to_string())),
         None => (reference, None),
     };
     Some((
-        model.rsplit_once('/').map_or(model, |(_, m)| m).to_string(),
+        model.split_once('/').map_or(model, |(_, m)| m).to_string(),
         variant,
     ))
 }
@@ -521,6 +604,7 @@ pub(crate) fn profile(
             .map(|control| (settings_file.clone(), control))
             .collect();
     }
+    let reallowed = skills_reallowed(&layers, &settings_file);
     Ok(Profile {
         id: identity(key),
         harness: Harness::OpenCode,
@@ -531,12 +615,19 @@ pub(crate) fn profile(
         ttl,
         provider: None,
         billing: None,
-        settings: layers
-            .iter()
-            .any(|l| l.config.get(RULES).is_some_and(Value::is_array))
-            .then(|| (RULES.to_string(), crate::model::Scalar::Bool(true)))
-            .into_iter()
-            .collect(),
+        settings: [
+            (
+                RULES,
+                layers
+                    .iter()
+                    .any(|l| l.config.get(RULES).is_some_and(Value::is_array)),
+            ),
+            (REALLOWED, reallowed),
+        ]
+        .into_iter()
+        .filter(|(_, set)| *set)
+        .map(|(key, _)| (key.to_string(), crate::model::Scalar::Bool(true)))
+        .collect(),
         mcp_servers: servers(&config)
             .iter()
             .filter(|s| s.enabled)
@@ -1049,6 +1140,7 @@ fn read_snapshot(tx: &Transaction, file: &str, profiles: &[String]) -> rusqlite:
                 } else {
                     Agent::Main
                 },
+                mode: step.agent.as_deref().map(Text::from),
                 model,
                 provider: step.provider.map(Text::from),
                 api: Api::Unknown,
@@ -1484,7 +1576,10 @@ mod tests {
             {"action": "skill", "resource": "a", "effect": "deny"},
             {"action": "skill", "resource": "b", "effect": "deny"},
             {"action": "skill", "resource": "b", "effect": "allow"},
+            {"action": "skill", "resource": "d", "effect": "deny"},
+            {"action": "skill", "resource": "d*", "effect": "ask"},
         ]});
+        // The last matching rule decides, a later wildcard's included.
         assert_eq!(
             switched_off(config.as_object().unwrap()),
             [skill_off("a", true)]
@@ -1505,22 +1600,49 @@ mod tests {
             json!({"action": "skill", "resource": "c", "effect": "deny"})
         );
         assert_eq!(edit(&edited, &edits, &[]).unwrap(), edited);
+        // A denial an allow follows is no longer in force, so it is appended again.
+        let allowed = "{ \"permissions\": [{ \"action\": \"skill\", \"resource\": \"c\", \"effect\": \"deny\" }, { \"action\": \"skill\", \"resource\": \"c\", \"effect\": \"allow\" }] }";
+        let rules = parse_config(&edit(allowed, &edits, &[]).unwrap()).unwrap();
+        assert_eq!(rules["permissions"].as_array().unwrap().len(), 3);
         assert_eq!(skill_off("c", false).path, ["permission", "skill", "c"]);
+    }
+
+    #[test]
+    fn a_rule_read_after_the_settings_file_leaves_skills_to_the_person() {
+        let layer = |file: &str, config: Value| Layer {
+            file: file.into(),
+            config: config.as_object().unwrap().clone(),
+        };
+        let allow = json!([{"action": "skill", "resource": "*", "effect": "allow"}]);
+        let global = layer("/g/opencode.jsonc", json!({"permissions": allow.clone()}));
+        assert!(!skills_reallowed(
+            std::slice::from_ref(&global),
+            &global.file
+        ));
+        let custom = layer("/c.json", json!({"permissions": allow.clone()}));
+        assert!(skills_reallowed(&[global.clone(), custom], &global.file));
+        let agent = layer(
+            "/g/opencode.jsonc",
+            json!({"agents": {"build": {"permissions": allow}}}),
+        );
+        assert!(skills_reallowed(&[agent], &global.file));
     }
 
     #[test]
     fn opencode_2_agents_name_their_variant_after_the_model() {
         let layers = [Layer {
             file: "/g/opencode.json".into(),
-            config: json!({"model": "opencode/zen-flash#low",
+            config: json!({"model": "openrouter/vendor/zen-flash#low",
                     "agent": {"plan": {"model": "openai/m1", "variant": "high"}},
-                    "agents": {"explore": {"model": "opencode/zen-flash#max"}}})
+                    "agents": {"explore": {"model": "opencode/zen-flash#max"},
+                        "review": {"model": {"providerID": "openai", "model": "m2",
+                            "variant": "low"}}}})
             .as_object()
             .unwrap()
             .clone(),
         }];
         let controls = agent_controls(&layers);
-        assert_eq!(controls.session.unwrap().value, "zen-flash");
+        assert_eq!(controls.session.unwrap().value, "vendor/zen-flash");
         let found: Vec<[Option<&str>; 4]> = controls
             .definitions
             .iter()
@@ -1543,6 +1665,7 @@ mod tests {
                     Some("max"),
                     Some("agents")
                 ],
+                [Some("review"), Some("m2"), Some("low"), Some("agents")],
             ]
         );
     }
@@ -1566,6 +1689,51 @@ mod tests {
             [realpath(&text(&data.join("other.db"))).unwrap()]
         );
         assert!(histories(":memory:").is_empty());
+    }
+
+    #[test]
+    fn a_server_a_project_redeclares_keeps_no_global_switch() {
+        let w = Workspace::new();
+        let file = opencode_database(&w.home);
+        let repo = w.home.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(
+            repo.join("opencode.json"),
+            r#"{"mcp": {"servers": {"docs": {"type": "remote", "url": "https://p"}, "local": {"type": "remote", "url": "https://l"}}}}"#,
+        )
+        .unwrap();
+        let db = Connection::open(&file).unwrap();
+        db.execute(
+            "INSERT INTO session_v2 VALUES ('ses_repo', NULL, ?1, '2.2.0', 1)",
+            [text(&repo)],
+        )
+        .unwrap();
+        drop(db);
+        let config = w.home.join(".config/opencode/opencode.json");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config,
+            r#"{"mcp": {"servers": {"docs": {"type": "remote", "url": "https://g"}, "kept": {"type": "remote", "url": "https://k"}}}}"#,
+        )
+        .unwrap();
+        let mut options = w.scan_options();
+        // OpenCode's data directory under an XDG variable that names no OpenCode directory
+        // is a default one, skipped.
+        options
+            .discovery
+            .env
+            .insert("XDG_DATA_HOME".into(), text(&w.home.join("missing")));
+        let scan = crate::reader::scan(&options).unwrap();
+        let profile = scan
+            .profiles
+            .iter()
+            .find(|p| p.harness == Harness::OpenCode)
+            .unwrap();
+        let names: Vec<String> = declared(&profile.mcp_servers)
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(names, ["kept"]);
     }
 
     #[test]

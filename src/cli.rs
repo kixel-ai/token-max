@@ -1898,7 +1898,8 @@ fn forensics(args: &[String]) -> Result<(Output, u8), ScanError> {
             "the repository has no remote, so SSH hosts cannot match it; use --all",
         ));
     }
-    let (discovery, destinations) = hosts(&mut values)?;
+    let (mut discovery, destinations) = hosts(&mut values)?;
+    discovery.opencode = false;
     let hosts_named: Vec<Option<String>> = std::iter::once(None)
         .chain(destinations.iter().cloned().map(Some))
         .collect();

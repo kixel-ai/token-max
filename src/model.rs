@@ -483,6 +483,9 @@ pub struct RequestMeta {
     pub harness: Harness,
     pub session: Text,
     pub agent: Agent,
+    /// The named agent that sent it, whose system prompt it opened with, such as OpenCode's
+    /// `build`; None where unrecorded.
+    pub mode: Option<Text>,
     pub model: Option<Text>,
     pub provider: Option<Text>,
     pub api: Api,

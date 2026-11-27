@@ -702,6 +702,8 @@ pub(crate) fn discover(
             let harness = match instance.driver.as_str() {
                 "claudeAgent" => Harness::Claude,
                 "codex" => Harness::Codex,
+                // The transcript audit reads no OpenCode history.
+                "opencode" if !options.opencode => continue,
                 "opencode" => {
                     if !slug(&id) {
                         return Err(fail("invalid supported T3 provider identity", &file));

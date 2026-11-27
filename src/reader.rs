@@ -983,6 +983,7 @@ fn request(
             harness: snapshot.harness,
             session: context.session.clone(),
             agent: context.agent,
+            mode: None,
             model: context.model.clone(),
             provider: context.provider.clone(),
             api: match snapshot.harness {
@@ -1238,28 +1239,56 @@ impl Reader {
     /// Read every OpenCode database once, as the profiles that share it.
     fn opencode(
         &mut self,
-        profiles: &[Profile],
+        profiles: &mut [Profile],
+        options: &crate::discovery::DiscoveryOptions,
         native: &mut crate::t3::NativeIds,
     ) -> Result<(), ScanError> {
-        let mut databases: IndexMap<&str, Vec<String>> = IndexMap::default();
+        let mut databases: IndexMap<String, Vec<String>> = IndexMap::default();
         for p in profiles.iter().filter(|p| p.harness == Harness::OpenCode) {
             for history in &p.histories {
-                databases.entry(history).or_default().push(p.id.clone());
+                databases
+                    .entry(history.clone())
+                    .or_default()
+                    .push(p.id.clone());
             }
         }
         for (file, ids) in databases {
-            let history = crate::opencode::read(file, &ids)?;
+            let history = crate::opencode::read(&file, &ids)?;
             let file: Text = file.into();
             for session in &history.sessions {
                 self.sessions.opencode(session, &file);
                 native.opencode(&session.key, &session.id, session.parent.as_deref());
             }
-            let servers: Vec<String> = profiles
+            // A server a project its sessions ran in declares replaces the global one there,
+            // so a switch in the global file would not reach it; it keeps no switch.
+            let cwds: crate::collections::IndexSet<&str> = history
+                .sessions
                 .iter()
-                .filter(|p| ids.contains(&p.id))
-                .flat_map(|p| crate::opencode::declared(&p.mcp_servers))
-                .map(|s| s.name)
+                .filter_map(|s| s.cwd.as_deref())
                 .collect();
+            let mut project: crate::collections::IndexSet<String> = Default::default();
+            for cwd in cwds {
+                for layer in crate::opencode::project_layers(options, cwd)? {
+                    project.extend(
+                        crate::opencode::servers(&layer.config)
+                            .into_iter()
+                            .map(|s| s.name),
+                    );
+                }
+            }
+            let mut servers: Vec<String> = project.iter().cloned().collect();
+            for p in profiles.iter_mut().filter(|p| ids.contains(&p.id)) {
+                let declared: Vec<String> = crate::opencode::declared(&p.mcp_servers)
+                    .into_iter()
+                    .map(|s| s.name)
+                    .collect();
+                p.mcp_servers.retain(|entry| {
+                    crate::opencode::declared(std::slice::from_ref(entry))
+                        .iter()
+                        .all(|s| !project.contains(&s.name))
+                });
+                servers.extend(declared);
+            }
             self.exposure.opencode(&file, &ids, &servers, &history);
             for subagent in history.subagents {
                 self.spawned(subagent);
@@ -2424,7 +2453,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         reading.step(Some("Reading OpenCode's database"));
     }
     if opencode {
-        reader.opencode(&profiles, &mut native_ids)?;
+        reader.opencode(&mut profiles, &options.discovery, &mut native_ids)?;
     }
     if let Some(reading) = &options.reading {
         reading.step(None);

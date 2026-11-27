@@ -1060,7 +1060,7 @@ fn settings_text(
                 ),
                 _ => (
                     format!("agents.{kind}.model in {file}"),
-                    format!("the #variant of agents.{kind}.model in {file}"),
+                    format!("the variant in agents.{kind}.model in {file}"),
                 ),
             }
         }

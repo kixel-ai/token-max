@@ -4405,16 +4405,16 @@ fn secret_json(path: &[Option<&str>], edited: &[&[String]]) -> bool {
     }
 }
 
-/// Whether the OpenCode config value at `path` may hold a secret: a provider's or MCP
-/// server's variables, headers, OAuth settings or API key.
+/// Whether the OpenCode config value at `path` may hold a secret: anything under a key
+/// that holds variables, headers, OAuth settings or an API key, wherever it sits, such as
+/// an MCP server's, a provider's or an agent's request headers.
 fn secret_opencode(path: &[Option<&str>]) -> bool {
-    matches!(path.first(), Some(Some("mcp" | "provider")))
-        && path.iter().any(|key| {
-            matches!(
-                key,
-                Some("environment" | "env" | "headers" | "oauth" | "apiKey" | "api_key")
-            )
-        })
+    path.iter().any(|key| {
+        matches!(
+            key,
+            Some("environment" | "env" | "headers" | "oauth" | "apiKey" | "api_key")
+        )
+    })
 }
 
 /// `text` with each scalar value that `secret` names by its path replaced by `mask` in

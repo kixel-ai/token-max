@@ -341,9 +341,10 @@ struct Pieces<'a> {
     /// By component and owning profile set, since a Codex server's switch
     /// depends on the profiles that declare it.
     of: HashMap<(&'a str, usize), Vec<Split>>,
-    /// The row a skill invocation counts for, by hashed `skill:<name>` target. The
-    /// scan already resolved a short name to the synced skill it reached.
-    skills: HashMap<String, usize>,
+    /// The rows a skill invocation counts for, by hashed `skill:<name>` target: one, or for an
+    /// OpenCode skill one per switch its profiles take. The scan already resolved a short
+    /// name to the synced skill it reached.
+    skills: HashMap<String, Vec<usize>>,
     /// Codex members are keyed by path, with name-only members left unswitchable.
     catalog: HashMap<usize, Option<String>>,
     /// The descriptions a component ships, by component and owning profile set, for the
@@ -599,9 +600,13 @@ fn pieces(
                     if synced_short(member).is_none() {
                         interned.describe(id, m);
                     }
-                    interned
+                    let keys = interned
                         .skills
-                        .insert(identity(&format!("skill:{member}")), id);
+                        .entry(identity(&format!("skill:{member}")))
+                        .or_default();
+                    if !keys.contains(&id) {
+                        keys.push(id);
+                    }
                     (id, n)
                 })
                 .collect();
@@ -734,13 +739,24 @@ fn codex_pieces(
     vec![(interned.intern(key, kind, name, control), characters)]
 }
 
+/// How an OpenCode request's profiles order skill permissions.
+#[derive(Clone, Copy)]
+enum Rules {
+    /// OpenCode 1's `permission` object alone.
+    Legacy,
+    /// An ordered `permissions` list, where an appended rule wins.
+    Ordered,
+    /// A rule read after any appended one could allow the skill again.
+    Reallowed,
+}
+
 /// Split one OpenCode context record into switchable pieces: each instruction file, each
 /// listed skill, which its `skill` permission hides, and each Code Mode namespace, which
 /// is an MCP server's when a profile's config declares it or T3 gives it.
 fn opencode_pieces(
     component: &Component,
     servers: &[&[String]],
-    rules: bool,
+    rules: Rules,
     components: &HashMap<&str, &Component>,
     interned: &mut Pieces<'_>,
 ) -> Vec<Split> {
@@ -760,15 +776,26 @@ fn opencode_pieces(
                 let m = components[member.as_str()];
                 let n = m.size.characters.unwrap_or(0);
                 listed += n;
+                // The switch depends on how the request's profiles order permissions, so
+                // profiles that differ get rows of their own.
+                let (shape, control) = match rules {
+                    Rules::Reallowed => ("manual", None),
+                    Rules::Ordered => ("rules", Some(crate::opencode::skill_off(&m.name, true))),
+                    Rules::Legacy => ("legacy", Some(crate::opencode::skill_off(&m.name, false))),
+                };
                 let key = interned.intern(
-                    format!("opencode:skill:{}", m.name),
+                    format!("opencode:skill:{shape}:{}", m.name),
                     ContextKind::Skill,
                     m.name.clone(),
-                    Some(crate::opencode::skill_off(&m.name, rules)),
+                    control,
                 );
-                interned
+                let keys = interned
                     .skills
-                    .insert(identity(&format!("opencode-skill:{}", m.name)), key);
+                    .entry(identity(&format!("opencode-skill:{}", m.name)))
+                    .or_default();
+                if !keys.contains(&key) {
+                    keys.push(key);
+                }
                 result.push((key, Some(n)));
             }
             let framing = interned.intern(
@@ -806,9 +833,10 @@ fn opencode_pieces(
                 )
             } else {
                 // A server no profile's global config declares alike, such as a project's,
-                // has no switch of its own.
+                // has no switch of its own. Each switch is a row of its own.
+                let shape = control.as_ref().map_or(String::new(), |c| c.path.join("."));
                 (
-                    format!("opencode:mcp:{name}"),
+                    format!("opencode:mcp:{name}:{shape}"),
                     ContextKind::McpServer,
                     name.to_string(),
                     control,
@@ -1006,15 +1034,22 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
     ordered.sort_by_key(|(_, r)| r.time);
     // A request no selected profile owns, such as a removed T3 instance's, has no setting to change.
     ordered.retain(|(_, r)| r.profiles.iter().any(|p| files.contains_key(p.as_str())));
-    // OpenCode's system prompt leads its context pieces at a length it does not record; the
-    // prompt and the pieces both fit in the session's smallest input, which bounds it.
-    let mut smallest: HashMap<&str, i64> = HashMap::default();
+    // OpenCode's system prompt leads its context pieces at a length it does not record. Its
+    // agent and model choose it, so the prompt and the pieces fit in the smallest input of
+    // the session's requests from that agent on that model, which bounds it. A request
+    // with neither recorded is bounded by its own input.
+    let prompt = |r: &Request| -> Option<(Text, Text, Text)> {
+        Some((r.session.clone(), r.mode.clone()?, r.model.clone()?))
+    };
+    let mut smallest: HashMap<(Text, Text, Text), i64> = HashMap::default();
     for (_, r) in &ordered {
         if r.harness == Harness::OpenCode
+            && r.source.is_none()
+            && let Some(key) = prompt(r)
             && let [part] = r.parts.as_slice()
             && let Some(input) = part.usage.input
         {
-            let n = smallest.entry(&*r.session).or_insert(input);
+            let n = smallest.entry(key).or_insert(input);
             *n = (*n).min(input);
         }
     }
@@ -1080,13 +1115,21 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             .filter(|p| p.harness == r.harness && r.profiles.contains(&p.id))
             .map(|p| p.mcp_servers.as_slice())
             .collect();
-        // Whether an OpenCode profile of this request orders its permissions as rules, which
-        // a legacy `permission` entry would not outrank.
-        let rules = input.profiles.iter().any(|p| {
-            p.harness == Harness::OpenCode
-                && r.profiles.contains(&p.id)
-                && p.settings.contains_key(crate::opencode::RULES)
-        });
+        // How this request's OpenCode profiles order skill permissions, which decides the
+        // switch a skill takes.
+        let own = || {
+            input
+                .profiles
+                .iter()
+                .filter(|p| p.harness == Harness::OpenCode && r.profiles.contains(&p.id))
+        };
+        let rules = if own().any(|p| p.settings.contains_key(crate::opencode::REALLOWED)) {
+            Rules::Reallowed
+        } else if own().any(|p| p.settings.contains_key(crate::opencode::RULES)) {
+            Rules::Ordered
+        } else {
+            Rules::Legacy
+        };
         let component = |id: &str| {
             *components
                 .get(id)
@@ -1365,9 +1408,11 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             let prefix_end: f64 = parts.iter().filter(|x| x.prefix).map(size).sum();
             // How far an unrecorded system prompt may push the leading pieces.
             let slack = (r.harness == Harness::OpenCode).then(|| {
-                smallest
-                    .get(&*r.session)
-                    .map_or(-1.0, |&n| n as f64 - prefix_end)
+                let bound = prompt(r)
+                    .filter(|_| r.source.is_none())
+                    .and_then(|key| smallest.get(&key).copied())
+                    .unwrap_or(end);
+                bound as f64 - prefix_end
             });
             let known = prior
                 .as_ref()
@@ -1660,29 +1705,37 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         );
     }
     let synced_group = identity(&format!("plugin:{SYNCED_NAMESPACE}"));
+    let mut gathered: Vec<usize>;
     for i in &scan.invocations {
         let indices = if i.harness == Harness::Codex {
             targets.get(&i.target)
         } else {
             // A namespace switch also removes uses of unmeasured members.
-            let key = if i.group.as_ref() == Some(&synced_group) {
-                interned.ids.get(SYNCED_SKILLS_KEY)
+            let keys: Vec<usize> = if i.group.as_ref() == Some(&synced_group) {
+                interned
+                    .ids
+                    .get(SYNCED_SKILLS_KEY)
+                    .into_iter()
+                    .copied()
+                    .collect()
             } else {
-                interned.skills.get(&i.target)
-            };
-            let Some(&key) = key else {
-                continue;
+                interned.skills.get(&i.target).cloned().unwrap_or_default()
             };
             // Typed requests still work when only the model listing is hidden.
-            let counts = match i.kind {
+            let counts = |key: &usize| match i.kind {
                 InvocationKind::SkillCall => i.status != InvocationStatus::Reference,
-                InvocationKind::SkillRequest => !typed_only(interned.kinds[key].control.as_ref()),
+                InvocationKind::SkillRequest => !typed_only(interned.kinds[*key].control.as_ref()),
                 _ => false,
             };
-            if !counts {
+            gathered = keys
+                .iter()
+                .filter(|key| counts(key))
+                .flat_map(|key| skill_families.get(key).into_iter().flatten().copied())
+                .collect();
+            if gathered.is_empty() {
                 continue;
             }
-            skill_families.get(&key)
+            Some(&gathered)
         };
         credit(
             indices,

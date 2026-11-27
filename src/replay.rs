@@ -91,6 +91,7 @@ fn proxy_request(event: &StructuralEvent, previous: Option<&Request>) -> Option<
             harness: event.harness,
             session: event.session.clone(),
             agent: Agent::Subagent,
+            mode: None,
             model: model.clone(),
             provider: event
                 .pricing

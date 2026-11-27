@@ -34,6 +34,8 @@ pub struct DiscoveryOptions {
     pub codex_dirs: Vec<String>,
     /// Explicit OpenCode data directories, each holding an `opencode.db`.
     pub opencode_dirs: Vec<String>,
+    /// Whether to discover OpenCode profiles at all; the transcript audit reads none.
+    pub opencode: bool,
     /// Explicit T3 state directories: settings.json, and statev2.sqlite when it exists.
     pub t3_dirs: Vec<String>,
     /// The system managed Claude settings file; overridable for host adapters and synthetic tests.
@@ -67,6 +69,7 @@ impl DiscoveryOptions {
             claude_dirs: vec![],
             codex_dirs: vec![],
             opencode_dirs: vec![],
+            opencode: true,
             t3_dirs: vec![],
             managed_settings_file: managed_settings_path(std::env::consts::OS).into(),
             codex_system_config_file: "/etc/codex/config.toml".into(),
@@ -88,6 +91,7 @@ impl DiscoveryOptions {
                     | "T3CODE_HOME"
                     | "XDG_DATA_HOME"
                     | "XDG_CONFIG_HOME"
+                    | "OPENCODE_DB"
             ) || CLAUDE_PROVIDERS.iter().any(|p| p.variable == k)
         });
     }
@@ -244,6 +248,7 @@ impl DiscoveryOptions {
                 for server in servers.values_mut() {
                     if let Value::Object(server) = server {
                         server.remove("enabled");
+                        server.remove("disabled");
                     }
                 }
                 pretended.insert("mcp".into(), Value::Object(mcp));
@@ -3081,12 +3086,14 @@ pub fn discover(options: &DiscoveryOptions) -> Result<Discovery, ScanError> {
         );
     }
     let empty = Env::default();
-    add(
-        &mut candidates,
-        Harness::OpenCode,
-        &crate::opencode::data_dir(home, &empty),
-        RootOrigin::Default,
-    );
+    if options.opencode {
+        add(
+            &mut candidates,
+            Harness::OpenCode,
+            &crate::opencode::data_dir(home, &empty),
+            RootOrigin::Default,
+        );
+    }
     for (harness, variable) in [
         (Harness::Claude, "CLAUDE_CONFIG_DIR"),
         (Harness::Codex, "CODEX_HOME"),
@@ -3095,13 +3102,15 @@ pub fn discover(options: &DiscoveryOptions) -> Result<Discovery, ScanError> {
             add(&mut candidates, harness, dir, RootOrigin::Environment);
         }
     }
-    if env.get("XDG_DATA_HOME").is_some_and(|d| !d.is_empty()) {
+    // `XDG_DATA_HOME` is set for every XDG program, not to select OpenCode, so the data
+    // directory it implies is a default one: missing, it is skipped.
+    if options.opencode && env.get("XDG_DATA_HOME").is_some_and(|d| !d.is_empty()) {
         let dir = crate::opencode::data_dir(home, env);
         add(
             &mut candidates,
             Harness::OpenCode,
             &dir,
-            RootOrigin::Environment,
+            RootOrigin::Default,
         );
     }
     let unreadable = || error("cannot discover home directory", home, 0);
@@ -3376,6 +3385,7 @@ mod tests {
             claude_dirs: vec![],
             codex_dirs: vec![],
             opencode_dirs: vec![],
+            opencode: true,
             t3_dirs: vec![],
             managed_settings_file: native_path(w.managed_settings_file()),
             codex_system_config_file: native_path(w.home.join("system.toml")),

@@ -145,7 +145,10 @@ fn service_tier<'a>(r: &'a Request, p: &'a BillingPart) -> Result<&'a str, &'sta
         let standard = if recorded.peek().is_some() {
             recorded.all(|t| t == "default")
         } else {
+            // Without an executor iteration, as when a replay drops the idle summary that
+            // held the request's tier, nothing is left to show it.
             r.provider.as_deref() == Some("anthropic")
+                && executor_tiers(r).next().is_some()
                 && r.parts
                     .iter()
                     .filter_map(|e| e.tier.as_deref().map(tier_name))
@@ -1292,7 +1295,7 @@ fn selected_rates(
     let tier = service_tier(r, p)?;
     if p.kind == PartKind::Advisor && p.tier.is_none() {
         assumptions.push(if executor_tiers(r).all(|t| t.is_none()) {
-            "no service tier is recorded on the request; its advisor call is priced at standard because the request is priced as Anthropic's API and nothing on it shows Priority Tier, which a commitment on the advisor model alone would change".into()
+            "no executor iteration records a service tier; its advisor call is priced at standard because the request is priced as Anthropic's API and nothing on it shows Priority Tier, which a commitment on the advisor model alone would change".into()
         } else {
             "an advisor call records no service tier; priced at its executor's standard tier, which a Priority Tier commitment on the advisor model alone would change".into()
         });
@@ -1777,7 +1780,7 @@ mod tests {
         assert!(
             none.assumptions
                 .iter()
-                .any(|a| a.starts_with("no service tier is recorded on the request"))
+                .any(|a| a.starts_with("no executor iteration records a service tier"))
         );
         // Another provider with no tier evidence, and any Priority evidence, stay unpriced.
         assert_eq!(tierless("amazon-bedrock", None).total_usd, None);
@@ -1798,6 +1801,9 @@ mod tests {
             ..r.parts[0].clone()
         };
         r.parts.extend([compaction, advisor.clone()]);
+        assert_eq!(price_part(&catalog, &r, &advisor).total_usd, None);
+        // An advisor alone has no executor iteration to show a tier.
+        r.parts = vec![advisor.clone()];
         assert_eq!(price_part(&catalog, &r, &advisor).total_usd, None);
     }
 

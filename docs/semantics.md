@@ -1651,11 +1651,12 @@ executor's). An iteration records no service tier, so it takes its
 executor's: standard when every tier recorded by an executor iteration of its
 request is (its message iterations, or its compaction ones only when it has
 none, as in a summary request), since Priority Tier is committed per model, and
-unknown when one is another tier. When the request records no tier at all, such as
-a reply through a gateway that strips it, the call is standard only on a request
-priced as Anthropic's API (a custom `ANTHROPIC_BASE_URL` included, whose upstream
-the record does not name) with no other iteration showing another tier; on another
-provider it is unknown. Unpriced requests are
+unknown when one is another tier. When no executor iteration records a tier, such
+as in a reply through a gateway that strips it, the call is standard only on a
+request priced as Anthropic's API (a custom `ANTHROPIC_BASE_URL` included, whose
+upstream the record does not name) that has an executor iteration and whose other
+iterations, a compaction one included, show no other tier; on another provider, or
+with no executor iteration, it is unknown. Unpriced requests are
 extrapolated from the priced ones, never below what each is known to cost.
 A T3 instance's requests count on the first line whose `advisorModel` its
 settings file owns, since its threads read that file; a line whose owner is

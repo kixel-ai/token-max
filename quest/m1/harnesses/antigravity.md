@@ -75,7 +75,3 @@ Recommendations:
   missing-model handling, `sessions`, and JSON edits with synthetic fixtures.
 - Document Antigravity discovery, accounting, and caveats in
   `docs/reference.md`, `docs/semantics.md`, and `docs/t3.md`.
-
-## Required
-
-- [Discover, price, and audit OpenCode sessions and settings](/quest/m1/harnesses/opencode.md) - generalizes Harness dispatch, discovery, T3 driver routing, and exposure checks past the two-harness Claude/Codex assumption

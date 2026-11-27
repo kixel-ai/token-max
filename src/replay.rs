@@ -1204,7 +1204,8 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         calibration: calibrate(&scan.exposure, &scan.requests),
         assumptions: [
             "component tokens are characters times a per-model ratio calibrated against recorded request totals",
-            "Codex records no complete request text to calibrate against, so its components and tool output use OpenAI's rule of thumb of 4 characters per token",
+            "Codex and OpenCode record no complete request text to calibrate against, so their components and tool output use OpenAI's rule of thumb of 4 characters per token",
+            "OpenCode keeps only each session's latest instructions, skill listing and Code Mode catalog, which every request of the session is taken to have carried at the start of its messages",
             "each component is priced at the cache state of its position in the prompt prefix: tools, system, then message attachments in arrival order",
             "tool output stays in the conversation until it compacts; output the previous request held lies within its content, and newer output follows its input and reply",
             "Claude Code caches through the last message, so a Claude request's content ends at its cached reads plus writes",
@@ -1240,6 +1241,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
             "unlogged or unresumed summary generation is unknown; a missing final boundary does not establish zero cost",
             "Claude prompt suggestions and session recaps, and Codex automatic recaps, are not logged; every other check's recorded baseline omits them and their cache refreshes",
             "Codex has no user cache-TTL control; its usage is priced but no TTL change is recommended",
+            "OpenCode's cache, compaction and keepalive behavior is not replayed; its usage is priced but none of those changes is recommended for it",
             "no summed per-check or joint savings total",
         ]
         .into_iter()

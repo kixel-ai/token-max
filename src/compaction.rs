@@ -413,7 +413,9 @@ fn prefix(harness: Harness, u: &Usage) -> Option<i64> {
     match harness {
         Harness::Codex => u.input,
         Harness::Claude => u.cached_prefix(),
-        Harness::OpenCode | Harness::Antigravity => unreachable!("OpenCode's and Antigravity's compaction is not replayed"),
+        Harness::OpenCode | Harness::Antigravity => {
+            unreachable!("OpenCode's and Antigravity's compaction is not replayed")
+        }
     }
 }
 
@@ -1103,7 +1105,9 @@ impl<'r, 'o> Simulator<'r, 'o> {
                 let lifetime = match req.harness {
                     Harness::Claude => ttl.map(ttl_milliseconds),
                     Harness::Codex => billed_writes.then_some(CODEX_CACHE_MILLISECONDS),
-                    Harness::OpenCode | Harness::Antigravity => unreachable!("OpenCode's and Antigravity's compaction is not replayed"),
+                    Harness::OpenCode | Harness::Antigravity => {
+                        unreachable!("OpenCode's and Antigravity's compaction is not replayed")
+                    }
                 };
                 // A newly generated prefix cannot inherit the old transcript's external warming.
                 let warm = added.is_none()
@@ -1991,7 +1995,9 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 match profile.harness {
                     Harness::Codex => None,
                     Harness::Claude => model.as_deref(),
-                    Harness::OpenCode | Harness::Antigravity => unreachable!("OpenCode's and Antigravity's compaction is not replayed"),
+                    Harness::OpenCode | Harness::Antigravity => {
+                        unreachable!("OpenCode's and Antigravity's compaction is not replayed")
+                    }
                 },
             );
             groups

@@ -74,7 +74,13 @@ fn transcripts(root: &str) -> Result<Vec<String>, ScanError> {
     for entry in entries {
         let entry = entry.map_err(|_| error("cannot list Antigravity conversations", &brain, 0))?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        let file = join(&[&brain, &name, ".system_generated", "logs", "transcript.jsonl"]);
+        let file = join(&[
+            &brain,
+            &name,
+            ".system_generated",
+            "logs",
+            "transcript.jsonl",
+        ]);
         match std::fs::metadata(&file) {
             Ok(info) if info.is_file() => files.push(file),
             Ok(_) => {}
@@ -229,7 +235,13 @@ fn summaries(root: &str) -> Result<HashMap<String, Summary>, ScanError> {
     match std::fs::metadata(&file) {
         Ok(_) => {}
         Err(e) if absent(e.kind()) => return Ok(HashMap::default()),
-        Err(_) => return Err(error("cannot inspect Antigravity conversation summaries", &file, 0)),
+        Err(_) => {
+            return Err(error(
+                "cannot inspect Antigravity conversation summaries",
+                &file,
+                0,
+            ));
+        }
     }
     let fail = |e| unreadable(&file, e);
     let mut db = Connection::open_with_flags(
@@ -421,7 +433,11 @@ fn read_transcript(
             // Antigravity may be writing the last line as it is read.
             Err(_) if lines.peek().is_none() => break,
             Err(_) => {
-                return Err(error("invalid Antigravity transcript line", file, line_number));
+                return Err(error(
+                    "invalid Antigravity transcript line",
+                    file,
+                    line_number,
+                ));
             }
         };
         let invalid = |_| error("invalid Antigravity token count", file, line_number);
@@ -513,16 +529,25 @@ mod tests {
             ("gemini-4-carbon".into(), Some("xhigh".into()))
         );
         assert_eq!(split_model("gemini-4-neon"), ("gemini-4-neon".into(), None));
-        assert_eq!(split_model("gemini-2.5-pro"), ("gemini-2.5-pro".into(), None));
+        assert_eq!(
+            split_model("gemini-2.5-pro"),
+            ("gemini-2.5-pro".into(), None)
+        );
         assert_eq!(split_model("-high"), ("-high".into(), None));
     }
 
     #[test]
     fn workspace_uris_name_absolute_decoded_paths() {
         if cfg!(windows) {
-            assert_eq!(file_path("file:///C:/my%20work").as_deref(), Some("C:/my work"));
+            assert_eq!(
+                file_path("file:///C:/my%20work").as_deref(),
+                Some("C:/my work")
+            );
         } else {
-            assert_eq!(file_path("file:///my%20work/repo").as_deref(), Some("/my work/repo"));
+            assert_eq!(
+                file_path("file:///my%20work/repo").as_deref(),
+                Some("/my work/repo")
+            );
         }
         assert_eq!(file_path("https://example.com/x"), None);
         assert_eq!(file_path("file://relative"), None);
@@ -532,8 +557,184 @@ mod tests {
 
     #[test]
     fn a_transcript_names_its_conversation() {
-        let file = "/home/u/.gemini/antigravity-cli/brain/abc/.system_generated/logs/transcript.jsonl";
+        let file =
+            "/home/u/.gemini/antigravity-cli/brain/abc/.system_generated/logs/transcript.jsonl";
         assert_eq!(conversation(file), Some("abc"));
         assert_eq!(conversation("transcript.jsonl"), None);
+    }
+
+    /// The synthetic root's history, read as one profile.
+    fn synthetic(w: &crate::test_support::Workspace) -> (String, History) {
+        let root = w.home.join(".gemini").join(CLI);
+        crate::test_support::antigravity_root(&root);
+        let root = root.to_string_lossy().into_owned();
+        let profile = profile(root.clone(), root.clone(), "key").unwrap();
+        assert_eq!(profile.histories.len(), 2);
+        let history = read(&root, &profile.histories, std::slice::from_ref(&profile.id)).unwrap();
+        (root, history)
+    }
+
+    #[test]
+    fn transcripts_become_priced_requests_conversations_and_subagents_without_text() {
+        let w = crate::test_support::Workspace::new();
+        let (_, history) = synthetic(&w);
+        assert!(!format!("{history:?}").contains("SYNTHETIC_PRIVATE"));
+        let catalog = crate::test_support::prices();
+        let cost = |r: &Request| crate::prices::price_request(&catalog, r).total_usd;
+        let main = identity("main-id");
+        let requests: Vec<&Request> = history
+            .requests
+            .iter()
+            .filter(|r| *r.session == *main)
+            .collect();
+        // The user step records no usage.
+        assert_eq!(requests.len(), 3);
+        let first = requests[0];
+        assert_eq!(first.model.as_deref(), Some("gemini-4-neon"));
+        assert_eq!(first.effort.as_deref(), Some("high"));
+        assert_eq!(first.agent, Agent::Main);
+        assert_eq!(first.provider.as_deref(), Some(PROVIDER));
+        // Recorded input is uncached; the normalized input adds the cache reads back.
+        let second = &requests[1].parts[0].usage;
+        assert_eq!(
+            (second.input, second.read, second.write, second.output),
+            (Some(1_500), Some(1_000), Some(0), Some(50))
+        );
+        // 500 uncached at $3, 1,000 cached at $0.15 and 50 output at $15 per million.
+        assert!((cost(requests[1]).unwrap().to_f64() - 0.0024).abs() < 1e-12);
+        // The checkpoint read the cache only gemini-4-neon held.
+        let checkpoint = requests[2];
+        assert_eq!(checkpoint.parts[0].kind, PartKind::Compaction);
+        assert_eq!(checkpoint.source.as_deref(), Some("compaction"));
+        assert_eq!(checkpoint.model.as_deref(), Some("gemini-4-neon"));
+        assert_eq!(checkpoint.effort, None);
+        assert!(checkpoint.issues.iter().any(|i| &**i == CACHED_MODEL));
+        assert!(cost(checkpoint).is_some());
+        let sub = history
+            .requests
+            .iter()
+            .find(|r| *r.session == *identity("sub-id"))
+            .unwrap();
+        assert_eq!(sub.agent, Agent::Subagent);
+        assert_eq!(sub.mode.as_deref(), Some("research"));
+        assert_eq!(sub.effort.as_deref(), Some("medium"));
+        assert_eq!(history.subagents.len(), 1);
+        let subagent = &history.subagents[0];
+        assert_eq!(subagent.kind, "research");
+        assert_eq!(subagent.parent.as_deref(), Some(&*main));
+        let (session, file) = history
+            .sessions
+            .iter()
+            .find(|(s, _)| s.id == "sub-id")
+            .unwrap();
+        assert_eq!(session.parent.as_deref(), Some("main-id"));
+        assert!(file.ends_with("transcript.jsonl"));
+        if cfg!(unix) {
+            assert_eq!(session.cwd.as_deref(), Some("/work/repo"));
+        }
+    }
+
+    #[test]
+    fn a_request_without_a_model_is_priced_only_when_the_conversations_cache_proves_it() {
+        let w = crate::test_support::Workspace::new();
+        let (root, _) = synthetic(&w);
+        let file = |id: &str| {
+            join(&[
+                &root,
+                "brain",
+                id,
+                ".system_generated",
+                "logs",
+                "transcript.jsonl",
+            ])
+        };
+        let step = |model: Option<&str>, read: u64| {
+            serde_json::json!({"type": "PLANNER_RESPONSE", "created_at": "2026-01-01T00:00:00Z",
+                "model": model, "input_tokens": 10, "cache_read_tokens": read,
+                "output_tokens": 1})
+            .to_string()
+        };
+        // A first request with no model has no cache to prove one.
+        let cold = [step(None, 0)].join("\n");
+        // Two models ran, so a cache read proves neither.
+        let mixed = [
+            step(Some("gemini-4-neon-high"), 0),
+            step(Some("gemini-4-carbon-high"), 0),
+            step(None, 100),
+        ]
+        .join("\n");
+        for (id, text) in [("cold", cold), ("mixed", mixed)] {
+            std::fs::create_dir_all(crate::discovery::dirname(&file(id))).unwrap();
+            std::fs::write(file(id), text).unwrap();
+        }
+        let history = read(&root, &[file("cold"), file("mixed")], &["p".into()]).unwrap();
+        let unknown: Vec<&Request> = history
+            .requests
+            .iter()
+            .filter(|r| r.model.is_none())
+            .collect();
+        assert_eq!(unknown.len(), 2);
+        let catalog = crate::test_support::prices();
+        for r in unknown {
+            assert_eq!(crate::prices::price_request(&catalog, r).total_usd, None);
+        }
+    }
+
+    #[test]
+    fn gemini_home_moves_the_cli_and_a_missing_one_is_skipped() {
+        let w = crate::test_support::Workspace::new();
+        let moved = w.home.join("gemini");
+        crate::test_support::antigravity_root(&moved.join(CLI));
+        let antigravity = |options: &crate::discovery::DiscoveryOptions| -> Vec<String> {
+            crate::discovery::discover(options)
+                .unwrap()
+                .profiles
+                .into_iter()
+                .filter(|p| p.harness == Harness::Antigravity)
+                .map(|p| p.root)
+                .collect()
+        };
+        let mut options = w.scan_options().discovery;
+        options
+            .env
+            .insert("GEMINI_HOME".into(), moved.to_string_lossy().into_owned());
+        assert_eq!(
+            antigravity(&options),
+            [moved.join(CLI).to_string_lossy().into_owned()]
+        );
+        // Gemini's other tools set it too, so a home without the CLI fails nothing.
+        options.env.insert(
+            "GEMINI_HOME".into(),
+            w.home.join("absent").to_string_lossy().into_owned(),
+        );
+        assert!(antigravity(&options).is_empty());
+        // The audit reads no Antigravity history.
+        options.unreplayed = false;
+        options
+            .env
+            .insert("GEMINI_HOME".into(), moved.to_string_lossy().into_owned());
+        assert!(antigravity(&options).is_empty());
+    }
+
+    #[test]
+    fn only_a_transcripts_last_line_may_be_unfinished() {
+        let w = crate::test_support::Workspace::new();
+        let (root, _) = synthetic(&w);
+        let file = join(&[
+            &root,
+            "brain",
+            "main-id",
+            ".system_generated",
+            "logs",
+            "transcript.jsonl",
+        ]);
+        let text = std::fs::read_to_string(&file).unwrap();
+        std::fs::write(&file, format!("{text}{{\"type\":\"PLANNER_RES")).unwrap();
+        let history = read(&root, std::slice::from_ref(&file), &["p".into()]).unwrap();
+        assert_eq!(history.requests.len(), 3);
+        std::fs::write(&file, format!("{{\"type\":\n{text}")).unwrap();
+        let error = read(&root, std::slice::from_ref(&file), &["p".into()]).unwrap_err();
+        assert_eq!(error.message, "invalid Antigravity transcript line");
+        assert_eq!(error.location.map(|l| l.line), Some(1));
     }
 }

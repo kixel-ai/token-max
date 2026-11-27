@@ -3114,12 +3114,14 @@ pub fn discover(options: &DiscoveryOptions) -> Result<Discovery, ScanError> {
             &crate::antigravity::cli_root(home, &empty),
             RootOrigin::Default,
         );
+        // Gemini's other tools read `GEMINI_HOME` too, so the CLI directory it implies is a
+        // default one: missing, it is skipped.
         if env.get("GEMINI_HOME").is_some_and(|d| !d.is_empty()) {
             add(
                 &mut candidates,
                 Harness::Antigravity,
                 &crate::antigravity::cli_root(home, env),
-                RootOrigin::Environment,
+                RootOrigin::Default,
             );
         }
     }

@@ -1980,7 +1980,9 @@ pub fn speed_controls(
         replacement: match harness {
             Harness::Claude => "fastMode: false; /fast off for an active session",
             Harness::Codex => "service_tier = \"default\"; /fast off for an active session",
-            Harness::OpenCode | Harness::Antigravity => unreachable!("OpenCode and Antigravity have no speed control"),
+            Harness::OpenCode | Harness::Antigravity => {
+                unreachable!("OpenCode and Antigravity have no speed control")
+            }
         }
         .into(),
         resolved: value.is_some(),

@@ -586,7 +586,9 @@ fn default_item(e: &EffortCheck, profile: &str, how: Option<How>, out: &Out<'_>)
             "Kixel's pick of a default. OpenAI's guidance:",
             &[OPENAI_REASONING],
         ),
-        Harness::OpenCode | Harness::Antigravity => unreachable!("OpenCode and Antigravity have no effort control"),
+        Harness::OpenCode | Harness::Antigravity => {
+            unreachable!("OpenCode and Antigravity have no effort control")
+        }
     };
     Some(Item {
         name: tagged("Main-session default".into(), profile),
@@ -709,7 +711,9 @@ fn subagent_item(line: &SubagentLine<'_>, out: &Out<'_>) -> Option<Item> {
             "Kixel's pick of a subagent default. OpenAI's guidance:".into(),
             OPENAI_REASONING.into(),
         ],
-        Harness::OpenCode | Harness::Antigravity => unreachable!("OpenCode and Antigravity have no subagent effort control"),
+        Harness::OpenCode | Harness::Antigravity => {
+            unreachable!("OpenCode and Antigravity have no subagent effort control")
+        }
     };
     if ignored.is_some() {
         sources.push(CLAUDE_CHANGELOG.into());
@@ -3844,7 +3848,9 @@ fn setting_name(result: &CheckResult) -> String {
         CheckResult::Memory(m) => match m.harness {
             Harness::Codex => CODEX_MEMORY.into(),
             Harness::Claude => CLAUDE_MEMORY.into(),
-            Harness::OpenCode | Harness::Antigravity => unreachable!("OpenCode and Antigravity have no memory check"),
+            Harness::OpenCode | Harness::Antigravity => {
+                unreachable!("OpenCode and Antigravity have no memory check")
+            }
         },
         CheckResult::Effort(_) => "Main-session effort".into(),
         CheckResult::Background(b) => match b.feature {

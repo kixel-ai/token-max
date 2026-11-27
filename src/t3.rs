@@ -5199,6 +5199,72 @@ mod tests {
     }
 
     #[test]
+    fn a_t3_antigravity_instance_owns_its_private_history() {
+        let w = Workspace::new();
+        // The CLI's own history, beside T3's, in conversations of its own.
+        let cli = w.home.join(".gemini/antigravity-cli");
+        crate::test_support::antigravity_root(&cli);
+        for id in ["main-id", "sub-id"] {
+            let brain = cli.join("brain");
+            std::fs::rename(brain.join(id), brain.join(format!("cli-{id}"))).unwrap();
+        }
+        let root = state(
+            &w,
+            json!({"providerInstances": {
+                "antigravity": {"driver": "antigravity", "enabled": true},
+                "gone": {"driver": "antigravity", "enabled": true}
+            }}),
+        );
+        crate::test_support::antigravity_root(
+            &root
+                .join("providers/antigravity")
+                .join(identity("antigravity"))
+                .join(crate::antigravity::ACP),
+        );
+        // T3 owns the instance's directory whether or not its database names the sessions.
+        for read in [false, true] {
+            if read {
+                db(&root);
+            }
+            let scan = scan(&w.scan_options()).unwrap();
+            let profile = |t3: bool| {
+                scan.profiles
+                    .iter()
+                    .find(|p| p.harness == Harness::Antigravity && p.t3.is_some() == t3)
+                    .unwrap()
+            };
+            let (instance, cli) = (profile(true), profile(false));
+            assert_eq!(instance.t3.as_ref().unwrap().instance, "antigravity");
+            let owners: HashSet<Vec<String>> = scan
+                .requests
+                .iter()
+                .filter(|r| r.harness == Harness::Antigravity)
+                .map(|r| r.profiles.to_vec())
+                .collect();
+            assert_eq!(
+                owners,
+                HashSet::from_iter([vec![instance.id.clone()], vec![cli.id.clone()]])
+            );
+            assert!(
+                scan.requests
+                    .iter()
+                    .all(|r| { !r.issues.iter().any(|i| i.starts_with(UNSETTLED)) })
+            );
+            let state = &scan.t3[0];
+            assert!(state.unresolved.is_empty(), "{:?}", state.unresolved);
+            assert_eq!(state.missing, 1);
+            assert!(
+                state
+                    .exclusions
+                    .iter()
+                    .any(|e| e.starts_with("T3 instance gone: native history home")),
+                "{:?}",
+                state.exclusions
+            );
+        }
+    }
+
+    #[test]
     fn a_t3_opencode_instance_reads_its_own_database() {
         use crate::test_support::opencode_database;
         let w = Workspace::new();

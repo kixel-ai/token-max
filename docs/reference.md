@@ -407,11 +407,12 @@ cuts nothing short, so the run reports what it wrote and exits 0.
 
 Without directory flags, discovery includes `~/.claude`, `~/.codex`,
 `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, recognizable `~/.claude*` and `~/.codex*`
-profiles, and [OpenCode](#opencode)'s data directory. Codex includes archived
+profiles, [OpenCode](#opencode)'s data directory and the
+[Antigravity](#antigravity) CLI's directory. Codex includes archived
 sessions; Claude includes nested subagents.
 T3 instances are included from `~/.t3/userdata`, an existing `~/.t3/dev`,
 and `$T3CODE_HOME/userdata`. Repeatable `--claude-dir`, `--codex-dir`,
-`--opencode-dir` and `--t3-dir` flags select only those roots across every
+`--opencode-dir`, `--antigravity-dir` and `--t3-dir` flags select only those roots across every
 harness. `--t3-dir`
 takes a state directory containing `settings.json` and optionally `statev2.sqlite`. `--details` shows every discovered root's selection. A missing or
 inaccessible explicitly selected root fails the run. Missing default roots do not.
@@ -490,6 +491,37 @@ audit and effort checks replay only Claude Code and Codex, so an OpenCode
 profile's spend counts in the report's totals but gets none of those lines.
 See [Replay semantics](semantics.md#opencode) for what each piece assumes.
 
+### Antigravity
+
+An Antigravity profile is the CLI's directory, `antigravity-cli` under
+`$GEMINI_HOME` or `~/.gemini`, or the `antigravity-acp` directory of a T3
+`antigravity` instance (see [T3](t3.md)); `--antigravity-dir` takes such a
+directory. A `GEMINI_HOME` without an `antigravity-cli` directory is skipped,
+since Gemini's other tools read it too. Its history is each conversation's
+transcript, `brain/<id>/.system_generated/logs/transcript.jsonl`, and
+`conversation_summaries.db` beside them names each conversation's workspace,
+which is its `cwd`, and for a subagent the conversation that started it and its
+agent, such as `research`. The `sessions` export, T3's `antigravity` instances
+and `--ssh` hosts read Antigravity the same way; `audit` does not. Antigravity's
+IDE and desktop app, which keep their history under `~/.gemini/antigravity`, are
+not read.
+
+Every transcript step that records token counts is one request: each
+`PLANNER_RESPONSE`, and each `CHECKPOINT`, which compacts the conversation and
+counts as compaction. Only each step's type, index, time, model and counts are
+read. Its model, such as `gemini-4-neon-high`, is split into the model,
+`gemini-4-neon`, and the effort, `high`, and priced at Google's catalog entry
+(see [Prices](#prices)). A main conversation and each subagent it started are
+split as Claude Code's are, and a subagent model line names no setting, since
+token-max reads none that chooses one.
+
+Antigravity's transcripts record no prompt, so the cost of its MCP servers,
+skills, plugins and rules is unmeasured: none gets a line or a switch, and the
+report's assumptions say so. Its cache lifetime and compaction are not
+replayed, so its spend counts in the report's totals but gets no cache TTL,
+compaction, keepalive or effort line. See
+[Replay semantics](semantics.md#antigravity) for what each piece assumes.
+
 ## Prices
 
 The first online run fetches only `https://models.dev/api.json`, caching validated
@@ -514,6 +546,15 @@ that provider's catalog lacks stays unpriced, even when another provider
 lists it. OpenCode records no service tier, so every request is priced at the
 standard rate, and one cache-write count without its lifetime, so writes are
 priced at the catalog's cache-write rate, Anthropic's 5-minute one.
+
+An Antigravity request is priced at the `google` catalog entry of its model
+with the effort suffix removed; a model that catalog lacks stays unpriced.
+Antigravity records no service tier, so every request is priced at the
+standard rate. Gemini's implicit cache bills reads and no writes, so a
+request's uncached input is priced as ordinary input. A request whose step
+records no model is priced at its conversation's model only when it read the
+conversation's cache and every earlier request in the conversation ran that
+one model, since Gemini caches per model; otherwise it stays unpriced.
 
 ## Plans and API prices
 
@@ -833,7 +874,7 @@ setting differs from its default gets a note under it naming the default and
 what the current value saves against it, such as `default 5m, saves $410/mo`,
 or `costs $12/mo more` when the current value costs more. The line shows on
 every run, including one with nothing left to change, and reads "No
-setting was found to differ from its Claude Code, Codex or OpenCode default." when none
+setting was found to differ from its Claude Code, Codex, OpenCode or Antigravity default." when none
 differs. A line whose current value is unknown gets no note, and that
 sentence does not claim it matches its default. On a terminal the same line
 also opens `doctor`'s walk, under its header, before the first question.
@@ -1557,7 +1598,8 @@ including retained histories of disabled instances. An OpenCode instance owns
 the sessions its threads name and the subagent sessions they spawned; the rest
 of the database stays native OpenCode's. An OpenCode instance with a
 `serverUrl` runs on a server whose history token-max does not read, so its
-spend is an explicit coverage gap. Shared homes, Codex shadow-home
+spend is an explicit coverage gap. An Antigravity instance owns every
+conversation in the private directory T3 gives it. Shared homes, Codex shadow-home
 symlinks and request identities are deduplicated. T3 Usage aggregates are never
 added to native billed requests. Unsupported providers are explicit coverage
 gaps. Each T3 state gets a line naming the model its

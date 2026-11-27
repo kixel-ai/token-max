@@ -692,7 +692,9 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
                 && ((match r.harness {
                     Harness::Claude => r.agent == Agent::Main,
                     Harness::Codex => r.agent != Agent::Subagent,
-                    Harness::OpenCode | Harness::Antigravity => unreachable!("OpenCode's and Antigravity's cache is not replayed"),
+                    Harness::OpenCode | Harness::Antigravity => {
+                        unreachable!("OpenCode's and Antigravity's cache is not replayed")
+                    }
                 }) || r.parts.iter().any(|p| p.kind == PartKind::Compaction))
         })
         .collect();
@@ -711,7 +713,9 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
             cache: Cache::Codex,
             reason: "documented 30m minimum cache lifetime, refreshed by reads".into(),
         }),
-        Harness::OpenCode | Harness::Antigravity => unreachable!("OpenCode's and Antigravity's cache is not replayed"),
+        Harness::OpenCode | Harness::Antigravity => {
+            unreachable!("OpenCode's and Antigravity's cache is not replayed")
+        }
     };
     let interval = lifetime.as_ref().map(|l| l.ms / 6 * 5);
     let new_tokens = ping_input(&requests, options.scan);
@@ -1122,7 +1126,9 @@ mod tests {
                 let cache = match source.harness {
                     Harness::Claude => Cache::Claude(Ttl::OneHour),
                     Harness::Codex => Cache::Codex,
-                    Harness::OpenCode | Harness::Antigravity => unreachable!("tests replay no OpenCode or Antigravity request"),
+                    Harness::OpenCode | Harness::Antigravity => {
+                        unreachable!("tests replay no OpenCode or Antigravity request")
+                    }
                 };
                 before.parts = vec![BillingPart {
                     usage: cache.usage(19_000, 1000, 0, 500),

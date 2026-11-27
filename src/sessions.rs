@@ -245,7 +245,9 @@ impl Sessions {
                 });
                 branch(git.and_then(|git| git.get("branch")))
             }
-            Harness::OpenCode | Harness::Antigravity => unreachable!("OpenCode and Antigravity sessions come from their own modules"),
+            Harness::OpenCode | Harness::Antigravity => {
+                unreachable!("OpenCode and Antigravity sessions come from their own modules")
+            }
         };
         let (Some(time), Some(name)) = (record.time, name) else {
             return;

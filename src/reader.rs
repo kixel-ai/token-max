@@ -879,7 +879,9 @@ impl FileState {
                     (Harness::Claude, true) => Agent::Subagent,
                     (Harness::Claude, false) => Agent::Main,
                     (Harness::Codex, _) => Agent::Unknown,
-                    (Harness::OpenCode | Harness::Antigravity, _) => unreachable!("OpenCode and Antigravity are read by their own modules"),
+                    (Harness::OpenCode | Harness::Antigravity, _) => {
+                        unreachable!("OpenCode and Antigravity are read by their own modules")
+                    }
                 },
                 model: None,
                 provider: None,
@@ -1346,7 +1348,10 @@ impl Reader {
     /// instance's root is its own, so its sessions need no join to T3's threads.
     fn antigravity(&mut self, profiles: &[Profile]) -> Result<(), ScanError> {
         let mut roots: IndexMap<&str, (&[String], Vec<String>)> = IndexMap::default();
-        for p in profiles.iter().filter(|p| p.harness == Harness::Antigravity) {
+        for p in profiles
+            .iter()
+            .filter(|p| p.harness == Harness::Antigravity)
+        {
             roots
                 .entry(&p.root)
                 .or_insert_with(|| (&p.histories, vec![]))
@@ -1421,7 +1426,9 @@ impl Reader {
         let read = match snapshot.harness {
             Harness::Claude => self.claude(snapshot, file, raw, location, time, kept),
             Harness::Codex => self.codex(snapshot, file, raw, location, time, kept),
-            Harness::OpenCode | Harness::Antigravity => unreachable!("OpenCode and Antigravity are read by their own modules"),
+            Harness::OpenCode | Harness::Antigravity => {
+                unreachable!("OpenCode and Antigravity are read by their own modules")
+            }
         };
         if let Err(error) = read {
             // Only a replay keeps records before the window; any other scan fails on one as

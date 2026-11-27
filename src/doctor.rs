@@ -1131,7 +1131,9 @@ pub(crate) fn subagent_effort_how(owner: &str, profile: &Profile, level: &str) -
             "agents.default_subagent_reasoning_effort",
             Edit::set("agents.default_subagent_reasoning_effort", level),
         ),
-        Harness::OpenCode | Harness::Antigravity => unreachable!("OpenCode and Antigravity have no subagent effort control"),
+        Harness::OpenCode | Harness::Antigravity => {
+            unreachable!("OpenCode and Antigravity have no subagent effort control")
+        }
     };
     // T3 keeps an instance's variables as entries named in a list.
     let step = match owner.rsplit_once(".environment.") {
@@ -1245,7 +1247,9 @@ pub(crate) fn check_how(result: &CheckResult, profile: &Profile) -> How {
                     "service_tier".into(),
                     vec![Edit::set("service_tier", "default")],
                 )],
-                Harness::OpenCode | Harness::Antigravity => unreachable!("OpenCode and Antigravity have no speed control"),
+                Harness::OpenCode | Harness::Antigravity => {
+                    unreachable!("OpenCode and Antigravity have no speed control")
+                }
             };
             owned(&s.base.owner, profile, candidates, s.replacement.clone())
         }
@@ -1319,7 +1323,9 @@ pub(crate) fn check_how(result: &CheckResult, profile: &Profile) -> How {
                     "features.memories".into(),
                     vec![Edit::set("features.memories", false)],
                 )],
-                Harness::OpenCode | Harness::Antigravity => unreachable!("OpenCode and Antigravity have no memory control"),
+                Harness::OpenCode | Harness::Antigravity => {
+                    unreachable!("OpenCode and Antigravity have no memory control")
+                }
             };
             owned(
                 &m.base.owner,
@@ -7632,7 +7638,9 @@ mod tests {
         match harness {
             Harness::Claude => crate::effort::claude_effort(&scopes, file, &env, None),
             Harness::Codex => crate::effort::codex_effort(&scopes, file, Some(&catalog), None),
-            Harness::OpenCode | Harness::Antigravity => unreachable!("OpenCode and Antigravity have no effort control"),
+            Harness::OpenCode | Harness::Antigravity => {
+                unreachable!("OpenCode and Antigravity have no effort control")
+            }
         }
         .unwrap()
     }

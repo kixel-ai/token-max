@@ -94,7 +94,9 @@ pub fn check(result: &CheckResult) -> &'static str {
             Harness::Codex => {
                 "Codex memories save what Codex learns in a session and load it into later ones."
             }
-            Harness::OpenCode | Harness::Antigravity => unreachable!("OpenCode and Antigravity have no memory check"),
+            Harness::OpenCode | Harness::Antigravity => {
+                unreachable!("OpenCode and Antigravity have no memory check")
+            }
         },
         CheckResult::Effort(_) => {
             "How much the main session's model reasons before it answers: a higher effort can do better on hard tasks and writes more output tokens."

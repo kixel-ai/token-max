@@ -155,7 +155,9 @@ fn transcript(
     let file = match harness {
         Harness::Codex => w.codex.join("sessions/main.jsonl"),
         Harness::Claude => w.claude.join("projects/project/main.jsonl"),
-        Harness::OpenCode | Harness::Antigravity => unreachable!("OpenCode and Antigravity are read by their own modules"),
+        Harness::OpenCode | Harness::Antigravity => {
+            unreachable!("OpenCode and Antigravity are read by their own modules")
+        }
     };
     std::fs::write(file, jsonl(records)).unwrap();
     scan(&options(&w, since))

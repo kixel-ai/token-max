@@ -110,7 +110,9 @@ pub fn window_cap(harness: Harness) -> i64 {
     match harness {
         Harness::Claude => 400_000,
         Harness::Codex => 240_000,
-        Harness::OpenCode | Harness::Antigravity => unreachable!("OpenCode's and Antigravity's compaction is not replayed"),
+        Harness::OpenCode | Harness::Antigravity => {
+            unreachable!("OpenCode's and Antigravity's compaction is not replayed")
+        }
     }
 }
 

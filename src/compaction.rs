@@ -839,6 +839,12 @@ impl<'r, 'o> Simulator<'r, 'o> {
         };
         let (input, read) = summary;
         let part = summary_part(template, input, read, output, cold);
+        // The summary is billed when the modeled request runs, not when its sample did, which
+        // matters where a rate moves on a date.
+        let at_summary = Request {
+            time: req.time,
+            ..template.summary_request.clone()
+        };
         self.result.added.push(AddedCompaction {
             request: req.id.clone(),
             input_tokens: input,
@@ -854,11 +860,11 @@ impl<'r, 'o> Simulator<'r, 'o> {
                 .collect(),
             // No one sample's rate stands for samples that disagree.
             summary_cost: if matches.uniform {
-                price_part(self.options.catalog, template.summary_request, &part)
+                price_part(self.options.catalog, &at_summary, &part)
             } else {
                 unknown_cost(DISAGREE)
             },
-            summary_scale: tier_scale(template.summary_request, &part),
+            summary_scale: tier_scale(&at_summary, &part),
             prefix_cost: zero_cost(),
         });
         self.result.added.len() - 1

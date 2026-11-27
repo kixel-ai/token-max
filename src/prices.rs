@@ -379,7 +379,7 @@ fn model_price(value: &Value) -> Result<ModelPrice, ScanError> {
 }
 
 /// Why a catalog could not be read: a validation error or a stream failure owned by the caller.
-enum Failure {
+pub(crate) enum Failure {
     Scan(ScanError),
     Io,
 }
@@ -494,7 +494,7 @@ impl<'de> Visitor<'de> for Walk<'_> {
 }
 
 /// Parse the public catalog one model at a time instead of buffering the whole document.
-fn parse_catalog(reader: impl Read) -> Result<Catalog, Failure> {
+pub(crate) fn parse_catalog(reader: impl Read) -> Result<Catalog, Failure> {
     let mut parsed = Parsed::default();
     let mut deserializer = serde_json::Deserializer::from_reader(BufReader::new(reader));
     let result = Walk {
@@ -1168,6 +1168,40 @@ fn promo_ultrafast(model: &str) -> bool {
     dated(model, &["gpt-6.2-sol", "gpt-6.2-astra"])
 }
 
+/// Models whose fast rate is 2x at every context size.
+const FAST_2X: &[&str] = &[
+    "gpt-6-sol",
+    "gpt-6-astra",
+    "gpt-6-luna",
+    "gpt-6.1-sol",
+    "gpt-6.1-terra",
+    "gpt-6.2-sol",
+    "gpt-6.2-astra",
+    "gpt-5.6",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+];
+
+/// Models whose fast rate is documented only at or below 272K input, at 2.5x and 2x.
+const FAST_SHORT_2_5X: &[&str] = &["gpt-5.5"];
+const FAST_SHORT_2X: &[&str] = &["gpt-5.4", "gpt-5.4-mini"];
+
+/// Models whose ultrafast rate is 6x at every date.
+const ULTRAFAST_6X: &[&str] = &["gpt-6-astra", "gpt-6.1-sol"];
+
+/// Whether a premium tier is documented for this model at some context size, optionally with
+/// a `-YYYY-MM-DD` snapshot.
+pub fn premium_model(model: &str, ultrafast: bool) -> bool {
+    if ultrafast {
+        promo_ultrafast(model) || dated(model, ULTRAFAST_6X)
+    } else {
+        [FAST_2X, FAST_SHORT_2_5X, FAST_SHORT_2X]
+            .iter()
+            .any(|names| dated(model, names))
+    }
+}
+
 /// The documented OpenAI premium-tier multiplier, or None when unverified for this model/context.
 fn premium_multiplier(tier: &str, billed: Billed) -> Option<f64> {
     let Billed { model, input, at } = billed;
@@ -1176,28 +1210,13 @@ fn premium_multiplier(tier: &str, billed: Billed) -> Option<f64> {
         if promo_ultrafast(model) {
             return Some(if at < ULTRAFAST_LIST_FROM { 3.0 } else { 6.0 });
         }
-        return dated(model, &["gpt-6-astra", "gpt-6.1-sol"]).then_some(6.0);
+        return dated(model, ULTRAFAST_6X).then_some(6.0);
     }
-    if dated(
-        model,
-        &[
-            "gpt-6-sol",
-            "gpt-6-astra",
-            "gpt-6-luna",
-            "gpt-6.1-sol",
-            "gpt-6.1-terra",
-            "gpt-6.2-sol",
-            "gpt-6.2-astra",
-            "gpt-5.6",
-            "gpt-5.6-sol",
-            "gpt-5.6-terra",
-            "gpt-5.6-luna",
-        ],
-    ) {
+    if dated(model, FAST_2X) {
         Some(2.0)
-    } else if dated(model, &["gpt-5.5"]) && within {
+    } else if dated(model, FAST_SHORT_2_5X) && within {
         Some(2.5)
-    } else if dated(model, &["gpt-5.4", "gpt-5.4-mini"]) && within {
+    } else if dated(model, FAST_SHORT_2X) && within {
         Some(2.0)
     } else {
         None
@@ -1354,7 +1373,7 @@ fn selected_rates(
             "documented {tier} API token rates are {multiplier}x standard, preserving context tiers and cache categories (2026-11-07)"
         ));
         if tier == "ultrafast" && promo_ultrafast(model_name) {
-            assumptions.push("documented ultrafast rate for this model is 3x standard through 2027-02-28 and 6x from 2027-03-01 (Pacific time), chosen by the request's time (2026-11-27)".into());
+            assumptions.push("documented ultrafast rate for this model is 3x standard through 2027-02-28 and 6x from 2027-03-01 (Pacific time), chosen by the pricing time: the request's own, or the report's date for a current-setting estimate (2026-11-27)".into());
         }
     } else if !["standard", "default"].contains(&tier) {
         return Err("effective service tier has no supported catalog rate");
@@ -2737,25 +2756,7 @@ mod tests {
     // GPT-6.2 fast is 2x at any context size; ultrafast is 3x until 2027-03-01 Pacific, then 6x.
     #[test]
     fn gpt_6_2_ultrafast_multiplier_follows_the_request_date() {
-        let fixture = crate::test_support::fixture_path("prices.json");
-        let mut catalog: Value =
-            serde_json::from_str(&fs::read_to_string(fixture).unwrap()).unwrap();
-        for (model, input, output) in [("gpt-6.2-sol", 2, 10), ("gpt-6.2-astra", 8, 40)] {
-            catalog["openai"]["models"][model] = json!({
-                "family": "gpt",
-                "release_date": "2026-11-20",
-                "tool_call": true,
-                "modalities": {"output": ["text"]},
-                "cost": {
-                    "input": input, "output": output, "cache_read": 0.1, "cache_write": 2.5,
-                    "tiers": [{"tier": {"type": "context", "size": 272000},
-                        "input": input * 2, "output": output * 3 / 2, "cache_read": 0.2, "cache_write": 5}],
-                },
-            });
-        }
-        let Ok(catalog) = parse_catalog(catalog.to_string().as_bytes()) else {
-            panic!("the catalog parses");
-        };
+        let catalog = crate::test_support::prices_with_gpt_6_2();
         let last_promo = ULTRAFAST_LIST_FROM - 1;
         for model in ["gpt-6.2-sol", "gpt-6.2-astra"] {
             let at = |input: i64, tier: &str, time: Millis| {

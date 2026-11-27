@@ -1176,7 +1176,7 @@ and GPT-5.5 at 2.5x and GPT-5.4 at 2x, each only at or below 272K input; ultrafa
 is 6x across context tiers on the models it lists for it. `premium_multiplier` in `src/prices.rs` lists the
 verified models. For `gpt-6.2-sol` and `gpt-6.2-astra`, checked 2026-11-27, fast is 2x at
 every context size and ultrafast is 3x through 2027-02-28 and 6x from 2027-03-01
-(Pacific time), so each request's own time picks the ultrafast multiplier. Older or
+(Pacific time), so the ultrafast multiplier follows the time priced: a request's own for its recorded premium and a replayed compaction summary's, and the report's date for the current-setting estimate. Older or
 unsupported combinations remain unknown. These API rates differ from
 a ChatGPT plan's multipliers, Fast at 2.5x and Ultrafast at 8x standard against
 included usage and 2x and 6x on credits

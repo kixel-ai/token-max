@@ -255,7 +255,19 @@ fn check(
             } else {
                 with_speed(p, Some(value), None)
             };
-            let delta = difference(catalog, r, &current);
+            // The current setting bills from now on, so an ultrafast rate that moves on a date
+            // is priced at the report's date, not the request's.
+            let repriced;
+            let at_now = if value == "ultrafast" && r.time < now {
+                repriced = Request {
+                    time: now,
+                    ..r.clone()
+                };
+                &repriced
+            } else {
+                r
+            };
+            let delta = difference(catalog, at_now, &current);
             if delta.total_usd.is_none() {
                 estimate_unknown += 1;
             } else {
@@ -482,6 +494,57 @@ mod tests {
         assert_eq!(advisory.base.action, Action::Advisory);
         assert_eq!(advisory.base.recommended, None);
         assert_eq!(advisory.current_estimate.premium.total_usd, None);
+    }
+
+    // GPT-6.2 ultrafast bills 3x before 2027-03-01 Pacific and 6x after: history is priced at its
+    // own date, the current setting at the report's.
+    #[test]
+    fn a_current_ultrafast_setting_is_priced_at_the_report_date() {
+        let catalog = crate::test_support::prices_with_gpt_6_2();
+        let usage = crate::reader::usage(
+            &serde_json::json!({
+                "input_tokens": 100000,
+                "output_tokens": 100,
+                "cached_input_tokens": 1000,
+                "cache_write_input_tokens": 100,
+                "cache_creation_30m_input_tokens": 100,
+            }),
+            Harness::Codex,
+        )
+        .unwrap();
+        let mut r = make_request();
+        r.harness = Harness::Codex;
+        r.provider = Some("openai".into());
+        r.api = Api::Responses;
+        r.time = 1_000;
+        let mut part = r.parts[0].clone();
+        part.model = Some("gpt-6.2-sol".into());
+        part.tier = Some("default".into());
+        part.speed = None;
+        part.geo = None;
+        part.usage = usage;
+        let standard = crate::prices::price_part(&catalog, &r, &part)
+            .total_usd
+            .unwrap()
+            .to_f64();
+        part.tier = Some("ultrafast".into());
+        r.parts = vec![part];
+        let s = scan(control(Some("ultrafast"), true), vec![r]);
+        let after = 1_803_888_000_000 + DAY_MS;
+        let result = &speed_checks(&SpeedInput {
+            scan: &s,
+            catalog: &catalog,
+            since: None,
+            now: after,
+        })[0];
+        assert!(close(
+            result.observed.premium.total_usd.unwrap().to_f64(),
+            standard * 2.0
+        ));
+        assert!(close(
+            result.current_estimate.premium.total_usd.unwrap().to_f64(),
+            standard * 5.0
+        ));
     }
 
     #[test]

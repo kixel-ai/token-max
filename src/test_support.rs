@@ -676,3 +676,27 @@ pub fn opencode_database(home: &Path) -> PathBuf {
     .unwrap();
     file
 }
+
+/// The synthetic prices plus GPT-6.2 Sol and Astra, which the fixture predates.
+pub fn prices_with_gpt_6_2() -> Catalog {
+    let mut catalog: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(fixture_path("prices.json")).unwrap())
+            .unwrap();
+    for (model, input, output) in [("gpt-6.2-sol", 2, 10), ("gpt-6.2-astra", 8, 40)] {
+        catalog["openai"]["models"][model] = serde_json::json!({
+            "family": "gpt",
+            "release_date": "2026-11-20",
+            "tool_call": true,
+            "modalities": {"output": ["text"]},
+            "cost": {
+                "input": input, "output": output, "cache_read": 0.1, "cache_write": 2.5,
+                "tiers": [{"tier": {"type": "context", "size": 272000},
+                    "input": input * 2, "output": output * 3 / 2, "cache_read": 0.2, "cache_write": 5}],
+            },
+        });
+    }
+    let Ok(catalog) = crate::prices::parse_catalog(catalog.to_string().as_bytes()) else {
+        panic!("the catalog parses");
+    };
+    catalog
+}

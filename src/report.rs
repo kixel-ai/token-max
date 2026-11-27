@@ -9210,12 +9210,12 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
     if report.context.is_empty() {
         return;
     }
-    let since = report
-        .scan
+    // The rate each piece's row projects its saving at, as `piece_saving` does.
+    let spend = &out.spend;
+    let scale = spend
         .since
-        .or(report.scan.requests.first().map(|r| r.time));
-    let until = generated_at(report);
-    let span = since.map(|since| ((until - since) as f64).max(DAY));
+        .filter(|&since| spend.until > since)
+        .map(|_| monthly(1.0, spend.since, Some(spend.until)));
     let many = report.scan.profiles.len() > 1;
     out.section("What each piece of context costs");
     out.line(
@@ -9249,8 +9249,7 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
             Some(Estimate { usd, margin }) => format!(
                 "{}{}{}",
                 approx(usd, margin, ""),
-                span.map_or_else(String::new, |span| {
-                    let scale = 30.0 * DAY / span;
+                scale.map_or_else(String::new, |scale| {
                     match margin {
                         None => format!(" (about {} per 30 days)", about(usd * scale)),
                         Some(m) => format!(
@@ -15319,6 +15318,12 @@ pub(crate) mod tests {
         let details = text(&report, Some(200), true);
         assert!(details.contains("\n  1 change recommended.\n"), "{details}");
         assert!(!details.contains("No applicable"));
+        // The piece's 30-day figure is the rate its row's saving projects, even from an hour.
+        assert!(
+            details.contains("$1 (about $720 per 30 days)")
+                && details.contains("$5 (about $3,600 per 30 days)"),
+            "{details}"
+        );
     }
 
     #[test]

@@ -28,6 +28,7 @@ use crate::prices::{
     Catalog, PRICE_SOURCES, Pairs, Sum, add_costs, price_components, price_part, server_cost,
     unknown_cost, zero_cost,
 };
+use crate::report::monthly;
 use crate::scenarios::{ReplayOptions, ReplayTtls, replay_parts};
 use crate::version::Needs;
 
@@ -1876,7 +1877,7 @@ impl<'a> Profiled<'a> {
             coverage,
             monthly_delta: delta
                 .filter(|_| elapsed > 0)
-                .map(|d| d.scale(30.0 * 86_400_000.0 / elapsed as f64)),
+                .map(|d| d.scale(monthly(1.0, Some(self.since), Some(self.now)))),
             context_sizes: sizes.into_iter().collect(),
             activation_cohorts,
             sensitivity: IdleSensitivity {
@@ -2480,7 +2481,7 @@ pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleChec
                 }.into(),
                 baseline: format!("{}; onReturn assumes accepting the offered summary, beforeCacheExpires assumes the server remains running until its observed-expiry timer fires",instance.idle_mode.as_str()),
                 requests: requests.iter().filter(|r|since.is_none_or(|s|r.time>=s)).count() as u64, coverage: best.map(|s| s.coverage),
-                savings_usd: savings.filter(|_|applicable), margin, monthly_savings_usd: savings.filter(|_|applicable).zip(since).filter(|(_,s)| options.now>*s).map(|(v,s)|v*30.0*86_400_000.0/(options.now-s) as f64), break_even: None,
+                savings_usd: savings.filter(|_|applicable), margin, monthly_savings_usd: savings.filter(|_|applicable).zip(since).filter(|(_,s)| options.now>*s).map(|(v,s)| monthly(v, Some(s), Some(options.now))), break_even: None,
                 assumptions: vec!["T3 beforeCacheExpires uses observed promptCacheExpiresAt minus two minutes, at least 200000 tokens, a completed listed main thread, no pending/background work, and the active Claude session, rebuilt from T3's event log at each completed-run event and when the timer fires; 5m and 1h caches both apply".into(), "T3 keeps about one day of its event log, so the window starts where it becomes complete; gaps that open earlier stay as recorded in every mode".into(), "onReturn is conditional on the SDK offering its resume dialog when a new run resumes a cold session of at least 200000 tokens, and on user acceptance; off also suppresses that dialog".into(), "Proactive timers live in memory and disappear on restart; configured mode alone does not prove summary generation. Final eligible periods pay for a summary with no resumed-prefix benefit".into(), "Summary output and the full resumed prefix use the existing compatible native compaction calibration; absent calibration and lifecycle evidence leave a session unpriced, and each mode is extrapolated over such sessions from the priced ones some mode could act on, assuming they resemble each other; sessions no mode acts on count exactly".into()],
                 uncertainty: instance.limitations.iter().chain(&unresolved_windows).cloned().collect(), sources: vec![crate::t3::SOURCE.into()],
                 upgrade: None,

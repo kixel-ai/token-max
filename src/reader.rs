@@ -1355,27 +1355,32 @@ impl Reader {
         snapshots: &mut Vec<Snapshot>,
         report: Option<bool>,
     ) -> Result<(), ScanError> {
-        // Each root's transcripts, the GEMINI_HOME its first profile was selected under, and
-        // the profiles that read it.
-        let mut roots: IndexMap<&str, (&[String], &str, Vec<String>)> = IndexMap::default();
+        // Each root's transcripts, every GEMINI_HOME a path its profiles were selected by sits
+        // in, and the profiles that read it.
+        type Root<'a> = (&'a [String], IndexSet<String>, Vec<String>);
+        let mut roots: IndexMap<&str, Root<'_>> = IndexMap::default();
         for p in profiles
             .iter()
             .filter(|p| p.harness == Harness::Antigravity)
         {
-            let selected = p.aliases.first().unwrap_or(&p.root);
-            roots
+            let entry = roots
                 .entry(&p.root)
-                .or_insert_with(|| (&p.histories, crate::discovery::dirname(selected), vec![]))
-                .2
-                .push(p.id.clone());
+                .or_insert_with(|| (&p.histories, IndexSet::default(), vec![]));
+            let homes = p
+                .aliases
+                .iter()
+                .map(|a| crate::discovery::dirname(a).to_string());
+            entry.1.extend(homes);
+            entry.2.push(p.id.clone());
         }
-        for (root, (files, home, ids)) in roots {
+        for (root, (files, homes, ids)) in roots {
+            let homes: Vec<String> = homes.into_iter().collect();
             let history = crate::antigravity::read(root, files, &ids)?;
             // Only a report lists the features; a session export reads no settings.
             if let Some(defaults) = report {
                 let at = crate::antigravity::Inventory {
                     root,
-                    home,
+                    homes: &homes,
                     profiles: &ids,
                     since: self.since,
                     defaults,

@@ -631,8 +631,9 @@ pub struct Feature {
 pub(crate) struct Inventory<'a> {
     /// The root, as its profiles read it.
     pub root: &'a str,
-    /// `GEMINI_HOME`: the selected root's parent, before any symlink to the root is resolved.
-    pub home: &'a str,
+    /// Each `GEMINI_HOME` the root was selected under: the parent of each path that names it,
+    /// before any symlink is resolved.
+    pub homes: &'a [String],
     pub profiles: &'a [String],
     /// Count only uses from here on.
     pub since: Option<Millis>,
@@ -702,7 +703,7 @@ fn is_file(path: &str) -> Result<bool, ScanError> {
 /// The enabled plugins' directories: those in the config's `plugins` and the root's built-in
 /// ones, each on unless `config.json` turns it off, or, with no entry there, its own
 /// `plugin.json` does. `--defaults` reads no `config.json`.
-fn plugins(home: &str, root: &str, defaults: bool) -> Result<Vec<String>, ScanError> {
+fn plugins(home: &str, root: &str, defaults: bool) -> Result<IndexSet<String>, ScanError> {
     // `config.json` holds credentials too; only `plugins` is kept.
     let choices = match defaults {
         true => Map::new(),
@@ -711,7 +712,7 @@ fn plugins(home: &str, root: &str, defaults: bool) -> Result<Vec<String>, ScanEr
             _ => Map::new(),
         },
     };
-    let mut enabled = vec![];
+    let mut enabled = IndexSet::default();
     for parent in [
         join(&[home, "config", "plugins"]),
         join(&[root, "builtin", "plugins"]),
@@ -731,7 +732,7 @@ fn plugins(home: &str, root: &str, defaults: bool) -> Result<Vec<String>, ScanEr
                 None => config(&manifest)?.get("disabled").and_then(Value::as_bool) != Some(true),
             };
             if on {
-                enabled.push(dir);
+                enabled.insert(dir);
             }
         }
     }
@@ -809,16 +810,21 @@ fn server_of<'a>(
 pub(crate) fn features(at: &Inventory<'_>, history: &History) -> Result<Vec<Feature>, ScanError> {
     let Inventory {
         root,
-        home,
+        homes,
         profiles,
         since,
         defaults,
     } = *at;
     let windowed = |time: Millis| since.is_none_or(|since| time >= since);
-    let plugins = plugins(home, root, defaults)?;
+    let mut plugins: IndexSet<String> = IndexSet::default();
+    for home in homes {
+        plugins.extend(self::plugins(home, root, defaults)?);
+    }
 
     let mut servers: IndexMap<String, IndexSet<String>> = IndexMap::default();
-    servers_in(&join(&[home, "config", "mcp_config.json"]), &mut servers)?;
+    for home in homes {
+        servers_in(&join(&[home, "config", "mcp_config.json"]), &mut servers)?;
+    }
     for plugin in &plugins {
         servers_in(&join(&[plugin, "mcp_config.json"]), &mut servers)?;
     }
@@ -834,13 +840,11 @@ pub(crate) fn features(at: &Inventory<'_>, history: &History) -> Result<Vec<Feat
     }
 
     let mut skills: IndexMap<String, IndexSet<String>> = IndexMap::default();
-    for dir in [
-        join(&[home, "config", "skills"]),
-        join(&[home, CLI, "skills"]),
-        join(&[root, "builtin", "skills"]),
-    ] {
-        skills_in(&dir, &mut skills)?;
+    for home in homes {
+        skills_in(&join(&[home, "config", "skills"]), &mut skills)?;
+        skills_in(&join(&[home, CLI, "skills"]), &mut skills)?;
     }
+    skills_in(&join(&[root, "builtin", "skills"]), &mut skills)?;
     for plugin in &plugins {
         skills_in(&join(&[plugin, "skills"]), &mut skills)?;
     }
@@ -861,10 +865,17 @@ pub(crate) fn features(at: &Inventory<'_>, history: &History) -> Result<Vec<Feat
         entry.0 += 1;
         entry.1 = entry.1.max(time);
     };
-    let files: HashMap<&str, &str> = skills
-        .iter()
-        .flat_map(|(name, files)| files.iter().map(move |f| (f.as_str(), name.as_str())))
-        .collect();
+    // Each skill's file by its path as found and as resolved, since a transcript may name it
+    // through a symlink or its target.
+    let mut files: HashMap<String, &str> = HashMap::default();
+    for (name, found) in &skills {
+        for file in found {
+            files.insert(file.clone(), name);
+            if let Ok(real) = crate::discovery::realpath(file) {
+                files.insert(real, name);
+            }
+        }
+    }
     // A project skill read from a workspace that no longer exists is still its skill.
     let mut read: Vec<(String, String)> = vec![];
     for call in history.calls.iter().filter(|c| windowed(c.time)) {
@@ -874,8 +885,12 @@ pub(crate) fn features(at: &Inventory<'_>, history: &History) -> Result<Vec<Feat
         let Some(path) = call.skill.as_deref() else {
             continue;
         };
-        let name = match files.get(path) {
-            Some(name) => *name,
+        let known = files.get(path).copied().or_else(|| {
+            let real = crate::discovery::realpath(path).ok()?;
+            files.get(&real).copied()
+        });
+        let name = match known {
+            Some(name) => name,
             None => match project_skill(path) {
                 Some(name) => {
                     read.push((name.into(), path.into()));
@@ -899,7 +914,10 @@ pub(crate) fn features(at: &Inventory<'_>, history: &History) -> Result<Vec<Feat
         .collect();
     let mut rules: IndexMap<String, IndexSet<&str>> = IndexMap::default();
     let mut global = vec![];
-    for dir in std::iter::once(home.to_string()).chain(plugins.iter().map(|p| join(&[p, "rules"])))
+    for dir in homes
+        .iter()
+        .cloned()
+        .chain(plugins.iter().map(|p| join(&[p, "rules"])))
     {
         for name in RULES {
             let file = join(&[&dir, name]);
@@ -1299,7 +1317,7 @@ mod tests {
         let found = |since, defaults| {
             let at = Inventory {
                 root: &root,
-                home: &home,
+                homes: std::slice::from_ref(&home),
                 profiles: &ids,
                 since,
                 defaults,
@@ -1372,6 +1390,56 @@ mod tests {
         assert_eq!(scan.exposure.antigravity.len(), all.len());
     }
 
+    /// A root selected through a symlink reads the settings of the home it was selected in,
+    /// and a skill read by its resolved path is still the skill its home lists.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_root_reads_the_home_it_was_selected_in() {
+        use serde_json::json;
+        let w = crate::test_support::Workspace::new();
+        let (root, _, _) = customized(&w);
+        let linked = w.home.join("linked");
+        std::fs::create_dir_all(linked.join("config")).unwrap();
+        std::fs::write(
+            linked.join("config/mcp_config.json"),
+            r#"{"mcpServers": {"linked": {}}}"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&root, linked.join(CLI)).unwrap();
+        let real = w.home.join("real-skills");
+        std::fs::create_dir_all(real.join("x")).unwrap();
+        std::fs::write(real.join("x/SKILL.md"), "x").unwrap();
+        std::os::unix::fs::symlink(&real, linked.join("config/skills")).unwrap();
+        let step = json!({"type": "PLANNER_RESPONSE", "created_at": "2026-01-04T00:00:00Z",
+            "model": "gemini-4-neon-high", "input_tokens": 10, "cache_read_tokens": 0,
+            "output_tokens": 1, "tool_calls": [{"name": "read_file", "args": {
+                "Path": json!(real.join("x/SKILL.md")).to_string()}}]});
+        let file = join(&[
+            &root,
+            "brain",
+            "tools-id",
+            ".system_generated",
+            "logs",
+            "transcript.jsonl",
+        ]);
+        let text = std::fs::read_to_string(&file).unwrap();
+        std::fs::write(&file, format!("{text}{step}\n")).unwrap();
+        let mut options = w.scan_options();
+        options.discovery.antigravity_dirs = vec![linked.join(CLI).to_string_lossy().into_owned()];
+        let scan = crate::reader::scan(&options).unwrap();
+        let uses = |kind, name: &str| {
+            scan.exposure
+                .antigravity
+                .iter()
+                .find(|f| f.kind == kind && f.name == name)
+                .map(|f| f.uses)
+        };
+        assert_eq!(uses(ContextKind::McpServer, "linked"), Some(0));
+        // `~/.gemini`'s config is not the home this root was selected in.
+        assert_eq!(uses(ContextKind::McpServer, "docs"), None);
+        assert_eq!(uses(ContextKind::Skill, "x"), Some(1));
+    }
+
     #[test]
     fn a_malformed_config_fails_loud_and_a_blank_one_declares_nothing() {
         let w = crate::test_support::Workspace::new();
@@ -1381,7 +1449,7 @@ mod tests {
         let history = History::default();
         let at = Inventory {
             root: &root,
-            home: &home,
+            homes: std::slice::from_ref(&home),
             profiles: &[],
             since: None,
             defaults: false,

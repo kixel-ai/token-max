@@ -532,8 +532,9 @@ its repository's root; a rule file's uses are the window's conversations whose
 workspace it applies to now, with no date, since the file's history is not kept. A plugin is enabled unless `plugins.<dir>.enabled` in
 `config/config.json` turns it off or, with no entry there, its `plugin.json`
 ships it `disabled`; `--defaults` reads no `config.json`. `GEMINI_HOME` here is
-the parent of the directory selected, before any symlink to it is resolved,
-and the `sessions` export reads none of these files. Its cache lifetime and compaction are not
+the parent of each path the directory was selected by, before any symlink to it
+is resolved, and a skill read through either spelling of its path counts. The
+`sessions` export reads none of these files. Its cache lifetime and compaction are not
 replayed, so its spend counts in the report's totals but gets no cache TTL,
 compaction, keepalive or effort line. See
 [Replay semantics](semantics.md#antigravity) for what each piece assumes.

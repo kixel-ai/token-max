@@ -3186,32 +3186,20 @@ fn run_tui(walk: Walk) -> Result<(), ScanError> {
                     has_work.push(false);
                     continue;
                 }
-                change_count += host_events
-                    .iter()
-                    .filter(|e| {
-                        matches!(
-                            e,
-                            crate::doctor::Event::Choose { yes: true, .. }
-                                | crate::doctor::Event::Cleanup { .. }
-                        )
-                    })
-                    .count();
                 let shown = match &mut host.side {
                     Side::Here { owner, .. } => {
                         let plan = owner.plan(host_events)?;
                         let shown = preview(&plan, &host.style);
-                        if !shown.is_empty() {
-                            file_count += 1;
-                        }
+                        file_count += plan.file_count();
+                        change_count += plan.change_count();
                         plans.push(Some(plan));
                         shown
                     }
                     Side::There { remote, .. } => {
-                        let shown = remote.review(host_events)?;
-                        let safe = crate::safe::remote_text(&shown, self.style.color);
-                        if !safe.is_empty() {
-                            file_count += 1;
-                        }
+                        let reviewed = remote.review(host_events)?;
+                        let safe = crate::safe::remote_text(&reviewed.preview, self.style.color);
+                        file_count += reviewed.files;
+                        change_count += reviewed.changes;
                         plans.push(None);
                         safe
                     }
@@ -3228,7 +3216,7 @@ fn run_tui(walk: Walk) -> Result<(), ScanError> {
             self.measured_work = has_work;
             Ok(DiffPreview {
                 text,
-                file_count: file_count.max(1),
+                file_count,
                 change_count,
                 backups: vec![],
             })
@@ -3252,17 +3240,12 @@ fn run_tui(walk: Walk) -> Result<(), ScanError> {
                     has_work.push(false);
                     continue;
                 }
-                change_count += host_events
-                    .iter()
-                    .filter(|e| matches!(e, crate::doctor::Event::Choose { yes: true, .. }))
-                    .count();
                 let shown = if let Some(owner) = self.vibes_owners.get(idx).and_then(Option::as_ref)
                 {
                     let plan = owner.plan(host_events)?;
                     let shown = preview(&plan, &host.style);
-                    if !shown.is_empty() {
-                        file_count += 1;
-                    }
+                    file_count += plan.file_count();
+                    change_count += plan.change_count();
                     plans.push(Some(plan));
                     shown
                 } else {
@@ -3270,18 +3253,17 @@ fn run_tui(walk: Walk) -> Result<(), ScanError> {
                         Side::Here { owner, .. } => {
                             let plan = owner.plan(host_events)?;
                             let shown = preview(&plan, &host.style);
-                            if !shown.is_empty() {
-                                file_count += 1;
-                            }
+                            file_count += plan.file_count();
+                            change_count += plan.change_count();
                             plans.push(Some(plan));
                             shown
                         }
                         Side::There { remote, .. } => {
-                            let shown = remote.review(host_events)?;
-                            let safe = crate::safe::remote_text(&shown, self.style.color);
-                            if !safe.is_empty() {
-                                file_count += 1;
-                            }
+                            let reviewed = remote.review(host_events)?;
+                            let safe =
+                                crate::safe::remote_text(&reviewed.preview, self.style.color);
+                            file_count += reviewed.files;
+                            change_count += reviewed.changes;
                             plans.push(None);
                             safe
                         }
@@ -3299,7 +3281,7 @@ fn run_tui(walk: Walk) -> Result<(), ScanError> {
             self.vibes_work = has_work;
             Ok(DiffPreview {
                 text,
-                file_count: file_count.max(1),
+                file_count,
                 change_count,
                 backups: vec![],
             })
@@ -3627,7 +3609,7 @@ fn settle(
                 shown
             }
             Side::There { remote, offers } => {
-                let shown = remote.review(selection.events())?;
+                let shown = remote.review(selection.events())?.preview;
                 let label = host.label.clone();
                 let theirs = selection.choices(offers);
                 choices.extend(theirs.into_iter().map(|(o, c)| (label.clone(), o, c)));

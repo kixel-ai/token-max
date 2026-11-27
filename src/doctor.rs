@@ -2426,6 +2426,16 @@ impl Plan {
         &self.choices
     }
 
+    /// How many files the plan writes.
+    pub fn file_count(&self) -> usize {
+        self.files.len()
+    }
+
+    /// How many settings the plan sets and entries it removes, as the write counts them.
+    pub fn change_count(&self) -> usize {
+        self.files.iter().map(Pending::changes).sum()
+    }
+
     /// The lines whose changes the plan writes.
     pub fn accepted(&self) -> Vec<Origin> {
         self.choices
@@ -5486,6 +5496,12 @@ mod tests {
                 vec!["remove [mcp_servers.off]".into()],
             ]
         );
+        // The plan writes the settings file the block lands in and the state file the removal
+        // edits: two files, though the walk's answers are one yes and one removal.
+        let plan = owner.plan(selection.events()).unwrap();
+        assert_eq!(plan.file_count(), 2);
+        // Its changes are the setting A's yes sets and the entry removed.
+        assert_eq!(plan.change_count(), 2);
         // The accepted change's step by hand and the cleanup's are left; the declined B's is
         // moot.
         let steps: Vec<(String, String)> = selection

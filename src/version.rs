@@ -98,6 +98,15 @@ impl Needs {
         }
     }
 
+    /// OpenCode 2.`minor`.`patch`.
+    pub const fn opencode(minor: u64, patch: u64) -> Self {
+        Needs {
+            harness: Harness::OpenCode,
+            minor,
+            patch,
+        }
+    }
+
     fn major(self) -> u64 {
         match self.harness {
             Harness::Claude => 2,
@@ -105,6 +114,11 @@ impl Needs {
             Harness::OpenCode => 2,
             Harness::Antigravity => unreachable!("no check needs an Antigravity version"),
         }
+    }
+
+    /// The version alone, such as "2.1.242".
+    pub fn number(self) -> String {
+        format!("{}.{}.{}", self.major(), self.minor, self.patch)
     }
 
     /// Whether `version` is a plain version at least this one; a missing or malformed one is not.
@@ -180,14 +194,7 @@ impl Needs {
 
 impl fmt::Display for Needs {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} {}.{}.{}",
-            self.harness.product(),
-            self.major(),
-            self.minor,
-            self.patch
-        )
+        write!(f, "{} {}", self.harness.product(), self.number())
     }
 }
 

@@ -839,7 +839,8 @@ threshold 0.156.0. When the version is the only thing
 holding a verdict back, its line keeps its unknown mark and exit code, and the
 line under it says which version the setting needs, which version the latest
 session ran, and to upgrade. `vibes`' window cap and
-subagent default cards and a step by hand to block an MCP server say so too. token-max never upgrades a
+subagent default cards and a step by hand to block an MCP server say so too,
+as does its OpenCode upgrade card for OpenCode 2.3.2 on gpt-6.2. token-max never upgrades a
 harness itself. A version the session didn't record, or one that isn't plain
 digits, still holds the setting back but advises no upgrade and names no
 command, since that release may already meet it: a `doctor` line then gets no
@@ -1900,6 +1901,7 @@ an exit code.
 | [Advisor model](#advisor-model) | Every Claude settings file: with no `advisorModel`, the advisor one rank above the main-session default, citing Claude Code's [advisor page](https://code.claude.com/docs/en/advisor). |
 | [Auto memory](#auto-memory-in-vibes) | Every auto memory or Codex memories line: off is advised when most main sessions ran in a repository with a CLAUDE.md or AGENTS.md. |
 | [Code intelligence](#code-intelligence) | Claude sessions read or edited files of a typed language whose official language server plugin a new session wouldn't load: Anthropic's [costs page](https://code.claude.com/docs/en/costs#install-code-intelligence-plugins-for-typed-languages). |
+| OpenCode upgrade | An OpenCode profile whose latest session, by the creation time OpenCode recorded, was created by a version before 2.3.2 and sent a request to gpt-6.2-sol or gpt-6.2-astra, which never cache a Responses request's top-level instructions but do cache a leading developer message ([openai/codex#62312](https://github.com/openai/codex/issues/62312)); a [user's report](https://x.com/TekonBurns/status/2123525121168314876) says 2.3.2 moved OpenCode's system prompt there. A resumed older session is not the latest, since a session records the version that created it. It names the version alone, as for Codex, prices nothing, and a version that isn't plain digits gets no card. |
 | [Token audit skill](#token-audit-skill) | Every Claude Code and Codex profile: the `token-audit` skill's install step for the profiles whose harness doesn't find it, and quiet when all do. |
 
 The effort, instruction-file, subagent, Fable and advisor lines stay in `doctor`, where

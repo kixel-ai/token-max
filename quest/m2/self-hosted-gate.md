@@ -22,9 +22,9 @@ entries timed out, which is what this standard prevents. Its other kixel-ai
 repositories each run their gate on a runner group of their own, such as
 `quest-queue` on `nixos-quest-ci`.
 
-- Linux jobs move to a `token-max` runner group on a NixOS CI host, labelled
-  like the others (`token-max-queue`). `Source` already runs in the Nix dev
-  shell, so the host needs only Nix.
+- Linux jobs move to a `token-max-queue` runner group, named like the
+  others, on a NixOS CI host, its runners labelled `linux`. `Source` already
+  runs in the Nix dev shell, so the host needs only Nix.
 - The Windows tests move to a self-hosted Windows host in the same
   `token-max-queue` group, labelled `windows` so `runs-on` picks it apart
   from the Linux runners. Each job gets a fresh worker, such as a VM

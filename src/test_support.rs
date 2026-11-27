@@ -90,6 +90,7 @@ pub fn make_request() -> Request {
             harness: Harness::Claude,
             session: "session".into(),
             agent: Agent::Main,
+            mode: None,
             model: Some("claude-opus-5-5".into()),
             provider: Some("anthropic".into()),
             api: Api::Messages,
@@ -181,6 +182,8 @@ impl Workspace {
                 env: Env::default(),
                 claude_dirs: vec![],
                 codex_dirs: vec![],
+                opencode_dirs: vec![],
+                opencode: true,
                 t3_dirs: vec![],
                 managed_settings_file: text(self.managed_settings_file()),
                 codex_system_config_file: text(self.home.join("system.toml")),
@@ -527,4 +530,149 @@ pub fn report_line(text: &str, head: &str) -> ReportLine {
         .find(|r| r.head.starts_with(head))
         .cloned()
         .unwrap_or_else(|| panic!("no line starts with {head:?} in {rows:#?}"))
+}
+
+/// When the synthetic OpenCode history starts: 2026-01-01T00:00:00Z.
+pub const OPENCODE_START: Millis = 1_767_225_600_000;
+
+/// A synthetic OpenCode 2 database at OpenCode's default data directory under `home`: a main
+/// session `ses_main` in `/work/repo` with two priced steps, a running step with no usage
+/// and a user message, the `explore` subagent `ses_sub` it started, and `ses_main`'s
+/// recorded instructions, two listed skills and T3's Code Mode server. The first step loads
+/// the skill `used-skill`; the second's script calls the T3 server's `thread_list`.
+pub fn opencode_database(home: &Path) -> PathBuf {
+    use serde_json::json;
+    let dir = home.join(".local/share/opencode");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("opencode.db");
+    let db = rusqlite::Connection::open(&file).unwrap();
+    db.execute_batch(
+        "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL,
+           version TEXT NOT NULL, time_created INTEGER NOT NULL);
+         CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+           type TEXT NOT NULL, seq INTEGER NOT NULL, time_created INTEGER NOT NULL,
+           data TEXT NOT NULL);
+         CREATE TABLE instruction_state (session_id TEXT PRIMARY KEY, current_values TEXT NOT NULL);
+         CREATE TABLE instruction_blob (hash TEXT PRIMARY KEY, value TEXT);",
+    )
+    .unwrap();
+    let t = OPENCODE_START;
+    for (id, parent, time) in [
+        ("ses_main", None, t),
+        ("ses_sub", Some("ses_main"), t + 5_000),
+    ] {
+        db.execute(
+            "INSERT INTO session_v2 VALUES (?1, ?2, '/work/repo', '2.2.0', ?3)",
+            rusqlite::params![id, parent, time],
+        )
+        .unwrap();
+    }
+    let step =
+        |agent: &str, time: Millis, tokens: serde_json::Value, content: serde_json::Value| {
+            json!({
+                "model": {"id": "zen-flash", "providerID": "opencode", "variant": "high"},
+                "agent": agent,
+                "time": {"created": time, "completed": time + 500},
+                "tokens": tokens,
+                "content": content,
+            })
+        };
+    let messages = [
+        (
+            "msg_user",
+            "ses_main",
+            "user",
+            0,
+            json!({"text": "SYNTHETIC_PROMPT"}),
+        ),
+        (
+            "msg_1",
+            "ses_main",
+            "assistant",
+            1,
+            step(
+                "build",
+                t + 1_000,
+                json!({"input": 1000, "output": 100, "reasoning": 50, "cache": {"read": 0, "write": 2000}}),
+                json!([{"type": "tool", "id": "call_1", "name": "skill",
+                        "state": {"status": "completed", "input": {"id": "used-skill"}}}]),
+            ),
+        ),
+        (
+            "msg_2",
+            "ses_main",
+            "assistant",
+            2,
+            step(
+                "build",
+                t + 2_000,
+                json!({"input": 100, "output": 10, "reasoning": 0, "cache": {"read": 3000, "write": 0}}),
+                json!([{"type": "tool", "id": "call_2", "name": "execute",
+                "state": {"status": "completed", "metadata": {"toolCalls": [
+                    {"tool": "t3-code-0123456789abcdef.thread_list", "status": "completed"}
+                ]}}}]),
+            ),
+        ),
+        // Still running, so OpenCode has recorded no usage for it yet.
+        (
+            "msg_3",
+            "ses_main",
+            "assistant",
+            3,
+            json!({"agent": "build"}),
+        ),
+        (
+            "msg_4",
+            "ses_sub",
+            "assistant",
+            1,
+            step(
+                "explore",
+                t + 6_000,
+                json!({"input": 500, "output": 20, "reasoning": 0, "cache": {"read": 0, "write": 0}}),
+                json!([]),
+            ),
+        ),
+    ];
+    for (id, session, kind, seq, data) in messages {
+        db.execute(
+            "INSERT INTO session_message VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![id, session, kind, seq, t, data.to_string()],
+        )
+        .unwrap();
+    }
+    let blobs = [
+        (
+            "h1",
+            json!([{"path": "/work/repo/AGENTS.md", "content": "Be brief.\n"}]),
+        ),
+        (
+            "h2",
+            json!([
+                {"id": "used-skill", "name": "used", "description": "Used."},
+                {"id": "idle-skill", "name": "idle", "description": "Never used."}
+            ]),
+        ),
+        (
+            "h3",
+            json!({"namespaces": [{"name": "t3-code-0123456789abcdef", "description": "T3",
+                "entries": [{"line": "- thread_list", "path": "t3-code.thread_list"}],
+                "count": 1}], "shown": 1, "total": 1}),
+        ),
+    ];
+    for (hash, value) in blobs {
+        db.execute(
+            "INSERT INTO instruction_blob VALUES (?1, ?2)",
+            rusqlite::params![hash, value.to_string()],
+        )
+        .unwrap();
+    }
+    let state =
+        json!({"core/instructions": "h1", "core/skill-guidance": "h2", "core/codemode": "h3"});
+    db.execute(
+        "INSERT INTO instruction_state VALUES ('ses_main', ?1)",
+        [state.to_string()],
+    )
+    .unwrap();
+    file
 }

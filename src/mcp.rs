@@ -89,6 +89,7 @@ impl Entry {
                 let key = toml_edit::Key::new(self.server.as_str());
                 format!("[mcp_servers.{}]", key.display_repr())
             }
+            (Harness::OpenCode, path) => path.join("."),
         }
     }
 

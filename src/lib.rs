@@ -28,6 +28,7 @@ mod lsp;
 mod mcp;
 mod memory;
 mod model;
+mod opencode;
 mod prices;
 mod reader;
 mod replay;

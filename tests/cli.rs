@@ -247,6 +247,8 @@ fn analysis(
         env: Env::default(),
         claude_dirs: vec![],
         codex_dirs: vec![],
+        opencode_dirs: vec![],
+        opencode: true,
         t3_dirs: vec![],
         managed_settings_file: native_path(w.home.join("managed-settings.json")),
         codex_system_config_file: native_path(w.home.join("system.toml")),
@@ -1077,6 +1079,59 @@ fn sessions_prints_one_json_line_per_session_and_only_takes_its_options() {
     assert!(help.contains("\n  sessions "), "{help}");
 }
 
+/// `--opencode-dir` selects an OpenCode data directory alone, whose database it reads
+/// without writing, and exports each session once.
+#[test]
+fn sessions_exports_an_opencode_database_the_directory_flag_selects() {
+    let w = Workspace::new();
+    let dir = w.home.join("opencode-data");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("opencode.db");
+    let db = rusqlite::Connection::open(&file).unwrap();
+    db.execute_batch(
+        "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL,
+           version TEXT NOT NULL, time_created INTEGER NOT NULL);
+         CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+           type TEXT NOT NULL, seq INTEGER NOT NULL, time_created INTEGER NOT NULL,
+           data TEXT NOT NULL);
+         INSERT INTO session_v2 VALUES ('ses_one', NULL, '/work', '2.2.0', 1767225600000);",
+    )
+    .unwrap();
+    let step = json!({
+        "model": {"id": "zen-flash", "providerID": "opencode"},
+        "time": {"created": 1767225601000_i64, "completed": 1767225602000_i64},
+        "tokens": {"input": 1000, "output": 10, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+        "content": [{"type": "text", "text": "SYNTHETIC_PRIVATE"}],
+    });
+    db.execute(
+        "INSERT INTO session_message VALUES ('msg_one', 'ses_one', 'assistant', 1, 1, ?1)",
+        [step.to_string()],
+    )
+    .unwrap();
+    drop(db);
+    let before = std::fs::read(&file).unwrap();
+    // The Claude fixture is left out: a directory flag limits the run to what it selects.
+    w.fixture();
+    let prices = native_path(fixture("prices.json"));
+    let dir = native_path(&dir);
+    let args = ["sessions", "--opencode-dir", &dir, "--prices-file", &prices];
+    let (status, stdout, stderr) = run(&mut command(&w, &args));
+    assert_eq!((status, &*stderr), (0, ""));
+    assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
+    let lines: Vec<Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 1, "{stdout}");
+    assert_eq!(lines[0]["harness"], "opencode");
+    assert_eq!(lines[0]["session"], "ses_one");
+    assert_eq!(lines[0]["files"], json!([native_path(&file)]));
+    assert_eq!(lines[0]["complete"], true);
+    // 1,000 input and 10 output tokens at the fixture's $1 and $4 per million.
+    assert!((lines[0]["costUsd"].as_f64().unwrap() - 0.00104).abs() < 1e-12);
+    assert_eq!(std::fs::read(&file).unwrap(), before);
+}
+
 /// Floats print in shortest form: integers without a fraction, no `1.0`.
 #[test]
 fn session_numbers_print_like_javascript() {
@@ -1179,6 +1234,8 @@ fn explicit_windows_match_the_library_replay() {
                 env: Env::default(),
                 claude_dirs: vec![],
                 codex_dirs: vec![],
+                opencode_dirs: vec![],
+                opencode: true,
                 t3_dirs: vec![],
                 managed_settings_file: native_path(w.home.join("managed-settings.json")),
                 codex_system_config_file: native_path(w.home.join("system.toml")),

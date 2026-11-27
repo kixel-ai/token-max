@@ -413,6 +413,7 @@ fn prefix(harness: Harness, u: &Usage) -> Option<i64> {
     match harness {
         Harness::Codex => u.input,
         Harness::Claude => u.cached_prefix(),
+        Harness::OpenCode => unreachable!("OpenCode's compaction is not replayed"),
     }
 }
 
@@ -1102,6 +1103,7 @@ impl<'r, 'o> Simulator<'r, 'o> {
                 let lifetime = match req.harness {
                     Harness::Claude => ttl.map(ttl_milliseconds),
                     Harness::Codex => billed_writes.then_some(CODEX_CACHE_MILLISECONDS),
+                    Harness::OpenCode => unreachable!("OpenCode's compaction is not replayed"),
                 };
                 // A newly generated prefix cannot inherit the old transcript's external warming.
                 let warm = added.is_none()
@@ -1845,7 +1847,8 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
         }
     }
     let mut checks = Vec::new();
-    for group in crate::rows::groups(&scan.profiles, crate::rows::compaction_owner) {
+    let replayed = scan.profiles.iter().filter(|p| p.harness.replayed());
+    for group in crate::rows::groups(replayed, crate::rows::compaction_owner) {
         let profile = group.lead;
         let in_profile = |profiles: &[String]| group.covers(profiles);
         let mut requests: Vec<&Request> = scan
@@ -1988,6 +1991,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 match profile.harness {
                     Harness::Codex => None,
                     Harness::Claude => model.as_deref(),
+                    Harness::OpenCode => unreachable!("OpenCode's compaction is not replayed"),
                 },
             );
             groups
@@ -2997,6 +3001,7 @@ mod tests {
                     harness: e.harness,
                     session: e.session.clone(),
                     agent: Agent::Subagent,
+                    mode: None,
                     model: pricing.model.clone(),
                     provider: pricing.provider.clone(),
                     api: Api::Messages,
@@ -5524,6 +5529,8 @@ mod tests {
                     env: Env::default(),
                     claude_dirs: vec![],
                     codex_dirs: vec![],
+                    opencode_dirs: vec![],
+                    opencode: true,
                     t3_dirs: vec![],
                     managed_settings_file: text(&w.managed_settings_file()),
                     codex_system_config_file: text(&w.home.join("system.toml")),

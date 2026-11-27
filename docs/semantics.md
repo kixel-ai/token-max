@@ -1180,6 +1180,45 @@ Current primary guidance: [Claude fast mode](https://code.claude.com/docs/en/fas
 checked 2026-11-07. Synthetic metadata follows these schemas; no real session
 content is stored or tested.
 
+## OpenCode
+
+OpenCode keeps every session in one SQLite database, which the reader opens as
+T3's adapter opens `statev2.sqlite`: read-only, `query_only`,
+`trusted_schema=OFF`, in one read transaction, never copying a live WAL file.
+SQL extracts only counts, times, model and provider IDs, tool names and skill
+IDs from each step; prompt, reasoning, reply and tool text never leave
+SQLite. OpenCode 2's `session_message` assistant rows and OpenCode 1's `part`
+`step-finish` rows are each one request. A session OpenCode 2 imported into
+its own tables is read only from them, so a database both versions wrote
+counts each step once. A step without recorded usage, such as one still
+running or one that failed before its first token, is no request. OpenCode's
+input count leaves out cache reads and writes and its output count leaves out
+reasoning, so both are added back to match the other harnesses' usage.
+
+OpenCode keeps only each session's latest instructions, skill listing and Code
+Mode catalog (`instruction_state`), not what each request carried, so every
+request of a session is taken to have carried them, at the start of its
+messages, after the system prompt. They are sized at a quarter token per
+character, as Codex's are. The system prompt's length is not recorded, but it
+and those pieces fit in the session's smallest input, so a piece is priced only
+when every start that bound allows pays one rate, and is otherwise unpriced
+and extrapolated over. A session OpenCode 1 wrote, or one OpenCode 2 recorded no
+instruction state for, prices no pieces; its requests still count. A Code
+Mode namespace is OpenCode's own when it is `browser` or `opencode`, and gets a
+tool line with no switch; any other is an MCP server's, with T3 Code's
+`t3-code-` and an ID named `t3-code`. A direct tool named `<server>_<tool>`
+is credited to the one switched-on server, global or from the session's own
+project, whose name it starts with; a project's declaration replaces a global
+one of the same name, and a name two such servers could own credits neither. A session whose database rows OpenCode 2
+has only partly migrated is read from both session tables, OpenCode 2's row
+winning for a session in both.
+
+OpenCode's cache lifetime, compaction and keepalive behavior are not
+replayed, and its requests are left out of the transcript audit, so none of
+those checks makes a claim about an OpenCode profile. Its spend still counts
+in every total, and its skills, MCP servers and instruction files get their
+measured lines.
+
 ## SSH hosts
 
 `--ssh HOST` runs `ssh -T -x -a` in batch mode, without forwarding, local

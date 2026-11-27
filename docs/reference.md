@@ -402,11 +402,13 @@ cuts nothing short, so the run reports what it wrote and exits 0.
 ## Profiles
 
 Without directory flags, discovery includes `~/.claude`, `~/.codex`,
-`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and recognizable `~/.claude*` and `~/.codex*`
-profiles. Codex includes archived sessions; Claude includes nested subagents.
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, recognizable `~/.claude*` and `~/.codex*`
+profiles, and [OpenCode](#opencode)'s data directory. Codex includes archived
+sessions; Claude includes nested subagents.
 T3 instances are included from `~/.t3/userdata`, an existing `~/.t3/dev`,
-and `$T3CODE_HOME/userdata`. Repeatable `--claude-dir`, `--codex-dir` and
-`--t3-dir` flags select only those roots across both harnesses. `--t3-dir`
+and `$T3CODE_HOME/userdata`. Repeatable `--claude-dir`, `--codex-dir`,
+`--opencode-dir` and `--t3-dir` flags select only those roots across every
+harness. `--t3-dir`
 takes a state directory containing `settings.json` and optionally `statev2.sqlite`. `--details` shows every discovered root's selection. A missing or
 inaccessible explicitly selected root fails the run. Missing default roots do not.
 
@@ -433,6 +435,57 @@ server's use counts on every line that shares a settings file with the
 profiles that recorded it, so no line offers to turn off what one of its
 files used.
 
+### OpenCode
+
+An OpenCode profile is a data directory, `$XDG_DATA_HOME/opencode` or
+`~/.local/share/opencode` on every platform, and its history is the
+`opencode.db` there, or the database `OPENCODE_DB` names when the shell's
+OpenCode uses that directory (`:memory:` keeps none). `--opencode-dir` takes
+such a directory. Its settings are
+the global `config.json`, `opencode.json` and `opencode.jsonc` under
+`$XDG_CONFIG_HOME/opencode` or `~/.config/opencode`, merged in that order, and
+the file `OPENCODE_CONFIG` names when the shell's OpenCode uses that data
+directory. A session's project files are each `opencode.json` and
+`opencode.jsonc` from its repository root down to its directory, then the same
+files in each of those directories' `.opencode/`, which outrank them. A confirmed
+change is written to the global file with the highest precedence that exists,
+or a new `opencode.json`, keeping its comments, key order and layout; a change
+the file's shape cannot take, such as a key under a value that is no object,
+is shown as a step by hand instead. Credentials in the file, anything under
+a `headers`, `env`, `environment` or `oauth` key and any API key, show masked
+in the confirm's diff. The `sessions` export, T3's `opencode` instances and
+`--ssh` hosts read OpenCode the same way; `audit` does not.
+
+Every assistant step OpenCode recorded usage for is one request, priced from
+its recorded `providerID` and model ID (see [Prices](#prices)); OpenCode's own
+`cost` field is never read. Its main session and each subagent session it
+spawned, such as `explore`, are split as Claude Code's are. Skills, MCP
+servers and instruction files are sized from the instructions, skill listing
+and Code Mode catalog OpenCode 2 recorded for each session, and judged by their
+recorded uses: the `skill` tool's calls, a skill picked with `@` and a skill
+message count for a skill, and Code Mode calls for an MCP server. A skill is
+turned off with a `{"action": "skill", "resource": "<id>", "effect": "deny"}`
+rule appended to `permissions` when a global file orders its permissions there,
+since the last matching rule wins, and with `permission.skill.<id> = "deny"`
+otherwise. When a rule OpenCode reads later could allow the skill again, an
+agent's own `permissions`, a file `OPENCODE_CONFIG` names or a project the
+sessions ran in, the skill's line offers no switch. An MCP server is turned off with `disabled: true` under
+`mcp.servers.<name>`, or `enabled: false` under OpenCode 1's `mcp.<name>`, in
+the shape its file declares it; a file may mix both, and `mcp.servers` wins a
+name both declare. A server a project the sessions ran in
+declares, which replaces the global declaration there, gets a line with no
+switch, and so do OpenCode's built-in Code Mode namespaces, `browser` and
+`opencode`. A project whose settings cannot be read leaves every OpenCode
+switch to the person, and the report's coverage notes name its directory.
+Profiles that share a settings file but take different switches get lines of
+their own. A subagent model line credits a definition only when the run's
+model came through the provider it names. Subagent model lines name `agents.<name>.model`, whose variant (a
+`#variant` suffix, or `variant` in its object form) sets the effort, or
+OpenCode 1's `agent.<name>.model` and `variant`. The cache TTL, compaction, keepalive,
+audit and effort checks replay only Claude Code and Codex, so an OpenCode
+profile's spend counts in the report's totals but gets none of those lines.
+See [Replay semantics](semantics.md#opencode) for what each piece assumes.
+
 ## Prices
 
 The first online run fetches only `https://models.dev/api.json`, caching validated
@@ -450,6 +503,13 @@ and Claude Models on Google Cloud. That provider is read from the profile's
 settings file and the shell, not from project settings, so a project whose
 settings choose a different provider, or turn the profile's off, is still
 priced at the profile's catalog.
+
+An OpenCode request is priced only at the catalog entry of the provider and
+model it recorded, such as `opencode`, `opencode-go` or `anthropic`; a model
+that provider's catalog lacks stays unpriced, even when another provider
+lists it. OpenCode records no service tier, so every request is priced at the
+standard rate, and one cache-write count without its lifetime, so writes are
+priced at the catalog's cache-write rate, Anthropic's 5-minute one.
 
 ## Plans and API prices
 
@@ -769,7 +829,7 @@ setting differs from its default gets a note under it naming the default and
 what the current value saves against it, such as `default 5m, saves $410/mo`,
 or `costs $12/mo more` when the current value costs more. The line shows on
 every run, including one with nothing left to change, and reads "No
-setting was found to differ from its Claude Code or Codex default." when none
+setting was found to differ from its Claude Code, Codex or OpenCode default." when none
 differs. A line whose current value is unknown gets no note, and that
 sentence does not claim it matches its default. On a terminal the same line
 also opens `doctor`'s walk, under its header, before the first question.
@@ -933,7 +993,8 @@ than adding its tools'.
 Removing a piece can also shift later cache writes and compaction, which this
 does not model. Claude requests without a recorded shape cannot price their
 context pieces. Codex prices rendered chronological context with a quarter-token
-per-character estimate; metadata-only pieces remain unknown.
+per-character estimate; metadata-only pieces remain unknown. OpenCode's pieces
+use the same estimate, each at the start of every request of its session.
 
 Comparisons use the requests priced under both options and extrapolate to the
 rest, assuming requests with missing usage resemble the measured ones, so a
@@ -1480,8 +1541,12 @@ stay unknown; `postTokens` alone cannot establish the full request.
 
 ## T3 Code
 
-T3's Claude Code and Codex instances reuse their native histories, including
-retained histories of disabled instances. Shared homes, Codex shadow-home
+T3's Claude Code, Codex and OpenCode instances reuse their native histories,
+including retained histories of disabled instances. An OpenCode instance owns
+the sessions its threads name and the subagent sessions they spawned; the rest
+of the database stays native OpenCode's. An OpenCode instance with a
+`serverUrl` runs on a server whose history token-max does not read, so its
+spend is an explicit coverage gap. Shared homes, Codex shadow-home
 symlinks and request identities are deduplicated. T3 Usage aggregates are never
 added to native billed requests. Unsupported providers are explicit coverage
 gaps. Each T3 state gets a line naming the model its

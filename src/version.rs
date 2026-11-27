@@ -102,6 +102,7 @@ impl Needs {
         match self.harness {
             Harness::Claude => 2,
             Harness::Codex => 0,
+            Harness::OpenCode => 2,
         }
     }
 

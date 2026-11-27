@@ -44,11 +44,12 @@ Recommendations:
   `settings.cache.ttl`; confirm against OpenCode's source that it reaches
   Anthropic's `cache_control` before offering the edit, and otherwise report
   the line as measured evidence naming the missing knob.
+- `Harness::replayed()` in `src/model.rs` keeps OpenCode out of the cache,
+  compaction and keepalive replays (and the transcript audit) today, and an
+  OpenCode profile's TTL and compaction controls are unset with that reason
+  in `src/opencode.rs`'s `profile`; each replay this quest adds lifts that
+  exclusion for its own check.
 - Exercise against real local OpenCode histories where applicable and add
   synthetic SQLite fixtures for warming, compaction, and Anthropic TTL cases.
 - Document replay assumptions and limits in `docs/reference.md` and
   `docs/semantics.md`.
-
-## Required
-
-- [Discover, price, and audit OpenCode sessions and settings](/quest/m1/harnesses/opencode.md) - adds OpenCode discovery, v1/v2 SQLite reader, multi-provider pricing, and comment-preserving opencode.jsonc edits

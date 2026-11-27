@@ -1131,6 +1131,7 @@ pub(crate) fn subagent_effort_how(owner: &str, profile: &Profile, level: &str) -
             "agents.default_subagent_reasoning_effort",
             Edit::set("agents.default_subagent_reasoning_effort", level),
         ),
+        Harness::OpenCode => unreachable!("OpenCode has no subagent effort control"),
     };
     // T3 keeps an instance's variables as entries named in a list.
     let step = match owner.rsplit_once(".environment.") {
@@ -1168,6 +1169,7 @@ fn effort_edit(harness: Harness, key: &str, level: &str) -> Option<Edit> {
             ]))
         }
         Harness::Codex => (key == "model_reasoning_effort").then(|| set(vec![key.into()])),
+        Harness::OpenCode => None,
     }
 }
 
@@ -1243,6 +1245,7 @@ pub(crate) fn check_how(result: &CheckResult, profile: &Profile) -> How {
                     "service_tier".into(),
                     vec![Edit::set("service_tier", "default")],
                 )],
+                Harness::OpenCode => unreachable!("OpenCode has no speed control"),
             };
             owned(&s.base.owner, profile, candidates, s.replacement.clone())
         }
@@ -1316,6 +1319,7 @@ pub(crate) fn check_how(result: &CheckResult, profile: &Profile) -> How {
                     "features.memories".into(),
                     vec![Edit::set("features.memories", false)],
                 )],
+                Harness::OpenCode => unreachable!("OpenCode has no memory control"),
             };
             owned(
                 &m.base.owner,
@@ -1729,7 +1733,7 @@ fn keys(harness: Harness, edits: &[Edit]) -> Vec<String> {
     };
     let value = |value: &Value| -> String {
         match harness {
-            Harness::Claude => value.to_string(),
+            Harness::Claude | Harness::OpenCode => value.to_string(),
             Harness::Codex => toml::Value::try_from(value)
                 .expect("settings values are TOML values")
                 .to_string(),
@@ -4353,7 +4357,8 @@ fn diff(pending: &Pending, after: &str, style: &Style) -> String {
     };
     let edited = shown(&pending.edits);
     let hide = |text: &str| match target.harness {
-        Harness::Claude => mask_json(text, mask, &edited),
+        Harness::Claude => mask_json(text, mask, |path| secret_json(path, &edited)),
+        Harness::OpenCode => mask_json(text, mask, secret_opencode),
         Harness::Codex => mask_toml(text, mask),
     };
     let (before, after) = (hide(target.before.as_deref().unwrap_or("")), hide(after));
@@ -4400,9 +4405,22 @@ fn secret_json(path: &[Option<&str>], edited: &[&[String]]) -> bool {
     }
 }
 
-/// `text` with each scalar value that [`secret_json`] names replaced by `mask` in quotes,
-/// keeping every other byte, so lines and their numbers stay as they are.
-fn mask_json(text: &str, mask: &str, edited: &[&[String]]) -> String {
+/// Whether the OpenCode config value at `path` may hold a secret: anything under a key
+/// that holds variables, headers, OAuth settings or an API key, wherever it sits, such as
+/// an MCP server's, a provider's or an agent's request headers.
+fn secret_opencode(path: &[Option<&str>]) -> bool {
+    path.iter().any(|key| {
+        matches!(
+            key,
+            Some("environment" | "env" | "headers" | "oauth" | "apiKey" | "api_key")
+        )
+    })
+}
+
+/// `text` with each scalar value that `secret` names by its path replaced by `mask` in
+/// quotes, keeping every other byte, comments included, so lines and their numbers stay as
+/// they are.
+fn mask_json(text: &str, mask: &str, secret: impl Fn(&[Option<&str>]) -> bool) -> String {
     let b = text.as_bytes();
     // Each open container: whether it is an object, and its current key.
     let mut stack: Vec<(bool, Option<String>)> = vec![];
@@ -4426,6 +4444,21 @@ fn mask_json(text: &str, mask: &str, edited: &[&[String]]) -> String {
             b',' => {
                 want_key = matches!(stack.last(), Some((true, _)));
                 i += 1;
+                continue;
+            }
+            // A JSONC comment, which may quote anything.
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i < b.len() && !(b[i] == b'*' && b.get(i + 1) == Some(&b'/')) {
+                    i += 1;
+                }
+                i = (i + 2).min(b.len());
                 continue;
             }
             b'"' => {
@@ -4458,7 +4491,7 @@ fn mask_json(text: &str, mask: &str, edited: &[&[String]]) -> String {
             .iter()
             .map(|(object, key)| if *object { key.as_deref() } else { None })
             .collect();
-        if secret_json(&path, edited) {
+        if secret(&path) {
             out.push_str(&text[copied..start]);
             out.push_str(&format!("\"{mask}\""));
             copied = i;
@@ -4531,6 +4564,7 @@ fn apply(target: &Target, edits: &[Edit], removals: &[Entry]) -> Result<String, 
     match target.harness {
         Harness::Claude => apply_json(text, edits).and_then(|t| remove_json(&t, &paths)),
         Harness::Codex => apply_toml(text, edits).and_then(|t| remove_toml(&t, &paths)),
+        Harness::OpenCode => crate::opencode::edit(text, edits, &paths),
     }
     .map_err(|reason| format!("{reason} in {shown}"))
 }
@@ -4542,7 +4576,13 @@ fn removals_unchanged(walked: &Target, now: &Target, removals: &[Entry]) -> bool
     if removals.is_empty() {
         return true;
     }
-    let parse = |t: &Target| -> Option<Value> { serde_json::from_str(t.before.as_deref()?).ok() };
+    let parse = |t: &Target| -> Option<Value> {
+        let text = t.before.as_deref()?;
+        match t.harness {
+            Harness::OpenCode => crate::opencode::parse_config(text),
+            _ => serde_json::from_str(text).ok(),
+        }
+    };
     let (walked, now) = (parse(walked), parse(now));
     let at = |root: &Option<Value>, path: &[String]| {
         path.iter()
@@ -7531,7 +7571,7 @@ mod tests {
         ];
         let text = "{\n  \"env\": {\"DISABLE_X\": \"1\", \"CLAUDE_CODE_AUTO_COMPACT_WINDOW\": \"sk-pasted\"}\n}\n";
         assert_eq!(
-            mask_json(text, "****", &shown(&edits)),
+            mask_json(text, "****", |path| secret_json(path, &shown(&edits))),
             "{\n  \"env\": {\"DISABLE_X\": \"1\", \"CLAUDE_CODE_AUTO_COMPACT_WINDOW\": \"****\"}\n}\n"
         );
     }
@@ -7542,8 +7582,17 @@ mod tests {
         let edited = [vec!["env".to_string(), "DISABLE_X".to_string()]];
         let edited: Vec<&[String]> = edited.iter().map(Vec::as_slice).collect();
         assert_eq!(
-            mask_json(text, "****", &edited),
+            mask_json(text, "****", |path| secret_json(path, &edited)),
             "{\n  \"env\": {\"API_KEY\": \"****\", \"DISABLE_X\": \"1\"},\n  \"mcpServers\": {\n    \"gh\": {\n      \"command\": \"gh\", \"args\": [\"a\"],\n      \"env\": {\"GITHUB_TOKEN\": \"****\", \"N\": \"****\"}\n    }\n  },\n  \"projects\": {\"/p\": {\"mcpServers\": {\"web\": {\"headers\": {\"Authorization\": \"****\"}, \"url\": \"https://x\"}}}}\n}\n"
+        );
+    }
+
+    #[test]
+    fn the_confirm_masks_opencode_credentials_past_its_comments() {
+        let text = "{\n  // a \"quoted\" \"mcp\": {\n  \"mcp\": {\"servers\": {\"gh\": {\"headers\": {\"Authorization\": \"Bearer t\"}, \"oauth\": {\"client_secret\": \"s\"}, \"environment\": {\"T\": \"1\"}, /* x\" */ \"url\": \"https://x\"}}},\n  \"provider\": {\"p\": {\"options\": {\"apiKey\": \"k\", \"baseURL\": \"u\"}}},\n  \"model\": \"m\"\n}\n";
+        assert_eq!(
+            mask_json(text, "****", secret_opencode),
+            "{\n  // a \"quoted\" \"mcp\": {\n  \"mcp\": {\"servers\": {\"gh\": {\"headers\": {\"Authorization\": \"****\"}, \"oauth\": {\"client_secret\": \"****\"}, \"environment\": {\"T\": \"****\"}, /* x\" */ \"url\": \"https://x\"}}},\n  \"provider\": {\"p\": {\"options\": {\"apiKey\": \"****\", \"baseURL\": \"u\"}}},\n  \"model\": \"m\"\n}\n"
         );
     }
 
@@ -7581,6 +7630,7 @@ mod tests {
         match harness {
             Harness::Claude => crate::effort::claude_effort(&scopes, file, &env, None),
             Harness::Codex => crate::effort::codex_effort(&scopes, file, Some(&catalog), None),
+            Harness::OpenCode => unreachable!("OpenCode has no effort control"),
         }
         .unwrap()
     }

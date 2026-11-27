@@ -258,7 +258,7 @@ fn check(
             // The current setting bills from now on, so an ultrafast rate that moves on a date
             // is priced at the report's date, not the request's.
             let repriced;
-            let at_now = if value == "ultrafast" && r.time < now {
+            let at_now = if value == "ultrafast" && r.time != now {
                 repriced = Request {
                     time: now,
                     ..r.clone()

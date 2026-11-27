@@ -2758,6 +2758,17 @@ mod tests {
     fn gpt_6_2_ultrafast_multiplier_follows_the_request_date() {
         let catalog = crate::test_support::prices_with_gpt_6_2();
         let last_promo = ULTRAFAST_LIST_FROM - 1;
+        // GPT-6 Astra and GPT-6.1 Sol have no promotion: 6x on every date.
+        for model in ["gpt-6-astra", "gpt-6.1-sol"] {
+            for at in [0, ULTRAFAST_LIST_FROM] {
+                let billed = Billed {
+                    model,
+                    input: Some(1000),
+                    at,
+                };
+                assert_eq!(premium_multiplier("ultrafast", billed), Some(6.0));
+            }
+        }
         for model in ["gpt-6.2-sol", "gpt-6.2-astra"] {
             let at = |input: i64, tier: &str, time: Millis| {
                 let r = Request {

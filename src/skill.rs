@@ -360,6 +360,8 @@ pub fn item(profiles: &[Profile], home: Option<&str>) -> Option<Item> {
         "Not installed for {}. /token-audit has an agent run token-max audit and rank by dollars the waste no setting changes: commands that bust the prompt cache, bloated or repeated tool calls, always-loaded context the sessions never needed, and context they kept rediscovering. It offers each fix and makes it only after a yes. What it saves is not measured.",
         crate::lsp::list(&names)
     );
+    // An --ssh destination runs a cached token-max that need not be on its PATH.
+    const CRABX: &str = "Where token-max isn't on the PATH, such as on a host reached with --ssh, run it as `npx @kixel/crabx token-max`.";
     // npx's global install reaches only the default homes, not a named Claude Code one.
     let npx = if named.is_empty() {
         ", or `npx skills add kixel-ai/token-max --skill token-audit -g`"
@@ -370,7 +372,7 @@ pub fn item(profiles: &[Profile], home: Option<&str>) -> Option<Item> {
         text,
         Some(How::Manual {
             step: format!(
-                "{create}run {}{npx}, then start a new session",
+                "{create}run {}{npx}, then start a new session. {CRABX}",
                 steps.join(" and ")
             ),
             reason: "doctor and vibes write only settings files, not skills".into(),
@@ -526,8 +528,8 @@ mod tests {
         .unwrap();
         let text = "Not installed for Claude Code in ~/.claude-work and Codex in ~/.codex. "; // slash ok: roots pass through unchanged
         assert!(both.text.starts_with(text), "{}", both.text);
-        let named = "run `token-max skill install --claude-dir ~/.claude-work` and `token-max skill install`, then start a new session"; // slash ok: roots pass through unchanged
-        assert_eq!(step(both), named);
+        let named = "run `token-max skill install --claude-dir ~/.claude-work` and `token-max skill install`, then start a new session. "; // slash ok: roots pass through unchanged
+        assert!(step(both).starts_with(named));
         // A disabled T3 instance starts no session, so it is not counted; aliases share a card.
         let mut t3 = make_t3_profile("t", "/state/claude");
         t3.skill = Some(Found {
@@ -543,11 +545,13 @@ mod tests {
         t3.skill = Some(missing);
         let spaced = profile("d", Harness::Claude, "/home/me/my claude", false, false);
         let card = item(&[claude.clone(), t3, spaced], home).unwrap();
-        let named = "run `token-max skill install --claude-dir /state/claude --claude-dir ~/'my claude'`, then start a new session"; // slash ok: roots pass through unchanged
+        let named = "run `token-max skill install --claude-dir /state/claude --claude-dir ~/'my claude'`, then start a new session. Where token-max isn't on the PATH, such as on a host reached with --ssh, run it as `npx @kixel/crabx token-max`."; // slash ok: roots pass through unchanged
         assert_eq!(step(card), named);
-        // A Codex home whose bare install has no ~/.agents or ~/.codex to write creates it.
+        // A Codex home whose bare install has no ~/.agents or ~/.codex to write creates it,
+        // named from a home with this platform's separators, as discovery reads one.
+        let native = crate::test_support::native_path("/home/me");
         let alone = profile("e", Harness::Codex, "/srv/codex", false, false);
-        let card = item(&[claude, alone], home).unwrap();
+        let card = item(&[claude, alone], Some(&native)).unwrap();
         let create = format!(
             "create {}, where Codex reads skills, then run `token-max skill install`, or `npx ",
             crate::test_support::native_path("~/.agents")

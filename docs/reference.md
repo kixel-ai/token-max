@@ -1222,7 +1222,9 @@ instance's included, quoted when its path needs it, or `npx skills add` when
 none needs it. When Codex is missing it and neither `~/.agents` nor the shell's
 Codex home (`CODEX_HOME` or `~/.codex`) exists, the step first creates
 `~/.agents`, which a bare install then writes.
-With `--ssh`, each host looks in its own homes. `doctor`
+With `--ssh`, each host looks in its own homes; the step runs there, where
+token-max may be only the cached copy `--ssh` put there and not on the `PATH`,
+so the card also names `npx @kixel/crabx token-max` for a host without it. `doctor`
 has no line for it, and it sets no exit code.
 
 ## Cache TTL

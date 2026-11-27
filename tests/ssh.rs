@@ -749,7 +749,7 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     assert!(
         there.starts_with("[12/12] Token audit skill not measured Host devbox")
             && there.contains("Not installed for Claude Code in ~/.claude.")
-            && there.ends_with("Change by hand, since doctor and vibes write only settings files, not skills: run `token-max skill install`, or `npx skills add kixel-ai/token-max --skill token-audit -g`, then start a new session"),
+            && there.ends_with("Change by hand, since doctor and vibes write only settings files, not skills: run `token-max skill install`, or `npx skills add kixel-ai/token-max --skill token-audit -g`, then start a new session. Where token-max isn't on the PATH, such as on a host reached with --ssh, run it as `npx @kixel/crabx token-max`."),
         "{there}"
     );
     let (_, stdout, _) = hosts.run(&["--ssh", "devbox"]);

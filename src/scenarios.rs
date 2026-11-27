@@ -240,6 +240,12 @@ impl<'b, 'o> PartReplay<'b, 'o> {
                 evidence: replayed.evidence,
             });
         }
+        // OpenCode records no boundary event: a summary, whichever provider wrote it, starts
+        // the conversation over, so later requests read nothing cached before it.
+        if r.harness == Harness::OpenCode && r.parts.iter().any(|p| p.kind == PartKind::Compaction)
+        {
+            self.chain.boundary(&r.session, r.time);
+        }
         result
     }
 }

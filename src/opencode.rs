@@ -36,6 +36,11 @@ pub(crate) const RULES: &str = "permissions";
 /// settings file could allow a skill that file denies, so no skill switch is offered.
 pub(crate) const REALLOWED: &str = "permissions.reallowed";
 
+/// The `Profile::settings` key present when warming may ping Anthropic sessions. Its pings
+/// keep caches warm and time themselves from `cache.ttl`, and no replay prices them, so the
+/// TTL line offers no edit.
+pub(crate) const WARMING: &str = "warming.anthropic";
+
 /// OpenCode's own Code Mode namespaces; any other is an MCP server's.
 pub(crate) const BUILT_IN: [&str; 2] = ["browser", "opencode"];
 
@@ -637,6 +642,20 @@ pub(crate) fn model_ttl(config: &Map<String, Value>) -> bool {
         })
 }
 
+/// Whether a config may turn warming on for Anthropic sessions: the top-level `warming`, or
+/// the Anthropic provider's or one of its models' `settings.cache.warming`, set to anything
+/// but `false`.
+pub(crate) fn warms_anthropic(config: &Map<String, Value>) -> bool {
+    let on =
+        |value: Option<&Value>| value.is_some_and(|v| !v.is_null() && *v != Value::Bool(false));
+    let anthropic = members(config.get("providers")).get(ANTHROPIC);
+    on(config.get("warming"))
+        || on(anthropic.and_then(|a| a.pointer("/settings/cache/warming")))
+        || members(anthropic.and_then(|a| a.get("models")))
+            .values()
+            .any(|model| on(model.pointer("/settings/cache/warming")))
+}
+
 /// Whether a config sets the Anthropic provider's `cache.ttl` or one of its models'.
 pub(crate) fn sets_ttl(config: &Map<String, Value>) -> bool {
     provider_ttl(config).is_some() || model_ttl(config)
@@ -729,8 +748,32 @@ pub(crate) fn profile(
             ));
         }
     };
+    // `OPENCODE_CONFIG_CONTENT` is read after every file, so it outranks them.
+    let mut cache_layers = layers.clone();
+    let content = env.get("OPENCODE_CONFIG_CONTENT").filter(|c| !c.is_empty());
+    let unreadable_content = match content.map(|c| parse_config(c)) {
+        Some(Some(Value::Object(config))) => {
+            cache_layers.push(Layer {
+                file: "OPENCODE_CONFIG_CONTENT".into(),
+                config,
+            });
+            false
+        }
+        Some(_) => true,
+        None => false,
+    };
     // One lifetime covers every agent, so both buckets hold it; the TTL line reads the main.
-    let ttl = anthropic_ttl(&layers, &settings_file);
+    let ttl = if unreadable_content {
+        TtlControl {
+            value: None,
+            owner: "OPENCODE_CONFIG_CONTENT".into(),
+            reason: "OPENCODE_CONFIG_CONTENT is not a JSONC object, so the cache.ttl it may set is unknown".into(),
+            varies: false,
+        }
+    } else {
+        anthropic_ttl(&cache_layers, &settings_file)
+    };
+    let warms = unreadable_content || cache_layers.iter().any(|l| warms_anthropic(&l.config));
     let ttl = PerBucket {
         main: ttl.clone(),
         subagent: ttl,
@@ -774,6 +817,7 @@ pub(crate) fn profile(
                     .any(|l| l.config.get(RULES).is_some_and(Value::is_array)),
             ),
             (REALLOWED, reallowed),
+            (WARMING, warms),
         ]
         .into_iter()
         .filter(|(_, set)| *set)
@@ -2033,6 +2077,75 @@ mod tests {
         assert_eq!(check.base.current, None);
         assert_eq!(check.base.action, crate::model::Action::Advisory);
         assert!(check.base.owner.ends_with(":providers.anthropic.models"));
+    }
+
+    #[test]
+    fn config_content_sets_the_anthropic_ttl_and_warming_leaves_it_advisory() {
+        let w = Workspace::new();
+        let file = opencode_database(&w.home);
+        anthropic_session(&file, "/work/repo", &[(0, 0, 10_000), (20, 0, 10_500)]);
+        let config = w.home.join(".config/opencode/opencode.json");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        // The shell's config content outranks the file an edit would change.
+        let mut options = w.scan_options();
+        options.discovery.env.insert(
+            "OPENCODE_CONFIG_CONTENT".into(),
+            r#"{"providers": {"anthropic": {"settings": {"cache": {"ttl": "1h"}}}}}"#.into(),
+        );
+        let catalog = prices();
+        let report = crate::replay::analyze(crate::replay::AnalyzeOptions {
+            scan: crate::reader::scan(&options).unwrap(),
+            catalog: &catalog,
+            since: None,
+            now: OPENCODE_START + 3_600_000,
+            max_cost_per_use_usd: 1.0,
+            reading: None,
+        })
+        .unwrap();
+        let check = report
+            .checks
+            .iter()
+            .find_map(|c| match c {
+                crate::model::CheckResult::Ttl(t) if t.harness == Harness::OpenCode => Some(t),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(check.base.current, Some(Ttl::OneHour));
+        assert!(check.base.owner.starts_with("OPENCODE_CONFIG_CONTENT:"));
+        assert_eq!(check.base.action, crate::model::Action::Keep);
+        // Warming pings no replay prices, so its line only advises.
+        std::fs::write(&config, r#"{"warming": {"duration": "30 minutes"}}"#).unwrap();
+        let (_, check) = anthropic_check(&w);
+        assert_eq!(check.base.current, Some(Ttl::FiveMinutes));
+        assert_eq!(check.base.action, crate::model::Action::Advisory);
+        assert!(check.base.uncertainty.iter().any(|u| u.contains("warming")));
+    }
+
+    #[test]
+    fn a_compaction_from_any_provider_restarts_the_anthropic_cache() {
+        let w = Workspace::new();
+        let file = opencode_database(&w.home);
+        anthropic_session(&file, "/work/repo", &[(0, 0, 10_000), (20, 0, 10_500)]);
+        let db = Connection::open(&file).unwrap();
+        let time = OPENCODE_START + 10 * 60_000;
+        let compaction = json!({"status": "completed", "reason": "auto",
+            "model": {"id": "zen-flash", "providerID": "opencode"},
+            "summary": "", "time": {"created": time},
+            "tokens": {"input": 500, "output": 80, "reasoning": 0,
+                "cache": {"read": 0, "write": 0}}});
+        db.execute(
+            "INSERT INTO session_message VALUES ('msg_c', 'ses_anthropic', 'compaction', 9, ?1, ?2)",
+            rusqlite::params![time, compaction.to_string()],
+        )
+        .unwrap();
+        drop(db);
+        let (_, check) = anthropic_check(&w);
+        // The summary is OpenCode's own, so only the two Anthropic requests are priced, and
+        // at 1h the second reads nothing the first cached: both write their whole prefix.
+        assert_eq!(check.base.requests, 2);
+        let five = (10_000.0 + 10_500.0) * 5.0 / 1e6;
+        let hour = (10_000.0 + 10_500.0) * 8.0 / 1e6;
+        assert!((check.one_hour_savings_usd - (five - hour)).abs() < 1e-9);
     }
 
     #[test]

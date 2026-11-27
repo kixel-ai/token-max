@@ -48,9 +48,13 @@ const ANTHROPIC_TTL_SOURCE: &str =
 const OPENCODE_TTL_SOURCE: &str = "https://opencode.ai/docs/models#cache-lifetime (2026-11-27)";
 
 /// Whether a part counts toward a TTL line for `selected`. OpenCode's one lifetime covers
-/// every agent, so its line takes every part.
+/// every agent, so its line takes every part sent to Anthropic; its other compactions only
+/// mark where a session's cache restarts.
 fn in_bucket(r: &Request, p: &BillingPart, selected: Bucket) -> bool {
-    r.harness == Harness::OpenCode || cache_bucket(r, p).is_none_or(|b| b == selected)
+    if r.harness == Harness::OpenCode {
+        return crate::opencode::anthropic(r);
+    }
+    cache_bucket(r, p).is_none_or(|b| b == selected)
 }
 
 /// One decimal place, rounding exact binary halves away from zero.
@@ -720,7 +724,14 @@ fn ttl_check(
     // An unset main TTL varies with billing, so pinning the replay's winner is a change either way.
     let pinnable = current.value.is_none() && current.reason == TTL_BILLING_UNKNOWN;
     let settable = current.value.is_some() || pinnable;
-    let applies = supported && settable;
+    // OpenCode's warming pings keep caches warm and time themselves from `cache.ttl`, so a
+    // change would move pings no replay here prices.
+    let warmed = opencode
+        && group
+            .members
+            .iter()
+            .any(|p| p.settings.contains_key(crate::opencode::WARMING));
+    let applies = supported && settable && !warmed;
     // Advice names only the install an upgrade reaches, and none while an SDK app on the
     // same file is also too old.
     let upgrade = upgrade
@@ -764,6 +775,11 @@ fn ttl_check(
     if !supported {
         uncertainty.insert(
             "current supported client version is not established; recorded latest version is absent or predates TTL controls",
+        );
+    }
+    if warmed {
+        uncertainty.insert(
+            "OpenCode's warming may ping these sessions: its unrecorded pings keep caches warm and time themselves from cache.ttl, which neither replay prices",
         );
     }
     // A plan's overflow onto usage credits gets 5m, which the transcripts don't mark.
@@ -1090,7 +1106,12 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
             .requests
             .iter()
             .chain(&scan.requests)
-            .filter(|r| crate::opencode::anthropic(r) && group.covers(&r.profiles))
+            .filter(|r| {
+                // A summary from any provider restarts the session's cache.
+                let summary = r.harness == Harness::OpenCode
+                    && r.parts.iter().any(|p| p.kind == PartKind::Compaction);
+                (crate::opencode::anthropic(r) || summary) && group.covers(&r.profiles)
+            })
             .collect();
         requests.sort_by_key(|r| r.time);
         ttls.extend(ttl_check(&input, &group, &requests, Bucket::Main));

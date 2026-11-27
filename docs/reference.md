@@ -1384,10 +1384,14 @@ alike, so its line covers all of them at once and is named "Anthropic prompt
 cache TTL". Unset, OpenCode sends no lifetime and Anthropic keeps its 5m
 default. A value an Anthropic model sets for itself under
 `providers.anthropic.models`, a value other than `5m` or `1h`, which Anthropic
-rejects, a project file that sets either, or a latest session that ran
-OpenCode older than 2.2.0, which added the setting, leaves the line advisory. Requests to any other
-provider, including OpenCode's own gateways, are not replayed: their cache
-lifetimes and write prices are not documented the same way.
+rejects, a project file that sets either, any `warming` setting, whose
+unrecorded pings keep caches warm on a schedule timed from `cache.ttl`, or a
+latest session that ran OpenCode older than 2.2.0, which added the setting,
+leaves the line advisory. `OPENCODE_CONFIG_CONTENT`, which OpenCode reads after
+every file, outranks them, so a lifetime it sets is the current one and is
+changed there. Requests to any other provider, including OpenCode's own
+gateways, are not replayed: their cache lifetimes and write prices are not
+documented the same way.
 
 Cache replay preserves known, estimated and unknown predecessor states, including
 unsupported attempts before the selected window. Missing cohort metadata spans

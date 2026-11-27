@@ -1240,6 +1240,8 @@ same cache chain as Claude Code's, with every agent's requests on one line,
 since OpenCode sends one lifetime per provider. OpenCode records one write
 count without its lifetime, so each replay writes every request at the
 lifetime it compares, and the current setting is applied to the whole history.
+A compaction, whichever provider wrote its summary, starts the session's
+conversation over, so no later request reads what was cached before it.
 OpenCode lists a fast mode as a model of its own, so its unrecorded speed is
 taken as standard and the model ID keeps cohorts apart.
 

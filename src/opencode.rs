@@ -225,6 +225,18 @@ pub(crate) fn servers(config: &Map<String, Value>) -> Vec<Server> {
         .collect()
 }
 
+/// The MCP servers project layers declare, as OpenCode resolves them: a later layer's
+/// declaration replaces an earlier one of the same name whole.
+pub(crate) fn project_servers(layers: &[Layer]) -> Vec<Server> {
+    let mut declared: IndexMap<String, Server> = IndexMap::default();
+    for layer in layers {
+        for server in servers(&layer.config) {
+            declared.insert(server.name.clone(), server);
+        }
+    }
+    declared.into_values().collect()
+}
+
 /// A server's `Profile::mcp_servers` entry: its key path as a JSON list, since a config
 /// declares servers in either of two shapes and its switch must use the same one.
 fn entry(server: &Server) -> String {
@@ -303,7 +315,7 @@ pub(crate) fn switched_off(config: &Map<String, Value>) -> Vec<Control> {
     let rules = skill_rules(config.get(RULES));
     let named: IndexMap<&str, ()> = rules
         .iter()
-        .filter(|(resource, _)| !resource.contains('*'))
+        .filter(|(resource, _)| !resource.contains(['*', '?']))
         .map(|(resource, _)| (*resource, ()))
         .collect();
     for id in named.keys() {
@@ -1742,6 +1754,29 @@ mod tests {
             [realpath(&text(&data.join("other.db"))).unwrap()]
         );
         assert!(histories(":memory:").is_empty());
+    }
+
+    #[test]
+    fn a_later_project_layer_replaces_a_server_whole() {
+        let layer = |file: &str, config: Value| Layer {
+            file: file.into(),
+            config: config.as_object().unwrap().clone(),
+        };
+        let layers = [
+            layer(
+                "/r/opencode.json",
+                json!({"mcp": {"servers": {"docs": {"type": "remote", "disabled": true}}}}),
+            ),
+            layer(
+                "/r/opencode.jsonc",
+                json!({"mcp": {"servers": {"docs": {"type": "remote"}}}}),
+            ),
+        ];
+        let found: Vec<(String, bool)> = project_servers(&layers)
+            .into_iter()
+            .map(|s| (s.name, s.enabled))
+            .collect();
+        assert_eq!(found, [("docs".to_string(), true)]);
     }
 
     #[test]

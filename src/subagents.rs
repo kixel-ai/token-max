@@ -1299,10 +1299,12 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
             let subagent = spawns.get(session).copied();
             let all = &history[session];
             let start = all[0].time;
+            // The model and the provider it came through, from one request.
+            let first = all.iter().find(|r| r.model.is_some());
             let run = Run {
                 subagent,
-                model: all.iter().find_map(|r| r.model.as_deref()),
-                provider: all.iter().find_map(|r| r.provider.as_deref()),
+                model: first.and_then(|r| r.model.as_deref()),
+                provider: first.and_then(|r| r.provider.as_deref()),
                 parent: subagent
                     .and_then(|s| s.parent.as_deref())
                     .and_then(|p| parent_model(p, start)),

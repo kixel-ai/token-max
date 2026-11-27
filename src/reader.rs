@@ -1273,7 +1273,7 @@ impl Reader {
                     Ok(layers) => {
                         reallowed |= layers.iter().any(|l| crate::opencode::reallows(&l.config));
                         // A project's declaration replaces the global one by name.
-                        let declared = crate::opencode::servers(&crate::opencode::merged(&layers));
+                        let declared = crate::opencode::project_servers(&layers);
                         projects.insert(cwd, declared);
                     }
                     Err(_) => unresolved.push(cwd),

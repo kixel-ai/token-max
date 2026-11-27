@@ -12,8 +12,8 @@ shows estimated net savings over the window and per month; otherwise it
 gives an applicable provider-guidance warning and says the dollars are
 unknown. On a terminal, `token-max doctor` offers each change it can make to
 a user settings file and writes it only after a yes; without one it prints
-the report and exits nonzero when anything should change. moq-dev/quest's
-`SETUP.md` points to it.
+the report and exits nonzero when anything should change. kixel-ai/quest's
+`SETUP.md` (formerly moq-dev/quest) points to it.
 
 ## Plan
 
@@ -192,7 +192,10 @@ cargo-dist, with `install.sh` and `run.sh` at
 [max.kixel.ai](https://max.kixel.ai); ✅ the report is
 sectioned by kind of claim, Measured, Official and Opinion
 ([kixelated/token-max#82](https://github.com/kixelated/token-max/pull/82)). The epic's end-to-end validation also runs both curl lines
-against the published release.
+against the published release. The page moved to max.kixel.me on 2026-11-23,
+and on 2026-11-25 the maintainer chose
+[crabx's pipeline](/quest/m1/crabx-pipeline.md) over cargo-dist for 0.1.0's
+binaries; those entries hold.
 
 Decided 2026-11-13 (maintainer, /quest-plan after Anthropic's
 [model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/)

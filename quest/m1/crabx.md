@@ -38,8 +38,8 @@ directory and `PATH` handling are crabx's, not cargo-dist's. The 2026-11-24 deci
 Found while planning: on 2026-11-24, `npx @kixel/crabx token-max --version`
 on x86_64 glibc Linux failed with `no usable prebuilt release for
 token-max@0.0.1 on x86_64-unknown-linux-gnu`. crabx 0.1.0 only tries the
-host's exact target, and token-max ships static musl builds for Linux. The
-crabx release this quest waits on falls back to musl.
+host's exact target, and token-max ships static musl builds for Linux.
+crabx 0.2.0 falls back to musl.
 
 Recommendations:
 
@@ -56,7 +56,7 @@ Recommendations:
   so the README and `docs/reference.md` name the run script as their way in;
   it picks the static musl build.
 - The page is deployed by hand (`docs/releasing.md`), so this quest's PR
-  deploys it once the crabx release is out, and checks that
+  deploys it once crabx runs 0.1.0, and checks that
   https://max.kixel.me opens on the `node` tab.
 - Retake `og.png` and update its `og:image:alt` so a shared link shows the
   npx line.

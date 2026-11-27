@@ -1137,40 +1137,48 @@ fn sessions_exports_an_opencode_database_the_directory_flag_selects() {
 /// nothing.
 #[test]
 fn vibes_advises_an_opencode_upgrade_when_its_latest_session_ran_gpt_6_2_before_2_3_2() {
-    // Each step: its session's ID and the version that created it, its start and model; a
-    // session's first step creates it, and the session created last decides.
-    type Step = (&'static str, &'static str, i64, &'static str);
-    let cases: [(&[Step], bool); 7] = [
-        (&[("ses_old", "2.3.1", 0, "gpt-6.2-sol")], true),
+    // Each request: its session's ID, the version that created the session and when, the
+    // request's own time and model; the session created last decides.
+    type Step = (&'static str, &'static str, i64, i64, &'static str);
+    let cases: [(&[Step], bool); 8] = [
+        (&[("ses_old", "2.3.1", 0, 1_000, "gpt-6.2-sol")], true),
         // An older session on gpt-6.2 is not the latest, which ran another model.
         (
             &[
-                ("ses_a", "2.2.0", 0, "gpt-6.2-astra-2026-10-01"),
-                ("ses_b", "2.2.0", 10_000, "zen-flash"),
+                ("ses_a", "2.2.0", 0, 1_000, "gpt-6.2-astra-2026-10-01"),
+                ("ses_b", "2.2.0", 10_000, 11_000, "zen-flash"),
             ],
             false,
         ),
         // The latest session ran 2.3.2, though an earlier one ran 2.2.0.
         (
             &[
-                ("ses_a", "2.2.0", 0, "gpt-6.2-sol"),
-                ("ses_b", "2.3.2", 10_000, "gpt-6.2-sol"),
+                ("ses_a", "2.2.0", 0, 1_000, "gpt-6.2-sol"),
+                ("ses_b", "2.3.2", 10_000, 11_000, "gpt-6.2-sol"),
             ],
             false,
         ),
         // Resuming a session 2.2.0 created doesn't make it the latest.
         (
             &[
-                ("ses_a", "2.2.0", 0, "gpt-6.2-sol"),
-                ("ses_b", "2.3.2", 10_000, "gpt-6.2-sol"),
-                ("ses_a", "2.2.0", 20_000, "gpt-6.2-sol"),
+                ("ses_a", "2.2.0", 0, 1_000, "gpt-6.2-sol"),
+                ("ses_b", "2.3.2", 10_000, 11_000, "gpt-6.2-sol"),
+                ("ses_a", "2.2.0", 0, 20_000, "gpt-6.2-sol"),
             ],
             false,
         ),
-        (&[("ses_new", "3.0.0", 0, "gpt-6.2-sol")], false),
+        // Nor does a session 2.2.0 created whose first request came after the 2.3.2 one's.
+        (
+            &[
+                ("ses_b", "2.3.2", 10_000, 11_000, "gpt-6.2-sol"),
+                ("ses_a", "2.2.0", 0, 20_000, "gpt-6.2-sol"),
+            ],
+            false,
+        ),
+        (&[("ses_new", "3.0.0", 0, 1_000, "gpt-6.2-sol")], false),
         // A version that isn't plain digits may already send the prompt where it caches.
-        (&[("ses_dev", "0.0.0-dev", 0, "gpt-6.2-sol")], false),
-        (&[("ses_other", "2.2.0", 0, "gpt-6.1-sol")], false),
+        (&[("ses_dev", "0.0.0-dev", 0, 1_000, "gpt-6.2-sol")], false),
+        (&[("ses_other", "2.2.0", 0, 1_000, "gpt-6.1-sol")], false),
     ];
     for (sessions, advised) in cases {
         let w = Workspace::new();
@@ -1185,16 +1193,16 @@ fn vibes_advises_an_opencode_upgrade_when_its_latest_session_ran_gpt_6_2_before_
                data TEXT NOT NULL);",
         )
         .unwrap();
-        for (seq, &(id, version, offset, model)) in sessions.iter().enumerate() {
-            let start = 1767225600000_i64 + offset;
+        for (seq, &(id, version, created, sent, model)) in sessions.iter().enumerate() {
+            const START: i64 = 1767225600000;
             db.execute(
                 "INSERT OR IGNORE INTO session_v2 VALUES (?1, NULL, '/work', ?2, ?3)",
-                rusqlite::params![id, version, start],
+                rusqlite::params![id, version, START + created],
             )
             .unwrap();
             let step = json!({
                 "model": {"id": model, "providerID": "openai"},
-                "time": {"created": start + 1000, "completed": start + 2000},
+                "time": {"created": START + sent, "completed": START + sent + 1000},
                 "tokens": {"input": 1000, "output": 10, "reasoning": 0, "cache": {"read": 0, "write": 0}},
             });
             db.execute(

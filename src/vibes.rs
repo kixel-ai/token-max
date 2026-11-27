@@ -13,7 +13,7 @@ use crate::doctor::{
     Answer, Card, Change, Event, Fix, How, Joint, Kind, Offers, Owner, Section, Selection,
     Standing, Style, Total,
 };
-use crate::model::{Harness, Profile, Request};
+use crate::model::{Harness, Profile, Scan};
 use crate::report::Origin;
 use crate::terminal::BOLD;
 use crate::version::Needs;
@@ -129,21 +129,21 @@ const OPENCODE_PROMPT_REPORT: &str = "https://x.com/TekonBurns/status/2123525121
 /// 2.3.2 and sent any request to gpt-6.2-sol or gpt-6.2-astra. None for any other profile,
 /// and for a version that is unrecorded or not plain digits, which may already send the
 /// prompt where it caches. `arrow` joins the version ran and the one advised.
-pub fn opencode_upgrade(profile: &Profile, requests: &[Request], arrow: &str) -> Option<Item> {
+pub fn opencode_upgrade(profile: &Profile, scan: &Scan, arrow: &str) -> Option<Item> {
     if profile.harness != Harness::OpenCode || profile.t3.as_ref().is_some_and(|t| !t.enabled) {
         return None;
     }
-    let mine = || requests.iter().filter(|r| r.profiles.contains(&profile.id));
+    let mine = || {
+        scan.requests
+            .iter()
+            .filter(|r| r.profiles.contains(&profile.id))
+    };
     // A session records the version that created it, so a resumed older session is not the
-    // latest: the latest is the one whose first request came last.
-    let mut first: crate::collections::HashMap<&str, &Request> = Default::default();
-    for r in mine() {
-        let entry = first.entry(&*r.session).or_insert(r);
-        if r.time < entry.time {
-            *entry = r;
-        }
-    }
-    let latest = first.into_values().max_by_key(|r| r.time)?;
+    // latest: the latest is the one OpenCode created last.
+    let latest = mine()
+        .filter_map(|r| Some((scan.sessions.created(&r.session)?, r)))
+        .max_by_key(|(created, _)| *created)?
+        .1;
     let upgrade = OPENCODE_PROMPT_CACHE.upgrade([(profile, latest.version.as_deref())])?;
     let model = mine()
         .filter(|r| r.session == latest.session)

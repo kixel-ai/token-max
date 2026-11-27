@@ -2835,8 +2835,13 @@ pub(crate) fn profile(
         }
     });
     // `--defaults`, whose report has no cards, looks for no skill.
-    let skill = (!options.defaults)
-        .then(|| crate::skill::found(harness, &canonical, &options.home, active == canonical));
+    let skill = (!options.defaults).then(|| {
+        let homes = crate::skill::Homes {
+            user: &options.home,
+            active: &active,
+        };
+        crate::skill::found(harness, &canonical, &homes)
+    });
     let claude_config = claude.then(|| claude_config(&options.home, &canonical, explicit));
     // Claude Code rewrites its state file while it runs, so one that doesn't parse now
     // leaves the install unknown, as a missing one does, rather than failing the scan.

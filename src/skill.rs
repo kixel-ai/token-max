@@ -239,11 +239,28 @@ pub struct Found {
     pub default: bool,
 }
 
+/// The homes a profile's skill lookup reads.
+pub struct Homes<'a> {
+    /// The user's home, holding `~/.agents`.
+    pub user: &'a str,
+    /// The harness's home the shell selects, by its variable or the default; for a T3
+    /// instance, the one its own environment selects.
+    pub active: &'a str,
+}
+
 /// Whether the profile rooted at `root` finds the skill: Claude Code in its home's `skills`,
-/// Codex in `~/.agents/skills` or its deprecated `$CODEX_HOME/skills`. `active` is whether
-/// it is the Claude Code home the shell selects, which for a T3 instance is its own. Only
-/// metadata is read, through any link.
-pub fn found(harness: Harness, root: &str, home: &str, active: bool) -> Found {
+/// Codex in `~/.agents/skills` or its deprecated `$CODEX_HOME/skills`. Only metadata is
+/// read, through any link.
+pub fn found(harness: Harness, root: &str, homes: &Homes<'_>) -> Found {
+    let home = homes.user;
+    // A bare install writes the Claude Code home the shell selects, and ~/.agents when it or
+    // the shell's Codex home exists.
+    let bare = match harness {
+        Harness::Claude => homes.active == root,
+        Harness::Codex => {
+            Path::new(home).join(".agents").is_dir() || Path::new(homes.active).is_dir()
+        }
+    };
     let at = |dir: &Path| {
         dir.join("skills")
             .join("token-audit")
@@ -253,14 +270,11 @@ pub fn found(harness: Harness, root: &str, home: &str, active: bool) -> Found {
     match harness {
         Harness::Claude => Found {
             installed: at(Path::new(root)),
-            default: active,
+            default: bare,
         },
         Harness::Codex => Found {
             installed: at(&Path::new(home).join(".agents")) || at(Path::new(root)),
-            // Codex's copy goes in ~/.agents whatever its home, which a bare install writes
-            // when it or ~/.codex exists.
-            default: Path::new(home).join(".agents").is_dir()
-                || Path::new(home).join(".codex").is_dir(),
+            default: bare,
         },
     }
 }
@@ -320,7 +334,7 @@ pub fn item(profiles: &[Profile], home: Option<&str>) -> Option<Item> {
     let named: String = missing
         .iter()
         .filter(|(p, f)| p.harness == Harness::Claude && !bare(p, f))
-        .map(|(p, _)| format!(" --claude-dir {}", arg(&p.root, shown(&p.root))))
+        .map(|(p, _)| format!(" --claude-dir {}", arg(&p.root, shown(&p.root), home)))
         .collect();
     let mut steps = vec![];
     if !named.is_empty() {
@@ -364,14 +378,40 @@ pub fn item(profiles: &[Profile], home: Option<&str>) -> Option<Item> {
     ))
 }
 
-/// `path` as one shell argument: `shown` when it needs no quoting, else the whole path in
-/// single quotes, since a quoted `~` doesn't expand.
-fn arg(path: &str, shown: String) -> String {
+/// `path` as one argument for its host's shell, by its separator: `shown` when it needs no
+/// quoting. Otherwise quoted, with a path under `home` kept from it outside the quotes, since a
+/// quoted `~` doesn't expand and the card's printer would turn the home inside them into one.
+fn arg(path: &str, shown: String, home: Option<&str>) -> String {
     let plain = |c: char| c.is_ascii_alphanumeric() || "/\\._-:@+,=".contains(c);
     if path.chars().all(plain) {
-        shown
+        return shown;
+    }
+    let windows = path.contains('\\');
+    let rest = home.and_then(|h| {
+        path.strip_prefix(h)
+            .and_then(|r| r.strip_prefix(if windows { '\\' } else { '/' }))
+    });
+    if windows {
+        // PowerShell: single quotes double an apostrophe; in double quotes a backtick escapes.
+        match rest {
+            Some(rest) => {
+                let escaped: String = rest
+                    .chars()
+                    .flat_map(|c| match c {
+                        '`' | '"' | '$' => vec!['`', c],
+                        c => vec![c],
+                    })
+                    .collect();
+                format!("\"$HOME\\{escaped}\"")
+            }
+            None => format!("'{}'", path.replace('\'', "''")),
+        }
     } else {
-        format!("'{}'", path.replace('\'', r"'\''"))
+        let quoted = |text: &str| format!("'{}'", text.replace('\'', r"'\''"));
+        match rest {
+            Some(rest) => format!("~/{}", quoted(rest)),
+            None => quoted(path),
+        }
     }
 }
 
@@ -391,7 +431,17 @@ mod tests {
         let w = Workspace::new();
         let text = |p: &Path| p.to_string_lossy().into_owned();
         let (home, claude, codex) = (text(&w.home), text(&w.claude), text(&w.codex));
-        let installed = |h, root: &str| found(h, root, &home, true).installed;
+        let look = |h, root: &str, active: &str| {
+            found(
+                h,
+                root,
+                &Homes {
+                    user: &home,
+                    active,
+                },
+            )
+        };
+        let installed = |h, root: &str| look(h, root, root).installed;
         assert!(!installed(Harness::Claude, &claude) && !installed(Harness::Codex, &codex));
         // ~/.agents is Codex's, never Claude Code's.
         put(&w.home.join(".agents"));
@@ -410,14 +460,15 @@ mod tests {
             fs::write(w.home.join("elsewhere"), "synthetic\n").unwrap();
             assert!(installed(Harness::Claude, &claude));
         }
-        // Codex's copy is the bare install's, whichever home it reads, while ~/.codex or
-        // ~/.agents exists for it to write.
-        assert!(found(Harness::Codex, &codex, &home, false).default);
-        assert!(!found(Harness::Claude, &claude, &home, false).default);
-        fs::remove_dir_all(&w.codex).unwrap();
-        assert!(!found(Harness::Codex, &codex, &home, true).default);
+        // A bare install writes the Claude Code home the shell selects, and Codex's copy in
+        // ~/.agents while it or the shell's Codex home exists.
+        assert!(look(Harness::Claude, &claude, &claude).default);
+        assert!(!look(Harness::Claude, &claude, &codex).default);
+        assert!(look(Harness::Codex, &codex, &codex).default);
+        let moved = text(&w.home.join("moved"));
+        assert!(!look(Harness::Codex, &codex, &moved).default);
         fs::create_dir(w.home.join(".agents")).unwrap();
-        assert!(found(Harness::Codex, &codex, &home, true).default);
+        assert!(look(Harness::Codex, &codex, &moved).default);
     }
 
     #[test]
@@ -492,7 +543,7 @@ mod tests {
         t3.skill = Some(missing);
         let spaced = profile("d", Harness::Claude, "/home/me/my claude", false, false);
         let card = item(&[claude.clone(), t3, spaced], home).unwrap();
-        let named = "run `token-max skill install --claude-dir /state/claude --claude-dir '/home/me/my claude'`, then start a new session"; // slash ok: roots pass through unchanged
+        let named = "run `token-max skill install --claude-dir /state/claude --claude-dir ~/'my claude'`, then start a new session"; // slash ok: roots pass through unchanged
         assert_eq!(step(card), named);
         // A Codex home whose bare install has no ~/.agents or ~/.codex to write creates it.
         let alone = profile("e", Harness::Codex, "/srv/codex", false, false);
@@ -502,5 +553,22 @@ mod tests {
             crate::test_support::native_path("~/.agents")
         );
         assert!(step(card).starts_with(&create));
+    }
+
+    #[test]
+    fn a_path_that_needs_quoting_keeps_its_home_outside_the_quotes() {
+        let home = Some("/home/me");
+        let shown = |p: &str| crate::report::home_path(home, p);
+        let plain = "/home/me/.claude-work";
+        assert_eq!(arg(plain, shown(plain), home), shown(plain));
+        let odd = "/home/me/it's mine";
+        assert_eq!(arg(odd, shown(odd), home), r"~/'it'\''s mine'");
+        let outside = "/srv/my claude";
+        assert_eq!(arg(outside, shown(outside), home), "'/srv/my claude'");
+        let home = Some(r"C:\Users\me");
+        let windows = r"C:\Users\me\my $claude";
+        assert_eq!(arg(windows, String::new(), home), r#""$HOME\my `$claude""#);
+        let elsewhere = r"D:\it's mine";
+        assert_eq!(arg(elsewhere, String::new(), home), r"'D:\it''s mine'");
     }
 }

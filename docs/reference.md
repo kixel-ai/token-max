@@ -1219,8 +1219,9 @@ is quiet, so `doctor` doesn't offer `vibes` for it. Otherwise it names the
 profiles missing it and, as a step by hand, `token-max skill install`, with
 `--claude-dir` for each Claude Code home the shell doesn't select, a T3
 instance's included, quoted when its path needs it, or `npx skills add` when
-none needs it. When Codex is missing it and neither `~/.agents` nor `~/.codex`
-exists, the step first creates `~/.agents`, which a bare install then writes.
+none needs it. When Codex is missing it and neither `~/.agents` nor the shell's
+Codex home (`CODEX_HOME` or `~/.codex`) exists, the step first creates
+`~/.agents`, which a bare install then writes.
 With `--ssh`, each host looks in its own homes. `doctor`
 has no line for it, and it sets no exit code.
 

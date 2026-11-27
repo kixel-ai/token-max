@@ -241,7 +241,8 @@ pub struct Found {
 
 /// Whether the profile rooted at `root` finds the skill: Claude Code in its home's `skills`,
 /// Codex in `~/.agents/skills` or its deprecated `$CODEX_HOME/skills`. `active` is whether
-/// it is the Claude Code home the shell selects. Only metadata is read, through any link.
+/// it is the Claude Code home the shell selects, which for a T3 instance is its own. Only
+/// metadata is read, through any link.
 pub fn found(harness: Harness, root: &str, home: &str, active: bool) -> Found {
     let at = |dir: &Path| {
         dir.join("skills")
@@ -256,8 +257,10 @@ pub fn found(harness: Harness, root: &str, home: &str, active: bool) -> Found {
         },
         Harness::Codex => Found {
             installed: at(&Path::new(home).join(".agents")) || at(Path::new(root)),
-            // Codex's copy goes in ~/.agents whatever its home.
-            default: true,
+            // Codex's copy goes in ~/.agents whatever its home, which a bare install writes
+            // when it or ~/.codex exists.
+            default: Path::new(home).join(".agents").is_dir()
+                || Path::new(home).join(".codex").is_dir(),
         },
     }
 }
@@ -311,19 +314,34 @@ pub fn item(profiles: &[Profile], home: Option<&str>) -> Option<Item> {
             Harness::Codex => format!("Codex in {}", shown(&p.root)),
         })
         .collect();
+    // A T3 instance's own environment selects its home, which the shell may not.
+    let bare =
+        |p: &Profile, f: &Found| f.default && (p.harness == Harness::Codex || p.t3.is_none());
     let named: String = missing
         .iter()
-        .filter(|(p, f)| p.harness == Harness::Claude && !f.default)
-        .map(|(p, _)| format!(" --claude-dir {}", shown(&p.root)))
+        .filter(|(p, f)| p.harness == Harness::Claude && !bare(p, f))
+        .map(|(p, _)| format!(" --claude-dir {}", arg(&p.root, shown(&p.root))))
         .collect();
     let mut steps = vec![];
     if !named.is_empty() {
         steps.push(format!("`token-max skill install{named}`"));
     }
+    // With neither ~/.agents nor ~/.codex, a bare install has nowhere to put Codex's copy.
+    let agents = missing
+        .iter()
+        .any(|(p, f)| p.harness == Harness::Codex && !f.default);
     // A bare install writes the shell's Claude Code home and ~/.agents, which Codex reads.
-    if missing.iter().any(|(_, f)| f.default) {
+    if agents || missing.iter().any(|(p, f)| bare(p, f)) {
         steps.push("`token-max skill install`".to_string());
     }
+    let create = match (agents, home) {
+        (false, _) => String::new(),
+        (true, Some(dir)) => format!(
+            "create {}, where Codex reads skills, then ",
+            shown(&Path::new(dir).join(".agents").to_string_lossy())
+        ),
+        (true, None) => "create .agents in your home, where Codex reads skills, then ".into(),
+    };
     let text = format!(
         "Not installed for {}. /token-audit has an agent run token-max audit and rank by dollars the waste no setting changes: commands that bust the prompt cache, bloated or repeated tool calls, always-loaded context the sessions never needed, and context they kept rediscovering. It offers each fix and makes it only after a yes. What it saves is not measured.",
         crate::lsp::list(&names)
@@ -337,10 +355,24 @@ pub fn item(profiles: &[Profile], home: Option<&str>) -> Option<Item> {
     Some(card(
         text,
         Some(How::Manual {
-            step: format!("run {}{npx}, then start a new session", steps.join(" and ")),
+            step: format!(
+                "{create}run {}{npx}, then start a new session",
+                steps.join(" and ")
+            ),
             reason: "doctor and vibes write only settings files, not skills".into(),
         }),
     ))
+}
+
+/// `path` as one shell argument: `shown` when it needs no quoting, else the whole path in
+/// single quotes, since a quoted `~` doesn't expand.
+fn arg(path: &str, shown: String) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "/\\._-:@+,=".contains(c);
+    if path.chars().all(plain) {
+        shown
+    } else {
+        format!("'{}'", path.replace('\'', r"'\''"))
+    }
 }
 
 #[cfg(test)]
@@ -378,9 +410,14 @@ mod tests {
             fs::write(w.home.join("elsewhere"), "synthetic\n").unwrap();
             assert!(installed(Harness::Claude, &claude));
         }
-        // Codex's copy is the bare install's, whichever home it reads.
+        // Codex's copy is the bare install's, whichever home it reads, while ~/.codex or
+        // ~/.agents exists for it to write.
         assert!(found(Harness::Codex, &codex, &home, false).default);
         assert!(!found(Harness::Claude, &claude, &home, false).default);
+        fs::remove_dir_all(&w.codex).unwrap();
+        assert!(!found(Harness::Codex, &codex, &home, true).default);
+        fs::create_dir(w.home.join(".agents")).unwrap();
+        assert!(found(Harness::Codex, &codex, &home, true).default);
     }
 
     #[test]
@@ -447,7 +484,23 @@ mod tests {
             default: false,
         });
         t3.t3.as_mut().unwrap().enabled = false;
-        let card = item(&[claude.clone(), claude, t3], home).unwrap();
+        let card = item(&[claude.clone(), claude.clone(), t3.clone()], home).unwrap();
         assert!(card.quiet);
+        // An enabled one reads its own home, which its environment selects but the shell
+        // may not, so it is named; so is a path that needs quoting, whole.
+        t3.t3.as_mut().unwrap().enabled = true;
+        t3.skill = Some(missing);
+        let spaced = profile("d", Harness::Claude, "/home/me/my claude", false, false);
+        let card = item(&[claude.clone(), t3, spaced], home).unwrap();
+        let named = "run `token-max skill install --claude-dir /state/claude --claude-dir '/home/me/my claude'`, then start a new session"; // slash ok: roots pass through unchanged
+        assert_eq!(step(card), named);
+        // A Codex home whose bare install has no ~/.agents or ~/.codex to write creates it.
+        let alone = profile("e", Harness::Codex, "/srv/codex", false, false);
+        let card = item(&[claude, alone], home).unwrap();
+        let create = format!(
+            "create {}, where Codex reads skills, then run `token-max skill install`, or `npx ",
+            crate::test_support::native_path("~/.agents")
+        );
+        assert!(step(card).starts_with(&create));
     }
 }

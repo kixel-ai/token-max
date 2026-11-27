@@ -2836,9 +2836,13 @@ pub(crate) fn profile(
     });
     // `--defaults`, whose report has no cards, looks for no skill.
     let skill = (!options.defaults).then(|| {
+        // The home `token-max skill install` selects, which reads an empty variable as unset.
+        let installer = options.env.get(variable).filter(|v| !v.is_empty());
+        let installer = resolve(installer.unwrap_or(&default_root));
+        let installer = realpath(&installer).unwrap_or(installer);
         let homes = crate::skill::Homes {
             user: &options.home,
-            active: &active,
+            active: &installer,
         };
         crate::skill::found(harness, &canonical, &homes)
     });
@@ -4049,6 +4053,28 @@ mod tests {
         let directory = &claude(&data).speed_directories.as_ref().unwrap()[&native_path(&cwd)];
         assert_eq!(directory.value.as_deref(), Some("standard"));
         assert_eq!(directory.owner, format!("{}:fastMode", native_path(&local)));
+    }
+
+    // The skill card's bare install reaches Codex only through a home the installer selects,
+    // which reads an empty CODEX_HOME as unset, as the shell's would be.
+    #[test]
+    fn an_empty_codex_home_reaches_no_skills_directory() {
+        let w = Workspace::new();
+        let custom = w.home.join("custom-codex");
+        std::fs::create_dir_all(custom.join("sessions")).unwrap();
+        std::fs::remove_dir_all(&w.codex).unwrap();
+        let bare = |value: &str| {
+            let env = Env::from_iter([("CODEX_HOME".to_string(), value.to_string())]);
+            let data = discover(&DiscoveryOptions {
+                env,
+                codex_dirs: vec![native_path(&custom)],
+                ..options(&w)
+            })
+            .unwrap();
+            data.profiles[0].skill.unwrap().default
+        };
+        assert!(!bare(""));
+        assert!(bare(&native_path(&custom)));
     }
 
     // Codex legacy/named profiles and project selection stay advisory; local requirements can block premium.

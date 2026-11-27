@@ -1209,6 +1209,24 @@ that differs, such as an edited copy, stops the install before anything is
 written, unless `--force` replaces it. Exit 0: printed or installed. Exit 2:
 argument, read or write failure.
 
+`token-max vibes` has a `Token audit skill` card for each host, the
+maintainer's pick, since what the audit saves is not measured. It looks for
+`skills/token-audit/SKILL.md`, through any link and without reading it, in
+each Claude Code home, and for Codex in `~/.agents` or its home. A copy in a
+project's `.claude` or `.agents` serves only that project and doesn't count. A
+disabled T3 instance is left out. When every profile finds the skill, the card
+is quiet, so `doctor` doesn't offer `vibes` for it. Otherwise it names the
+profiles missing it and, as a step by hand, `token-max skill install`, with
+`--claude-dir` for each Claude Code home the shell doesn't select, a T3
+instance's included, quoted when its path needs it, or `npx skills add` when
+none needs it. When Codex is missing it and neither `~/.agents` nor the shell's
+Codex home (`CODEX_HOME` or `~/.codex`) exists, the step first creates
+`~/.agents`, which a bare install then writes.
+With `--ssh`, each host looks in its own homes; the step runs there, where
+token-max may be only the cached copy `--ssh` put there and not on the `PATH`,
+so the card also names `npx @kixel/crabx token-max` for a host without it. `doctor`
+has no line for it, and it sets no exit code.
+
 ## Cache TTL
 
 A profile's TTL resolves to one value only when every request in it, across all
@@ -1710,6 +1728,7 @@ an exit code.
 | [Advisor model](#advisor-model) | Every Claude settings file: with no `advisorModel`, the advisor one rank above the main-session default, citing Claude Code's [advisor page](https://code.claude.com/docs/en/advisor). |
 | [Auto memory](#auto-memory-in-vibes) | Every auto memory or Codex memories line: off is advised when most main sessions ran in a repository with a CLAUDE.md or AGENTS.md. |
 | [Code intelligence](#code-intelligence) | Claude sessions read or edited files of a typed language whose official language server plugin a new session wouldn't load: Anthropic's [costs page](https://code.claude.com/docs/en/costs#install-code-intelligence-plugins-for-typed-languages). |
+| [Token audit skill](#token-audit-skill) | Every Claude Code and Codex profile: the `token-audit` skill's install step for the profiles whose harness doesn't find it, and quiet when all do. |
 
 The effort, instruction-file, subagent, Fable and advisor lines stay in `doctor`, where
 their costs are measured; only the advice about them is here.

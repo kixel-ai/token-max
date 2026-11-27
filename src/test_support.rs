@@ -344,6 +344,7 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
         memory: None,
         inbound: None,
         plugins: None,
+        skill: None,
         t3: None,
     }
 }

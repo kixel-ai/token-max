@@ -19,9 +19,9 @@ rustup stable toolchain and `llvm-tools-preview` installed under `.tmp`
 its profiler runtime. `tests/support`'s `isolated` keeps `LLVM_PROFILE_FILE`,
 so the binary the integration tests spawn writes its profiles beside the test
 binaries' (check no `default_*.profraw` lands in the checkout). A few of those
-profiles come out truncated, from destinations a cancel test kills mid-exit:
-set aside each one `llvm-profdata show` rejects before `cargo llvm-cov
-report`, or the merge fails. What coverage cannot see: the `cfg(windows)`
+profiles come out truncated, from destinations a cancel test kills mid-exit,
+and fail the merge: collect with `cargo llvm-cov --no-report`, set aside each
+profile `llvm-profdata show` rejects, then run `cargo llvm-cov report`. What coverage cannot see: the `cfg(windows)`
 branches on Linux, `tests/ssh.rs` off Unix, and a process that `exec`s, such
 as doctor's rerun after an upgrade, so `upgrade.rs`'s staging reads as
 uncovered though `tests/cli.rs` drives it.

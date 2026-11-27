@@ -41,8 +41,8 @@ Baseline from the m2 run (2026-11-27, main at 104ec46), before its fixes:
   (12.2 s) are slowest, then libsqlite3-sys's build script (3.5 s). A
   repeated edit to `src/report.rs` rebuilds the tests in 19.4 to 20.2 s, the
   lib test unit (19.5 s) being the critical path. Since m1, `src/` grew from
-  82,434 to 116,035 lines and tests from 622 to 855, matching the build's
-  growth of about 30%.
+  82,434 to 116,035 lines and `#[test]` functions from 622 to 855 (854 run on
+  Linux), matching the build's growth of about 30%.
 - Tests, `cargo test --locked` at the dev profile with libtest's default
   threads on that host: 854 tests; lib 0.34 s, `tests/ssh.rs` 2.0 s, every
   other target under 0.4 s.
@@ -54,8 +54,11 @@ Baseline from the m2 run (2026-11-27, main at 104ec46), before its fixes:
   2.74 to 4.64 MB, which includes the 1.50 MB of source text `wire::build`
   embeds (0.92 MB at v0.0.1). Crate 842,687 to 1,228,231 bytes; the GitHub
   source archive 1,755,977 to 2,616,729, `walk.gif` 717,546 to 985,957 of it.
-  No release has shipped since v0.0.1, so its asset sizes in the m1 stub
-  remain the last measured.
+  No release has shipped since v0.0.1, whose published assets were:
+  x86_64-linux-musl archive 4,567,080 bytes (binary 15,429,536 unstripped,
+  12,777,856 stripped), aarch64-linux-musl 4,121,880, x86_64-darwin
+  4,250,884, aarch64-darwin 3,774,108, windows zip 5,599,366, source.tar.gz
+  1,756,394, crate 842,687.
 
 Check first: the gate latency and Windows job time after the m2 fixes, whether
 the `macOS` workflow failed on `main` and filed its issue, and the release
@@ -63,8 +66,10 @@ assets against the sizes above.
 
 Tried and rejected in m1: stripping symbols from release binaries (saves
 2.6 MB unpacked but only 330 KB of the 4.57 MB archive, and loses symbolized
-panic backtraces); a Cargo cache (no run on main would save one now that
-pushes to main don't run Check); a per-test time limit in the gate (it would
+panic backtraces); a Cargo cache for Check (Check never runs on main, so no
+run saves a cache pull requests could read; the macOS run on main could
+save one, but it is off the gate, so its build time costs no latency); a
+per-test time limit in the gate (it would
 depend on runner wall-clock time).
 
 Tried and rejected in m2: `debug = "line-tables-only"` locally (cold build

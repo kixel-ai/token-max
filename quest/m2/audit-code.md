@@ -24,8 +24,8 @@ Check first:
   `median`, `harness_name`, `js_string`, `js_space`, hex encoding, the 30-day
   projection and plural helpers. Search for distinctive bodies such as
   `30.0 *`, `{b:02x}` and `== 1 { "" }`.
-- Platform-only warnings: CI runs clippy on Linux only, and the macOS and
-  Windows test job denies warnings.
+- Platform-only warnings: CI runs clippy on Linux only, and the Windows gate
+  job and the macOS run after each merge deny warnings.
 
 Kept on purpose:
 

@@ -20,9 +20,15 @@ repositories each run their gate on a runner group of their own, such as
 - Linux jobs move to a `token-max` runner group on a NixOS CI host, labelled
   like the others (`token-max-queue`). `Source` already runs in the Nix dev
   shell, so the host needs only Nix.
-- Pull requests from forks would run their code on that host. Keep fork runs
-  behind GitHub's approval for outside contributors, and give the runner no
-  credentials beyond the job's read-only token, as the other queue runners do.
+- Pull requests from forks would run their code on that host. Set the
+  repository's fork-run approval to "Require approval for all outside
+  collaborators", since GitHub's default asks only first-time contributors,
+  and run every job that executes pull request code on a fresh, ephemeral
+  worker, so no job leaves state that a later merge-queue `Check` reads.
+  Give the runner no credentials beyond the job's read-only token. If the
+  host cannot give each job a fresh worker, keep fork `pull_request` runs on
+  GitHub's runners and send only `merge_group` runs, which a maintainer
+  enqueues, to the self-hosted group.
 - `Check` stays the single required context, so the ruleset needs no change.
 
 ## Waiting

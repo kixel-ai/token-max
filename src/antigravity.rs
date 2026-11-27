@@ -449,24 +449,33 @@ fn read_transcript(
         if read == 0 {
             break;
         }
-        // Antigravity ends every line it finishes with a newline, so a line without one is
-        // still being written: it is left for a later read, and leaves the conversation's
-        // export incomplete.
-        if line.pop() != Some(b'\n') {
-            snapshot.deferred_bytes = read as u64;
-            break;
+        let finished = line.last() == Some(&b'\n');
+        if finished {
+            line.pop();
         }
-        snapshot.lines = line_number;
         if line.iter().all(u8::is_ascii_whitespace) {
+            snapshot.lines = line_number;
             continue;
         }
-        let Ok(step) = serde_json::from_slice::<Step>(&line) else {
-            return Err(error(
-                "invalid Antigravity transcript line",
-                file,
-                line_number,
-            ));
+        let step = match serde_json::from_slice::<Step>(&line) {
+            Ok(step) => step,
+            // A last line without its newline that doesn't parse is still being written: it
+            // is left for a later read, and leaves the conversation's export incomplete. A
+            // copied transcript's complete last record may lack the newline, so it parses.
+            Err(_) if !finished => {
+                snapshot.deferred_bytes = read as u64;
+                break;
+            }
+            // A finished line that doesn't parse, such as a fragment a crash left that the
+            // next write continued, is skipped as the transcript reader skips one, leaving
+            // the conversation's export incomplete.
+            Err(_) => {
+                snapshot.lines = line_number;
+                snapshot.skipped_lines += 1;
+                continue;
+            }
         };
+        snapshot.lines = line_number;
         let invalid = |_| error("invalid Antigravity token count", file, line_number);
         let time = step.created_at.as_deref().and_then(parse_instant);
         if let Some(time) = time {
@@ -763,7 +772,7 @@ mod tests {
     }
 
     #[test]
-    fn only_an_unterminated_last_line_may_be_unfinished() {
+    fn a_malformed_line_is_skipped_and_only_an_unfinished_last_line_waits() {
         let w = crate::test_support::Workspace::new();
         let (root, _) = synthetic(&w);
         let file = join(&[
@@ -781,16 +790,19 @@ mod tests {
         // Left for a later read, it leaves the conversation's export incomplete.
         let deferred = "{\"type\":\"PLANNER_RES".len() as u64;
         assert_eq!(history.snapshots[0].deferred_bytes, deferred);
-        std::fs::write(&file, &text).unwrap();
-        let finished = read(&root, std::slice::from_ref(&file), &["p".into()]).unwrap();
-        assert_eq!(finished.snapshots[0].deferred_bytes, 0);
-        // A finished line that doesn't parse fails the scan, even the last.
-        std::fs::write(&file, format!("{text}{{\"type\":\n")).unwrap();
-        let error = read(&root, std::slice::from_ref(&file), &["p".into()]).unwrap_err();
-        assert_eq!(error.message, "invalid Antigravity transcript line");
-        std::fs::write(&file, format!("{{\"type\":\n{text}")).unwrap();
-        let error = read(&root, std::slice::from_ref(&file), &["p".into()]).unwrap_err();
-        assert_eq!(error.message, "invalid Antigravity transcript line");
-        assert_eq!(error.location.map(|l| l.line), Some(1));
+        // A copied transcript's complete last record may lack its newline.
+        std::fs::write(&file, text.trim_end()).unwrap();
+        let copied = read(&root, std::slice::from_ref(&file), &["p".into()]).unwrap();
+        assert_eq!(copied.requests.len(), 3);
+        let s = &copied.snapshots[0];
+        assert_eq!((s.deferred_bytes, s.skipped_lines), (0, 0));
+        // A finished line that doesn't parse, last or not, is skipped and the rest kept.
+        for text in [format!("{text}{{\"type\":\n"), format!("{{\"type\":{text}")] {
+            std::fs::write(&file, text).unwrap();
+            let history = read(&root, std::slice::from_ref(&file), &["p".into()]).unwrap();
+            assert_eq!(history.requests.len(), 3);
+            let s = &history.snapshots[0];
+            assert_eq!((s.deferred_bytes, s.skipped_lines), (0, 1));
+        }
     }
 }

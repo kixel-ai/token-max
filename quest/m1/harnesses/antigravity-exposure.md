@@ -34,12 +34,11 @@ What exists to work from:
 - T3 rewrites an instance's `antigravity-acp/settings.json` on every launch,
   so no edit may target it.
 
-## Waiting
-
-- Maintainer: How should doctor treat the cost of Antigravity's MCP servers, skills and rules, which its transcripts never record?
-  - Lines with uses, cost unmeasured, no switch (Recommended) - each feature shows on its own line with its recorded uses and says its cost is unmeasured, without guessing what Antigravity sent
-  - Price from current files - size each server from its cached tool definitions and each skill and rule from its file at 4 characters per token, take every request as having carried them, and offer removing a never-used server from mcp_config.json; prices what the files hold now, not what was sent
-  - Drop - keep the single assumption line the report already prints
+Decided 2026-11-27 (maintainer, /quest-run): each MCP server, skill and rule
+gets its own line with its recorded uses and says plainly that its cost is
+unmeasured, with no on/off switch (rejected: estimate each from its current
+files at 4 characters per token and offer removing a never-used server; drop
+the lines and keep the report's single assumption line).
 
 ## Related
 

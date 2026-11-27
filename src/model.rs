@@ -1129,6 +1129,8 @@ pub struct Profile {
     pub t3: Option<T3Instance>,
     /// Claude's code intelligence plugins; None for Codex and under `--defaults`.
     pub plugins: Option<crate::lsp::Plugins>,
+    /// Whether the `token-audit` skill is where the harness reads it; None under `--defaults`.
+    pub skill: Option<crate::skill::Found>,
     /// Current controls that choose subagent models and efforts.
     pub agents: AgentControls,
     /// The file that sets Codex's `project_doc_max_bytes` in `settings`, when one does.

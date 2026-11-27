@@ -2834,6 +2834,9 @@ pub(crate) fn profile(
             managed: crate::lsp::enabled_entries(&managed, managed_file),
         }
     });
+    // `--defaults`, whose report has no cards, looks for no skill.
+    let skill = (!options.defaults)
+        .then(|| crate::skill::found(harness, &canonical, &options.home, active == canonical));
     let claude_config = claude.then(|| claude_config(&options.home, &canonical, explicit));
     // Claude Code rewrites its state file while it runs, so one that doesn't parse now
     // leaves the install unknown, as a missing one does, rather than failing the scan.
@@ -2872,6 +2875,7 @@ pub(crate) fn profile(
         inbound: None,
         t3: None,
         plugins,
+        skill,
         agents: crate::model::AgentControls::default(),
         instruction_budget_file,
         instruction_budget_unresolved: None,

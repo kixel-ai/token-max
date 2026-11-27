@@ -3619,6 +3619,7 @@ mod tests {
             memory: None,
             inbound: None,
             plugins: None,
+            skill: None,
             t3: None,
         }
     }

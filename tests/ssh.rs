@@ -124,6 +124,10 @@ HOME="$TEST_ROOT/homes/$host" PATH="$TEST_ROOT/remote/$host:$TEST_PATH" exec sh 
             r#"{"promptCacheTtl":"1h","advisorModel":"fable","cleanupPeriodDays":365}"#,
         )
         .unwrap();
+        // The token-audit skill installed, so its `vibes` card is quiet too.
+        let skill = home.join(".claude/skills/token-audit");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "synthetic\n").unwrap();
         home
     }
 
@@ -663,7 +667,7 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     );
     // Each host's card names its host, its own waits and the edit to make there, in its home.
     let here = flat(cards[1]);
-    assert!(here.starts_with("[1/10] Bash timeout cap not measured 10m -> 55m Host this host"));
+    assert!(here.starts_with("[1/12] Bash timeout cap not measured 10m -> 55m Host this host"));
     assert!(
         here.contains("No foreground Bash wait outlasted the cache."),
         "{here}"
@@ -676,36 +680,36 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     );
     // Each host's memory card follows its cap, then its window card, its edit in that
     // host's home.
-    assert!(flat(cards[2]).starts_with("[2/10] Auto memory not measured Host this host"));
-    assert!(flat(cards[7]).starts_with("[7/10] Auto memory not measured Host devbox"));
+    assert!(flat(cards[2]).starts_with("[2/12] Auto memory not measured Host this host"));
+    assert!(flat(cards[8]).starts_with("[8/12] Auto memory not measured Host devbox"));
     let window = flat(cards[3]);
     assert!(
         window.starts_with(
-            "[3/10] Auto-compact window (claude-opus-5-5) not measured 967k -> 400k Host this host"
+            "[3/12] Auto-compact window (claude-opus-5-5) not measured 967k -> 400k Host this host"
         ) && window.ends_with(r#"in ~/.claude/settings.json"#),
         "{window}"
     );
-    let window = flat(cards[8]);
+    let window = flat(cards[9]);
     assert!(
         window.starts_with(
-            "[8/10] Auto-compact window (claude-opus-5-5) not measured 967k -> 400k Host devbox"
+            "[9/12] Auto-compact window (claude-opus-5-5) not measured 967k -> 400k Host devbox"
         ) && window.ends_with(r#"in devbox:~/.claude/settings.json"#),
         "{window}"
     );
     // Each host's default has its own card, which advises nothing on the pick.
-    assert!(flat(cards[4]).starts_with("[4/10] Main-session default not measured Host this host"));
-    assert!(flat(cards[9]).starts_with("[9/10] Main-session default not measured Host devbox"));
+    assert!(flat(cards[4]).starts_with("[4/12] Main-session default not measured Host this host"));
+    assert!(flat(cards[10]).starts_with("[10/12] Main-session default not measured Host devbox"));
     // Each host's advisor card, already set, advises nothing.
     assert!(
-        flat(cards[5]).starts_with("[5/10] Advisor model not measured Host this host What"),
+        flat(cards[5]).starts_with("[5/12] Advisor model not measured Host this host What"),
         "{stdout}"
     );
     assert!(
-        flat(cards[10]).starts_with("[10/10] Advisor model not measured Host devbox What"),
+        flat(cards[11]).starts_with("[11/12] Advisor model not measured Host devbox What"),
         "{stdout}"
     );
-    let there = flat(cards[6]);
-    assert!(there.starts_with("[6/10] Bash timeout cap not measured 2h -> 55m Host devbox"));
+    let there = flat(cards[7]);
+    assert!(there.starts_with("[7/12] Bash timeout cap not measured 2h -> 55m Host devbox"));
     assert!(
         there.contains(
             "1 foreground Bash wait outlasted the cache (1 hit the timeout, 1 polled in a loop)"
@@ -724,10 +728,34 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     let alone = flat(alone.split("\n\n").nth(1).unwrap());
     assert_eq!(
         there
-            .replace("[6/10]", "[1/5]")
+            .replace("[7/12]", "[1/6]")
             .replace(" Host devbox", "")
             .replace("devbox:~", "~"),
         alone
+    );
+    // Each host looks for the token-audit skill in its own homes: installed here, the card
+    // is quiet; missing on devbox, it names the step there, and doctor counts it.
+    assert!(
+        flat(cards[6]).starts_with("[6/12] Token audit skill not measured Host this host What")
+            && !cards[6].contains("Change"),
+        "{stdout}"
+    );
+    std::fs::remove_dir_all(home.join(".claude/skills")).unwrap();
+    let (status, stdout, stderr) = advice(&["--ssh", "devbox"]);
+    assert_eq!((status, stderr.as_str()), (0, ""), "{stdout}");
+    let cards: Vec<&str> = stdout.split("\n\n").collect();
+    assert!(flat(cards[6]).contains("Installed for every Claude Code and Codex profile here"));
+    let there = flat(cards[12]);
+    assert!(
+        there.starts_with("[12/12] Token audit skill not measured Host devbox")
+            && there.contains("Not installed for Claude Code in ~/.claude.")
+            && there.ends_with("Change by hand, since doctor and vibes write only settings files, not skills: run `token-max skill install`, or `npx skills add kixel-ai/token-max --skill token-audit -g`, then start a new session"),
+        "{there}"
+    );
+    let (_, stdout, _) = hosts.run(&["--ssh", "devbox"]);
+    assert!(
+        stdout.contains("token-max vibes has 5 pieces of advice"),
+        "{stdout}"
     );
 }
 

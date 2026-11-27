@@ -1,4 +1,4 @@
-# token-audit: agent-run transcript efficiency audit
+# [S] token-audit: agent-run transcript efficiency audit
 
 ## Goal
 

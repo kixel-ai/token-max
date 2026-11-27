@@ -1,10 +1,14 @@
-//! The `token-audit` agent skill: its prompt, and installing its stub where harnesses look.
+//! The `token-audit` agent skill: its prompt, installing its stub where harnesses look, and
+//! `vibes`' card for the profiles that lack it.
 
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 
+use crate::doctor::How;
+use crate::model::{Harness, Profile};
 use crate::safe::{ScanError, display};
+use crate::vibes::Item;
 
 /// The skill's `SKILL.md`, which only runs `token-max skill audit`, so installs never go stale.
 pub const STUB: &str = include_str!("../skills/token-audit/SKILL.md");
@@ -224,4 +228,223 @@ fn cannot(verb: &str, path: &Path) -> ScanError {
         "cannot {verb} {}; nothing after it was installed",
         display(&path.to_string_lossy())
     ))
+}
+
+/// Whether a profile's harness finds the skill, read when its profile is discovered.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Found {
+    /// A `token-audit/SKILL.md` is where the harness reads user skills, this build's or not.
+    pub installed: bool,
+    /// `token-max skill install` without `--claude-dir` writes this profile's copy.
+    pub default: bool,
+}
+
+/// Whether the profile rooted at `root` finds the skill: Claude Code in its home's `skills`,
+/// Codex in `~/.agents/skills` or its deprecated `$CODEX_HOME/skills`. `active` is whether
+/// it is the Claude Code home the shell selects. Only metadata is read, through any link.
+pub fn found(harness: Harness, root: &str, home: &str, active: bool) -> Found {
+    let at = |dir: &Path| {
+        dir.join("skills")
+            .join("token-audit")
+            .join("SKILL.md")
+            .is_file()
+    };
+    match harness {
+        Harness::Claude => Found {
+            installed: at(Path::new(root)),
+            default: active,
+        },
+        Harness::Codex => Found {
+            installed: at(&Path::new(home).join(".agents")) || at(Path::new(root)),
+            // Codex's copy goes in ~/.agents whatever its home.
+            default: true,
+        },
+    }
+}
+
+const WHAT: &str = "An agent skill for Claude Code and Codex that audits their transcripts for token waste beyond settings.";
+
+const PICK: &str = "The maintainer's pick, from token-max's own maintainer: https://github.com/kixel-ai/token-max/blob/main/docs/reference.md#token-audit-skill";
+
+/// `vibes`' card for the skill on one host: quiet when every profile finds it, else the
+/// install step for those that don't. None when no profile was looked at.
+pub fn item(profiles: &[Profile], home: Option<&str>) -> Option<Item> {
+    let shown = |path: &str| crate::report::home_path(home, path);
+    let mut seen: Vec<(&Profile, Found)> = vec![];
+    for p in profiles {
+        // A disabled T3 instance starts no session to use it.
+        let Some(found) = p.skill.filter(|_| p.t3.as_ref().is_none_or(|t| t.enabled)) else {
+            continue;
+        };
+        if !seen
+            .iter()
+            .any(|(s, _)| s.harness == p.harness && s.root == p.root)
+        {
+            seen.push((p, found));
+        }
+    }
+    if seen.is_empty() {
+        return None;
+    }
+    let missing: Vec<&(&Profile, Found)> = seen.iter().filter(|(_, f)| !f.installed).collect();
+    let card = |text: String, how: Option<How>| Item {
+        name: "Token audit skill".into(),
+        value: String::new(),
+        what: WHAT.into(),
+        text,
+        sources: vec![PICK.into()],
+        quiet: how.is_none(),
+        how,
+        after: vec![],
+        defers: None,
+    };
+    if missing.is_empty() {
+        return Some(card(
+            "Installed for every Claude Code and Codex profile here: ask for /token-audit in Claude Code or $token-audit in Codex.".into(),
+            None,
+        ));
+    }
+    let names: Vec<String> = missing
+        .iter()
+        .map(|(p, _)| match p.harness {
+            Harness::Claude => format!("Claude Code in {}", shown(&p.root)),
+            Harness::Codex => format!("Codex in {}", shown(&p.root)),
+        })
+        .collect();
+    let named: String = missing
+        .iter()
+        .filter(|(p, f)| p.harness == Harness::Claude && !f.default)
+        .map(|(p, _)| format!(" --claude-dir {}", shown(&p.root)))
+        .collect();
+    let mut steps = vec![];
+    if !named.is_empty() {
+        steps.push(format!("`token-max skill install{named}`"));
+    }
+    // A bare install writes the shell's Claude Code home and ~/.agents, which Codex reads.
+    if missing.iter().any(|(_, f)| f.default) {
+        steps.push("`token-max skill install`".to_string());
+    }
+    let text = format!(
+        "Not installed for {}. /token-audit has an agent run token-max audit and rank by dollars the waste no setting changes: commands that bust the prompt cache, bloated or repeated tool calls, always-loaded context the sessions never needed, and context they kept rediscovering. It offers each fix and makes it only after a yes. What it saves is not measured.",
+        crate::lsp::list(&names)
+    );
+    Some(card(
+        text,
+        Some(How::Manual {
+            step: format!(
+                "run {}, or `npx skills add kixel-ai/token-max --skill token-audit -g`, then start a new session",
+                steps.join(" and ")
+            ),
+            reason: "doctor and vibes write only settings files, not skills".into(),
+        }),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{Workspace, make_profile, make_t3_profile};
+
+    fn put(dir: &Path) {
+        let dir = dir.join("skills/token-audit");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("SKILL.md"), "synthetic\n").unwrap();
+    }
+
+    #[test]
+    fn each_harness_finds_the_skill_where_it_reads_skills() {
+        let w = Workspace::new();
+        let text = |p: &Path| p.to_string_lossy().into_owned();
+        let (home, claude, codex) = (text(&w.home), text(&w.claude), text(&w.codex));
+        let installed = |h, root: &str| found(h, root, &home, true).installed;
+        assert!(!installed(Harness::Claude, &claude) && !installed(Harness::Codex, &codex));
+        // ~/.agents is Codex's, never Claude Code's.
+        put(&w.home.join(".agents"));
+        assert!(!installed(Harness::Claude, &claude) && installed(Harness::Codex, &codex));
+        fs::remove_dir_all(w.home.join(".agents")).unwrap();
+        // Codex still reads its deprecated home copy.
+        put(&w.codex);
+        assert!(installed(Harness::Codex, &codex));
+        // A link to a SKILL.md counts; a dangling one doesn't.
+        #[cfg(unix)]
+        {
+            let dir = w.claude.join("skills/token-audit");
+            fs::create_dir_all(&dir).unwrap();
+            std::os::unix::fs::symlink(w.home.join("elsewhere"), dir.join("SKILL.md")).unwrap();
+            assert!(!installed(Harness::Claude, &claude));
+            fs::write(w.home.join("elsewhere"), "synthetic\n").unwrap();
+            assert!(installed(Harness::Claude, &claude));
+        }
+        // Codex's copy is the bare install's, whichever home it reads.
+        assert!(found(Harness::Codex, &codex, &home, false).default);
+        assert!(!found(Harness::Claude, &claude, &home, false).default);
+    }
+
+    #[test]
+    fn the_card_names_each_profile_missing_it_and_the_install_that_reaches_it() {
+        let profile = |id: &str, harness, root: &str, installed, default| {
+            let mut p = make_profile(id, root);
+            p.harness = harness;
+            p.skill = Some(Found { installed, default });
+            p
+        };
+        let home = Some("/home/me");
+        // No profile looked: no card, as under --defaults.
+        assert_eq!(item(&[make_profile("a", "/home/me/.claude")], home), None);
+        let claude = profile("a", Harness::Claude, "/home/me/.claude", true, true);
+        let codex = profile("b", Harness::Codex, "/home/me/.codex", true, true);
+        let card = item(&[claude.clone(), codex.clone()], home).unwrap();
+        assert!(card.quiet && card.how.is_none(), "{card:?}");
+        let step = |card: Item| match card.how {
+            Some(How::Manual { step, .. }) => step,
+            other => panic!("{other:?}"),
+        };
+        // One harness missing it: the bare install, which writes ~/.agents for Codex.
+        let missing = Found {
+            installed: false,
+            default: true,
+        };
+        let partial = item(
+            &[
+                claude.clone(),
+                Profile {
+                    skill: Some(missing),
+                    ..codex.clone()
+                },
+            ],
+            home,
+        )
+        .unwrap();
+        assert!(!partial.quiet);
+        let codex_only = "Not installed for Codex in ~/.codex. "; // slash ok: roots pass through unchanged
+        assert!(partial.text.starts_with(codex_only));
+        assert!(step(partial).starts_with("run `token-max skill install`, or `npx "));
+        // A Claude home the shell doesn't select gets --claude-dir, beside the bare install.
+        let work = profile("c", Harness::Claude, "/home/me/.claude-work", false, false);
+        let both = item(
+            &[
+                claude.clone(),
+                work.clone(),
+                Profile {
+                    skill: Some(missing),
+                    ..codex
+                },
+            ],
+            home,
+        )
+        .unwrap();
+        let text = "Not installed for Claude Code in ~/.claude-work and Codex in ~/.codex. "; // slash ok: roots pass through unchanged
+        assert!(both.text.starts_with(text), "{}", both.text);
+        let named = "run `token-max skill install --claude-dir ~/.claude-work` and `token-max skill install`, or "; // slash ok: roots pass through unchanged
+        assert!(step(both).starts_with(named));
+        // A disabled T3 instance starts no session, so it is not counted; aliases share a card.
+        let mut t3 = make_t3_profile("t", "/state/claude");
+        t3.skill = Some(Found {
+            installed: false,
+            default: false,
+        });
+        t3.t3.as_mut().unwrap().enabled = false;
+        let card = item(&[claude.clone(), claude, t3], home).unwrap();
+        assert!(card.quiet);
+    }
 }

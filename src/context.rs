@@ -5,13 +5,11 @@ use crate::collections::{HashMap, HashSet, IndexMap, IndexSet};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use crate::exposure::{
-    MEMORY_OUTPUT, NAMESPACE_DESCRIPTION, UNMAPPED_DELTA, calibrate, codex_server, cohort,
-};
+use crate::exposure::{MEMORY_OUTPUT, NAMESPACE_DESCRIPTION, UNMAPPED_DELTA, codex_server, cohort};
 use crate::model::{
-    Category, Component, ContextCost, ContextKind, Control, ControlValue, ExposureScan, Harness,
-    Invocation, InvocationKind, InvocationStatus, Linkage, Millis, Profile, Request, ResultTotals,
-    Snapshot, Text, Usd, Verdict, Via,
+    Calibration, Category, Component, ContextCost, ContextKind, Control, ControlValue,
+    ExposureScan, Harness, Invocation, InvocationKind, InvocationStatus, Linkage, Millis, Profile,
+    Request, ResultTotals, Snapshot, Text, Usd, Verdict, Via,
 };
 use crate::prices::{Catalog, Sample, conditional_tier, prefix_spans, pricing_assumptions};
 use crate::safe::identity;
@@ -110,6 +108,8 @@ pub struct ContextInput<'a> {
     pub scan: &'a ExposureScan,
     /// The selected requests whose usage prices those shapes.
     pub requests: &'a [Request],
+    /// Tokens per character of each cohort's text, from [`crate::exposure::calibrate`] over `requests`.
+    pub calibration: &'a [Calibration],
     /// The selected profiles, whose settings files name the switches.
     pub profiles: &'a [Profile],
     /// Public prices.
@@ -998,9 +998,10 @@ struct ObservedUse<'a> {
 /// added content goes.
 pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
     let ContextInput { scan, catalog, .. } = *input;
-    let calibration: HashMap<String, f64> = calibrate(scan, input.requests)
-        .into_iter()
-        .map(|c| (c.cohort, c.tokens_per_character))
+    let calibration: HashMap<&str, f64> = input
+        .calibration
+        .iter()
+        .map(|c| (&*c.cohort, c.tokens_per_character))
         .collect();
     let requests: HashMap<&str, &Request> = input.requests.iter().map(|r| (&*r.id, r)).collect();
     let components: HashMap<&str, &Component> =
@@ -1253,7 +1254,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         let u = p.map(|p| &p.usage);
         let tokenizer = cohort(r);
         let ratio = calibration
-            .get(&tokenizer)
+            .get(tokenizer.as_str())
             .copied()
             .or(chronological.then_some(CODEX_TOKENS_PER_CHARACTER));
         let spans = p
@@ -1962,6 +1963,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::exposure::calibrate;
     use crate::model::{
         Exposure, ExposureView, Ids, Invocation, Margin, Owner, Scope, Size, TextCoverage,
         ToolCalls, ToolResults, Usage, Via,
@@ -2056,6 +2058,7 @@ mod tests {
         context_costs(&ContextInput {
             scan,
             requests,
+            calibration: &calibrate(scan, requests),
             profiles: &profiles,
             catalog: &prices(),
             snapshots: &[],
@@ -2190,6 +2193,7 @@ mod tests {
             let rows = context_costs(&ContextInput {
                 scan: &scan,
                 requests: &requests,
+                calibration: &calibrate(&scan, &requests),
                 profiles: &profiles,
                 catalog: &prices(),
                 snapshots,
@@ -2357,6 +2361,7 @@ mod tests {
         let rows = context_costs(&ContextInput {
             scan: &scan,
             requests: &requests,
+            calibration: &calibrate(&scan, &requests),
             profiles: &profiles,
             catalog: &prices(),
             snapshots: &[],
@@ -2450,6 +2455,7 @@ mod tests {
         let rows = context_costs(&ContextInput {
             scan: &scan,
             requests: &requests,
+            calibration: &calibrate(&scan, &requests),
             profiles: &profiles,
             catalog: &prices(),
             snapshots: &[],
@@ -2475,6 +2481,7 @@ mod tests {
         let rows = context_costs(&ContextInput {
             scan: &scan,
             requests: &requests,
+            calibration: &calibrate(&scan, &requests),
             profiles: std::slice::from_ref(&profile),
             catalog: &prices(),
             snapshots: &[],
@@ -2755,6 +2762,7 @@ mod tests {
                 let costs = context_costs(&ContextInput {
                     scan: &scan,
                     requests: std::slice::from_ref(&r),
+                    calibration: &calibrate(&scan, std::slice::from_ref(&r)),
                     profiles: std::slice::from_ref(&profile),
                     catalog: &prices(),
                     snapshots: &[],
@@ -2843,6 +2851,7 @@ mod tests {
         let rows = context_costs(&ContextInput {
             scan: &scan,
             requests: &requests,
+            calibration: &calibrate(&scan, &requests),
             profiles: &profiles,
             catalog: &prices(),
             snapshots: &[],
@@ -3138,6 +3147,7 @@ mod tests {
         let rows = context_costs(&ContextInput {
             scan: &scan,
             requests: &requests,
+            calibration: &calibrate(&scan, &requests),
             profiles: std::slice::from_ref(&profile),
             catalog: &prices(),
             snapshots: &[],
@@ -3200,6 +3210,7 @@ mod tests {
             let rows = context_costs(&ContextInput {
                 scan: &scan,
                 requests: &requests,
+                calibration: &calibrate(&scan, &requests),
                 profiles: std::slice::from_ref(&profile),
                 catalog: &prices(),
                 snapshots: &[],
@@ -3284,13 +3295,15 @@ mod tests {
             p.mcp_servers = vec![server.into()];
             p
         };
+        let requests = [
+            codex("r1", &["a"]),
+            codex("r2", &["b"]),
+            codex("r3", &["a", "b"]),
+        ];
         let rows = context_costs(&ContextInput {
             scan: &scan,
-            requests: &[
-                codex("r1", &["a"]),
-                codex("r2", &["b"]),
-                codex("r3", &["a", "b"]),
-            ],
+            requests: &requests,
+            calibration: &calibrate(&scan, &requests),
             profiles: &[profile("a", "docs-server"), profile("b", "docs_server")],
             catalog: &prices(),
             snapshots: &[],
@@ -3548,6 +3561,7 @@ mod tests {
         let rows = context_costs(&ContextInput {
             scan: &scan,
             requests: &requests,
+            calibration: &calibrate(&scan, &requests),
             profiles: &[mine, other],
             catalog: &prices(),
             snapshots: &[],

@@ -1235,9 +1235,11 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     .map(CheckResult::T3Idle)
     .collect();
     checking.land(&t3_idle, &scan);
+    let calibration = calibrate(&scan.exposure, &scan.requests);
     let context = context_costs(&ContextInput {
         scan: &scan.exposure,
         requests: &scan.requests,
+        calibration: &calibration,
         profiles: &scan.profiles,
         catalog,
         snapshots: &scan.snapshots,
@@ -1247,6 +1249,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     let memory: Vec<CheckResult> = memory_checks(&MemoryInput {
         scan: &scan,
         context: &context,
+        calibration: &calibration,
         catalog,
         since,
         now,
@@ -1275,7 +1278,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     .flatten()
     .collect();
     let exposure = ExposureSummary {
-        calibration: calibrate(&scan.exposure, &scan.requests),
+        calibration,
         assumptions: [
             "component tokens are characters times a per-model ratio calibrated against recorded request totals",
             "Codex and OpenCode record no complete request text to calibrate against, so their components and tool output use OpenAI's rule of thumb of 4 characters per token",

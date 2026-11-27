@@ -9,7 +9,7 @@ use crate::cache::{
     CODEX_CACHE_MILLISECONDS, CacheBoundaries, CacheChain, Touch, observed_ttl, ttl_milliseconds,
 };
 use crate::compaction::{
-    CompactionSamples, WindowEvents, WindowOptions, WindowSetting, compaction_samples,
+    CompactionSamples, History, WindowEvents, WindowOptions, WindowSetting, compaction_samples,
     replay_windows,
 };
 use crate::idle::{Scopes, recommended_windows, ttls_after};
@@ -680,15 +680,12 @@ fn ping_input(requests: &[&Request], scan: &Scan) -> Option<i64> {
 
 fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<KeepaliveCheck> {
     let profile = line.lead;
-    let mut requests: Vec<_> = options
-        .scan
-        .cache_context
+    let history = History::new(options.scan, line);
+    let requests: Vec<_> = history
         .requests
-        .iter()
-        .chain(&options.scan.requests)
+        .into_iter()
         .filter(|r| {
-            line.covers(&r.profiles)
-                && r.harness == profile.harness
+            r.harness == profile.harness
                 && ((match r.harness {
                     Harness::Claude => r.agent == Agent::Main,
                     Harness::Codex => r.agent != Agent::Subagent,
@@ -698,7 +695,6 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
                 }) || r.parts.iter().any(|p| p.kind == PartKind::Compaction))
         })
         .collect();
-    requests.sort_by_key(|r| r.time);
     let main: Vec<_> = requests
         .iter()
         .copied()
@@ -741,13 +737,10 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
     {
         ttls.main = Some(*ttl);
     }
-    let all_events: Vec<_> = options
-        .scan
-        .cache_context
-        .boundaries
-        .iter()
-        .chain(&options.scan.events)
-        .filter(|e| e.kind == EventKind::Compaction && line.covers(&e.profiles))
+    let all_events: Vec<_> = history
+        .events
+        .into_iter()
+        .filter(|e| e.kind == EventKind::Compaction)
         .collect();
     let samples = compaction_samples(&requests, &all_events, options.summaries);
     let mut window_events = WindowEvents::new(all_events.iter().copied());

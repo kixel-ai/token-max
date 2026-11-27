@@ -5,11 +5,11 @@
 use crate::collections::HashMap;
 
 use crate::context::CODEX_TOKENS_PER_CHARACTER;
-use crate::exposure::{MEMORY_SECTION, calibrate, cohort};
+use crate::exposure::{MEMORY_SECTION, cohort};
 use crate::model::{
-    Action, Agent, Category, CheckBase, Component, ContextCost, ContextKind, Estimate, Evidence,
-    Harness, Linkage, Margin, MemoryAccess, MemoryCheck, Millis, PartKind, Profile, ProfileShare,
-    Request, Scan, SessionPlaces, Usd,
+    Action, Agent, Calibration, Category, CheckBase, Component, ContextCost, ContextKind, Estimate,
+    Evidence, Harness, Linkage, Margin, MemoryAccess, MemoryCheck, Millis, PartKind, Profile,
+    ProfileShare, Request, Scan, SessionPlaces, Usd,
 };
 use crate::prices::{Catalog, Sample, output_rate};
 
@@ -24,6 +24,8 @@ pub struct MemoryInput<'a> {
     pub scan: &'a Scan,
     /// Context costs, whose auto memory rows hold its loaded context and reads.
     pub context: &'a [ContextCost],
+    /// Tokens per character of each cohort's text, from [`crate::exposure::calibrate`].
+    pub calibration: &'a [Calibration],
     pub catalog: &'a Catalog,
     /// The explicit window start; None uses each profile's first request.
     pub since: Option<Millis>,
@@ -37,9 +39,10 @@ pub struct MemoryInput<'a> {
 /// is on and never used, advisory above the cost per use, keep otherwise.
 pub fn memory_checks(input: &MemoryInput<'_>) -> Vec<MemoryCheck> {
     let scan = input.scan;
-    let calibration: HashMap<String, f64> = calibrate(&scan.exposure, &scan.requests)
-        .into_iter()
-        .map(|c| (c.cohort, c.tokens_per_character))
+    let calibration: HashMap<&str, f64> = input
+        .calibration
+        .iter()
+        .map(|c| (&*c.cohort, c.tokens_per_character))
         .collect();
     let requests: HashMap<&str, &Request> = scan.requests.iter().map(|r| (&*r.id, r)).collect();
     let components: HashMap<&str, &Component> = scan
@@ -78,7 +81,7 @@ fn check(
     control: &crate::model::MemoryControl,
     requests: &HashMap<&str, &Request>,
     components: &HashMap<&str, &Component>,
-    calibration: &HashMap<String, f64>,
+    calibration: &HashMap<&str, f64>,
 ) -> MemoryCheck {
     let scan = input.scan;
     let profile = line.lead;
@@ -228,7 +231,7 @@ fn check(
         .map(|m| {
             let r = requests.get(m.request.as_deref()?)?;
             let ratio = calibration
-                .get(&cohort(r))
+                .get(cohort(r).as_str())
                 .copied()
                 .or((r.harness == Harness::Codex).then_some(CODEX_TOKENS_PER_CHARACTER))?;
             // The message iteration that wrote the call, not a compaction or advisor

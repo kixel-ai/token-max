@@ -6,19 +6,16 @@ use std::collections::BTreeSet;
 
 use crate::collections::{HashMap, HashSet, IndexMap, IndexSet};
 use crate::compaction::{
-    Lockstep, Pass, Simulator, Stream, Trigger, TurnEnds, WindowEvents, WindowOptions,
+    History, Lockstep, Pass, Simulator, Stream, Trigger, TurnEnds, WindowEvents, WindowOptions,
     compaction_samples, is_conversation, scenarios, skipped_lines,
 };
 use crate::controls::TURN_END_KEY;
-use crate::discovery::locale_compare;
 use crate::model::{
-    Action, CheckBase, CompactionCharge, CompactionCheck, Cost, EventKind, Evidence, Harness, Id,
-    Millis, PerBucket, Profile, Request, Scan, StructuralEvent, Text, TurnEndCheck, UsableWindow,
-    UsageEstimate, WindowScenario,
+    Action, CheckBase, CompactionCharge, CompactionCheck, Cost, EventKind, Evidence, Harness,
+    Millis, PerBucket, Profile, Request, Scan, Text, TurnEndCheck, UsableWindow, UsageEstimate,
+    WindowScenario,
 };
-use crate::prices::{
-    Catalog, PRICE_SOURCES, Signs, Sum, TIER_SENSITIVITY, TIER_SIGNS, server_cost, tier_sensitive,
-};
+use crate::prices::{Catalog, PRICE_SOURCES, Signs, TIER_SENSITIVITY, TIER_SIGNS, tier_sensitive};
 use crate::scenarios::{PartReplay, ReplayOptions, ReplayTtls};
 use crate::version::Needs;
 
@@ -104,25 +101,8 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
     let profile = group.lead;
     let control = profile.turn_end.as_ref()?;
     let in_profile = |profiles: &[String]| group.covers(profiles);
-    let mut requests: Vec<&Request> = scan
-        .cache_context
-        .requests
-        .iter()
-        .chain(&scan.requests)
-        .filter(|r| in_profile(&r.profiles))
-        .collect();
-    requests.sort_by(|a, b| {
-        a.time
-            .cmp(&b.time)
-            .then_with(|| locale_compare(&a.id, &b.id))
-    });
-    let events: Vec<&StructuralEvent> = scan
-        .cache_context
-        .boundaries
-        .iter()
-        .chain(&scan.events)
-        .filter(|e| in_profile(&e.profiles))
-        .collect();
+    let history = History::new(scan, group);
+    let History { requests, events } = &history;
     let selected_ids: HashSet<&str> = scan.requests.iter().map(|r| &*r.id).collect();
     let selected: Vec<&Request> = requests
         .iter()
@@ -150,7 +130,7 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
         .collect();
     // Each model's usable window as its latest turn recorded it.
     let mut latest: HashMap<Option<Text>, (Millis, i64)> = HashMap::default();
-    for e in &events {
+    for e in events {
         if let Some(window) = e.usable_window
             && latest.get(&e.model).is_none_or(|(time, _)| *time <= e.time)
         {
@@ -180,9 +160,9 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
     let turns = TurnEnds::new(
         events.iter().copied(),
         usable.iter().map(|u| (u.model.clone(), u.tokens)).collect(),
-        index.carried(&requests),
+        index.carried(requests),
     );
-    let calibration = compaction_samples(&requests, &events, options.summaries);
+    let calibration = compaction_samples(requests, events, options.summaries);
     let window_options = WindowOptions {
         events: &index,
         estimates: options.estimates,
@@ -195,30 +175,14 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
         },
     };
 
-    // Charges no threshold changes: summaries the transcripts record without a request and
-    // server tools.
-    let summary_ids: HashSet<&Id> = events
-        .iter()
-        .filter(|e| e.time >= since)
-        .map(|e| &e.id)
-        .collect();
-    let mut fixed = Sum::new();
-    for s in options.summaries {
-        if summary_ids.contains(&s.event) && s.request.is_none() {
-            fixed.add(&s.cost);
-        }
-    }
-    for r in selected.iter().filter(|r| r.time >= since) {
-        fixed.add(&server_cost(r));
-    }
-    let fixed = fixed.cost();
+    let inputs = history.lockstep_inputs(&selected, since, options.summaries);
 
     // Thresholds where the cost of a turn's end can change: each model's price tiers and the
     // auto-compact limit, each as a percentage of that model's usable window.
     let current = control.percent;
     let mut candidates: BTreeSet<i64> = BTreeSet::from([current]);
     let mut providers: IndexMap<&Option<Text>, IndexSet<&str>> = IndexMap::default();
-    for r in &requests {
+    for r in requests {
         for p in r.parts.iter().filter(|p| is_conversation(p)) {
             if let (Some(provider), Some(_)) = (&r.provider, &p.model) {
                 providers.entry(&p.model).or_default().insert(provider);
@@ -246,14 +210,8 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
         .filter(|&p| p == current || (1..=ceiling).contains(&p))
         .collect();
 
-    let last: HashMap<&str, usize> = requests
-        .iter()
-        .enumerate()
-        .map(|(i, r)| (&*r.session, i))
-        .collect();
-    let no_estimates = IndexMap::default();
     let replay_options = ReplayOptions {
-        estimates: &no_estimates,
+        estimates: &inputs.no_estimates,
         catalog,
         ttls: ReplayTtls::default(),
         since,
@@ -262,10 +220,9 @@ fn check(options: &TurnEndOptions, group: &crate::rows::Group<'_>) -> Option<Tur
         attempt_scenario: Default::default(),
     };
     let lockstep = Lockstep {
-        requests: &requests,
-        last: &last,
+        requests,
+        inputs: &inputs,
         catalog,
-        fixed: &fixed,
         // A limit the replay cannot model leaves every threshold beside it unpriced.
         unknown: profile.compaction.default.comparison_unknown.as_deref(),
         skipped: skipped_lines(scan, &group.ids),
@@ -481,7 +438,7 @@ mod tests {
     use crate::controls::{CompactionSources, Env, SettingsScope, compaction_controls};
     use crate::model::{
         Api, CacheContext, CheckResult, ExposureScan, IdleAttribution, Location, Origin, PartKind,
-        Pricing, ScanCoverage, Usage,
+        Pricing, ScanCoverage, StructuralEvent, Usage,
     };
     use crate::replay::{AnalyzeOptions, analyze};
     use crate::test_support::{make_profile, make_request, prices};

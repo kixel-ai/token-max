@@ -1,7 +1,7 @@
 //! `token-max vibes`: the advice the transcripts can't price, apart from `doctor`'s
 //! measured lines.
 //!
-//! Each item is a card naming whose advice it is: a provider's page or the maintainer's
+//! Each item is a card naming whose advice it is: a provider's page or Kixel's
 //! pick. An item that names the settings to change is offered as one edit, through
 //! `doctor`'s walk and confirm. Nothing here is a verdict or sets an exit code.
 
@@ -30,7 +30,7 @@ pub struct Item {
     pub what: String,
     /// The advice, with what was measured beside it.
     pub text: String,
-    /// Whose advice it is: the provider's pages, or the maintainer's pick.
+    /// Whose advice it is: the provider's pages, or Kixel's pick.
     pub sources: Vec<String>,
     /// The settings change it names, which the walk offers; None for a card with no question.
     pub how: Option<How>,
@@ -104,7 +104,7 @@ pub struct After {
     pub item: Box<Item>,
 }
 
-/// The window the maintainer caps compaction at for `harness`, for output quality rather than
+/// The window Kixel caps compaction at for `harness`, for output quality rather than
 /// cost.
 pub fn window_cap(harness: Harness) -> i64 {
     match harness {
@@ -134,7 +134,7 @@ pub fn settled(items: Vec<Item>, written: &[Origin]) -> Vec<Item> {
 impl After {
     /// Whether the card replaces its item in `vibes`' walk, once an earlier card's change
     /// is accepted, rather than after `doctor`'s walk writes a line's change.
-    fn walked(&self) -> bool {
+    pub(crate) fn walked(&self) -> bool {
         self.origins.iter().all(|o| matches!(o, Origin::Vibe(_)))
     }
 }
@@ -171,6 +171,7 @@ pub fn fixes(items: &[Item]) -> Vec<Fix> {
             },
             profile: String::new(),
             removal: vec![],
+            proof: None,
         })
     };
     let base: Vec<Fix> = items

@@ -478,7 +478,7 @@ fn model_setting(owner: &str, settings_file: &str) -> Option<(String, String)> {
     Some((file.into(), key.into()))
 }
 
-/// The main-session default as `vibes` shows it: the maintainer's pick beside the default
+/// The main-session default as `vibes` shows it: Kixel's pick beside the default
 /// the settings give, the provider's guidance past `high`, and what each recorded model and
 /// effort pair cost. None when the default is unresolved.
 fn default_item(e: &EffortCheck, profile: &str, how: Option<How>, out: &Out<'_>) -> Option<Item> {
@@ -549,13 +549,13 @@ fn default_item(e: &EffortCheck, profile: &str, how: Option<How>, out: &Out<'_>)
     let quiet = crate::effort::accepted(c, e.harness) || refused.is_some();
     let how = how.filter(|_| refused.is_none());
     let mut text = if current == pick {
-        format!("Defaults to {current}, the maintainer's pick.")
+        format!("Defaults to {current}, Kixel's pick.")
     } else if let Some(why) = &refused {
-        format!("Defaults to {current}. The maintainer's pick, {pick}, is not offered: {why}.")
+        format!("Defaults to {current}. Kixel's pick, {pick}, is not offered: {why}.")
     } else if quiet {
-        format!("Defaults to {current}, which the maintainer accepts beside their pick, {pick}.")
+        format!("Defaults to {current}, which Kixel accepts beside {pick}.")
     } else {
-        let mut text = format!("Defaults to {current}. The maintainer's pick is {pick}");
+        let mut text = format!("Defaults to {current}. Kixel's pick is {pick}");
         if !fine.is_empty() {
             let _ = write!(text, ", and {} is fine too", fine.join(" or "));
         }
@@ -579,11 +579,11 @@ fn default_item(e: &EffortCheck, profile: &str, how: Option<How>, out: &Out<'_>)
     }
     let (lead, guides): (&str, &[&str]) = match e.harness {
         Harness::Claude => (
-            "The maintainer's pick of a default. Anthropic's guidance:",
+            "Kixel's pick of a default. Anthropic's guidance:",
             &[CLAUDE_MODEL_GUIDE, CLAUDE_EFFORT_DOCS],
         ),
         Harness::Codex => (
-            "The maintainer's pick of a default. OpenAI's guidance:",
+            "Kixel's pick of a default. OpenAI's guidance:",
             &[OPENAI_REASONING],
         ),
     };
@@ -629,7 +629,7 @@ struct SubagentLine<'a> {
 }
 
 /// The default subagent effort as `vibes` shows it: the level and the model it pairs with,
-/// past `high` the provider's guidance and the maintainer's pick of `high`, and an upgrade
+/// past `high` the provider's guidance and Kixel's pick of `high`, and an upgrade
 /// when the latest Claude Code ignores the variable. None when no setting names one, as
 /// subagents then follow the main session, which its own card covers.
 fn subagent_item(line: &SubagentLine<'_>, out: &Out<'_>) -> Option<Item> {
@@ -691,7 +691,7 @@ fn subagent_item(line: &SubagentLine<'_>, out: &Out<'_>) -> Option<Item> {
     if let Some(guidance) = &guidance {
         let _ = write!(
             text,
-            " {guidance} The maintainer's pick for subagents is {SUBAGENT_PICK}. A different effort changes the output tokens, so what {SUBAGENT_PICK} would cost is not measured."
+            " {guidance} Kixel's pick for subagents is {SUBAGENT_PICK}. A different effort changes the output tokens, so what {SUBAGENT_PICK} would cost is not measured."
         );
     }
     // The edit stays on offer beside an upgrade, which token-max does not make itself.
@@ -700,12 +700,12 @@ fn subagent_item(line: &SubagentLine<'_>, out: &Out<'_>) -> Option<Item> {
         .then(|| crate::doctor::subagent_effort_how(&effort.owner, p, SUBAGENT_PICK));
     let mut sources: Vec<String> = match p.harness {
         Harness::Claude => vec![
-            "The maintainer's pick of a subagent default. Anthropic's guidance:".into(),
+            "Kixel's pick of a subagent default. Anthropic's guidance:".into(),
             CLAUDE_MODEL_GUIDE.into(),
             CLAUDE_EFFORT_DOCS.into(),
         ],
         Harness::Codex => vec![
-            "The maintainer's pick of a subagent default. OpenAI's guidance:".into(),
+            "Kixel's pick of a subagent default. OpenAI's guidance:".into(),
             OPENAI_REASONING.into(),
         ],
     };
@@ -1738,7 +1738,105 @@ pub enum Choice {
     Manual(String),
 }
 
+/// One already-good setting or feature extracted from a rendered `Listing` for the interactive TUI.
+#[derive(Clone, Debug)]
+pub(crate) struct KeptRow {
+    pub name: String,
+    pub value: String,
+    pub saving_usd: Option<f64>,
+    /// Whether the saving holds only while a default is the other value.
+    pub up_to: bool,
+    /// The profile it is kept on, when another profile keeping it compares differently.
+    pub profile: Option<String>,
+    pub default_value: Option<String>,
+    pub summary: String,
+}
+
 impl Listing {
+    /// Already-good settings (and any features saving >= $1/mo vs defaults) for the TUI's
+    /// green-check scorecard, plus the count of other in-budget features folded into a summary.
+    pub(crate) fn kept(&self) -> (Vec<KeptRow>, usize) {
+        use crate::defaults::Saving;
+
+        let mut items: Vec<KeptRow> = vec![];
+        let mut candidates: Vec<(&str, KeptRow)> = vec![];
+        let mut other_features = 0usize;
+        for row in self.rows.iter().filter(|r| r.mark == Mark::Keep) {
+            let (saving_usd, default_value) = match &row.baseline {
+                Some(b) => {
+                    let usd = match b.saving {
+                        Saving::Saves(u) | Saving::UpTo(u) | Saving::Estimated(u) if u > 0.0 => {
+                            Some(u)
+                        }
+                        _ => None,
+                    };
+                    (usd, Some(b.default.clone()))
+                }
+                None => (None, None),
+            };
+            let up_to = row
+                .baseline
+                .as_ref()
+                .is_some_and(|b| matches!(b.saving, Saving::UpTo(_)));
+            let is_core_setting = row.group.is_none();
+            let saves_meaningfully = saving_usd.is_some_and(|u| u >= 1.0);
+            if !is_core_setting && !saves_meaningfully {
+                other_features += 1;
+                continue;
+            }
+            let summary = match (&default_value, saving_usd) {
+                (Some(def), Some(usd)) => format!(
+                    "Default is {def} — keeping {} saves {}~{}/mo.",
+                    row.value,
+                    if up_to { "up to " } else { "" },
+                    about(usd)
+                ),
+                (Some(def), None) => format!("Already set to {} (default {def}).", row.value),
+                (None, _) if !row.what.is_empty() => row.what.clone(),
+                (None, _) => format!("Already at the recommended value ({}).", row.value),
+            };
+            candidates.push((
+                row.profile.as_str(),
+                KeptRow {
+                    name: row.name.clone(),
+                    value: row.value.clone(),
+                    saving_usd,
+                    up_to,
+                    profile: None,
+                    default_value,
+                    summary,
+                },
+            ));
+        }
+        // Profiles keeping one setting at one value share a row only when their comparisons
+        // are interchangeable; otherwise each row names its profile.
+        for (profile, row) in &candidates {
+            let same = |k: &KeptRow| k.name == row.name && k.value == row.value;
+            let interchangeable = candidates.iter().filter(|(_, k)| same(k)).all(|(_, k)| {
+                (k.saving_usd, k.up_to, &k.default_value)
+                    == (row.saving_usd, row.up_to, &row.default_value)
+            });
+            if interchangeable {
+                if !items.iter().any(same) {
+                    items.push(row.clone());
+                }
+            } else {
+                let profile = (!profile.is_empty()).then(|| profile.to_string());
+                items.push(KeptRow {
+                    profile,
+                    ..row.clone()
+                });
+            }
+        }
+        items.sort_by(|a, b| match (a.saving_usd, b.saving_usd) {
+            (Some(x), Some(y)) => y.total_cmp(&x),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
+        (items, other_features)
+    }
+
     /// The report as printed without a terminal, ending with the edits its changes name.
     pub fn text(&self) -> String {
         let closing: String = self
@@ -4340,7 +4438,7 @@ fn catalog_evidence(c: &ContextCost) -> String {
 
 fn catalog_control(c: &ContextCost) -> String {
     match c.skill.as_ref().and_then(|s| s.path.as_ref()) {
-        Some(path) => format!("Disable in config.toml with [[skills.config]], path = {}, enabled = false", toml::Value::String(path.clone())),
+        Some(path) => format!("Disable in config.toml with [[skills.config]], path = {}, enabled = false, which also removes explicit requests", toml::Value::String(path.clone())),
         None => "Disable control unavailable: the recorded catalog does not resolve an absolute SKILL.md path".into(),
     }
 }
@@ -5845,7 +5943,7 @@ fn tagged(name: String, profile: &str) -> String {
 
 /// Whose advice the advisor pairing is, before Claude Code's page on the advisor.
 const ADVISOR_PICK: &str =
-    "The maintainer's pick of one rank above the main-session default. Claude Code's docs:";
+    "Kixel's pick of one rank above the main-session default. Claude Code's docs:";
 
 /// What an advisor line's recorded calls cost, as sentences.
 fn advisor_calls(u: &AdvisorUse) -> String {
@@ -6144,7 +6242,7 @@ fn allowlist_note(p: &Profile, model: &str, main: Option<&str>) -> Option<String
 }
 
 /// The main-session default once the Main-session default card's edit is written: the
-/// maintainer's pick, named by the setting the edit writes. None when the edit leaves the
+/// Kixel's pick, named by the setting the edit writes. None when the edit leaves the
 /// model as it is.
 fn written_default(control: &EffortControl, p: &Profile) -> Option<EffortControl> {
     let ((model, _), _) = crate::effort::pick(p.harness);
@@ -6204,8 +6302,7 @@ fn project_file<'a>(owner: &'a str, user_file: &str) -> Option<&'a str> {
 }
 
 /// Whose advice the Bash cap's margin is, before the pages on how the cap and cache work.
-const BASH_PICK: &str =
-    "The maintainer's pick of a margin under the cache TTL. Claude Code's docs:";
+const BASH_PICK: &str = "Kixel's pick of a margin under the cache TTL. Claude Code's docs:";
 
 /// A Bash timeout cap as `vibes` shows it: the long waits measured under it, the cap a
 /// guessed margin under the cache TTL suggests, and what moving it trades.
@@ -6291,7 +6388,7 @@ fn bash_item(cap: &BashCap, profile: &str, how: Option<How>, out: &Out<'_>) -> I
 }
 
 /// Whose advice the compaction window cap is.
-const WINDOW_PICK: &str = "The maintainer's pick, for output quality rather than cost.";
+const WINDOW_PICK: &str = "Kixel's pick, for output quality rather than cost.";
 /// Anthropic's page on context rot: accuracy and recall fall as a context grows.
 const CONTEXT_ROT: &str = "https://platform.claude.com/docs/en/build-with-claude/context-windows";
 
@@ -6308,7 +6405,7 @@ enum Doctor {
     Wrote(i64),
 }
 
-/// A compaction line's window as `vibes` shows it beside the maintainer's cap: the window
+/// A compaction line's window as `vibes` shows it beside Kixel's cap: the window
 /// left after `doctor`'s change, what `doctor`'s replay priced the cap at, and how the card
 /// relates to that line's verdict. Its name and what it does are the caller's.
 fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out<'_>) -> Item {
@@ -6347,7 +6444,7 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
             if w > cap && c.scenarios.is_empty() && profile.compaction.percent.is_some() =>
         {
             item.text = format!(
-                "Set to {}, but {} lowers where each model compacts under it, and with no request in the window to name a model token-max cannot tell whether that is above the {} window the maintainer caps it at.",
+                "Set to {}, but {} lowers where each model compacts under it, and with no request in the window to name a model token-max cannot tell whether that is above the {} window Kixel caps it at.",
                 tokens(w),
                 crate::controls::PERCENT_KEY,
                 tokens(cap)
@@ -6375,7 +6472,7 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
         // A smaller default would rise to the cap, so an unknown window is not advised down.
         (_, None) => {
             item.text = format!(
-                "token-max could not resolve this window, so it cannot tell whether it is above the {} window the maintainer caps it at. Set by {}.",
+                "token-max could not resolve this window, so it cannot tell whether it is above the {} window Kixel caps it at. Set by {}.",
                 tokens(cap),
                 out.home(&c.base.owner)
             );
@@ -6384,13 +6481,13 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
     };
     if window <= cap {
         item.text = format!(
-            "{now} That is at or under the {} window the maintainer caps it at, so there is nothing to change.",
+            "{now} That is at or under the {} window Kixel caps it at, so there is nothing to change.",
             tokens(cap)
         );
         return item;
     }
     let why = if codex {
-        "No OpenAI page says how output changes with the window, so this rests on the maintainer's pick alone."
+        "No OpenAI page says how output changes with the window, so this rests on Kixel's pick alone."
     } else {
         "Anthropic's docs say accuracy and recall degrade as a context grows."
     };
@@ -6472,7 +6569,7 @@ fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out
         Doctor::Unknown => format!(" {line} gives no verdict on cost."),
     };
     item.text = format!(
-        "{now} The maintainer would cap it at {} for better output, not a smaller bill: a smaller window compacts sooner, so the model works from a shorter context. {why}{verdict} {cost} The cap is advice beside that line, not its verdict.",
+        "{now} Kixel would cap it at {} for better output, not a smaller bill: a smaller window compacts sooner, so the model works from a shorter context. {why}{verdict} {cost} The cap is advice beside that line, not its verdict.",
         tokens(cap)
     );
     item.value = format!("{} {} {}", tokens(window), out.arrow, tokens(cap));
@@ -6516,7 +6613,8 @@ fn window_rescan(c: &CompactionCheck, profile: &Profile, out: &Out<'_>) -> Item 
 }
 
 /// Whose advice turning memory off is, before the providers' pages on it.
-const MEMORY_PICK: &str = "The maintainer's pick: a lasting fact about a project belongs in its repository. How memory works:";
+const MEMORY_PICK: &str =
+    "Kixel's pick: a lasting fact about a project belongs in its repository. How memory works:";
 
 /// Auto memory's line as `vibes`' card reads it.
 struct MemoryLine<'a> {
@@ -6669,7 +6767,7 @@ fn memory_item(line: MemoryLine<'_>, out: &Out<'_>) -> Item {
 
 /// What the maintainer picked for how long Claude Code keeps transcripts, before the pages
 /// on the setting and on what the sweep deletes.
-const RETENTION_PICK: &str = "The maintainer's pick of 365 days, which keeps a year of history without growing disk without bound. Claude Code's docs:";
+const RETENTION_PICK: &str = "Kixel's pick of 365 days, which keeps a year of history without growing disk without bound. Claude Code's docs:";
 
 /// The days of transcripts Claude Code is advised to keep, a year.
 const RETENTION_DAYS: u64 = 365;
@@ -8057,7 +8155,37 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
             .find(|p| p.id == cap.profile)
             .and_then(|profile| crate::doctor::bash_how(cap, profile));
         let profile = tag(&cap.profiles, &|_| cap.owner.clone(), out);
-        vibes.push(bash_item(cap, &profile, how, out));
+        let mut item = bash_item(cap, &profile, how, out);
+        // A main-agent TTL change the walk writes moves the TTL this cap is compared with,
+        // which the scan can't replay, so the card asks for a fresh one.
+        let ttl_changes: Vec<Origin> = checks
+            .iter()
+            .filter(|(i, result, _)| {
+                // Every profile the TTL line's setting covers, not only its lead: a T3
+                // instance can share the native TTL yet sit on a Bash line of its own.
+                matches!(result, CheckResult::Ttl(t)
+                    if t.bucket == crate::model::Bucket::Main
+                        && t.base.profiles.iter().any(|p| cap.profiles.contains(p)))
+                    && fixes.iter().any(|f| {
+                        f.origins.contains(&Origin::Check(*i)) && matches!(f.how, How::Edit(_))
+                    })
+            })
+            .map(|(i, _, _)| Origin::Check(*i))
+            .collect();
+        if !ttl_changes.is_empty() {
+            let rescan = Item {
+                value: String::new(),
+                text: "doctor's walk just wrote a main-agent cache TTL change, which moves the TTL this cap is compared with. Run token-max vibes again to compare the cap with the settings as they are now.".into(),
+                how: None,
+                quiet: false,
+                ..item.clone()
+            };
+            item.after.push(crate::vibes::After {
+                origins: ttl_changes,
+                item: Box::new(rescan),
+            });
+        }
+        vibes.push(item);
     }
     let owned = |p: &Profile| {
         p.retention
@@ -11470,7 +11598,7 @@ pub(crate) mod tests {
         );
         assert!(text.contains("prone to overthinking"), "{text}");
         assert!(
-            text.contains("The maintainer's pick for subagents is high"),
+            text.contains("Kixel's pick for subagents is high"),
             "{text}"
         );
         assert!(text.contains(CLAUDE_MODEL_GUIDE), "{text}");
@@ -11814,14 +11942,14 @@ pub(crate) mod tests {
         assert!(!card.quiet);
         let warning = said(&card);
         assert!(
-            warning.starts_with("Defaults to claude-opus-5-5 at max. The maintainer's pick is claude-opus-5-5 at medium, and claude-opus-5-5 at high is fine too. Anthropic's model guide says"),
+            warning.starts_with("Defaults to claude-opus-5-5 at max. Kixel's pick is claude-opus-5-5 at medium, and claude-opus-5-5 at high is fine too. Anthropic's model guide says"),
             "{warning}"
         );
         assert!(warning.contains("prone to overthinking"));
         assert!(warning.contains("Ran claude-opus-5-5 at an unrecorded effort 4 times"));
         assert!(warning.contains("what the pick would cost is not measured"));
         assert!(warning.contains(&format!(
-            "The maintainer's pick of a default. Anthropic's guidance: {CLAUDE_MODEL_GUIDE} {CLAUDE_EFFORT_DOCS}"
+            "Kixel's pick of a default. Anthropic's guidance: {CLAUDE_MODEL_GUIDE} {CLAUDE_EFFORT_DOCS}"
         )));
         // The edit sets the variable that decides the level, in the file that sets it.
         match card.how {
@@ -13489,7 +13617,7 @@ pub(crate) mod tests {
             (&None, true, "")
         );
         assert!(
-            default.text.starts_with(&format!("Defaults to claude-sonnet-5-5 at medium. The maintainer's pick, claude-opus-5-5 at medium, is not offered: {owner} excludes it.")),
+            default.text.starts_with(&format!("Defaults to claude-sonnet-5-5 at medium. Kixel's pick, claude-opus-5-5 at medium, is not offered: {owner} excludes it.")),
             "{}",
             default.text
         );
@@ -13712,6 +13840,7 @@ pub(crate) mod tests {
             },
             profile: String::new(),
             removal: vec![],
+            proof: None,
             how: How::Edit(crate::doctor::Patch {
                 file,
                 harness: Harness::Claude,
@@ -13808,7 +13937,7 @@ pub(crate) mod tests {
             item.text,
             "3 of 4 main sessions (75%) in the window ran in a repository with a CLAUDE.md or AGENTS.md. A lasting fact about a project belongs in that file, where it is reviewed and every host and teammate sees it, not saved silently on one machine. doctor's line measured $150 at API prices over the window, used 3 times (1 read, 2 writes); judging only cost, it offers no change. Its cost per read or write is within --max-cost-per-use."
         );
-        assert!(item.sources[0].starts_with("The maintainer's pick"));
+        assert!(item.sources[0].starts_with("Kixel's pick"));
         // doctor already suggests it off: its walk asks, and the card advises nothing more.
         let m = memory(&mut report);
         (m.base.action, m.base.recommended) = (Action::Advisory, Some(false));
@@ -15562,5 +15691,83 @@ pub(crate) mod tests {
             ),
             "{plain}"
         );
+    }
+
+    #[test]
+    fn every_bash_card_under_a_written_ttl_asks_for_a_fresh_run() {
+        let (mut report, _) = synthetic_report_with("{}");
+        let index = report
+            .checks
+            .iter()
+            .position(|c| matches!(c, CheckResult::Ttl(t) if t.bucket == Bucket::Main))
+            .unwrap();
+        // A T3 instance shares the native profile's TTL setting, yet a Bash default of its
+        // own puts it on a Bash line apart, which the TTL line does not lead.
+        let CheckResult::Ttl(ttl) = &mut report.checks[index] else {
+            unreachable!()
+        };
+        ttl.base.profiles.push("t3".into());
+        let mut t3 = report.bash[0].clone();
+        (t3.profile, t3.profiles) = ("t3".into(), vec!["t3".into()]);
+        report.bash.push(t3);
+        let fixes = crate::doctor::fixes(&report, false);
+        assert!(
+            fixes
+                .iter()
+                .any(|f| f.origins.contains(&super::Origin::Check(index)))
+        );
+        let cards: Vec<Item> = format_report(&report, &fixes, ReportOptions::default())
+            .vibes
+            .into_iter()
+            .filter(|i| i.name.starts_with("Bash timeout cap"))
+            .collect();
+        assert_eq!(cards.len(), 2);
+        for card in &cards {
+            assert_eq!(card.after.len(), 1, "{}", card.name);
+            assert_eq!(card.after[0].origins, [super::Origin::Check(index)]);
+            assert!(card.after[0].item.how.is_none());
+        }
+    }
+
+    #[test]
+    fn kept_rows_share_a_line_only_when_their_comparisons_match() {
+        let (report, _) = synthetic_report_with("{}");
+        let mut listing = format_report(&report, &[], ReportOptions::default());
+        let mut row = listing.rows[0].clone();
+        (row.mark, row.group) = (Mark::Keep, None);
+        (row.name, row.value) = ("Prompt cache TTL".into(), "1h".into());
+        let kept = |profile: &str, usd: f64| Row {
+            profile: profile.into(),
+            baseline: Some(crate::defaults::Baseline {
+                default: "5m".into(),
+                saving: crate::defaults::Saving::Saves(usd),
+                margin: None,
+            }),
+            ..row.clone()
+        };
+        listing.rows = vec![kept("work", 40.0), kept("home", 40.0)];
+        let (rows, _) = listing.kept();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "Prompt cache TTL");
+        listing.rows = vec![kept("work", 40.0), kept("home", 9.0)];
+        let names: Vec<(String, Option<String>)> = listing
+            .kept()
+            .0
+            .into_iter()
+            .map(|r| (r.name, r.profile))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("Prompt cache TTL".to_string(), Some("work".to_string())),
+                ("Prompt cache TTL".to_string(), Some("home".to_string()))
+            ]
+        );
+        // A saving that holds under one default only keeps saying so.
+        let mut up_to = kept("work", 40.0);
+        up_to.baseline.as_mut().unwrap().saving = crate::defaults::Saving::UpTo(40.0);
+        listing.rows = vec![up_to];
+        let (rows, _) = listing.kept();
+        assert!(rows[0].up_to && rows[0].summary.contains("saves up to ~$40/mo"));
     }
 }

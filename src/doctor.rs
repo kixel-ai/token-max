@@ -31,6 +31,27 @@ use crate::version::{Needs, Upgrade};
 /// Whose spend a share is of, for a host's own changes.
 const THIS_HOST: &str = "this host's";
 
+/// Real measured visual breakdown attached to a change for the interactive TUI.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Proof {
+    /// Replayed 30-day cache cost at 5m vs 1h across `requests`.
+    CacheTtl {
+        five_m_usd: f64,
+        one_h_usd: f64,
+        requests: u64,
+    },
+    /// Feature cost per recorded use vs the configured threshold.
+    CostPerUse {
+        cost_per_use_usd: f64,
+        threshold_usd: f64,
+        uses: u64,
+        requests: u64,
+    },
+    /// Feature carried on `requests` with zero recorded uses.
+    Unused { requests: u64, tokens: Option<i64> },
+}
+
 /// One recommendation and how to carry it out.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Fix {
@@ -64,6 +85,9 @@ pub struct Fix {
     /// Where a never-used MCP server it turns off is configured, which the walk offers to
     /// remove after a yes; empty for any other change.
     pub removal: Vec<Definition>,
+    /// Structured measured numbers behind this change, used for ASCII proof charts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proof: Option<Proof>,
 }
 
 /// A saving verb. Named apart from `&'static str`, which serde would borrow from the input
@@ -142,7 +166,7 @@ pub struct Joint {
 }
 
 /// The value a change offers, such as "off" in "on -> off".
-fn target(value: &str) -> &str {
+pub(crate) fn target(value: &str) -> &str {
     [" → ", " -> "]
         .iter()
         .filter_map(|arrow| value.rsplit_once(arrow))
@@ -448,8 +472,66 @@ pub(crate) fn how(profiles: &[Profile], source: &Source<'_>, defaults: bool) -> 
     }
 }
 
+/// Build a visual proof payload from real measured check numbers when available.
+fn proof(report: &Report, line: &Recommendation<'_>) -> Option<Proof> {
+    match &line.source {
+        Source::Check(CheckResult::Ttl(t)) => {
+            let five = t
+                .comparison_estimate
+                .five_minutes
+                .map(|e| e.usd)
+                .or_else(|| t.comparison_cost.five_minutes.total_usd.map(|u| u.to_f64()))?;
+            let one = t
+                .comparison_estimate
+                .one_hour
+                .map(|e| e.usd)
+                .or_else(|| t.comparison_cost.one_hour.total_usd.map(|u| u.to_f64()))?;
+            let since = t.base.since;
+            let until = t.base.until;
+            Some(Proof::CacheTtl {
+                five_m_usd: crate::report::monthly(five, since, until),
+                one_h_usd: crate::report::monthly(one, since, until),
+                requests: t.base.requests,
+            })
+        }
+        Source::Check(CheckResult::Memory(m)) => {
+            let uses = m.reads + m.writes;
+            if uses == 0 {
+                return Some(Proof::Unused {
+                    requests: m.base.requests,
+                    tokens: None,
+                });
+            }
+            let total_usd = m.base.savings_usd?;
+            Some(Proof::CostPerUse {
+                cost_per_use_usd: total_usd / uses as f64,
+                threshold_usd: report.max_cost_per_use_usd,
+                uses,
+                requests: m.base.requests,
+            })
+        }
+        // A Codex skill's catalog shows only some uses, so none seen is not "0 uses": its
+        // evidence says what was observed instead.
+        Source::Piece(c) => match (c.calls, c.cost_per_use_usd) {
+            (Some(0), _) if c.skill.is_none() => Some(Proof::Unused {
+                requests: c.requests,
+                tokens: c.tokens,
+            }),
+            (Some(uses), Some(cpu)) if uses > 0 => Some(Proof::CostPerUse {
+                cost_per_use_usd: cpu,
+                threshold_usd: report.max_cost_per_use_usd,
+                uses,
+                requests: c.requests,
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
     let section = section(report, &line);
+    let proof = proof(report, &line);
     let how = how(&report.scan.profiles, &line.source, report.scan.defaults);
     let unused = section.kind == Kind::Feature(ContextKind::McpServer, Reason::Unused);
     let mut removal = vec![];
@@ -490,6 +572,7 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
         section,
         profile: String::new(),
         removal,
+        proof,
     }
 }
 
@@ -932,8 +1015,8 @@ pub(crate) fn retention_how(control: &RetentionControl, days: u64, profile: &Pro
     )
 }
 
-/// How to move a main-session default to the maintainer's pick in `profile`'s settings,
-/// the model and the effort in one edit; None when the default is the pick or one they accept.
+/// How to move a main-session default to Kixel's pick in `profile`'s settings,
+/// the model and the effort in one edit; None when the default is the pick or one Kixel accepts.
 pub(crate) fn default_how(control: &EffortControl, profile: &Profile) -> Option<How> {
     if crate::effort::accepted(control, profile.harness) {
         return None;
@@ -1825,7 +1908,7 @@ impl Style {
     }
 
     /// `question` and its `options` as the walk asks them, ready for an answer on the line.
-    fn ask(&self, question: &str, options: &str) -> String {
+    pub(crate) fn ask(&self, question: &str, options: &str) -> String {
         let text = self.spans(
             &[(question, BOLD), (" ", ""), (options, DIM), (":", "")],
             self.width,
@@ -1964,7 +2047,7 @@ fn saving(
 
 /// Evidence without its closing sentence naming the setting, such as "Set in
 /// ~/.claude/settings.json:promptCacheTtl.", which the edit shown after it already names.
-fn why(evidence: &str) -> &str {
+pub(crate) fn why(evidence: &str) -> &str {
     ["Set ", "Turn off: ", "Hide it from the model: "]
         .iter()
         .filter_map(|lead| evidence.rfind(&format!(" {lead}")))
@@ -2443,7 +2526,7 @@ impl Total {
 
     /// What the changes save every 30 days, a saving that depends on a default included;
     /// none when one was not measured.
-    fn usd(&self) -> Option<f64> {
+    pub(crate) fn usd(&self) -> Option<f64> {
         (self.unmeasured == 0).then_some(self.measured.usd + self.up_to.usd)
     }
 
@@ -2515,6 +2598,13 @@ impl Total {
             up_to: up_to.into_iter().collect(),
             unmeasured,
         }
+    }
+
+    /// The measured savings and those that depend on the default they replace, each as a
+    /// figure with its margin, such as `~$343/mo ± $12`; None where there are none.
+    pub(crate) fn figures(&self) -> (Option<String>, Option<String>) {
+        let figure = |s: &Sum| (s.changes > 0).then(|| approx(s.usd, s.margin, "/mo"));
+        (figure(&self.measured), figure(&self.up_to))
     }
 
     /// How many changes were accepted.
@@ -3179,15 +3269,15 @@ impl Targets {
 /// may also add to `deniedMcpServers` in its own file.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Offer {
-    target: usize,
-    fix: Fix,
+pub(crate) struct Offer {
+    pub(crate) target: usize,
+    pub(crate) fix: Fix,
     /// Each entry with its target.
-    entries: Vec<(usize, Entry)>,
+    pub(crate) entries: Vec<(usize, Entry)>,
     /// Each name to deny, once.
-    denials: Vec<String>,
+    pub(crate) denials: Vec<String>,
     /// Removals to make by hand: the step, and why.
-    manual: Vec<(String, String)>,
+    pub(crate) manual: Vec<(String, String)>,
 }
 
 /// One host's changes as its walk offers them, checked against its own files, so the walk
@@ -3195,22 +3285,22 @@ struct Offer {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Offers {
-    offers: Vec<Offer>,
+    pub(crate) offers: Vec<Offer>,
     /// What became of each change that is a step by hand.
     steps: Vec<(Origin, Choice)>,
     /// Each change that is a step by hand, which the walk lists once it ends.
-    by_hand: Vec<Fix>,
+    pub(crate) by_hand: Vec<Fix>,
     /// The entries of MCP servers that are off already, each with its target, which the
     /// walk's last question offers to remove.
-    cleanup: Vec<(usize, Entry)>,
+    pub(crate) cleanup: Vec<(usize, Entry)>,
     /// How to look for servers that are off by hand: the step, and why.
-    cleanup_by_hand: Vec<(String, String)>,
+    pub(crate) cleanup_by_hand: Vec<(String, String)>,
     /// Each target's file as a profile names it, by index.
-    files: Vec<String>,
+    pub(crate) files: Vec<String>,
     /// The host's home directory, which its paths are shown from as `~`.
     pub home: Option<String>,
     /// The host's spend every 30 days, which a share of several hosts' spend adds up.
-    monthly: f64,
+    pub(crate) monthly: f64,
 }
 
 /// What a host's walk does about one line: offers its edit, or names the step by hand.
@@ -3514,7 +3604,7 @@ impl Question<'_> {
 
     /// What the members save every 30 days, a saving that depends on a default included;
     /// none when it was not measured.
-    fn usd(&self) -> Option<f64> {
+    pub(crate) fn usd(&self) -> Option<f64> {
         self.together().usd()
     }
 
@@ -5054,6 +5144,7 @@ mod tests {
             },
             profile: String::new(),
             removal: vec![],
+            proof: None,
             how: How::Edit(Patch {
                 file: file.to_string_lossy().into_owned(),
                 harness,

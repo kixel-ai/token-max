@@ -439,7 +439,7 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     assert_eq!(
         cards,
         format!(
-            "token-max vibes: 4 pieces of advice the transcripts can't price.\n  None of it is measured, so none of it is a verdict. Each card names whose advice it is.\n\n  [1/6] Bash timeout cap  not measured\n        2h -> 4m\n        What    The longest Claude waits on a foreground Bash command before Claude Code moves it to the background.\n        Advice  A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess. A command past the cap is not killed: it keeps running in the background, where Claude checks on it in later turns. Some commands need longer in the foreground; keep the cap if yours do. Project and local settings, which override it, are not read.\n        Source  The maintainer's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching\n        Change  \"env\": {{\"BASH_MAX_TIMEOUT_MS\": \"240000\"}} in ~{0}.claude{0}settings.json\n\n  [2/6] Auto memory  not measured\n        What    Auto memory lets Claude write notes for itself and loads them into every session.\n        Advice  0 of 1 main session (0%) in the window ran in a repository with a CLAUDE.md or AGENTS.md, counting as without 1 session whose transcript recorded loading none and whose directory is gone or unrecorded. Outside a repository, memory may be the only place a fact is kept, so turning it off is not advised. doctor's line could not price it over the window (never read back or written).\n        Source  The maintainer's pick: a lasting fact about a project belongs in its repository. How memory works: https://code.claude.com/docs/en/memory#auto-memory (2026-11-11)\n\n  [3/6] Auto-compact window (claude-opus-5-5)  not measured\n        967k -> 400k\n        What    How large a conversation grows before it is automatically summarized and continued from the summary.\n        Advice  No setting names it, so Claude Code compacts this model near 967k, its window for the model. The maintainer would cap it at 400k for better output, not a smaller bill: a smaller window compacts sooner, so the model works from a shorter context. Anthropic's docs say accuracy and recall degrade as a context grows. doctor's auto-compact window line keeps it on cost. Against the 967k window, its replay of a 400k window changes no recorded request, so it costs the same at API prices. The cap is advice beside that line, not its verdict.\n        Source  The maintainer's pick, for output quality rather than cost. Anthropic's docs on context rot: https://platform.claude.com/docs/en/build-with-claude/context-windows\n        Change  \"modelSettings\": {{\"claude-opus-5-5\": {{\"autoCompactWindow\": 400000}}}} in ~{0}.claude{0}settings.json\n\n  [4/6] Main-session default  not measured\n        What    The model and reasoning effort a main session starts with.\n        Advice  Defaults to claude-opus-5-5 at medium, the maintainer's pick. Ran claude-opus-5-5 at an unrecorded effort 2 times, $0.01.\n        Source  The maintainer's pick of a default. Anthropic's guidance: https://claude.dev/blog/which-claude-model-should-you-build-with/ https://code.claude.com/docs/en/model-config#choose-an-effort-level\n",
+            "token-max vibes: 4 pieces of advice the transcripts can't price.\n  None of it is measured, so none of it is a verdict. Each card names whose advice it is.\n\n  [1/6] Bash timeout cap  not measured\n        2h -> 4m\n        What    The longest Claude waits on a foreground Bash command before Claude Code moves it to the background.\n        Advice  A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess. A command past the cap is not killed: it keeps running in the background, where Claude checks on it in later turns. Some commands need longer in the foreground; keep the cap if yours do. Project and local settings, which override it, are not read.\n        Source  Kixel's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching\n        Change  \"env\": {{\"BASH_MAX_TIMEOUT_MS\": \"240000\"}} in ~{0}.claude{0}settings.json\n\n  [2/6] Auto memory  not measured\n        What    Auto memory lets Claude write notes for itself and loads them into every session.\n        Advice  0 of 1 main session (0%) in the window ran in a repository with a CLAUDE.md or AGENTS.md, counting as without 1 session whose transcript recorded loading none and whose directory is gone or unrecorded. Outside a repository, memory may be the only place a fact is kept, so turning it off is not advised. doctor's line could not price it over the window (never read back or written).\n        Source  Kixel's pick: a lasting fact about a project belongs in its repository. How memory works: https://code.claude.com/docs/en/memory#auto-memory (2026-11-11)\n\n  [3/6] Auto-compact window (claude-opus-5-5)  not measured\n        967k -> 400k\n        What    How large a conversation grows before it is automatically summarized and continued from the summary.\n        Advice  No setting names it, so Claude Code compacts this model near 967k, its window for the model. Kixel would cap it at 400k for better output, not a smaller bill: a smaller window compacts sooner, so the model works from a shorter context. Anthropic's docs say accuracy and recall degrade as a context grows. doctor's auto-compact window line keeps it on cost. Against the 967k window, its replay of a 400k window changes no recorded request, so it costs the same at API prices. The cap is advice beside that line, not its verdict.\n        Source  Kixel's pick, for output quality rather than cost. Anthropic's docs on context rot: https://platform.claude.com/docs/en/build-with-claude/context-windows\n        Change  \"modelSettings\": {{\"claude-opus-5-5\": {{\"autoCompactWindow\": 400000}}}} in ~{0}.claude{0}settings.json\n\n  [4/6] Main-session default  not measured\n        What    The model and reasoning effort a main session starts with.\n        Advice  Defaults to claude-opus-5-5 at medium, Kixel's pick. Ran claude-opus-5-5 at an unrecorded effort 2 times, $0.01.\n        Source  Kixel's pick of a default. Anthropic's guidance: https://claude.dev/blog/which-claude-model-should-you-build-with/ https://code.claude.com/docs/en/model-config#choose-an-effort-level\n",
             std::path::MAIN_SEPARATOR
         )
     );
@@ -459,7 +459,7 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     assert_eq!(
         skill,
         format!(
-            "\n  [6/6] Token audit skill  not measured\n        What    An agent skill for Claude Code and Codex that audits their transcripts for token waste beyond settings.\n        Advice  Not installed for Claude Code in {}. /token-audit has an agent run token-max audit and rank by dollars the waste no setting changes: commands that bust the prompt cache, bloated or repeated tool calls, always-loaded context the sessions never needed, and context they kept rediscovering. It offers each fix and makes it only after a yes. What it saves is not measured.\n        Source  The maintainer's pick, from token-max's own maintainer: https://github.com/kixel-ai/token-max/blob/main/docs/reference.md#token-audit-skill\n        Change  by hand, since doctor and vibes write only settings files, not skills: run `token-max skill install`, or `npx skills add kixel-ai/token-max --skill token-audit -g`, then start a new session. Where token-max isn't on the PATH, such as on a host reached with --ssh, run it as `npx @kixel/crabx token-max`.\n",
+            "\n  [6/6] Token audit skill  not measured\n        What    An agent skill for Claude Code and Codex that audits their transcripts for token waste beyond settings.\n        Advice  Not installed for Claude Code in {}. /token-audit has an agent run token-max audit and rank by dollars the waste no setting changes: commands that bust the prompt cache, bloated or repeated tool calls, always-loaded context the sessions never needed, and context they kept rediscovering. It offers each fix and makes it only after a yes. What it saves is not measured.\n        Source  Kixel's pick, token-max's own skill: https://github.com/kixel-ai/token-max/blob/main/docs/reference.md#token-audit-skill\n        Change  by hand, since doctor and vibes write only settings files, not skills: run `token-max skill install`, or `npx skills add kixel-ai/token-max --skill token-audit -g`, then start a new session. Where token-max isn't on the PATH, such as on a host reached with --ssh, run it as `npx @kixel/crabx token-max`.\n",
             support::native_path("~/.claude")
         )
     );
@@ -470,7 +470,7 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     // Settings pretended away are not the ones vibes reads, so --defaults names no count.
     let (_, report, _) = invoke("doctor", &["--defaults"]);
     assert!(!report.contains("token-max vibes"), "{report}");
-    // A cap already at the margin, a window at the maintainer's and an advisor already set
+    // A cap already at the margin, a window at Kixel's and an advisor already set
     // keep their cards, and doctor has nothing to name.
     w.settings(
         r#"{"promptCacheTtl":"1h","autoCompactWindow":400000,"advisorModel":"fable","cleanupPeriodDays":365,"env":{"BASH_MAX_TIMEOUT_MS":"3300000"}}"#,
@@ -500,7 +500,7 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
             && stdout.contains("\n  [5/6] Advisor model  not measured\n        What    ")
             && stdout.contains("\n  [6/6] Token audit skill  not measured\n        What    ")
             && stdout.contains("Installed for every Claude Code and Codex profile here")
-            && stdout.contains("Set to 400k. That is at or under the 400k window the maintainer caps it at, so there is nothing to change.")
+            && stdout.contains("Set to 400k. That is at or under the 400k window Kixel caps it at, so there is nothing to change.")
             && stdout.contains("Capped at 55m, the margin suggested under the 1h cache, the current main-agent cache TTL setting.")
             && !stdout.contains("Change"),
         "{stdout}"
@@ -576,7 +576,7 @@ fn vibes_advises_memory_off_when_most_sessions_ran_in_a_repository() {
         std::fs::write(w.transcript(), text).unwrap();
     };
     session(&repo.join("src"), &[]);
-    // Memory is on by default; a 55m cap under a 1h cache, a window at the maintainer's cap,
+    // Memory is on by default; a 55m cap under a 1h cache, a window at Kixel's cap,
     // a year of transcripts and an advisor already set leave the other cards quiet.
     w.settings(
         r#"{"promptCacheTtl":"1h","autoCompactWindow":400000,"advisorModel":"fable","cleanupPeriodDays":365,"env":{"BASH_MAX_TIMEOUT_MS":"3300000"}}"#,
@@ -1786,9 +1786,9 @@ mod unix {
         // open until the child exits, as a person's would.
         let mut keyboard = std::fs::File::from(master);
         // A plan pays, then yes to the TTL and to writing it; then yes to seeing `vibes`'
-        // advice, yes to its Bash cap, no to its window and its advisor, and yes to writing
-        // the cap.
-        keyboard.write_all(b"p\ny\ny\ny\ny\nn\nn\ny\n").unwrap();
+        // advice, whose Bash cap asks nothing once the TTL it compares with is written, yes
+        // to its window, no to its advisor, and yes to writing the window.
+        keyboard.write_all(b"p\ny\ny\ny\ny\nn\ny\n").unwrap();
         let status = child.wait().unwrap().code().unwrap();
         let (stdout, stderr) = (out.join().unwrap(), err.join().unwrap());
         assert_eq!(status, 0, "{stderr}");
@@ -1882,13 +1882,11 @@ mod unix {
         let memory = at("\n  [2/6] Auto memory ");
         assert!(card < memory && memory < window, "{stdout}");
         let entry = words(&stdout[card..memory]);
-        assert!(
-            entry.starts_with("[1/6] Bash timeout cap not measured 2h -> 4m What The longest Claude waits on a foreground Bash command before Claude Code moves it to the background. Advice A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess."),
-            "{entry}"
-        );
-        assert!(
-            entry.ends_with(r#"Source The maintainer's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching Change "env": {"BASH_MAX_TIMEOUT_MS": "240000"} in ~/.claude/settings.json Accept? [y]es, [n]o, [q]uit:"#),
-            "{entry}"
+        // The card's cap was compared with the 5m TTL doctor just replaced, which the scan
+        // can't replay, so it asks for a fresh run rather than offering a cap under 5m.
+        assert_eq!(
+            entry,
+            "[1/6] Bash timeout cap not measured What The longest Claude waits on a foreground Bash command before Claude Code moves it to the background. Advice doctor's walk just wrote a main-agent cache TTL change, which moves the TTL this cap is compared with. Run token-max vibes again to compare the cap with the settings as they are now. Source Kixel's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching"
         );
         assert!(!entry.contains("Recommended") && !entry.contains("Worth considering"));
         // The window card names doctor's verdict beside its own cap, which is declined.
@@ -1918,12 +1916,11 @@ mod unix {
             words(&stdout[advisor..skill]).ends_with(r#"Change "advisorModel": "fable" in ~/.claude/settings.json Accept? [y]es, [n]o, [q]uit:"#),
             "{stdout}"
         );
-        // The card is from the scan before doctor wrote 1h, so its cap is for the 5m cache
-        // set then; the next run moves it to 55m.
-        // Its edit is checked against the file as doctor just wrote it, and confirmed alone.
+        // The window's edit is checked against the file as doctor just wrote it, and
+        // confirmed alone.
         let tail = &stdout[again..];
         assert!(
-            tail.contains("  @@ -3,3 +3,3 @@\n      \"env\": {\n  -     \"BASH_MAX_TIMEOUT_MS\": \"7200000\"\n  +     \"BASH_MAX_TIMEOUT_MS\": \"240000\"\n"),
+            tail.contains("  +   \"modelSettings\": {\n  +     \"claude-opus-5-5\": {\n  +       \"autoCompactWindow\": 400000\n"),
             "{tail}"
         );
         assert!(
@@ -1946,11 +1943,138 @@ mod unix {
             std::fs::read_to_string(w.claude.join("settings.json.token-max.bak")).unwrap(),
             raised
         );
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(w.claude.join("settings.json")).unwrap())
+                .unwrap();
+        let mut expected: Value = serde_json::from_str(&raised).unwrap();
+        expected["modelSettings"] = json!({ "claude-opus-5-5": { "autoCompactWindow": 400000 } });
+        assert_eq!(written, expected);
+        drop(keyboard);
+    }
+
+    #[test]
+    fn doctor_rich_tui_applies_prechecked_wins_on_enter_then_y() {
+        let w = Workspace::new();
+        let prices = native_path(fixture("prices.json"));
+        let settings = "{\n  \"promptCacheTtl\": \"5m\"\n}\n";
+        std::fs::write(w.claude.join("settings.json"), settings).unwrap();
+        let base = "2026-10-01T12:00:00.000Z";
+        // Write a 2-request session with a 20m pause so 1h cache saves >$1/mo cleanly.
+        let project = w.claude.join("projects/app");
+        std::fs::create_dir_all(&project).unwrap();
+        let mut lines = String::new();
+        for i in 0..8 {
+            let minute = i * 20;
+            let hour = 12 + minute / 60;
+            let min = minute % 60;
+            let rec = serde_json::json!({
+                "type": "assistant",
+                "uuid": format!("u-{i}"),
+                "sessionId": "tui-session",
+                "timestamp": format!("2026-10-01T{hour:02}:{min:02}:00.000Z"),
+                "version": "2.1.314",
+                "entrypoint": "cli",
+                "cwd": w.home.to_string_lossy(),
+                "message": {
+                    "id": format!("m-{i}"),
+                    "model": "claude-opus-5-5",
+                    "content": [],
+                    "usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 100,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 1_000_000,
+                        "cache_creation": {
+                            "ephemeral_5m_input_tokens": 1_000_000,
+                            "ephemeral_1h_input_tokens": 0
+                        },
+                        "service_tier": "standard",
+                        "speed": "standard",
+                        "inference_geo": "global",
+                        "server_tool_use": { "web_search_requests": 0, "web_fetch_requests": 0 }
+                    }
+                }
+            });
+            lines.push_str(&rec.to_string());
+            lines.push('\n');
+        }
+        std::fs::write(project.join("tui-session.jsonl"), lines).unwrap();
+        let args = [
+            "doctor",
+            "--since",
+            base,
+            "--offline",
+            "--prices-file",
+            &prices,
+        ];
+        // The checklist follows the billing question, read a line at a time, so its keys wait
+        // for its first frame. A doubled Enter opens the diff and writes nothing; `q` then
+        // leaves, and `n` declines vibes' advice.
+        let paid = ("How is ~/.claude paid for?", &b"a\n"[..]);
+        let mut c = command(&w, &args);
+        c.env("LANG", "C.UTF-8");
+        let steps = [paid, ("Review diff", b"\r\rq"), ("Show them?", b"n")];
+        let (status, stdout, stderr) = typed_after(&mut c, &steps);
+        assert_eq!(status, 0, "stdout={stdout}\nstderr={stderr}");
+        assert!(stdout.contains("no settings were changed"), "{stdout}");
         assert_eq!(
             std::fs::read_to_string(w.claude.join("settings.json")).unwrap(),
-            raised.replace("7200000", "240000")
+            settings
         );
-        drop(keyboard);
+        let mut c = command(&w, &args);
+        c.env("LANG", "C.UTF-8");
+        // Peek at Vibes (`v`), return to Measured (`v`), then Enter (diff) and `y` (write),
+        // so peeking at Vibes never clobbers the Measured offers or the cards a write
+        // rebuilds. Then open vibes' advice, the Bash cap's card first, and Ctrl-C.
+        let steps = [
+            paid,
+            ("Review diff", b"vv\ry"),
+            ("Show them?", b"y"),
+            ("unmeasured tips", b"\x1b[C"),
+            ("compare the cap with", b"\x03"),
+        ];
+        let (status, stdout, stderr) = typed_after(&mut c, &steps);
+        assert_eq!(status, 2, "stdout={stdout}\nstderr={stderr}");
+        assert!(stdout.contains("updated 1 file"), "{stdout}");
+        // The cap compared with the 5m TTL it replaced is not offered after the 1h write.
+        let after = &stdout[stdout.find("Show them?").unwrap()..];
+        assert!(!after.contains("10m \u{2192} 4m"), "{after}");
+        assert!(
+            stderr.contains("cancelled; no further settings were changed"),
+            "{stderr}"
+        );
+        let written = std::fs::read_to_string(w.claude.join("settings.json")).unwrap();
+        assert!(written.contains("\"promptCacheTtl\": \"1h\""), "{written}");
+        assert_eq!(
+            std::fs::read_to_string(w.claude.join("settings.json.token-max.bak")).unwrap(),
+            settings
+        );
+
+        // `--defaults` changes nothing, so on a terminal it prints the report and asks only
+        // how the profile pays, exiting 1 for the change it recommends.
+        let mut defaults_cmd = command(
+            &w,
+            &[
+                "doctor",
+                "--defaults",
+                "--since",
+                base,
+                "--offline",
+                "--prices-file",
+                &prices,
+            ],
+        );
+        defaults_cmd.env("LANG", "C.UTF-8");
+        let (status, stdout, stderr) = typed(&mut defaults_cmd, b"a\n");
+        assert_eq!(status, 1, "stdout={stdout}\nstderr={stderr}");
+        assert!(
+            stdout.contains("as a default user (--defaults)"),
+            "{stdout}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(w.claude.join("settings.json")).unwrap(),
+            written
+        );
     }
 
     /// The binary hard-linked into its own directory, so an upgrade replaces only the link.
@@ -1960,6 +2084,49 @@ mod unix {
         let bin = dir.join("token-max");
         std::fs::hard_link(BIN, &bin).unwrap();
         bin
+    }
+
+    /// Run `command` with stdin, stdout and stderr on terminals, typing each step's keys once
+    /// stdout shows its text, so keys meant for the checklist never reach a line read first.
+    fn typed_after(command: &mut Command, steps: &[(&str, &[u8])]) -> (i32, String, String) {
+        let Pty { master, slave } = Pty::new(80);
+        let Pty {
+            master: screen,
+            slave: shown,
+        } = Pty::new(80);
+        let (stderr, err) = Pty::new(80).drain();
+        command
+            .stdin(Stdio::from(slave))
+            .stdout(Stdio::from(shown))
+            .stderr(stderr);
+        let mut child = command.spawn().unwrap();
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut keyboard = std::fs::File::from(master);
+        let mut screen = std::fs::File::from(screen);
+        let (mut out, mut buf) = (vec![], [0; 4096]);
+        for (text, keys) in steps {
+            while !String::from_utf8_lossy(&out).contains(text) {
+                match screen.read(&mut buf) {
+                    Ok(n @ 1..) => out.extend_from_slice(&buf[..n]),
+                    _ => panic!(
+                        "stdout ended before {text:?}: {}",
+                        String::from_utf8_lossy(&out)
+                    ),
+                }
+            }
+            keyboard.write_all(keys).unwrap();
+        }
+        // Linux reports EIO once the last slave descriptor closes.
+        while let Ok(n @ 1..) = screen.read(&mut buf) {
+            out.extend_from_slice(&buf[..n]);
+        }
+        let status = child.wait().unwrap().code().unwrap();
+        drop(keyboard);
+        let out = String::from_utf8(out).unwrap();
+        (status, out, err.join().unwrap())
     }
 
     /// Run `command` with stdin, stdout and stderr on terminals, typing `keys`.
@@ -2032,7 +2199,7 @@ mod unix {
         let (_, stdout, _) = run(&mut command(&w, &base));
         let stdout = words(&stdout);
         assert!(
-            stdout.contains("The maintainer's pick, claude-opus-5-5 at medium, is not offered: ~/.claude/settings.json:availableModels excludes it.")
+            stdout.contains("Kixel's pick, claude-opus-5-5 at medium, is not offered: ~/.claude/settings.json:availableModels excludes it.")
                 && stdout.contains("No advisor is suggested: Opus ranks one above claude-sonnet-5-5")
                 && !stdout.contains("-> opus")
                 && !stdout.contains("-> claude-opus-5-5"),

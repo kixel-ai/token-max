@@ -12,6 +12,7 @@ categories = ["command-line-utilities", "development-tools"]
 include = ["/src", "/skills/token-audit/SKILL.md", "/tests", "/test/fixtures", "/site/public/run.sh", "/site/public/run.ps1", "/docs/semantics.md", "/README.md", "/LICENSE"]
 
 [dependencies]
+crossterm = "0.29.0"
 ctrlc = { version = "3.5.3", features = ["termination"] }
 foldhash = "0.2.0"
 indexmap = { version = "2.14.2", features = ["serde"] }

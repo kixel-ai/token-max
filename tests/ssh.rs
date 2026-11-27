@@ -1770,7 +1770,7 @@ fn flat(text: &str) -> String {
 
 /// Each walked home's settings: a 1h TTL, and a Bash cap that outlasts it, which `vibes`
 /// offers to lower on every host with a saving not measured. The compaction window is at the
-/// maintainer's cap and an advisor is set, so their cards ask nothing.
+/// Kixel's cap and an advisor is set, so their cards ask nothing.
 const HOME_SETTINGS: &str = r#"{"promptCacheTtl":"1h","autoCompactWindow":400000,"advisorModel":"fable","cleanupPeriodDays":365,"env":{"BASH_MAX_TIMEOUT_MS":"7200000"}}"#;
 
 /// [`HOME_SETTINGS`] with the cap lowered under the TTL, as accepting its change writes them.
@@ -1790,7 +1790,7 @@ impl Hosts {
         for host in ["local", "devbox", "laptop"] {
             std::fs::write(self.settings(host), HOME_SETTINGS).unwrap();
         }
-        let mut command = self.invoke(command, &["--ssh", "devbox", "--ssh", "laptop"]);
+        let mut command = self.invoke(command, &["--plain", "--ssh", "devbox", "--ssh", "laptop"]);
         command.env("NO_COLOR", "1");
         let mut terminal = Terminal::spawn(command);
         // Each host's profile, in the order the hosts were given.
@@ -1922,7 +1922,7 @@ fn doctor_hands_every_host_to_vibes_from_the_same_scan() {
 fn one_hosts_walk_opens_with_its_credit() {
     let hosts = Hosts::new();
     std::fs::write(hosts.settings("local"), HOME_SETTINGS).unwrap();
-    let mut command = hosts.command(&[]);
+    let mut command = hosts.command(&["--plain"]);
     command.env("NO_COLOR", "1");
     let mut terminal = Terminal::spawn(command);
     terminal.answer("How is ~/.claude paid for?", "a");
@@ -2101,7 +2101,14 @@ fn each_destination_prices_its_main_ttl_by_the_answer_given_for_it() {
     let hosts = Hosts::new();
     hosts.host("devbox");
     hosts.host("laptop");
-    let mut command = hosts.command(&["--defaults", "--ssh", "devbox", "--ssh", "laptop"]);
+    let mut command = hosts.command(&[
+        "--plain",
+        "--defaults",
+        "--ssh",
+        "devbox",
+        "--ssh",
+        "laptop",
+    ]);
     command.env("NO_COLOR", "1");
     let mut terminal = Terminal::spawn(command);
     for (profile, answer) in [

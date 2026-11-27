@@ -281,7 +281,7 @@ pub fn found(harness: Harness, root: &str, homes: &Homes<'_>) -> Found {
 
 const WHAT: &str = "An agent skill for Claude Code and Codex that audits their transcripts for token waste beyond settings.";
 
-const PICK: &str = "The maintainer's pick, from token-max's own maintainer: https://github.com/kixel-ai/token-max/blob/main/docs/reference.md#token-audit-skill";
+const PICK: &str = "Kixel's pick, token-max's own skill: https://github.com/kixel-ai/token-max/blob/main/docs/reference.md#token-audit-skill";
 
 /// `vibes`' card for the skill on one host: quiet when every profile finds it, else the
 /// install step for those that don't. None when no profile was looked at.

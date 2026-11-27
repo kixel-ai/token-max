@@ -96,14 +96,14 @@
 </span><span class="step">  <span class="b">How is desktop:~/.claude-api-credits paid for?</span> <span class="d">[p]lan, [a]PI key or usage credits, [s]kip</span>: <span class="ans">a</span><span class="cur"></span>
 </span><span class="step">  <span class="b">How is fedora:~/.claude paid for?</span> <span class="d">[p]lan, [a]PI key or usage credits, [s]kip</span>: <span class="ans">p</span><span class="cur"></span>
 </span><span class="step">
-<span class="rest"><span class="b">token-max: total over 3 hosts</span>  <span class="d">1,217,665 requests and 168,044,276,860 tokens in 24,257 sessions,</span></span>
-                               <span class="d">~$66,551 ± $14 at API prices</span>
-  <span class="b r">72 changes recommended</span> <span class="b">and</span> <span class="b y">43 worth considering</span><span class="b">.</span>
-  From the defaults, these changes save ~$5,633/mo ± $10, 8% of these hosts' spend; overlapping
+<span class="rest"><span class="b">token-max: total over 3 hosts</span>  <span class="d">1,219,505 requests and 168,303,354,301 tokens in 24,289 sessions,</span></span>
+                               <span class="d">~$66,641 ± $14 at API prices</span>
+  <span class="b r">78 changes recommended</span> <span class="b">and</span> <span class="b y">38 worth considering</span><span class="b">.</span>
+  From the defaults, these changes save ~$5,664/mo ± $10, 8% of these hosts' spend; overlapping
   changes may save less.
 
   <span class="d">Left out or assumed: 7 unsupported T3 instances, 330 unattributed T3 requests, 272,861 removed T3</span>
-  <span class="d">requests, 4,441 requests with no usage, 63 unreadable lines, 135,930 requests at an assumed</span>
+  <span class="d">requests, 4,442 requests with no usage, 63 unreadable lines, 136,291 requests at an assumed</span>
   <span class="d">service tier. --details says why.</span>
   <span class="d">A ~ figure extrapolates from the priced requests to the unpriced ones, assuming they resemble each</span>
   <span class="d">other; ± is its 95% margin of error.</span>
@@ -114,7 +114,7 @@
     subagent (desktop:~/.claude/settings.json) 5m → 1h, main
     (desktop:~/.claude-api-credits/settings.json) 5m (default) → 1h, subagent
     (~/.claude/settings.json) 5m → 1h, main (~/.claude-api-credits/settings.json) 5m (default) → 1h
-    <span class="g">saves ~$4,631/mo ± $6.75</span>   <span class="d">7%  [fedora:~/.claude/settings.json, desktop:~/.claude/settings.json,</span>
+    <span class="g">saves ~$4,657/mo ± $6.75</span>   <span class="d">7%  [fedora:~/.claude/settings.json, desktop:~/.claude/settings.json,</span>
     <span class="d">desktop:~/.claude-api-credits/settings.json, ~/.claude/settings.json,</span>
     <span class="d">~/.claude-api-credits/settings.json]  fedora:~/.claude/settings.json:subagentPromptCacheTtl;</span>
     <span class="d">desktop:~/.claude/settings.json:subagentPromptCacheTtl;</span>
@@ -125,6 +125,11 @@
     <span class="d">[desktop:~/.claude/settings.json, fedora:~/.claude/settings.json, ~/.claude/settings.json]</span>
     <span class="d">desktop:~/.claude/settings.json:autoMemoryEnabled;</span>
     <span class="d">fedora:~/.claude/settings.json:autoMemoryEnabled; ~/.claude/settings.json:autoMemoryEnabled</span>
+  <span class="r">●</span> Never-used tools                         30 → off            <span class="g">saves ~$156/mo ± $0.05</span>  <span class="d">&lt;1%</span>
+    <span class="d">[fedora:~/.claude/settings.json, ~/.claude/settings.json,</span>
+    <span class="d">desktop:~/.claude-api-credits/settings.json]  fedora:~/.claude/settings.json:enableWorkflows,</span>
+    <span class="d">permissions.deny; ~/.claude/settings.json:enableWorkflows, permissions.deny;</span>
+    <span class="d">desktop:~/.claude-api-credits/settings.json:enableWorkflows, permissions.deny</span>
   <span class="y">●</span> Skills over $1 per use                   12 → typed only     <span class="g">saves ~$150/mo ± $0.15</span>  <span class="d">&lt;1%</span>
     <span class="d">[fedora:~/.claude/settings.json, desktop:~/.claude/settings.json, ~/.claude/settings.json]</span>
     <span class="d">fedora:~/.claude/settings.json:skillOverrides.*;</span>
@@ -138,19 +143,14 @@
     <span class="d">[desktop:~/.claude/settings.json, fedora:~/.claude/settings.json]</span>
     <span class="d">desktop:~/.claude/settings.json:skillOverrides.*;</span>
     <span class="d">fedora:~/.claude/settings.json:skillOverrides.*</span>
-  <span class="y">●</span> Tools with no recorded use               8 → off             <span class="g">saves ~$108/mo ± $0.04</span>  <span class="d">&lt;1%</span>
-    <span class="d">[desktop:~/.claude/settings.json]  permissions.deny</span>
-  <span class="y">●</span> Tools over $1 per use                    2 → off             <span class="g">saves ~$102/mo ± $0.03</span>  <span class="d">&lt;1%</span>
-    <span class="d">[desktop:~/.claude/settings.json, ~/.claude/settings.json]</span>
-    <span class="d">desktop:~/.claude/settings.json:enableWorkflows; ~/.claude/settings.json:permissions.deny</span>
-  <span class="r">●</span> Never-used tools                         24 → off            <span class="g">saves ~$45/mo ± $0.02</span>  <span class="d">&lt;1%</span>
-    <span class="d">[~/.claude/settings.json, desktop:~/.claude-api-credits/settings.json,</span>
-    <span class="d">fedora:~/.claude/settings.json]  ~/.claude/settings.json:enableWorkflows, permissions.deny;</span>
-    <span class="d">desktop:~/.claude-api-credits/settings.json:enableWorkflows, permissions.deny;</span>
-    <span class="d">fedora:~/.claude/settings.json:permissions.deny</span>
+  <span class="y">●</span> Tools over $1 per use                    3 → off             <span class="g">saves ~$105/mo ± $0.03</span>  <span class="d">&lt;1%</span>
+    <span class="d">[fedora:~/.claude/settings.json, ~/.claude/settings.json]</span>
+    <span class="d">fedora:~/.claude/settings.json:permissions.deny; ~/.claude/settings.json:permissions.deny</span>
   <span class="y">●</span> MCP tools over $1 per use                2 → off             <span class="g">saves ~$25/mo ± &lt;$0.01</span>  <span class="d">&lt;1%</span>
     <span class="d">[fedora:~/.claude/settings.json, ~/.claude/settings.json]</span>
     <span class="d">fedora:~/.claude/settings.json:permissions.deny; ~/.claude/settings.json:permissions.deny</span>
+  <span class="y">●</span> Tools with no recorded use               2 → off             <span class="g">saves ~$0.73/mo ± &lt;$0.01</span>  <span class="d">&lt;1%</span>
+    <span class="d">[desktop:~/.claude/settings.json]  permissions.deny</span>
 </span><span class="step">
   <span class="b">EVERYTHING ELSE</span>  <span class="d">biggest cost first ──────────────────────────────────────────────────────────────</span>
 <span class="elided">  … 132 lines on every other setting and feature, cut from this page</span>
@@ -167,13 +167,13 @@
 <span class="elided">  … 1 line naming each edit, cut from this page</span>
 </span><span class="step">
   <span class="b">EDITS</span>  <span class="d">desktop:~/.claude/settings.json ───────────────────────────────────────────────────────────</span>
-<span class="elided">  … 8 lines naming each edit, cut from this page</span>
+<span class="elided">  … 6 lines naming each edit, cut from this page</span>
 </span><span class="step">
   <span class="b">EDITS</span>  <span class="d">desktop:~/.claude-api-credits/settings.json ───────────────────────────────────────────────</span>
 <span class="elided">  … 8 lines naming each edit, cut from this page</span>
 </span><span class="step">
   <span class="b">EDITS</span>  <span class="d">fedora:~/.claude/settings.json ────────────────────────────────────────────────────────────</span>
-<span class="elided">  … 7 lines naming each edit, cut from this page</span>
+<span class="elided">  … 10 lines naming each edit, cut from this page</span>
 </span></code></pre><!-- /doctor --></div>
   </div>
 </section>
@@ -183,31 +183,31 @@
   <h2 id="found">My usage:</h2>
   <!-- results -->
   <div class="stats">
-    <div class="stat"><h3>Tokens</h3><p>168.0B</p></div>
-    <div class="stat"><h3>Requests</h3><p>1,217,665</p></div>
-    <div class="stat"><h3>API price, 29 days</h3><p>~$66,551</p></div>
+    <div class="stat"><h3>Tokens</h3><p>168.3B</p></div>
+    <div class="stat"><h3>Requests</h3><p>1,219,505</p></div>
+    <div class="stat"><h3>API price, 29 days</h3><p>~$66,641</p></div>
   </div>
   <h3 class="where">What token-max saves</h3>
   <div class="cols">
     <div class="col plan">
       <h3>On my subscription</h3>
       <p class="big">8%<small> saved</small></p>
-      <p>~$5,633/mo at API rates</p>
+      <p>~$5,664/mo at API rates</p>
     </div>
     <div class="col api">
       <h3>If I used the API</h3>
-      <p class="big">31%<small> saved</small></p>
-      <p>~$21,459/mo</p>
+      <p class="big">32%<small> saved</small></p>
+      <p>~$21,838/mo</p>
     </div>
   </div>
   <h3 class="where">Where it comes from, at API rates</h3>
   <ol class="breakdown">
-    <li><span class="name">Main-agent prompt cache TTL <span class="tag">API only</span></span><span class="amt">~$16,443<small>/mo</small></span><span class="track" aria-hidden="true"><i class="plan"></i><i class="api"></i></span></li>
-    <li><span class="name">Subagent prompt cache TTL</span><span class="amt">~$4,203<small>/mo</small></span><span class="sr">, ~$4,199/mo of it on my subscription too</span><span class="track" aria-hidden="true"><i class="plan"></i><i class="api"></i></span></li>
+    <li><span class="name">Main-agent prompt cache TTL <span class="tag">API only</span></span><span class="amt">~$16,448<small>/mo</small></span><span class="track" aria-hidden="true"><i class="plan"></i><i class="api"></i></span></li>
+    <li><span class="name">Subagent prompt cache TTL</span><span class="amt">~$4,227<small>/mo</small></span><span class="sr">, ~$4,225/mo of it on my subscription too</span><span class="track" aria-hidden="true"><i class="plan"></i><i class="api"></i></span></li>
+    <li><span class="name">Skills (24)</span><span class="amt">~$392<small>/mo</small></span><span class="sr">, ~$385/mo of it on my subscription too</span><span class="track" aria-hidden="true"><i class="plan"></i><i class="api"></i></span></li>
     <li><span class="name">Auto memory</span><span class="amt">~$296<small>/mo</small></span><span class="sr">, all of it on my subscription too</span><span class="track" aria-hidden="true"><i class="plan"></i><i class="api"></i></span></li>
-    <li><span class="name">Skill dataviz</span><span class="amt">~$97<small>/mo</small></span><span class="sr">, ~$95/mo of it on my subscription too</span><span class="track" aria-hidden="true"><i class="plan"></i><i class="api"></i></span></li>
-    <li><span class="name">Skill code-review</span><span class="amt">~$61<small>/mo</small></span><span class="sr">, ~$60/mo of it on my subscription too</span><span class="track" aria-hidden="true"><i class="plan"></i><i class="api"></i></span></li>
-    <li><span class="name">Everything else (42 settings)</span><span class="amt">~$359<small>/mo</small></span><span class="sr">, ~$321/mo of it on my subscription too</span><span class="track" aria-hidden="true"><i class="plan"></i><i class="api"></i></span></li>
+    <li><span class="name">Workflow tool</span><span class="amt">~$186<small>/mo</small></span><span class="sr">, ~$182/mo of it on my subscription too</span><span class="track" aria-hidden="true"><i class="plan"></i><i class="api"></i></span></li>
+    <li><span class="name">Everything else (14 settings)</span><span class="amt">~$288<small>/mo</small></span><span class="sr">, ~$283/mo of it on my subscription too</span><span class="track" aria-hidden="true"><i class="plan"></i><i class="api"></i></span></li>
   </ol>
   <p class="key"><span class="k-plan">saves on my subscription too</span><span class="k-api">saves only at API rates</span></p>
   <p class="fine">Replayed at public API prices on 3 of my machines on 2026-11-27, each change

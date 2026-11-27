@@ -1894,6 +1894,14 @@ impl App {
                 if !item.sources.is_empty() {
                     paragraphs.push(format!("Source: {}", item.sources.join(" ")));
                 }
+                // A change this checklist can't write is a step by hand, as `vibes`' walk says.
+                if let Some(How::Manual { step, reason }) = &item.how {
+                    paragraphs.push(format!(
+                        "Change by hand, since {}: {}",
+                        terminal_text(reason),
+                        terminal_text(step)
+                    ));
+                }
                 if v.read_only && matches!(item.how, Some(How::Edit(_))) {
                     paragraphs.push(
                         "Its edit is offered on this host once this checklist closes, when doctor asks to show vibes' advice."
@@ -2365,7 +2373,10 @@ pub(crate) fn run(
                 .filter_map(|k| k.saving_usd)
                 .fold(0.0_f64, f64::max);
             for ki in 0..app.hero.kept.len() {
-                for line in app.render_kept_row(ki, false, false, max_kept_usd, width) {
+                // A row naming its profile prints its proof too, which names it whole, since
+                // nothing is left to expand once this report prints.
+                let expand = app.hero.kept[ki].profile.is_some();
+                for line in app.render_kept_row(ki, false, expand, max_kept_usd, width) {
                     writeln!(stdout, "{line}").map_err(failed)?;
                 }
             }
@@ -4063,5 +4074,35 @@ mod tests {
         assert!(row.contains("+ [~/.claude-api"), "{row}"); // slash ok: the profile label passes through unchanged
         assert!(row.contains("up to"), "{row}");
         assert!(row.contains("On ~/.claude-api-credits:"), "{row}"); // slash ok: the profile label passes through unchanged
+    }
+
+    #[test]
+    fn a_card_left_by_hand_shows_its_step() {
+        let mut app = App::new(&[], Hero::default(), Tab::Vibes, false, false);
+        let card = VibeItem {
+            how: Some(How::Manual {
+                step: "run `token-max skill install`".into(),
+                reason: "doctor and vibes write only settings files".into(),
+            }),
+            ..item("Token audit skill")
+        };
+        app.set_vibes(vec![VibeRow {
+            host: 0,
+            host_label: None,
+            versions: vec![VibeVersion {
+                after: vec![],
+                item: card,
+                offer: None,
+                accepts: vec![],
+            }],
+            shown: 0,
+            checked: false,
+            read_only: false,
+        }]);
+        let drawer = app.render_vibe_row(0, true, true, 200).join(" ");
+        assert!(
+            drawer.contains("Change by hand, since doctor and vibes write only settings files: run `token-max skill install`"),
+            "{drawer}"
+        );
     }
 }

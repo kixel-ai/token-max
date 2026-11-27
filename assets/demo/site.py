@@ -13,7 +13,8 @@ goes between style.css's run markers, since the page's CSP allows no inline styl
 runs on a terminal too wide to wrap a row repeat it and answer every profile as API. The hosts'
 totals, which --ssh prints, and their changes fill the results section between index.html's
 <!-- results --> markers: the shown run's usage and saving on the subscription, the API run's
-saving at API rates, and both wide runs' changes ranked by setting. The
+saving at API rates, and both wide runs' changes ranked by setting, each skill or MCP server
+folded into its kind's row, since a project's own can be named after it. The
 EVERYTHING ELSE section is cut to one line: a kind or setting with a single line, such as a
 project's only instruction file or subagent, still names its project files, which can belong
 to private repositories. So is each EDITS section, which names every skill and tool an edit
@@ -371,6 +372,9 @@ def billions(tokens: int) -> str:
 
 # The breakdown names this many settings, then one row for every other one.
 LISTED = 5
+# A skill or MCP server is named by whoever installed it, perhaps after a private project, so
+# the public page shows each kind as one row of its members' sum, never a member's name.
+FOLDED = {"Skill ": "Skills", "MCP server ": "MCP servers", "MCP tool ": "MCP servers"}
 
 
 def results(shown: str, plan: str, api: str, paid: set[str], since: date, now: datetime) -> tuple[str, str]:
@@ -408,11 +412,21 @@ def results(shown: str, plan: str, api: str, paid: set[str], since: date, now: d
                 sys.exit(f"the changes add up to ${summed:,.2f}/mo, not the total's ${offer[key][0]:,.2f}/mo")
     # A setting saves on the subscription what the first run measured outside the profiles
     # answered as API; at API rates, everything the second run offers.
-    rows = []
+    folded: dict[str, list] = {}
     for name, (measured, up_to, about, _, _, lower) in api_rows.items():
         # A 1h main TTL makes cache writes dearer, so a change can save more on the plan.
         on_plan = min(plan_rows.get(name, [0.0] * 5)[4], measured + up_to)
-        rows.append((measured + up_to, on_plan, about, name, lower))
+        kind = next((k for p, k in FOLDED.items() if name.startswith(p)), name)
+        row = folded.setdefault(kind, [0.0, 0.0, False, set(), False])
+        row[0] += measured + up_to
+        row[1] += on_plan
+        row[2] |= about
+        row[3].add(name)
+        row[4] |= lower
+    rows = [
+        (whole, on_plan, about, f"{kind} ({len(names)})" if kind in FOLDED.values() else kind, lower, len(names))
+        for kind, (whole, on_plan, about, names, lower) in folded.items()
+    ]
     # A change only the plan run offers, such as a 1h main TTL moved to 5m, saves nothing at
     # API rates, so the breakdown leaves it out.
     rows.sort(key=lambda r: (-r[0], r[3]))
@@ -420,11 +434,11 @@ def results(shown: str, plan: str, api: str, paid: set[str], since: date, now: d
     if rest:
         listed.append(
             (sum(r[0] for r in rest), sum(r[1] for r in rest), any(r[2] for r in rest),
-             f"Everything else ({len(rest)} settings)", any(r[4] for r in rest))
+             f"Everything else ({sum(r[5] for r in rest)} settings)", any(r[4] for r in rest), 0)
         )
     top = max((r[0] for r in listed), default=0)
     items, css = [], []
-    for n, (whole, on_plan, about, name, lower) in enumerate(listed, 1):
+    for n, (whole, on_plan, about, name, lower, _) in enumerate(listed, 1):
         tag = ' <span class="tag">API only</span>' if on_plan < 0.005 else ""
         # The bars are decorative, so a screen reader hears the split they draw as text.
         if on_plan < 0.005:

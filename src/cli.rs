@@ -3410,9 +3410,14 @@ fn run_tui(walk: Walk) -> Result<(), ScanError> {
                             }
                             _ => (None, vec![]),
                         };
+                        // A step by hand names paths from `~`, as `vibes`' walk shows it.
+                        let mut item = item.clone();
+                        if let Some(crate::doctor::How::Manual { step, .. }) = &mut item.how {
+                            *step = crate::doctor::home_in(step, host.style.home.as_deref());
+                        }
                         tui::VibeVersion {
                             after,
-                            item: item.clone(),
+                            item,
                             offer,
                             accepts,
                         }

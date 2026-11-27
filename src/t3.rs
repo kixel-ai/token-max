@@ -2786,6 +2786,9 @@ mod tests {
     }
     fn db(root: &Path) -> Connection {
         let db = Connection::open(root.join("statev2.sqlite")).unwrap();
+        // Each fixture insert commits on its own, and a synced commit is slow on
+        // Windows; a test's database never needs to survive a crash.
+        db.execute_batch("PRAGMA synchronous=OFF;").unwrap();
         db.execute_batch(include_str!("../test/fixtures/t3-schema.sql"))
             .unwrap();
         db

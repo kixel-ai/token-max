@@ -1,0 +1,69 @@
+name: macOS
+
+# The macOS tests run after pushes to main, outside pull requests and the
+# merge queue: over 22 days of gate runs they never failed where Linux passed,
+# while waiting for one of the org's shared macOS runners held the gate up to an
+# hour. A release still runs them before publishing, through Check.
+# The merge queue's bot pushes to main, and GitHub tells no one when a run it
+# triggered fails, so a failure files an issue.
+on:
+  push:
+    branches: [main]
+    # Check's quest-only rule: nothing here affects the build or tests.
+    paths-ignore: ["quest/**", AGENTS.md, CLAUDE.md, CONTRIBUTING.md]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A run in progress finishes, and a newer push replaces a pending one, so runs
+# coalesce without starving. A manual run or a rerun keys apart, so it never
+# replaces a pending push, whose failure alone files the issue.
+concurrency:
+  group: macos-${{ github.event_name }}-${{ github.ref }}${{ github.run_attempt > 1 && format('-{0}', github.run_id) || '' }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+
+jobs:
+  test:
+    name: Tests (macos-15)
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Update the preinstalled stable toolchain
+        run: rustup update stable --no-self-update
+      - name: Run the tests
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo +stable test --locked
+
+  report:
+    name: Report
+    needs: test
+    if: failure() && github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+        run: |
+          title="macOS tests fail on main"
+          body="The macOS tests failed on $SHA: $RUN"
+          number=$(gh issue list --state open --search "in:title \"$title\"" --json number,title \
+            --jq "map(select(.title == \"$title\")) | first | .number // empty")
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi

@@ -17,10 +17,10 @@ permissions:
   contents: read
 
 # A run in progress finishes, and a newer push replaces a pending one, so runs
-# coalesce without starving. A manual run keys apart, so it never replaces a
-# pending push, whose failure alone files the issue.
+# coalesce without starving. A manual run or a rerun keys apart, so it never
+# replaces a pending push, whose failure alone files the issue.
 concurrency:
-  group: macos-${{ github.event_name }}-${{ github.ref }}
+  group: macos-${{ github.event_name }}-${{ github.ref }}${{ github.run_attempt > 1 && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: false
 
 env:

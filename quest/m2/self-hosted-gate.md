@@ -23,12 +23,11 @@ repositories each run their gate on a runner group of their own, such as
 - Pull requests from forks would run their code on that host. Set the
   repository's fork-run approval to "Require approval for all outside
   collaborators", since GitHub's default asks only first-time contributors,
-  and run every job that executes pull request code on a fresh, ephemeral
-  worker, so no job leaves state that a later merge-queue `Check` reads.
-  Give the runner no credentials beyond the job's read-only token. If the
-  host cannot give each job a fresh worker, keep fork `pull_request` runs on
-  GitHub's runners and send only `merge_group` runs, which a maintainer
-  enqueues, to the self-hosted group.
+  and run every job that executes pull request or merge-group code, which
+  holds a fork's code once its PR is queued, on a fresh, ephemeral worker, so
+  no job leaves state that a later `Check` reads. Give the runner no
+  credentials beyond the job's read-only token. Until the host can give each
+  job a fresh worker, those jobs stay on GitHub's runners.
 - `Check` stays the single required context, so the ruleset needs no change.
 
 ## Waiting

@@ -104,7 +104,7 @@ token-max doctor --since 2026-11-01  # only sessions from that date on
 token-max doctor --details           # the evidence behind every line
 token-max doctor --ssh devbox       # this host and devbox, each change made on its own host
 token-max vibes                      # advice the transcripts can't price, with no verdict
-token-max skill install              # the token-audit skill, then ask your agent for /token-audit
+token-max skill install              # the token-audit skill: /token-audit in Claude Code, $token-audit in Codex
 token-max doctor --help
 ```
 

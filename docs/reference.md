@@ -1384,10 +1384,12 @@ alike, so its line covers all of them at once and is named "Anthropic prompt
 cache TTL". Unset, OpenCode sends no lifetime and Anthropic keeps its 5m
 default. A value an Anthropic model sets for itself under
 `providers.anthropic.models`, a value other than `5m` or `1h`, which Anthropic
-rejects, a project file that sets either, `warming` left on for Anthropic, whose
-unrecorded pings keep caches warm on a schedule timed from `cache.ttl`, or a
-latest session that ran OpenCode older than 2.2.0, which added the setting,
-leaves the line advisory. `OPENCODE_CONFIG_CONTENT`, which OpenCode reads after
+rejects, a project file that changes the lifetime an Anthropic session there
+ran with or the file that sets it, `warming` left on where an Anthropic session
+ran, whose unrecorded pings keep caches warm on a schedule timed from
+`cache.ttl`, or a latest session that ran OpenCode older than 2.2.0, which added
+the setting, leaves the line advisory. A project file that cannot be read where
+an Anthropic session ran may do either, so it does too. `OPENCODE_CONFIG_CONTENT`, which OpenCode reads after
 every file, project files included, outranks them: the lifetime and warming it
 sets are the ones every session runs with, and its lifetime is changed there.
 Requests to any other provider, including OpenCode's own

@@ -1267,7 +1267,7 @@ impl Reader {
             let mut reallowed = false;
             // Each project's files, which sit between the global ones and the shell's inline
             // config for the Anthropic cache lifetime and warming.
-            let mut cache_projects = vec![];
+            let mut project_files: HashMap<&str, Vec<crate::opencode::Layer>> = HashMap::default();
             for cwd in history.sessions.iter().filter_map(|s| s.cwd.as_deref()) {
                 if projects.contains_key(cwd) || unresolved.contains(&cwd) {
                     continue;
@@ -1278,13 +1278,25 @@ impl Reader {
                         // A project's declaration replaces the global one by name.
                         let declared = crate::opencode::project_servers(&layers);
                         projects.insert(cwd, declared);
-                        if !layers.is_empty() {
-                            cache_projects.push(layers);
-                        }
+                        project_files.insert(cwd, layers);
                     }
                     Err(_) => unresolved.push(cwd),
                 }
             }
+            // Where each session sent straight to Anthropic ran, which sets the cache lifetime
+            // and warming it ran with.
+            let anthropic: HashSet<&str> = history
+                .requests
+                .iter()
+                .filter(|r| crate::opencode::anthropic(r))
+                .map(|r| &*r.session)
+                .collect();
+            let anthropic_dirs: IndexSet<Option<&str>> = history
+                .sessions
+                .iter()
+                .filter(|s| anthropic.contains(&*s.key))
+                .map(|s| s.cwd.as_deref())
+                .collect();
             for cwd in &unresolved {
                 self.issues.insert(
                     format!(
@@ -1310,18 +1322,27 @@ impl Reader {
                     });
                 }
                 // A project that changes the Anthropic cache lifetime, or the file that sets
-                // it, runs at its own, which no global edit reaches; one that leaves warming
-                // on pings sessions no replay prices.
+                // it, runs at its own, which no global edit reaches; warming left on where a
+                // session ran pings it at times no replay prices. An unreadable project may
+                // do either.
                 let cache = crate::opencode::CacheStack::new(options, &p.root, &p.settings_file)?;
-                if !unresolved.is_empty() || cache_projects.iter().any(|l| cache.ttl_varies(l)) {
+                let stacks = || {
+                    anthropic_dirs.iter().map(|cwd| match cwd {
+                        Some(cwd) => project_files.get(cwd).map(Vec::as_slice),
+                        None => Some(&[][..]),
+                    })
+                };
+                if stacks().any(|l| l.is_none_or(|l| cache.ttl_varies(l))) {
                     p.ttl.main.varies = true;
                     p.ttl.subagent.varies = true;
                 }
-                if !unresolved.is_empty() || cache_projects.iter().any(|l| cache.warms(l)) {
+                if stacks().any(|l| l.is_none_or(|l| cache.warms(l))) {
                     p.settings.insert(
                         crate::opencode::WARMING.into(),
                         crate::model::Scalar::Bool(true),
                     );
+                } else {
+                    p.settings.shift_remove(crate::opencode::WARMING);
                 }
                 if reallowed || !unresolved.is_empty() {
                     p.settings.insert(

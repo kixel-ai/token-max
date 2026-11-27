@@ -2191,6 +2191,23 @@ mod tests {
     }
 
     #[test]
+    fn warming_counts_only_where_the_anthropic_sessions_ran() {
+        let w = Workspace::new();
+        let file = opencode_database(&w.home);
+        let repo = w.home.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        anthropic_session(&file, &text(&repo), &[(0, 0, 10_000), (20, 0, 10_500)]);
+        let config = w.home.join(".config/opencode/opencode.json");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, r#"{"warming": {"duration": "30 minutes"}}"#).unwrap();
+        // The project turns the global warming off, so its sessions never warm.
+        std::fs::write(repo.join("opencode.json"), r#"{"warming": false}"#).unwrap();
+        let (_, check) = anthropic_check(&w);
+        assert_eq!(check.base.action, crate::model::Action::Change);
+        assert!(!check.base.uncertainty.iter().any(|u| u.contains("warming")));
+    }
+
+    #[test]
     fn a_compaction_from_any_provider_restarts_the_anthropic_cache() {
         let w = Workspace::new();
         let file = opencode_database(&w.home);

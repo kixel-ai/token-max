@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::model::{
-    Api, BillingPart, Cost, Estimate, Harness, Margin, PartKind, Request, Text, TierScenario, Usd,
+    Api, BillingPart, Cost, Estimate, Harness, Margin, Millis, PartKind, Request, Text,
+    TierScenario, Usd,
 };
 use crate::safe::{ScanError, iso, label, object, truthy};
 
@@ -61,7 +62,14 @@ pub fn tier_scale(r: &Request, p: &BillingPart) -> Option<TierScale> {
     let input = p.usage.input;
     let rate = |tier: &str| match tier {
         "default" | "standard" => Some(1.0),
-        tier => premium_multiplier(tier, model, input),
+        tier => premium_multiplier(
+            tier,
+            Billed {
+                model,
+                input,
+                at: r.time,
+            },
+        ),
     };
     let ratios = rate(assumed).and_then(|base| {
         let tiers = [rate("default")?, rate("fast")?, rate("ultrafast")?];
@@ -371,7 +379,7 @@ fn model_price(value: &Value) -> Result<ModelPrice, ScanError> {
 }
 
 /// Why a catalog could not be read: a validation error or a stream failure owned by the caller.
-enum Failure {
+pub(crate) enum Failure {
     Scan(ScanError),
     Io,
 }
@@ -486,7 +494,7 @@ impl<'de> Visitor<'de> for Walk<'_> {
 }
 
 /// Parse the public catalog one model at a time instead of buffering the whole document.
-fn parse_catalog(reader: impl Read) -> Result<Catalog, Failure> {
+pub(crate) fn parse_catalog(reader: impl Read) -> Result<Catalog, Failure> {
     let mut parsed = Parsed::default();
     let mut deserializer = serde_json::Deserializer::from_reader(BufReader::new(reader));
     let result = Walk {
@@ -1058,7 +1066,7 @@ fn ends_or_hyphen(text: &str) -> bool {
 }
 
 /// Whether `model` is one of `names`, optionally followed by a `-YYYY-MM-DD` snapshot date.
-fn dated(model: &str, names: &[&str]) -> bool {
+pub(crate) fn dated(model: &str, names: &[&str]) -> bool {
     names.iter().any(|name| {
         let Some(rest) = model.strip_prefix(name) else {
             return false;
@@ -1143,30 +1151,72 @@ fn fast_opus(model: &str) -> bool {
     })
 }
 
+/// What a premium tier's multiplier depends on: the model, its input size and the request's time.
+#[derive(Clone, Copy)]
+struct Billed<'a> {
+    model: &'a str,
+    input: Option<i64>,
+    at: Millis,
+}
+
+/// When GPT-6.2's ultrafast rate moves from its 3x promotion to the 6x list price: midnight
+/// Pacific time on 2027-03-01 (PST, UTC-8).
+const ULTRAFAST_LIST_FROM: Millis = 1_803_888_000_000;
+
+/// Whether this is a model whose ultrafast multiplier depends on the request's date.
+fn promo_ultrafast(model: &str) -> bool {
+    dated(model, &["gpt-6.2-sol", "gpt-6.2-astra"])
+}
+
+/// Models whose fast rate is 2x at every context size.
+const FAST_2X: &[&str] = &[
+    "gpt-6-sol",
+    "gpt-6-astra",
+    "gpt-6-luna",
+    "gpt-6.1-sol",
+    "gpt-6.1-terra",
+    "gpt-6.2-sol",
+    "gpt-6.2-astra",
+    "gpt-5.6",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+];
+
+/// Models whose fast rate is documented only at or below 272K input, at 2.5x and 2x.
+const FAST_SHORT_2_5X: &[&str] = &["gpt-5.5"];
+const FAST_SHORT_2X: &[&str] = &["gpt-5.4", "gpt-5.4-mini"];
+
+/// Models whose ultrafast rate is 6x at every date.
+const ULTRAFAST_6X: &[&str] = &["gpt-6-astra", "gpt-6.1-sol"];
+
+/// Whether a premium tier is documented for this model at some context size, optionally with
+/// a `-YYYY-MM-DD` snapshot.
+pub fn premium_model(model: &str, ultrafast: bool) -> bool {
+    if ultrafast {
+        promo_ultrafast(model) || dated(model, ULTRAFAST_6X)
+    } else {
+        [FAST_2X, FAST_SHORT_2_5X, FAST_SHORT_2X]
+            .iter()
+            .any(|names| dated(model, names))
+    }
+}
+
 /// The documented OpenAI premium-tier multiplier, or None when unverified for this model/context.
-fn premium_multiplier(tier: &str, model: &str, input: Option<i64>) -> Option<f64> {
+fn premium_multiplier(tier: &str, billed: Billed) -> Option<f64> {
+    let Billed { model, input, at } = billed;
     let within = input.is_some_and(|i| i <= 272_000);
     if tier == "ultrafast" {
-        return dated(model, &["gpt-6-astra", "gpt-6.1-sol"]).then_some(6.0);
+        if promo_ultrafast(model) {
+            return Some(if at < ULTRAFAST_LIST_FROM { 3.0 } else { 6.0 });
+        }
+        return dated(model, ULTRAFAST_6X).then_some(6.0);
     }
-    if dated(
-        model,
-        &[
-            "gpt-6-sol",
-            "gpt-6-astra",
-            "gpt-6-luna",
-            "gpt-6.1-sol",
-            "gpt-6.1-terra",
-            "gpt-5.6",
-            "gpt-5.6-sol",
-            "gpt-5.6-terra",
-            "gpt-5.6-luna",
-        ],
-    ) {
+    if dated(model, FAST_2X) {
         Some(2.0)
-    } else if dated(model, &["gpt-5.5"]) && within {
+    } else if dated(model, FAST_SHORT_2_5X) && within {
         Some(2.5)
-    } else if dated(model, &["gpt-5.4", "gpt-5.4-mini"]) && within {
+    } else if dated(model, FAST_SHORT_2X) && within {
         Some(2.0)
     } else {
         None
@@ -1310,13 +1360,21 @@ fn selected_rates(
         }
     }
     if provider == "openai" && ["fast", "priority", "ultrafast"].contains(&tier) {
-        let Some(multiplier) = premium_multiplier(tier, model_name, p.usage.input) else {
+        let billed = Billed {
+            model: model_name,
+            input: p.usage.input,
+            at: r.time,
+        };
+        let Some(multiplier) = premium_multiplier(tier, billed) else {
             return Err("premium tier lacks verified model/context rates");
         };
         factor *= multiplier;
         assumptions.push(format!(
             "documented {tier} API token rates are {multiplier}x standard, preserving context tiers and cache categories (2026-11-07)"
         ));
+        if tier == "ultrafast" && promo_ultrafast(model_name) {
+            assumptions.push("documented ultrafast rate for this model is 3x standard through 2027-02-28 and 6x from 2027-03-01 (Pacific time), chosen by the pricing time: the request's own, or the report's date for a current-setting estimate (2026-11-27)".into());
+        }
     } else if !["standard", "default"].contains(&tier) {
         return Err("effective service tier has no supported catalog rate");
     }
@@ -1412,7 +1470,7 @@ pub fn prefix_spans(catalog: &Catalog, r: &Request, p: &BillingPart) -> Option<V
             spans.push((u.write1h? as f64, input * 2.0));
             spans.push((u.write5m? as f64, rates.write? / 1e6));
         }
-    } else if r.harness == Harness::OpenCode {
+    } else if matches!(r.harness, Harness::OpenCode | Harness::Antigravity) {
         let written = u.write?;
         if written > 0 {
             match (u.write5m, u.write1h) {
@@ -1553,7 +1611,7 @@ pub fn price_components(catalog: &Catalog, r: &Request, p: &BillingPart) -> Comp
                     .to_string(),
             );
         }
-    } else if r.harness == Harness::OpenCode {
+    } else if matches!(r.harness, Harness::OpenCode | Harness::Antigravity) {
         // OpenCode records one write count for any provider, which its catalog prices at
         // the cache-write rate; a provider without that rate records none.
         let ordinary = match (u.input, u.read, u.write) {
@@ -2722,6 +2780,70 @@ mod tests {
             }
             assert_eq!(at(1000, "ultrafast"), None, "{model}");
         }
+    }
+
+    // GPT-6.2 fast is 2x at any context size; ultrafast is 3x until 2027-03-01 Pacific, then 6x.
+    #[test]
+    fn gpt_6_2_ultrafast_multiplier_follows_the_request_date() {
+        let catalog = crate::test_support::prices_with_gpt_6_2();
+        let last_promo = ULTRAFAST_LIST_FROM - 1;
+        // GPT-6 Astra and GPT-6.1 Sol have no promotion: 6x on every date.
+        for model in ["gpt-6-astra", "gpt-6.1-sol"] {
+            for at in [0, ULTRAFAST_LIST_FROM] {
+                let billed = Billed {
+                    model,
+                    input: Some(1000),
+                    at,
+                };
+                assert_eq!(premium_multiplier("ultrafast", billed), Some(6.0));
+            }
+        }
+        for model in ["gpt-6.2-sol", "gpt-6.2-astra"] {
+            let at = |input: i64, tier: &str, time: Millis| {
+                let r = Request {
+                    time,
+                    ..codex_request()
+                };
+                let p = BillingPart {
+                    model: Some(model.into()),
+                    tier: Some(tier.into()),
+                    usage: codex(json!({
+                        "input_tokens": input,
+                        "output_tokens": 100,
+                        "cached_input_tokens": 1000, "cache_write_input_tokens": 100,
+                        "cache_creation_30m_input_tokens": 100,
+                    })),
+                    ..r.parts[0].clone()
+                };
+                let c = price_part(&catalog, &r, &p);
+                assert!(c.total_usd.is_some(), "{:?}", c.unknown);
+                c.total_usd.map(Usd::to_f64)
+            };
+            for input in [272_000, 272_001] {
+                let standard = at(input, "default", 0).unwrap();
+                for (tier, time, multiplier) in [
+                    ("fast", 0, 2.0),
+                    ("priority", ULTRAFAST_LIST_FROM, 2.0),
+                    ("ultrafast", 0, 3.0),
+                    ("ultrafast", last_promo, 3.0),
+                    ("ultrafast", ULTRAFAST_LIST_FROM, 6.0),
+                ] {
+                    let premium = at(input, tier, time).unwrap();
+                    assert!(
+                        (premium - standard * multiplier).abs() < 1e-12,
+                        "{model} {input} {tier} {time}: {premium} vs {standard}"
+                    );
+                }
+            }
+        }
+        // The list-price boundary is midnight Pacific time, eight hours past UTC midnight.
+        assert_eq!(
+            "2027-03-01T00:00:00-08:00"
+                .parse::<jiff::Timestamp>()
+                .unwrap()
+                .as_millisecond(),
+            ULTRAFAST_LIST_FROM
+        );
     }
 
     // Plain GPT-5.6 alias has verified fast rates without substituting catalog model prices.

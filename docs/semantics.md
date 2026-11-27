@@ -1174,7 +1174,9 @@ checked 2026-11-07, gives fast rates at 2x standard for the GPT-6, GPT-6.1 and G
 `premium_multiplier` lists,
 and GPT-5.5 at 2.5x and GPT-5.4 at 2x, each only at or below 272K input; ultrafast
 is 6x across context tiers on the models it lists for it. `premium_multiplier` in `src/prices.rs` lists the
-verified models. Older or
+verified models. For `gpt-6.2-sol` and `gpt-6.2-astra`, checked 2026-11-27, fast is 2x at
+every context size and ultrafast is 3x through 2027-02-28 and 6x from 2027-03-01
+(Pacific time), so the ultrafast multiplier follows the time priced: a request's own for its recorded premium and a replayed compaction summary's, and the report's date for the current-setting estimate. Older or
 unsupported combinations remain unknown. These API rates differ from
 a ChatGPT plan's multipliers, Fast at 2.5x and Ultrafast at 8x standard against
 included usage and 2x and 6x on credits
@@ -1249,6 +1251,47 @@ OpenCode's compaction and warming are not replayed, and its requests are left
 out of the transcript audit, so those checks make no claim about an OpenCode
 profile. Its spend still counts in every total, and its skills, MCP servers and
 instruction files get their measured lines.
+
+## Antigravity
+
+Antigravity keeps one JSONL transcript per conversation. Each line is parsed
+into the step's type, index, time, model and three counts, `input_tokens`,
+`cache_read_tokens` and `output_tokens`; its content, thinking and tool
+arguments are skipped unread. A step with any count is one request, and a
+`CHECKPOINT` step, which summarizes the conversation, is a compaction request.
+Antigravity ends every line it finishes with a newline. A last line without one
+that doesn't parse is still being written: it is left unread, as Claude Code's
+unfinished last line is. A finished line that doesn't parse, such as a fragment
+a crash left, is skipped, as Claude Code's and Codex's unreadable lines are.
+Either marks its conversation's `sessions` row incomplete. A last line without
+a newline that does parse, as in a copied transcript, is read.
+`conversation_summaries.db` is opened the way OpenCode's database is, and only conversation IDs, workspace URIs, agent names
+and parent IDs leave SQLite.
+
+`input_tokens` counts only uncached input: across 1,662 consecutive request
+pairs on the maintainer's host (2026-11-27), 931 read exactly the previous
+request's input plus cache reads, plus one, from the cache, and none read
+more, so `cache_read_tokens` is added back to match the other harnesses'
+usage. `output_tokens` already counts thinking: it exceeds the visible reply
+and tool calls on every request, and for all 100 requests of one conversation,
+Antigravity's own per-request metadata (`gen_metadata` in the conversation's
+database) splits it into reply and thinking tokens that sum to it. Gemini's implicit
+cache bills reads at the catalog's cache-read rate and charges nothing to
+write, so every request records zero writes.
+
+A step that records no model is priced at the conversation's model only when
+it read the conversation's cache and every earlier request in the conversation
+ran one model, by its record or by this same rule, with no skipped line among
+them: Gemini keeps an implicit cache per model, so only that model could serve
+the read, and a skipped line may have held a request on another. On the maintainer's host every `CHECKPOINT` records no
+model and reads hundreds of thousands of cached tokens, so this prices them;
+any other such step stays unpriced and is extrapolated over.
+
+Antigravity records neither its system prompt nor the tools, skills and rules it
+sent, so no piece of its context is priced, and none of its MCP servers,
+skills, plugins or rules gets a line. Gemini's implicit cache lifetime is
+undocumented, and Antigravity has no setting for it or for compaction, so no
+cache or compaction check replays an Antigravity profile.
 
 ## SSH hosts
 

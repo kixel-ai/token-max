@@ -407,11 +407,12 @@ cuts nothing short, so the run reports what it wrote and exits 0.
 
 Without directory flags, discovery includes `~/.claude`, `~/.codex`,
 `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, recognizable `~/.claude*` and `~/.codex*`
-profiles, and [OpenCode](#opencode)'s data directory. Codex includes archived
+profiles, [OpenCode](#opencode)'s data directory and the
+[Antigravity](#antigravity) CLI's directory. Codex includes archived
 sessions; Claude includes nested subagents.
 T3 instances are included from `~/.t3/userdata`, an existing `~/.t3/dev`,
 and `$T3CODE_HOME/userdata`. Repeatable `--claude-dir`, `--codex-dir`,
-`--opencode-dir` and `--t3-dir` flags select only those roots across every
+`--opencode-dir`, `--antigravity-dir` and `--t3-dir` flags select only those roots across every
 harness. `--t3-dir`
 takes a state directory containing `settings.json` and optionally `statev2.sqlite`. `--details` shows every discovered root's selection. A missing or
 inaccessible explicitly selected root fails the run. Missing default roots do not.
@@ -494,6 +495,37 @@ Codex, so an OpenCode profile's spend counts in the report's totals but gets
 none of those lines.
 See [Replay semantics](semantics.md#opencode) for what each piece assumes.
 
+### Antigravity
+
+An Antigravity profile is the CLI's directory, `antigravity-cli` under
+`$GEMINI_HOME` or `~/.gemini`, or the `antigravity-acp` directory of a T3
+`antigravity` instance (see [T3](t3.md)); `--antigravity-dir` takes such a
+directory. A `GEMINI_HOME` without an `antigravity-cli` directory is skipped,
+since Gemini's other tools read it too. Its history is each conversation's
+transcript, `brain/<id>/.system_generated/logs/transcript.jsonl`, and
+`conversation_summaries.db` beside them names each conversation's workspace,
+which is its `cwd`, and for a subagent the conversation that started it and its
+agent, such as `research`. The `sessions` export, T3's `antigravity` instances
+and `--ssh` hosts read Antigravity the same way; `audit` does not. Antigravity's
+IDE and desktop app, which keep their history under `~/.gemini/antigravity`, are
+not read.
+
+Every transcript step that records token counts is one request: each
+`PLANNER_RESPONSE`, and each `CHECKPOINT`, which compacts the conversation and
+counts as compaction. Only each step's type, index, time, model and counts are
+read. Its model, such as `gemini-4-neon-high`, is split into the model,
+`gemini-4-neon`, and the effort, `high`, and priced at Google's catalog entry
+(see [Prices](#prices)). A main conversation and each subagent it started are
+split as Claude Code's are, and a subagent model line names no setting, since
+token-max reads none that chooses one.
+
+Antigravity's transcripts record no prompt, so the cost of its MCP servers,
+skills, plugins and rules is unmeasured: none gets a line or a switch, and the
+report's assumptions say so. Its cache lifetime and compaction are not
+replayed, so its spend counts in the report's totals but gets no cache TTL,
+compaction, keepalive or effort line. See
+[Replay semantics](semantics.md#antigravity) for what each piece assumes.
+
 ## Prices
 
 The first online run fetches only `https://models.dev/api.json`, caching validated
@@ -518,6 +550,16 @@ that provider's catalog lacks stays unpriced, even when another provider
 lists it. OpenCode records no service tier, so every request is priced at the
 standard rate, and one cache-write count without its lifetime, so writes are
 priced at the catalog's cache-write rate, Anthropic's 5-minute one.
+
+An Antigravity request is priced at the `google` catalog entry of its model
+with the effort suffix removed; a model that catalog lacks stays unpriced.
+Antigravity records no service tier, so every request is priced at the
+standard rate. Gemini's implicit cache bills reads and no writes, so a
+request's uncached input is priced as ordinary input. A request whose step
+records no model is priced at its conversation's model only when it read the
+conversation's cache and every earlier request in the conversation ran that
+one model, by its record or by this same rule, with no skipped line among
+them, since Gemini caches per model; otherwise it stays unpriced.
 
 ## Plans and API prices
 
@@ -802,7 +844,8 @@ threshold 0.156.0. When the version is the only thing
 holding a verdict back, its line keeps its unknown mark and exit code, and the
 line under it says which version the setting needs, which version the latest
 session ran, and to upgrade. `vibes`' window cap and
-subagent default cards and a step by hand to block an MCP server say so too. token-max never upgrades a
+subagent default cards and a step by hand to block an MCP server say so too,
+as does its OpenCode upgrade card for OpenCode 2.3.2 on gpt-6.2. token-max never upgrades a
 harness itself. A version the session didn't record, or one that isn't plain
 digits, still holds the setting back but advises no upgrade and names no
 command, since that release may already meet it: a `doctor` line then gets no
@@ -837,7 +880,7 @@ setting differs from its default gets a note under it naming the default and
 what the current value saves against it, such as `default 5m, saves $410/mo`,
 or `costs $12/mo more` when the current value costs more. The line shows on
 every run, including one with nothing left to change, and reads "No
-setting was found to differ from its Claude Code, Codex or OpenCode default." when none
+setting was found to differ from its Claude Code, Codex, OpenCode or Antigravity default." when none
 differs. A line whose current value is unknown gets no note, and that
 sentence does not claim it matches its default. On a terminal the same line
 also opens `doctor`'s walk, under its header, before the first question.
@@ -1579,7 +1622,8 @@ including retained histories of disabled instances. An OpenCode instance owns
 the sessions its threads name and the subagent sessions they spawned; the rest
 of the database stays native OpenCode's. An OpenCode instance with a
 `serverUrl` runs on a server whose history token-max does not read, so its
-spend is an explicit coverage gap. Shared homes, Codex shadow-home
+spend is an explicit coverage gap. An Antigravity instance owns every
+conversation in the private directory T3 gives it. Shared homes, Codex shadow-home
 symlinks and request identities are deduplicated. T3 Usage aggregates are never
 added to native billed requests. Unsupported providers are explicit coverage
 gaps. Each T3 state gets a line naming the model its
@@ -1880,6 +1924,7 @@ an exit code.
 | [Advisor model](#advisor-model) | Every Claude settings file: with no `advisorModel`, the advisor one rank above the main-session default, citing Claude Code's [advisor page](https://code.claude.com/docs/en/advisor). |
 | [Auto memory](#auto-memory-in-vibes) | Every auto memory or Codex memories line: off is advised when most main sessions ran in a repository with a CLAUDE.md or AGENTS.md. |
 | [Code intelligence](#code-intelligence) | Claude sessions read or edited files of a typed language whose official language server plugin a new session wouldn't load: Anthropic's [costs page](https://code.claude.com/docs/en/costs#install-code-intelligence-plugins-for-typed-languages). |
+| OpenCode upgrade | An OpenCode profile whose latest session, by the creation time OpenCode recorded, was created by a version before 2.3.2 and sent a request to gpt-6.2-sol or gpt-6.2-astra, which never cache a Responses request's top-level instructions but do cache a leading developer message ([openai/codex#62312](https://github.com/openai/codex/issues/62312)); a [user's report](https://x.com/TekonBurns/status/2123525121168314876) says 2.3.2 moved OpenCode's system prompt there. A resumed older session is not the latest, since a session records the version that created it. It names the version alone, as for Codex, prices nothing, and a version that isn't plain digits gets no card. |
 | [Token audit skill](#token-audit-skill) | Every Claude Code and Codex profile: the `token-audit` skill's install step for the profiles whose harness doesn't find it, and quiet when all do. |
 
 The effort, instruction-file, subagent, Fable and advisor lines stay in `doctor`, where

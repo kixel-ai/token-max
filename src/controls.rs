@@ -10,6 +10,7 @@ use crate::model::{
     Millis, PercentOverride, RetentionControl, Scan, Setting, Source, SpeedControl, TunedWindow,
     WindowControl,
 };
+use crate::prices::premium_model;
 use crate::safe::{MAX_SAFE_INTEGER, ScanError, object};
 
 /// A process environment, from variable name to value.
@@ -1902,35 +1903,6 @@ pub fn claude_fast_support(model: Option<&str>) -> Option<bool> {
     standard.then_some(false)
 }
 
-/// Whether a Codex model is documented for a premium tier, optionally with a `-YYYY-MM-DD` snapshot.
-fn codex_premium_model(model: &str, ultrafast: bool) -> bool {
-    let Some(rest) = model.strip_prefix("gpt-") else {
-        return false;
-    };
-    let known: &[&str] = if ultrafast {
-        &["6-astra", "6.1-sol"]
-    } else {
-        &[
-            "6-sol",
-            "6-astra",
-            "6-luna",
-            "6.1-sol",
-            "6.1-terra",
-            "5.6",
-            "5.6-sol",
-            "5.6-terra",
-            "5.6-luna",
-            "5.4",
-            "5.5",
-            "5.4-mini",
-        ]
-    };
-    let snapshot = strip_dated(rest, 2)
-        .and_then(|day| strip_dated(day, 2))
-        .and_then(|month| strip_dated(month, 4));
-    known.contains(&rest) || snapshot.is_some_and(|base| known.contains(&base))
-}
-
 /// The effective value of a dotted settings key and the scope that supplied it.
 struct Effective<'a> {
     value: Option<&'a Value>,
@@ -1980,7 +1952,9 @@ pub fn speed_controls(
         replacement: match harness {
             Harness::Claude => "fastMode: false; /fast off for an active session",
             Harness::Codex => "service_tier = \"default\"; /fast off for an active session",
-            Harness::OpenCode => unreachable!("OpenCode has no speed control"),
+            Harness::OpenCode | Harness::Antigravity => {
+                unreachable!("OpenCode and Antigravity have no speed control")
+            }
         }
         .into(),
         resolved: value.is_some(),
@@ -2096,7 +2070,7 @@ pub fn speed_controls(
             let supported = model
                 .value
                 .and_then(Value::as_str)
-                .is_some_and(|m| codex_premium_model(m, premium == "ultrafast"));
+                .is_some_and(|m| premium_model(m, premium == "ultrafast"));
             Ok(result(
                 supported.then_some(premium),
                 &tier.owner,
@@ -2820,10 +2794,11 @@ mod tests {
             assert_eq!(claude_fast_support(Some(model)), None, "{model}");
         }
         assert_eq!(claude_fast_support(None), None);
-        assert!(codex_premium_model("gpt-6.1-sol-2026-01-02", false));
-        assert!(codex_premium_model("gpt-5.4-mini", false));
-        assert!(!codex_premium_model("gpt-6-luna", true));
-        assert!(!codex_premium_model("gpt-6.1-sol-2026-1-02", false));
+        assert!(premium_model("gpt-6.1-sol-2026-01-02", false));
+        assert!(premium_model("gpt-5.4-mini", false));
+        assert!(!premium_model("gpt-6-luna", true));
+        assert!(premium_model("gpt-6.2-sol", false) && premium_model("gpt-6.2-astra", true));
+        assert!(!premium_model("gpt-6.1-sol-2026-1-02", false));
     }
 
     // Claude disabling controls and unsupported models suppress saved fast preferences, with exact owners.

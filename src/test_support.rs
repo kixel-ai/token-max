@@ -183,7 +183,8 @@ impl Workspace {
                 claude_dirs: vec![],
                 codex_dirs: vec![],
                 opencode_dirs: vec![],
-                opencode: true,
+                antigravity_dirs: vec![],
+                unreplayed: true,
                 t3_dirs: vec![],
                 managed_settings_file: text(self.managed_settings_file()),
                 codex_system_config_file: text(self.home.join("system.toml")),
@@ -677,4 +678,94 @@ pub fn opencode_database(home: &Path) -> PathBuf {
     )
     .unwrap();
     file
+}
+
+/// A synthetic Antigravity root at `root`, such as `~/.gemini/antigravity-cli`: a main
+/// conversation `main-id` in `/work/repo` with two `gemini-4-neon-high` requests, a checkpoint
+/// that records no model and a user step, and the `research` subagent `sub-id` it started,
+/// with one `gemini-4-neon-medium` request. Prompt and reply text read `SYNTHETIC_PRIVATE`.
+pub fn antigravity_root(root: &Path) {
+    use serde_json::json;
+    std::fs::create_dir_all(root).unwrap();
+    let db = rusqlite::Connection::open(root.join("conversation_summaries.db")).unwrap();
+    db.execute_batch(
+        "CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY,
+           title TEXT NOT NULL DEFAULT '', workspace_uris TEXT NOT NULL,
+           agent_name TEXT NOT NULL DEFAULT '', parent_conversation_id TEXT NOT NULL DEFAULT '');
+         INSERT INTO conversation_summaries VALUES
+           ('main-id', 'SYNTHETIC_PRIVATE', '[\"file:///work/repo\"]', '', ''),
+           ('sub-id', 'SYNTHETIC_PRIVATE', '[\"file:///work/repo\"]', 'research', 'main-id');",
+    )
+    .unwrap();
+    drop(db);
+    let transcript = |id: &str, steps: Vec<serde_json::Value>| {
+        let dir = root.join("brain").join(id).join(".system_generated/logs");
+        std::fs::create_dir_all(&dir).unwrap();
+        let lines: Vec<String> = steps.iter().map(|s| s.to_string() + "\n").collect();
+        std::fs::write(dir.join("transcript.jsonl"), lines.concat()).unwrap();
+    };
+    let planner = |index: u64, time: &str, model: &str, tokens: [u64; 3]| {
+        json!({"step_index": index, "source": "MODEL", "type": "PLANNER_RESPONSE",
+               "status": "DONE", "created_at": time, "model": model,
+               "input_tokens": tokens[0], "cache_read_tokens": tokens[1],
+               "output_tokens": tokens[2], "thinking": "SYNTHETIC_PRIVATE",
+               "tool_calls": [{"name": "read_file", "args": {"Path": "SYNTHETIC_PRIVATE"}}]})
+    };
+    transcript(
+        "main-id",
+        vec![
+            json!({"step_index": 0, "source": "USER_EXPLICIT", "type": "USER_INPUT",
+                   "status": "DONE", "created_at": "2026-01-01T00:00:00Z",
+                   "content": "SYNTHETIC_PRIVATE"}),
+            planner(
+                1,
+                "2026-01-01T00:00:01Z",
+                "gemini-4-neon-high",
+                [1_000, 0, 100],
+            ),
+            planner(
+                2,
+                "2026-01-01T00:00:02Z",
+                "gemini-4-neon-high",
+                [500, 1_000, 50],
+            ),
+            json!({"step_index": 3, "source": "SYSTEM", "type": "CHECKPOINT",
+                   "status": "DONE", "created_at": "2026-01-01T00:00:03Z",
+                   "input_tokens": 200, "cache_read_tokens": 1_400, "output_tokens": 300,
+                   "content": "SYNTHETIC_PRIVATE"}),
+        ],
+    );
+    transcript(
+        "sub-id",
+        vec![planner(
+            1,
+            "2026-01-01T00:00:05Z",
+            "gemini-4-neon-medium",
+            [2_000, 0, 10],
+        )],
+    );
+}
+
+/// The synthetic prices plus GPT-6.2 Sol and Astra, which the fixture predates.
+pub fn prices_with_gpt_6_2() -> Catalog {
+    let mut catalog: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(fixture_path("prices.json")).unwrap())
+            .unwrap();
+    for (model, input, output) in [("gpt-6.2-sol", 2, 10), ("gpt-6.2-astra", 8, 40)] {
+        catalog["openai"]["models"][model] = serde_json::json!({
+            "family": "gpt",
+            "release_date": "2026-11-20",
+            "tool_call": true,
+            "modalities": {"output": ["text"]},
+            "cost": {
+                "input": input, "output": output, "cache_read": 0.1, "cache_write": 2.5,
+                "tiers": [{"tier": {"type": "context", "size": 272000},
+                    "input": input * 2, "output": output * 3 / 2, "cache_read": 0.2, "cache_write": 5}],
+            },
+        });
+    }
+    let Ok(catalog) = crate::prices::parse_catalog(catalog.to_string().as_bytes()) else {
+        panic!("the catalog parses");
+    };
+    catalog
 }

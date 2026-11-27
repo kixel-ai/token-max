@@ -34,6 +34,7 @@
           src = pkgs.lib.fileset.toSource {
             root = ./.;
             fileset = pkgs.lib.fileset.unions [
+              ./build.rs
               ./Cargo.toml
               ./Cargo.lock
               ./src

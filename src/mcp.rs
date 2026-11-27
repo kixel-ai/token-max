@@ -90,6 +90,7 @@ impl Entry {
                 format!("[mcp_servers.{}]", key.display_repr())
             }
             (Harness::OpenCode, path) => path.join("."),
+            (Harness::Antigravity, _) => unreachable!("Antigravity's servers take no switch"),
         }
     }
 

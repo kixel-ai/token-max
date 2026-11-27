@@ -30,7 +30,7 @@ jobs:
   # GitHub judges the PR by its newest run, so it must validate a PR ready now.
   # A change only to quests and agent docs cannot affect the Rust build or tests,
   # so it runs `quest check` alone. The compare API lists at most 300 files, so a
-  # longer list builds everything.
+  # longer list builds everything. A release has no base and builds everything.
   state:
     name: Plan
     runs-on: ubuntu-24.04

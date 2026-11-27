@@ -567,7 +567,8 @@ pub fn discover(
                 agents
             }
             // Discovery read the global layers; project layers do not change agents yet.
-            Harness::OpenCode => profile.agents.clone(),
+            // Antigravity has no agent setting token-max reads.
+            Harness::OpenCode | Harness::Antigravity => profile.agents.clone(),
             Harness::Codex => {
                 let system_file = options.codex_system_config_file.as_str();
                 let system = settings(system_file, Harness::Codex)?;
@@ -1061,6 +1062,10 @@ fn settings_text(
     native: bool,
 ) -> (String, String) {
     let mut texts = match profile.harness {
+        Harness::Antigravity => (
+            "none token-max reads; each request records the model it ran".into(),
+            "none token-max reads; each request records the effort it ran at".into(),
+        ),
         Harness::OpenCode => {
             let defined = definition(controls, kind);
             let file = defined.map_or(&*profile.settings_file, |d| &d.file);
@@ -1337,6 +1342,11 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
                         (None, Harness::Claude) => claude_source(&run, controls, kind),
                         (None, Harness::Codex) => codex_source(&run, controls, kind),
                         (None, Harness::OpenCode) => opencode_source(&run, controls, kind),
+                        (None, Harness::Antigravity) => (
+                            ModelSource::Unknown,
+                            "Antigravity records no setting that chose its subagents' models"
+                                .into(),
+                        ),
                     }
                 }
             };

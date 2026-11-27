@@ -225,6 +225,9 @@ pub enum Harness {
     Codex,
     /// OpenCode, whose history is one SQLite database rather than transcript files.
     OpenCode,
+    /// Antigravity's CLI and ACP server, whose history is a transcript per conversation that
+    /// its own module reads.
+    Antigravity,
 }
 
 impl Harness {
@@ -234,6 +237,7 @@ impl Harness {
             Harness::Claude => "claude",
             Harness::Codex => "codex",
             Harness::OpenCode => "opencode",
+            Harness::Antigravity => "antigravity",
         }
     }
 
@@ -243,16 +247,25 @@ impl Harness {
             Harness::Claude => "Claude Code",
             Harness::Codex => "Codex",
             Harness::OpenCode => "OpenCode",
+            Harness::Antigravity => "Antigravity",
         }
     }
 
     /// Whether token-max replays its compaction and keepalive settings and audits its
-    /// transcripts: Claude Code's and Codex's are; of OpenCode's, only the Anthropic cache TTL
-    /// is replayed, by its own check.
+    /// transcripts: Claude Code's and Codex's are, Antigravity's not; of OpenCode's, only the
+    /// Anthropic cache TTL is replayed, by its own check.
     pub fn replayed(self) -> bool {
         match self {
             Harness::Claude | Harness::Codex => true,
-            Harness::OpenCode => false,
+            Harness::OpenCode | Harness::Antigravity => false,
+        }
+    }
+
+    /// Whether its own module reads its history, rather than the transcript reader.
+    pub fn own_reader(self) -> bool {
+        match self {
+            Harness::Claude | Harness::Codex => false,
+            Harness::OpenCode | Harness::Antigravity => true,
         }
     }
 }

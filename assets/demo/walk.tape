@@ -54,7 +54,7 @@ Sleep 3s
 # Then the advice the transcripts can't price, from the same scan: its Bash cap, which asks
 # for a fresh run now that the 1h cache it is compared with is written, auto memory off,
 # since the sessions ran in a repository with an AGENTS.md, a smaller compaction window,
-# and a Fable advisor above the Opus main model.
+# a Fable advisor above the Opus main model, and the token-audit skill, a step by hand.
 Type "y"
 Sleep 4s
 Right

@@ -434,7 +434,12 @@ impl<'b> CacheChain<'b> {
         let cohort = CohortRef {
             model: p.model.as_deref(),
             provider: r.provider.as_deref(),
-            speed: p.speed.as_deref(),
+            // OpenCode records no speed: it lists a fast mode as a model of its own, so the
+            // model ID already tells cohorts apart.
+            speed: p
+                .speed
+                .as_deref()
+                .or((r.harness == Harness::OpenCode).then_some("standard")),
             kind: (p.kind != PartKind::Unknown).then_some(p.kind),
             agent: (r.agent != Agent::Unknown).then_some(r.agent),
         };

@@ -260,6 +260,7 @@ pub fn make_ttl_check(profile: &str, bucket: Bucket, action: Action, recommended
             upgrade: None,
         },
         window_basis_kind: WindowBasisKind::Available,
+        harness: crate::model::Harness::Claude,
         bucket,
         one_hour_savings_usd: 0.0,
         comparison_estimate: PerTtl::default(),

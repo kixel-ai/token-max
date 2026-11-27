@@ -35,10 +35,22 @@ use crate::version::Needs;
 /// The v2.1 patch release that added TTL controls.
 const TTL_CONTROLS: Needs = Needs::claude(1, 242);
 
+/// The OpenCode release that added `cache.ttl`.
+const OPENCODE_TTL_CONTROLS: Needs = Needs::opencode(2, 0);
+
 const TTL_SOURCE: &str = "https://code.claude.com/docs/en/prompt-caching (2026-11-07)";
 
+/// Where Anthropic documents its two cache lifetimes and their write prices.
+const ANTHROPIC_TTL_SOURCE: &str =
+    "https://platform.claude.com/docs/en/build-with-claude/prompt-caching (2026-11-27)";
+
+/// Where OpenCode documents `cache.ttl`, which it sends on Anthropic's `cache_control`.
+const OPENCODE_TTL_SOURCE: &str = "https://opencode.ai/docs/models#cache-lifetime (2026-11-27)";
+
+/// Whether a part counts toward a TTL line for `selected`. OpenCode's one lifetime covers
+/// every agent, so its line takes every part.
 fn in_bucket(r: &Request, p: &BillingPart, selected: Bucket) -> bool {
-    cache_bucket(r, p).is_none_or(|b| b == selected)
+    r.harness == Harness::OpenCode || cache_bucket(r, p).is_none_or(|b| b == selected)
 }
 
 /// One decimal place, rounding exact binary halves away from zero.
@@ -695,9 +707,15 @@ fn ttl_check(
         Some(usd) if usd < 0.0 => Some(Ttl::FiveMinutes),
         Some(_) => current.value,
     };
+    let opencode = profile.harness == Harness::OpenCode;
+    let controls = if opencode {
+        OPENCODE_TTL_CONTROLS
+    } else {
+        TTL_CONTROLS
+    };
     // Each source's current client must honor the setting, since one file sets it for all.
     let versions = crate::version::latest(&group.members, requests.iter().copied());
-    let upgrade = TTL_CONTROLS.unmet(versions.iter().copied());
+    let upgrade = controls.unmet(versions.iter().copied());
     let supported = !versions.is_empty() && upgrade.is_none();
     // An unset main TTL varies with billing, so pinning the replay's winner is a change either way.
     let pinnable = current.value.is_none() && current.reason == TTL_BILLING_UNKNOWN;
@@ -707,7 +725,7 @@ fn ttl_check(
     // same file is also too old.
     let upgrade = upgrade
         .filter(|_| settable)
-        .and_then(|_| TTL_CONTROLS.advice(&group.members, requests.iter().copied()));
+        .and_then(|_| controls.advice(&group.members, requests.iter().copied()));
     let action = match recommended {
         Some(recommended) if applies => {
             if Some(recommended) != current.value {
@@ -734,7 +752,11 @@ fn ttl_check(
         "gap replay assumes the same requests, stable prefixes, and no extra work; shared caches and invalidations can change the outcome",
         "unknown source identifiers are never inferred from idle time",
         "unknown part/agent attribution is conditional in both possible buckets; per-check request counts and fixed costs are not additive",
-        "current profile settings are applied to history; project/CLI settings and agent frontmatter may override user defaults",
+        if opencode {
+            "the current Anthropic cache.ttl is applied to history; OpenCode records no request's write lifetime, so each replay writes every request at the lifetime it compares"
+        } else {
+            "current profile settings are applied to history; project/CLI settings and agent frontmatter may override user defaults"
+        },
         "unknown client lifetime and unlogged discarded summaries are not measured zero",
     ]
     .into_iter()
@@ -757,12 +779,21 @@ fn ttl_check(
         uncertainty.insert(estimate.reason);
         uncertainty.extend(estimate.assumptions.iter().map(String::as_str));
     }
-    uncertainty.extend(selected.iter().flat_map(|r| &r.issues).map(|i| &**i));
+    // The replays price each write at its compared lifetime, not the recorded pricing's 5m.
+    let issue = |i: &&Text| &***i != crate::opencode::WRITE_LIFETIME;
+    uncertainty.extend(
+        selected
+            .iter()
+            .flat_map(|r| &r.issues)
+            .filter(issue)
+            .map(|i| &**i),
+    );
     uncertainty.extend(
         requests
             .iter()
             .filter(|r| predecessor(r))
             .flat_map(|r| &r.issues)
+            .filter(issue)
             .map(|i| &**i),
     );
     uncertainty.extend(short.evidence.iter().map(|e| e.reason));
@@ -828,9 +859,13 @@ fn ttl_check(
             .map(String::from)
             .collect(),
             uncertainty,
-            sources: [TTL_SOURCE]
-                .into_iter()
-                .chain(PRICE_SOURCES)
+            sources: if opencode {
+                vec![OPENCODE_TTL_SOURCE, ANTHROPIC_TTL_SOURCE]
+            } else {
+                vec![TTL_SOURCE]
+            }
+            .into_iter()
+            .chain(PRICE_SOURCES)
                 .map(String::from)
                 .collect(),
             upgrade,
@@ -842,6 +877,7 @@ fn ttl_check(
         } else {
             WindowBasisKind::Available
         },
+        harness: profile.harness,
         bucket,
         one_hour_savings_usd: gap.unwrap_or(0.0),
         comparison_estimate: PerTtl {
@@ -1037,6 +1073,23 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
             requests.sort_by_key(|r| r.time);
             ttls.extend(ttl_check(&input, &group, &requests, bucket));
         }
+    }
+    // OpenCode sends one lifetime for every agent's requests to a provider; Anthropic's is
+    // the one with documented lifetimes and write prices, so it alone is replayed.
+    let opencode = scan
+        .profiles
+        .iter()
+        .filter(|p| p.harness == Harness::OpenCode);
+    for group in crate::rows::groups(opencode, |p| crate::rows::ttl_owner(p, Bucket::Main)) {
+        let mut requests: Vec<&Request> = scan
+            .cache_context
+            .requests
+            .iter()
+            .chain(&scan.requests)
+            .filter(|r| crate::opencode::anthropic(r) && group.covers(&r.profiles))
+            .collect();
+        requests.sort_by_key(|r| r.time);
+        ttls.extend(ttl_check(&input, &group, &requests, Bucket::Main));
     }
     for check in &mut ttls {
         crate::t3::constrain(&mut check.base, &scan.profiles);

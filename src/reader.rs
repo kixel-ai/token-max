@@ -1265,6 +1265,9 @@ impl Reader {
             let mut projects: HashMap<&str, Vec<crate::opencode::Server>> = HashMap::default();
             let mut unresolved: Vec<&str> = vec![];
             let mut reallowed = false;
+            // A project that sets the Anthropic cache lifetime runs at its own, which no
+            // global edit reaches.
+            let mut ttl_varies = false;
             for cwd in history.sessions.iter().filter_map(|s| s.cwd.as_deref()) {
                 if projects.contains_key(cwd) || unresolved.contains(&cwd) {
                     continue;
@@ -1272,6 +1275,7 @@ impl Reader {
                 match crate::opencode::project_layers(options, cwd) {
                     Ok(layers) => {
                         reallowed |= layers.iter().any(|l| crate::opencode::reallows(&l.config));
+                        ttl_varies |= layers.iter().any(|l| crate::opencode::sets_ttl(&l.config));
                         // A project's declaration replaces the global one by name.
                         let declared = crate::opencode::project_servers(&layers);
                         projects.insert(cwd, declared);
@@ -1302,6 +1306,10 @@ impl Reader {
                             .iter()
                             .all(|s| !projects.values().flatten().any(|n| n.name == s.name))
                     });
+                }
+                if ttl_varies || !unresolved.is_empty() {
+                    p.ttl.main.varies = true;
+                    p.ttl.subagent.varies = true;
                 }
                 if reallowed || !unresolved.is_empty() {
                     p.settings.insert(

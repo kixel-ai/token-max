@@ -21,7 +21,7 @@ use crate::doctor::{Edit, Op};
 use crate::model::{
     Agent, AgentControls, AgentDefinition, Api, BillingPart, CompactionControls, Control,
     ControlValue, Few, Harness, Location, Millis, Owned, PartKind, PerBucket, Profile, Request,
-    RequestEvidence, RequestMeta, Subagent, Text, TtlControl, Usage, WindowControl,
+    RequestEvidence, RequestMeta, Subagent, Text, Ttl, TtlControl, Usage, WindowControl,
 };
 use crate::safe::{ScanError, identity, label};
 
@@ -42,7 +42,7 @@ pub(crate) const BUILT_IN: [&str; 2] = ["browser", "opencode"];
 /// What an OpenCode request's pricing assumes, since OpenCode records neither.
 const STANDARD_TIER: &str =
     "OpenCode records no service tier; priced at the provider's standard catalog rate";
-const WRITE_LIFETIME: &str = "OpenCode records one cache-write count without its lifetime; priced at the catalog's cache-write rate, Anthropic's 5-minute writes";
+pub(crate) const WRITE_LIFETIME: &str = "OpenCode records one cache-write count without its lifetime; priced at the catalog's cache-write rate, Anthropic's 5-minute writes";
 
 /// The largest single value read from the database. An assistant row holds its whole reply
 /// and tool output, which `json_extract` must load to pick out its counts; real ones reach a
@@ -601,6 +601,95 @@ fn modified(file: &str) -> Option<Millis> {
     Some(since.as_millis() as Millis)
 }
 
+/// The provider ID OpenCode records for requests sent straight to Anthropic, whose prompt
+/// cache lifetime `cache.ttl` sets and token-max replays.
+pub(crate) const ANTHROPIC: &str = "anthropic";
+
+/// The key that sets the Anthropic provider's prompt cache lifetime, which OpenCode sends on
+/// every `cache_control` marker of the provider's requests.
+pub(crate) const TTL_KEY: &str = "providers.anthropic.settings.cache.ttl";
+
+/// Whether OpenCode sent a request straight to Anthropic, whose cache lifetime its
+/// `cache.ttl` sets.
+pub(crate) fn anthropic(r: &Request) -> bool {
+    r.harness == Harness::OpenCode && r.provider.as_deref() == Some(ANTHROPIC)
+}
+
+/// A `cache.ttl` value as Anthropic takes it; None for any other, which OpenCode still sends
+/// as given and Anthropic rejects.
+fn anthropic_lifetime(value: &Value) -> Option<Ttl> {
+    match value.as_str()? {
+        "5m" => Some(Ttl::FiveMinutes),
+        "1h" => Some(Ttl::OneHour),
+        _ => None,
+    }
+}
+
+/// Whether a config sets an Anthropic model's own `cache.ttl`, which outranks the provider's.
+pub(crate) fn model_ttl(config: &Map<String, Value>) -> bool {
+    let anthropic = members(config.get("providers")).get(ANTHROPIC);
+    members(anthropic.and_then(|a| a.get("models")))
+        .values()
+        .any(|model| {
+            model
+                .pointer("/settings/cache/ttl")
+                .is_some_and(|ttl| !ttl.is_null())
+        })
+}
+
+/// Whether a config sets the Anthropic provider's `cache.ttl` or one of its models'.
+pub(crate) fn sets_ttl(config: &Map<String, Value>) -> bool {
+    provider_ttl(config).is_some() || model_ttl(config)
+}
+
+/// The Anthropic provider's `cache.ttl` a config sets.
+fn provider_ttl(config: &Map<String, Value>) -> Option<&Value> {
+    config
+        .get("providers")?
+        .get(ANTHROPIC)?
+        .pointer("/settings/cache/ttl")
+        .filter(|ttl| !ttl.is_null())
+}
+
+/// The Anthropic prompt cache lifetime the layers send: the provider's `cache.ttl` in the
+/// last layer that sets it, else none, which leaves Anthropic's 5-minute default.
+fn anthropic_ttl(layers: &[Layer], settings_file: &str) -> TtlControl {
+    let unset = format!("{settings_file}:{TTL_KEY}");
+    if let Some(layer) = layers.iter().rev().find(|l| model_ttl(&l.config)) {
+        return TtlControl {
+            value: None,
+            owner: format!("{}:providers.anthropic.models", layer.file),
+            reason: "an Anthropic model sets its own cache.ttl, which outranks the provider's"
+                .into(),
+            varies: false,
+        };
+    }
+    let Some((layer, value)) = layers
+        .iter()
+        .rev()
+        .find_map(|l| Some((l, provider_ttl(&l.config)?)))
+    else {
+        return TtlControl {
+            value: Some(Ttl::FiveMinutes),
+            owner: unset,
+            reason: "OpenCode sends no cache lifetime while cache.ttl is unset, so Anthropic keeps its 5m default".into(),
+            varies: false,
+        };
+    };
+    let value = anthropic_lifetime(value);
+    TtlControl {
+        value,
+        owner: format!("{}:{TTL_KEY}", layer.file),
+        reason: match value {
+            Some(_) => "current user setting".into(),
+            None => {
+                "Anthropic takes only 5m or 1h, and OpenCode sends any other value as given".into()
+            }
+        },
+        varies: false,
+    }
+}
+
 /// One OpenCode data directory's current settings, without reading its history.
 pub(crate) fn profile(
     options: &crate::discovery::DiscoveryOptions,
@@ -640,15 +729,11 @@ pub(crate) fn profile(
             ));
         }
     };
-    let unset = |reason: &str| TtlControl {
-        value: None,
-        owner: String::new(),
-        reason: reason.into(),
-        varies: false,
-    };
+    // One lifetime covers every agent, so both buckets hold it; the TTL line reads the main.
+    let ttl = anthropic_ttl(&layers, &settings_file);
     let ttl = PerBucket {
-        main: unset("OpenCode's cache lifetime is not replayed"),
-        subagent: unset("OpenCode's cache lifetime is not replayed"),
+        main: ttl.clone(),
+        subagent: ttl,
     };
     let user = layers
         .iter()
@@ -895,7 +980,8 @@ fn usage(tokens: [Option<i64>; 5]) -> Usage {
     }
 }
 
-/// Assistant steps in OpenCode 2's `session_message`, one request each.
+/// Assistant steps in OpenCode 2's `session_message`, one request each, and the compactions it
+/// records as messages of their own, whose usage is the summary request's.
 const V2_STEPS: &str = "SELECT m.rowid, m.id, m.session_id, m.time_created,
     json_extract(m.data, '$.model.providerID'), json_extract(m.data, '$.model.id'),
     json_extract(m.data, '$.model.variant'), json_extract(m.data, '$.agent'),
@@ -903,8 +989,10 @@ const V2_STEPS: &str = "SELECT m.rowid, m.id, m.session_id, m.time_created,
     json_type(m.data, '$.tokens'),
     json_extract(m.data, '$.tokens.input'), json_extract(m.data, '$.tokens.output'),
     json_extract(m.data, '$.tokens.reasoning'), json_extract(m.data, '$.tokens.cache.read'),
-    json_extract(m.data, '$.tokens.cache.write'), json_extract(m.data, '$.summary') IS 1
-  FROM session_message m WHERE m.type = 'assistant' ORDER BY m.session_id, m.seq";
+    json_extract(m.data, '$.tokens.cache.write'),
+    json_extract(m.data, '$.summary') IS 1 OR m.type = 'compaction'
+  FROM session_message m WHERE m.type IN ('assistant', 'compaction')
+  ORDER BY m.session_id, m.seq";
 
 /// Steps in OpenCode 1's `part` table: each `step-finish` part is one request of the
 /// assistant message it belongs to, and records only when it finished.
@@ -1824,6 +1912,167 @@ mod tests {
             Some(vec![(0.0, 0.0), (f64::INFINITY, 1.0 / 1e6)])
         );
         assert_eq!(crate::prices::prefix_spans(&catalog, &r, &part(5)), None);
+    }
+
+    /// Add a main session of `steps` sent straight to Anthropic: each step's minutes after
+    /// the start, and its cache reads and writes.
+    fn anthropic_session(file: &std::path::Path, cwd: &str, steps: &[(i64, i64, i64)]) {
+        let db = Connection::open(file).unwrap();
+        db.execute(
+            "INSERT INTO session_v2 VALUES ('ses_anthropic', NULL, ?1, '2.4.1', ?2)",
+            rusqlite::params![cwd, OPENCODE_START],
+        )
+        .unwrap();
+        for (i, &(minutes, read, write)) in steps.iter().enumerate() {
+            let time = OPENCODE_START + minutes * 60_000;
+            let step = json!({"model": {"id": "claude-opus-5-5", "providerID": "anthropic"},
+                "agent": "build", "time": {"created": time, "completed": time + 1_000},
+                "tokens": {"input": 100, "output": 50, "reasoning": 0,
+                    "cache": {"read": read, "write": write}}});
+            db.execute(
+                "INSERT INTO session_message VALUES (?1, 'ses_anthropic', 'assistant', ?2, ?3, ?4)",
+                rusqlite::params![format!("msg_a{i}"), i as i64, time, step.to_string()],
+            )
+            .unwrap();
+        }
+    }
+
+    /// The report's Anthropic TTL check for a scan of `w`'s home.
+    fn anthropic_check(w: &Workspace) -> (crate::model::Report, crate::model::TtlCheck) {
+        let catalog = prices();
+        let report = crate::replay::analyze(crate::replay::AnalyzeOptions {
+            scan: crate::reader::scan(&w.scan_options()).unwrap(),
+            catalog: &catalog,
+            since: None,
+            now: OPENCODE_START + 3_600_000,
+            max_cost_per_use_usd: 1.0,
+            reading: None,
+        })
+        .unwrap();
+        let check = report
+            .checks
+            .iter()
+            .find_map(|c| match c {
+                crate::model::CheckResult::Ttl(t) if t.harness == Harness::OpenCode => {
+                    Some(t.clone())
+                }
+                _ => None,
+            })
+            .expect("an Anthropic TTL line");
+        (report, check)
+    }
+
+    #[test]
+    fn anthropic_requests_replay_the_cache_ttl_and_offer_its_jsonc_edit() {
+        let w = Workspace::new();
+        let file = opencode_database(&w.home);
+        // Each request comes back after the 5m cache expired, within the 1h one.
+        anthropic_session(
+            &file,
+            "/work/repo",
+            &[(0, 0, 10_000), (20, 0, 10_500), (40, 0, 11_000)],
+        );
+        let config = w.home.join(".config/opencode/opencode.jsonc");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "{\n  // Mine.\n}\n").unwrap();
+        let (report, check) = anthropic_check(&w);
+        // Only the Anthropic session's requests: OpenCode's own provider has no TTL to set.
+        assert_eq!(check.base.requests, 3);
+        assert_eq!(check.base.current, Some(Ttl::FiveMinutes));
+        assert_eq!(check.base.recommended, Some(Ttl::OneHour));
+        assert_eq!(check.base.action, crate::model::Action::Change);
+        // At 5m every request writes its whole prefix at 1.25x input, $5/M; at 1h the later
+        // two read the earlier prefix at $0.20/M and write the rest at 2x input, $8/M.
+        let five = (10_000.0 + 10_500.0 + 11_000.0) * 5.0 / 1e6;
+        let hour = (10_000.0 * 8.0 + 2.0 * 500.0 * 8.0 + (10_000.0 + 10_500.0) * 0.2) / 1e6;
+        assert!((check.one_hour_savings_usd - (five - hour)).abs() < 1e-9);
+        assert!(check.base.sources[0].contains("opencode.ai"));
+        let profile = report
+            .scan
+            .profiles
+            .iter()
+            .find(|p| p.harness == Harness::OpenCode)
+            .unwrap();
+        let how = crate::doctor::check_how(&crate::model::CheckResult::Ttl(check), profile);
+        let crate::doctor::How::Edit(patch) = how else {
+            panic!("no edit: {how:?}");
+        };
+        assert_eq!(patch.file, text(&config));
+        let edited = edit("{\n  // Mine.\n}\n", &patch.edits, &[]).unwrap();
+        assert!(edited.contains("// Mine."), "{edited}");
+        assert_eq!(
+            parse_config(&edited).unwrap(),
+            json!({"providers": {"anthropic": {"settings": {"cache": {"ttl": "1h"}}}}})
+        );
+    }
+
+    #[test]
+    fn a_project_or_model_cache_ttl_leaves_the_anthropic_line_advisory() {
+        let w = Workspace::new();
+        let file = opencode_database(&w.home);
+        let repo = w.home.join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        anthropic_session(&file, &text(&repo), &[(0, 0, 10_000), (20, 0, 10_500)]);
+        std::fs::write(
+            repo.join("opencode.json"),
+            r#"{"providers": {"anthropic": {"settings": {"cache": {"ttl": "1h"}}}}}"#,
+        )
+        .unwrap();
+        let (_, check) = anthropic_check(&w);
+        assert_eq!(check.base.current, None);
+        assert_eq!(check.base.action, crate::model::Action::Advisory);
+        std::fs::remove_file(repo.join("opencode.json")).unwrap();
+        let config = w.home.join(".config/opencode/opencode.json");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config,
+            r#"{"providers": {"anthropic": {"models": {"claude-opus-5-5": {"settings": {"cache": {"ttl": "1h"}}}}}}}"#,
+        )
+        .unwrap();
+        let (_, check) = anthropic_check(&w);
+        assert_eq!(check.base.current, None);
+        assert_eq!(check.base.action, crate::model::Action::Advisory);
+        assert!(check.base.owner.ends_with(":providers.anthropic.models"));
+    }
+
+    #[test]
+    fn a_compaction_message_is_its_summary_request() {
+        let w = Workspace::new();
+        let file = opencode_database(&w.home);
+        let db = Connection::open(&file).unwrap();
+        let compaction = json!({"status": "completed", "reason": "auto",
+            "model": {"id": "zen-flash", "providerID": "opencode"},
+            "summary": "SYNTHETIC_SUMMARY", "time": {"created": OPENCODE_START + 3_000},
+            "tokens": {"input": 500, "output": 80, "reasoning": 0,
+                "cache": {"read": 4000, "write": 0}}});
+        let running = json!({"status": "running", "reason": "auto", "summary": "",
+            "time": {"created": OPENCODE_START + 4_000}});
+        for (id, seq, data) in [("msg_c", 4, compaction), ("msg_r", 5, running)] {
+            db.execute(
+                "INSERT INTO session_message VALUES (?1, 'ses_main', 'compaction', ?2, 1, ?3)",
+                rusqlite::params![id, seq, data.to_string()],
+            )
+            .unwrap();
+        }
+        drop(db);
+        let history = read(&text(&file), &["profile".into()]).unwrap();
+        // The running compaction has recorded no usage yet.
+        let summaries: Vec<&Request> = history
+            .requests
+            .iter()
+            .filter(|r| r.parts[0].kind == PartKind::Compaction)
+            .collect();
+        assert_eq!(summaries.len(), 1);
+        let summary = summaries[0];
+        assert_eq!(summary.time, OPENCODE_START + 3_000);
+        assert_eq!(summary.source.as_deref(), Some("compaction"));
+        assert_eq!(summary.parts[0].model.as_deref(), Some("zen-flash"));
+        let u = &summary.parts[0].usage;
+        assert_eq!(
+            (u.input, u.output, u.read),
+            (Some(4500), Some(80), Some(4000))
+        );
+        assert!(!format!("{history:?}").contains("SYNTHETIC_SUMMARY"));
     }
 
     #[test]

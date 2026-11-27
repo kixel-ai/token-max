@@ -1181,6 +1181,15 @@ pub(crate) fn check_how(result: &CheckResult, profile: &Profile) -> How {
             let Some(ttl) = t.base.recommended else {
                 return unknown(&t.base.owner);
             };
+            if t.harness == Harness::OpenCode {
+                let key = crate::opencode::TTL_KEY;
+                return owned(
+                    &t.base.owner,
+                    profile,
+                    vec![(key.into(), vec![Edit::set(key, ttl.as_str())])],
+                    format!("set {} to {}", t.base.owner, ttl.as_str()),
+                );
+            }
             let (key, variable) = match t.bucket {
                 Bucket::Main => ("promptCacheTtl", "CLAUDE_CODE_PROMPT_CACHE_TTL"),
                 Bucket::Subagent => (

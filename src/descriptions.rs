@@ -49,6 +49,9 @@ fn abbreviation(before: &str) -> bool {
 /// What a checked setting does.
 pub fn check(result: &CheckResult) -> &'static str {
     match result {
+        CheckResult::Ttl(t) if t.harness == crate::model::Harness::OpenCode => {
+            "How long OpenCode asks Anthropic to keep each session's prompt cached between requests: a 1h cache costs more to write than 5m but survives longer pauses."
+        }
         CheckResult::Ttl(t) => match t.bucket {
             Bucket::Main => {
                 "How long the main conversation's prompt stays cached between requests: a 1h cache costs more to write than 5m but survives longer pauses."

@@ -98,6 +98,15 @@ impl Needs {
         }
     }
 
+    /// OpenCode 2.`minor`.`patch`.
+    pub const fn opencode(minor: u64, patch: u64) -> Self {
+        Needs {
+            harness: Harness::OpenCode,
+            minor,
+            patch,
+        }
+    }
+
     fn major(self) -> u64 {
         match self.harness {
             Harness::Claude => 2,

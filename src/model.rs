@@ -246,8 +246,9 @@ impl Harness {
         }
     }
 
-    /// Whether token-max replays its cache and compaction settings: Claude Code's and
-    /// Codex's are, OpenCode's not yet.
+    /// Whether token-max replays its compaction and keepalive settings and audits its
+    /// transcripts: Claude Code's and Codex's are; of OpenCode's, only the Anthropic cache TTL
+    /// is replayed, by its own check.
     pub fn replayed(self) -> bool {
         match self {
             Harness::Claude | Harness::Codex => true,
@@ -1910,6 +1911,9 @@ pub struct TtlSensitivity {
 pub struct TtlCheck {
     pub base: CheckBase<Ttl>,
     pub window_basis_kind: WindowBasisKind,
+    /// Claude Code's TTL for one bucket, or OpenCode's one Anthropic TTL, which covers every
+    /// agent and is reported as the main bucket's.
+    pub harness: Harness,
     pub bucket: Bucket,
     /// How much less 1h costs than 5m on the parts both replays price; negative when 5m is cheaper.
     pub one_hour_savings_usd: f64,

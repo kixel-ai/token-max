@@ -1756,8 +1756,9 @@ impl App {
         let right_plain_len = if bar_w > 0 { bar_w + 2 } else { 0 } + cells(&usd_text).max(9);
         let left_budget = w.saturating_sub(11 + right_plain_len);
         // The profile leads, as the host does, so a narrow row cuts the name rather than it.
-        let profile_tag = k
-            .profile
+        // A directory's name may hold controls, so it prints escaped wherever it shows.
+        let profile = k.profile.as_deref().map(terminal_text);
+        let profile_tag = profile
             .as_deref()
             .map(|p| format!("[{p}] "))
             .unwrap_or_default();
@@ -1816,7 +1817,7 @@ impl App {
         if expanded && !k.summary.is_empty() {
             let pipe = self.style(GREEN, if self.unicode { "│" } else { "|" });
             let wrap_w = w.saturating_sub(11).max(20);
-            let summary = match &k.profile {
+            let summary = match &profile {
                 Some(profile) => format!("On {profile}: {}", k.summary),
                 None => k.summary.clone(),
             };
@@ -4074,6 +4075,13 @@ mod tests {
         assert!(row.contains("+ [~/.claude-api"), "{row}"); // slash ok: the profile label passes through unchanged
         assert!(row.contains("up to"), "{row}");
         assert!(row.contains("On ~/.claude-api-credits:"), "{row}"); // slash ok: the profile label passes through unchanged
+        app.hero.kept[0].profile = Some("~/.claude-\u{1b}]0;x\u{7}".into()); // slash ok: a profile label
+        let row = app.render_kept_row(0, true, true, 40.0, 200).join("\n");
+        assert!(
+            !row.contains('\u{7}') && !row.contains("\u{1b}]"),
+            "{row:?}"
+        );
+        assert!(row.contains("On ~/.claude-\\u001b]0;x\\u0007:"), "{row:?}"); // slash ok: a profile label
     }
 
     #[test]

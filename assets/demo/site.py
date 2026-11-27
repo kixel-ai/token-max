@@ -374,7 +374,7 @@ def billions(tokens: int) -> str:
 LISTED = 5
 # A skill or MCP server is named by whoever installed it, perhaps after a private project, so
 # the public page shows each kind as one row of its members' sum, never a member's name.
-FOLDED = {"Skill ": "Skills", "MCP server ": "MCP servers", "MCP tool ": "MCP servers"}
+FOLDED = {"Skill ": "Skills", "MCP server ": "MCP servers", "MCP tool ": "MCP tools"}
 
 
 def results(shown: str, plan: str, api: str, paid: set[str], since: date, now: datetime) -> tuple[str, str]:

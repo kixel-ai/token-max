@@ -927,6 +927,7 @@ impl ExposureCollector {
             tool_results: tool_results(results),
             memory,
             project_files,
+            antigravity: vec![],
         }
     }
 

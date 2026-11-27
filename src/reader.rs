@@ -1178,6 +1178,8 @@ struct Reader {
     subagents: IndexMap<Text, Subagent>,
     earlier: Vec<Request>,
     sessions: Sessions,
+    /// Each Antigravity MCP server, skill and rule file, with its window's uses.
+    antigravity: Vec<crate::antigravity::Feature>,
 }
 
 impl Reader {
@@ -1391,26 +1393,48 @@ impl Reader {
         Ok(())
     }
 
-    /// Read every Antigravity root's transcripts once, as the profiles that read it. A T3
-    /// instance's root is its own, so its sessions need no join to T3's threads.
+    /// Read every Antigravity root's transcripts once, as the profiles that read it, and for a
+    /// report, given `--defaults`, the MCP servers, skills and rule files each root offers. A
+    /// T3 instance's root is its own, so its sessions need no join to T3's threads.
     fn antigravity(
         &mut self,
         profiles: &[Profile],
         snapshots: &mut Vec<Snapshot>,
+        report: Option<bool>,
     ) -> Result<(), ScanError> {
-        let mut roots: IndexMap<&str, (&[String], Vec<String>)> = IndexMap::default();
+        // Each root's transcripts, every GEMINI_HOME a path its profiles were selected by sits
+        // in, and the profiles that read it.
+        type Root<'a> = (&'a [String], IndexSet<String>, Vec<String>);
+        let mut roots: IndexMap<&str, Root<'_>> = IndexMap::default();
         for p in profiles
             .iter()
             .filter(|p| p.harness == Harness::Antigravity)
         {
-            roots
+            let entry = roots
                 .entry(&p.root)
-                .or_insert_with(|| (&p.histories, vec![]))
-                .1
-                .push(p.id.clone());
+                .or_insert_with(|| (&p.histories, IndexSet::default(), vec![]));
+            let homes = p
+                .aliases
+                .iter()
+                .map(|a| crate::discovery::dirname(a).to_string());
+            entry.1.extend(homes);
+            entry.2.push(p.id.clone());
         }
-        for (root, (files, ids)) in roots {
+        for (root, (files, homes, ids)) in roots {
+            let homes: Vec<String> = homes.into_iter().collect();
             let history = crate::antigravity::read(root, files, &ids)?;
+            // Only a report lists the features; a session export reads no settings.
+            if let Some(defaults) = report {
+                let at = crate::antigravity::Inventory {
+                    root,
+                    homes: &homes,
+                    profiles: &ids,
+                    since: self.since,
+                    defaults,
+                };
+                self.antigravity
+                    .extend(crate::antigravity::features(&at, &history)?);
+            }
             for (session, file) in &history.sessions {
                 self.sessions.recorded(session, file);
             }
@@ -2527,6 +2551,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         subagents: IndexMap::default(),
         earlier: vec![],
         sessions: Sessions::default(),
+        antigravity: vec![],
     };
     reader.exposure.roots(&profiles);
     // Bytes in the transcripts already read.
@@ -2588,7 +2613,9 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         {
             reading.step(Some("Reading Antigravity's transcripts"));
         }
-        reader.antigravity(&profiles, &mut snapshots)?;
+        // A report reads every transcript; its features read `--defaults`.
+        let report = (options.reach == Reach::History).then_some(options.discovery.defaults);
+        reader.antigravity(&profiles, &mut snapshots, report)?;
     }
     if let Some(reading) = &options.reading {
         reading.step(None);
@@ -2608,6 +2635,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         subagents,
         earlier,
         sessions,
+        antigravity,
         ..
     } = reader;
     for (r, total_key) in legacy {
@@ -2882,7 +2910,10 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         roots,
         profiles,
         snapshots,
-        exposure: exposure.finish(&requests, &context_requests, since),
+        exposure: crate::model::ExposureScan {
+            antigravity,
+            ..exposure.finish(&requests, &context_requests, since)
+        },
         requests,
         events,
         cache_context: CacheContext {

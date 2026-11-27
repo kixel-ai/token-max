@@ -5681,6 +5681,14 @@ fn kind_row(members: &[Row], out: &Out<'_>) -> Row {
         row.costs(Some(Estimate { usd, margin }), at_least, &out.spend);
     } else if unknown {
         row.costs(None, false, &out.spend);
+        // Lines that each say no transcript measured their cost say so together.
+        if members
+            .iter()
+            .filter(|r| matches!(r.amount, Some(("costs", _))))
+            .all(|r| matches!(&r.amount, Some((_, figure)) if figure == UNMEASURED))
+        {
+            row.amount = Some(("costs", UNMEASURED.into()));
+        }
     } else if let (["saves"], true) = (
         verbs.iter().copied().collect::<Vec<_>>().as_slice(),
         members
@@ -5846,6 +5854,85 @@ fn instruction_row(c: &ContextCost, out: &Out<'_>) -> Row {
     row.setting = "the file itself".into();
     row.group = Some("Instruction files".into());
     // Each request belongs to one settings owner, whose files are its own lines.
+    row.apart = true;
+    row
+}
+
+/// What an Antigravity feature's line says its cost is: no transcript records the prompt.
+const UNMEASURED: &str = "unmeasured";
+
+/// An Antigravity MCP server, skill or rule file's line: its recorded uses beside a cost no
+/// transcript measures, so it has no verdict and offers no change.
+fn antigravity_row(f: &crate::antigravity::Feature, out: &Out<'_>) -> Row {
+    let (name, what) = match f.kind {
+        ContextKind::McpServer => (
+            format!("MCP server {}", f.name),
+            "An MCP server whose tools Antigravity lists for the model in each request.",
+        ),
+        ContextKind::Skill => (
+            format!("Skill {}", f.name),
+            "A skill Antigravity lists for the model, which reads its SKILL.md to use it.",
+        ),
+        _ => (
+            out.home(&f.name),
+            "Rules Antigravity loads from this file into each conversation under its directory.",
+        ),
+    };
+    let mut row = Row::new(Mark::Info, name, what.into());
+    let last = f
+        .last_used
+        .map_or_else(String::new, |t| format!(", last on {}", date(&iso(t))));
+    let times = match f.uses {
+        1 => "once".to_string(),
+        n => plural(n, "time"),
+    };
+    let (used, setting) = match f.kind {
+        ContextKind::McpServer => (
+            match f.uses {
+                0 => "Its tools were never called".into(),
+                _ => format!("Its tools were called {times}{last}"),
+            },
+            match f.sources.as_slice() {
+                [] => "the client that started Antigravity, such as T3 Code".into(),
+                sources => sources
+                    .iter()
+                    .map(|s| out.home(s))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            },
+        ),
+        ContextKind::Skill => (
+            match f.uses {
+                0 => "Its SKILL.md was never read".into(),
+                _ => format!("Its SKILL.md was read {times}{last}"),
+            },
+            match f.sources.as_slice() {
+                [] => "its SKILL.md".into(),
+                [one] => out.home(one),
+                [first, rest @ ..] => {
+                    format!("{} and {} more", out.home(first), count(rest.len() as u64))
+                }
+            },
+        ),
+        _ => (
+            format!(
+                "It applies to the workspaces of {} in the window",
+                plural(f.uses, "conversation")
+            ),
+            "the file itself".into(),
+        ),
+    };
+    row.value = match f.kind {
+        ContextKind::Instructions => String::new(),
+        _ => "on".into(),
+    };
+    row.amount = Some(("costs", UNMEASURED.into()));
+    row.evidence = format!(
+        "{used}. Antigravity's transcripts record no prompt, so what it cost is unmeasured, and no change is offered."
+    );
+    row.setting = setting.clone();
+    (row.group, row.key) = (kind_group(f.kind), setting);
+    // Each profile's features are its own lines.
     row.apart = true;
     row
 }
@@ -8756,6 +8843,11 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
             out,
         ));
     }
+    for feature in &report.scan.exposure.antigravity {
+        let mut row = antigravity_row(feature, out);
+        row.profile = tag(&feature.profiles, &|_| String::new(), out);
+        rows.push(row);
+    }
     let loading = mcp_guidance(report.context.iter().filter(|c| c.current));
     if !loading.is_empty() {
         let mut row = Row::new(
@@ -10209,6 +10301,81 @@ pub(crate) mod tests {
             "Policy in /etc/managed-settings.json keeps it off, which a user can't change."
         );
         assert_eq!(report_line(&text, "MCP server docs off").mark, "info");
+    }
+
+    /// Each Antigravity server, skill and rule file gets a line with its recorded uses, saying
+    /// its cost is unmeasured and offering nothing, and so does the line its kind shares.
+    #[test]
+    fn antigravity_features_show_their_uses_beside_an_unmeasured_cost() {
+        let mut report = synthetic();
+        report.context.clear();
+        let feature =
+            |kind, name: &str, sources: &[&str], uses, last_used| crate::antigravity::Feature {
+                kind,
+                name: name.into(),
+                profiles: vec!["profile".into()],
+                sources: sources.iter().map(|s| s.to_string()).collect(),
+                uses,
+                last_used,
+            };
+        report.scan.exposure.antigravity = vec![
+            feature(ContextKind::McpServer, "t3-code", &[], 3, Some(NOV1)),
+            feature(
+                ContextKind::McpServer,
+                "docs",
+                &["/g/config/mcp_config.json:mcpServers.docs"],
+                0,
+                None,
+            ),
+            feature(
+                ContextKind::Skill,
+                "review",
+                &["/s/review/SKILL.md"],
+                1,
+                Some(NOV1),
+            ),
+            feature(
+                ContextKind::Instructions,
+                "/work/repo/AGENTS.md",
+                &[],
+                2,
+                None,
+            ),
+        ];
+        let summary = text(&report, None, false);
+        let servers = report_line(&summary, "MCP servers");
+        assert_eq!(
+            (servers.mark.as_str(), servers.head.as_str(), servers.change),
+            ("info", "MCP servers 2 info costs unmeasured", false)
+        );
+        let details = text(&report, None, true);
+        let unmeasured = "Antigravity's transcripts record no prompt, so what it cost is unmeasured, and no change is offered.";
+        let t3 = report_line(&details, "MCP server t3-code");
+        assert_eq!(t3.head, "MCP server t3-code on costs unmeasured");
+        assert_eq!(
+            t3.setting,
+            "the client that started Antigravity, such as T3 Code"
+        );
+        assert_eq!(
+            t3.evidence,
+            format!("Its tools were called 3 times, last on 2026-11-01. {unmeasured}")
+        );
+        let docs = report_line(&details, "MCP server docs");
+        assert_eq!(docs.setting, "/g/config/mcp_config.json:mcpServers.docs");
+        assert_eq!(
+            docs.evidence,
+            format!("Its tools were never called. {unmeasured}")
+        );
+        let skill = report_line(&details, "Skill review");
+        assert_eq!(
+            skill.evidence,
+            format!("Its SKILL.md was read once, last on 2026-11-01. {unmeasured}")
+        );
+        let rules = report_line(&details, "/work/repo/AGENTS.md");
+        assert_eq!(
+            rules.evidence,
+            format!("It applies to the workspaces of 2 conversations in the window. {unmeasured}")
+        );
     }
 
     /// A section's lines on one host can price the same requests, so their margins add; hosts'

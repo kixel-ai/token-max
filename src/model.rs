@@ -3038,6 +3038,8 @@ pub struct ExposureScan {
     /// Each session's instruction files Claude Code recorded loading as the project's,
     /// rather than the user's, a local or a managed one.
     pub project_files: IndexMap<Text, crate::collections::IndexSet<String>>,
+    /// Each Antigravity MCP server, skill and rule file, with its selected-window uses.
+    pub antigravity: Vec<crate::antigravity::Feature>,
 }
 
 /// Whether the agent read or wrote auto memory.

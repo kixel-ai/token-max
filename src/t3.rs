@@ -1165,7 +1165,13 @@ fn antigravity_instance(
         Err(_) => return Err(fail("cannot inspect T3 provider home", &native_root)),
     };
     let key = profile_key(&state.path, id);
-    let mut profile = crate::antigravity::profile(root.clone(), root, &key)?;
+    let mut profile = crate::antigravity::profile(root.clone(), root.clone(), &key)?;
+    // T3's own path to the root names the GEMINI_HOME it gives the instance, which a
+    // symlinked root's target would not.
+    let native = native_root.to_string_lossy().into_owned();
+    if native != root {
+        profile.aliases.push(native);
+    }
     let policy_unresolved = managed_policy_unresolved();
     profile.t3 = Some(T3Instance {
         state: state.path.clone(),

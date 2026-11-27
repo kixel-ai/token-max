@@ -512,16 +512,33 @@ not read.
 
 Every transcript step that records token counts is one request: each
 `PLANNER_RESPONSE`, and each `CHECKPOINT`, which compacts the conversation and
-counts as compaction. Only each step's type, index, time, model and counts are
-read. Its model, such as `gemini-4-neon-high`, is split into the model,
+counts as compaction. Only each step's type, index, time, model and counts,
+its tool calls' names, and the `SKILL.md` a `read_file` call names are read.
+Its model, such as `gemini-4-neon-high`, is split into the model,
 `gemini-4-neon`, and the effort, `high`, and priced at Google's catalog entry
 (see [Prices](#prices)). A main conversation and each subagent it started are
 split as Claude Code's are, and a subagent model line names no setting, since
 token-max reads none that chooses one.
 
-Antigravity's transcripts record no prompt, so the cost of its MCP servers,
-skills, plugins and rules is unmeasured: none gets a line or a switch, and the
-report's assumptions say so. Its cache lifetime and compaction are not
+Each MCP server, skill and rule file Antigravity offers gets a line with the
+uses its transcripts record and says its cost is unmeasured, since no
+transcript records the prompt that carried it; none gets a verdict or a switch.
+Servers are those `config/mcp_config.json` under `GEMINI_HOME` and each enabled
+plugin's `mcp_config.json` declare, and those whose tools Antigravity cached in
+the profile's `mcp/`, as T3 Code's `t3-code` is; a server's uses are its
+`mcp_<server>_<tool>` calls. Skills are those in `config/skills` and
+`antigravity-cli/skills` under `GEMINI_HOME`, the profile's `builtin/skills`,
+each enabled plugin's `skills` and each conversation's workspace's
+`.agents/skills`; a skill's uses are `read_file` calls on its `SKILL.md`. Rule
+files are `GEMINI.md` and `AGENTS.md` in `GEMINI_HOME`, in each enabled
+plugin's `rules`, and in each directory from a conversation's workspace up to
+its repository's root; a rule file's uses are the window's conversations whose
+workspace it applies to now, with no date, since the file's history is not kept. A plugin is enabled unless `plugins.<dir>.enabled` in
+`config/config.json` turns it off or, with no entry there, its `plugin.json`
+ships it `disabled`; `--defaults` reads no `config.json`. `GEMINI_HOME` here is
+the parent of each path the directory was selected by, before any symlink to it
+is resolved, and a skill read through either spelling of its path counts. The
+`sessions` export reads none of these files. Its cache lifetime and compaction are not
 replayed, so its spend counts in the report's totals but gets no cache TTL,
 compaction, keepalive or effort line. See
 [Replay semantics](semantics.md#antigravity) for what each piece assumes.

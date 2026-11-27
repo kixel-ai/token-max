@@ -1256,7 +1256,8 @@ instruction files get their measured lines.
 
 Antigravity keeps one JSONL transcript per conversation. Each line is parsed
 into the step's type, index, time, model and three counts, `input_tokens`,
-`cache_read_tokens` and `output_tokens`; its content, thinking and tool
+`cache_read_tokens` and `output_tokens`, and its tool calls' names with the
+`SKILL.md` a `read_file` call names; its content, thinking and other tool
 arguments are skipped unread. A step with any count is one request, and a
 `CHECKPOINT` step, which summarizes the conversation, is a compaction request.
 Antigravity ends every line it finishes with a newline. A last line without one
@@ -1288,8 +1289,20 @@ model and reads hundreds of thousands of cached tokens, so this prices them;
 any other such step stays unpriced and is extrapolated over.
 
 Antigravity records neither its system prompt nor the tools, skills and rules it
-sent, so no piece of its context is priced, and none of its MCP servers,
-skills, plugins or rules gets a line. Gemini's implicit cache lifetime is
+sent, so no piece of its context is priced. Its MCP servers, skills and rule
+files each get a line of recorded uses instead, its cost unmeasured, and a
+plugin is counted by the servers, skills and rules it bundles. Each step's
+`tool_calls` give only their names, and a `read_file` call its `Path`, which
+Antigravity records as JSON text and which is kept only when it names a
+`SKILL.md`. A call named `mcp_<server>_<tool>` is credited to the one server
+whose name it starts with; when two could own it, such as `a` and `a_b` for
+`mcp_a_b_x`, it goes to the one whose cached tools include it, else to
+neither. A read of a `SKILL.md` credits the skill found at that path, or, for
+any other path in a project's `.agents/skills`, such as one in a workspace that
+no longer exists, the skill its directory names. Skills are named by their directory, so one skill in many
+workspaces is one line. A rule file counts each window conversation whose
+workspace it applies to, taken from `conversation_summaries.db`; a workspace
+that no longer exists has no rule files to find. Gemini's implicit cache lifetime is
 undocumented, and Antigravity has no setting for it or for compaction, so no
 cache or compaction check replays an Antigravity profile.
 

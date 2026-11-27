@@ -78,6 +78,8 @@ pub(crate) struct KeptItem {
     pub saving_usd: Option<f64>,
     /// Whether the saving holds only while a default is the other value.
     pub up_to: bool,
+    /// The profile it is kept on, when another profile keeping it compares differently.
+    pub profile: Option<String>,
     pub default_value: Option<String>,
     pub summary: String,
 }
@@ -513,11 +515,12 @@ impl App {
     }
 
     /// The steps by hand to print on leaving: each change's that is one, the cleanup of
-    /// servers that are off, and the removals an accepted change leaves by hand.
-    fn steps_by_hand(&self) -> Vec<(Option<String>, String, String, String)> {
+    /// servers that are off, and, once `wrote` says the measured changes were written, the
+    /// removals each of them leaves by hand.
+    fn steps_by_hand(&self, wrote: bool) -> Vec<(Option<String>, String, String, String)> {
         let mut steps = self.by_hand.clone();
         for m in self.groups.iter().flat_map(|g| &g.members) {
-            if m.checked {
+            if wrote && m.checked {
                 for (step, reason) in &m.manual {
                     steps.push((
                         m.host_label.clone(),
@@ -529,6 +532,21 @@ impl App {
             }
         }
         steps
+    }
+
+    /// Whether open caveats take `code`: one that would move or toggle a row they may hide
+    /// closes them instead, leaving them only their scroll, their toggle and the exits.
+    fn caveats_take(&mut self, code: KeyCode) -> bool {
+        let theirs = matches!(
+            code,
+            KeyCode::PageUp | KeyCode::PageDown | KeyCode::Char('?' | 'q') | KeyCode::Esc
+        );
+        if self.screen != Screen::List || !self.show_caveats || theirs {
+            return false;
+        }
+        self.show_caveats = false;
+        self.block_scroll.set(0);
+        true
     }
 
     /// Whether there are zero interactive items to prompt on in Measured mode.
@@ -1177,7 +1195,7 @@ impl App {
                 let gap = w.saturating_sub(cells(&left) + cells(right) + 2).max(1);
                 foot.push(self.style(DIM, &format!("{left}{}{right}", " ".repeat(gap))));
             }
-            let by_hand = self.steps_by_hand().len();
+            let by_hand = self.steps_by_hand(true).len();
             if by_hand > 0 {
                 foot.push(self.style(
                     DIM,
@@ -1737,7 +1755,13 @@ impl App {
 
         let right_plain_len = if bar_w > 0 { bar_w + 2 } else { 0 } + cells(&usd_text).max(9);
         let left_budget = w.saturating_sub(11 + right_plain_len);
-        let full_title = format!("{host_tag}{}", k.name);
+        // The profile leads, as the host does, so a narrow row cuts the name rather than it.
+        let profile_tag = k
+            .profile
+            .as_deref()
+            .map(|p| format!("[{p}] "))
+            .unwrap_or_default();
+        let full_title = format!("{host_tag}{profile_tag}{}", k.name);
         let name_fit = self.fit_text(&full_title, left_budget);
         let val_budget = left_budget.saturating_sub(cells(&name_fit) + 2);
         let val_str = if val_budget >= 2 && !k.value.is_empty() {
@@ -1775,7 +1799,8 @@ impl App {
         if focused {
             let mut tags = vec!["already good".to_string()];
             if let (Some(def), Some(u)) = (&k.default_value, k.saving_usd) {
-                tags.push(format!("saving ~{}/mo vs {def} default", about(u)));
+                let up_to = if k.up_to { "up to " } else { "" };
+                tags.push(format!("saving {up_to}~{}/mo vs {def} default", about(u)));
             }
             tags.push(format!(
                 "[{}] {}",
@@ -1791,8 +1816,12 @@ impl App {
         if expanded && !k.summary.is_empty() {
             let pipe = self.style(GREEN, if self.unicode { "│" } else { "|" });
             let wrap_w = w.saturating_sub(11).max(20);
+            let summary = match &k.profile {
+                Some(profile) => format!("On {profile}: {}", k.summary),
+                None => k.summary.clone(),
+            };
             for line in wrap_text(
-                &k.summary,
+                &summary,
                 WrapOptions {
                     width: Some(wrap_w),
                     ..Default::default()
@@ -2342,7 +2371,7 @@ pub(crate) fn run(
             }
             writeln!(stdout).map_err(failed)?;
         }
-        write_by_hand(&mut stdout, &app.steps_by_hand(), style.color).map_err(failed)?;
+        write_by_hand(&mut stdout, &app.steps_by_hand(false), style.color).map_err(failed)?;
         stdout.flush().map_err(failed)?;
         return Ok(ExitKind::Done);
     }
@@ -2398,6 +2427,11 @@ pub(crate) fn run(
 
         app.status_error = None;
 
+        // Open caveats can fill the body and hide every row, so a key that would move or
+        // toggle one closes them instead; they keep only their scroll, toggle and exits.
+        if app.caveats_take(code) {
+            continue;
+        }
         if !matches!(code, KeyCode::PageUp | KeyCode::PageDown) {
             app.block_scroll.set(0);
         }
@@ -2519,7 +2553,7 @@ pub(crate) fn run(
                             "{}",
                             app.style(DIM, &format!("  Nothing selected; {}.", app.unchanged()))
                         );
-                        let _ = write_by_hand(&mut stdout, &app.steps_by_hand(), app.color);
+                        let _ = write_by_hand(&mut stdout, &app.steps_by_hand(false), app.color);
                         let _ = stdout.flush();
                         return Ok(ExitKind::Done);
                     }
@@ -2613,7 +2647,8 @@ pub(crate) fn run(
                     for line in &written.lines {
                         let _ = writeln!(stdout, "  {}", app.style(DIM, line));
                     }
-                    let _ = write_by_hand(&mut stdout, &app.steps_by_hand(), app.color);
+                    let measured = app.diff_tab == Tab::Measured;
+                    let _ = write_by_hand(&mut stdout, &app.steps_by_hand(measured), app.color);
                     let _ = stdout.flush();
                     return Ok(ExitKind::Done);
                 }
@@ -3394,6 +3429,7 @@ mod tests {
                     value: "1h".into(),
                     saving_usd: Some(3545.0),
                     up_to: false,
+                    profile: None,
                     default_value: Some("5m".into()),
                     summary: "Default is 5m — keeping 1h saves ~$3,545/mo.".into(),
                 },
@@ -3403,6 +3439,7 @@ mod tests {
                     value: "off".into(),
                     saving_usd: None,
                     up_to: false,
+                    profile: None,
                     default_value: None,
                     summary: "Already at the recommended value (off).".into(),
                 },
@@ -3598,15 +3635,17 @@ mod tests {
             split: false,
             minor: false,
         });
-        // A removal left by hand prints once its change is accepted, as the walk prints it.
-        let step = |app: &App| {
-            app.steps_by_hand()
+        // A removal left by hand prints once its change is written, as the walk prints it:
+        // a write of `vibes`' changes alone leaves it out.
+        let step = |app: &App, wrote: bool| {
+            app.steps_by_hand(wrote)
                 .iter()
                 .any(|(_, _, step, _)| step == "remove it from /etc/managed.json")
         };
-        assert!(step(&app));
+        assert!(step(&app, true));
+        assert!(!step(&app, false));
         app.groups[0].members[0].checked = false;
-        assert!(!step(&app));
+        assert!(!step(&app, true));
         app.groups[0].members[0].checked = true;
         let frame = app.render(90, 40).join("\n");
         assert!(
@@ -3920,6 +3959,15 @@ mod tests {
         }
         app.show_caveats = false;
 
+        // Open caveats may hide every row, so a row key closes them and moves nothing; their
+        // scroll stays theirs.
+        app.show_caveats = true;
+        let focus = app.focus;
+        assert!(!app.caveats_take(KeyCode::PageDown));
+        assert!(app.caveats_take(KeyCode::Down));
+        assert!(!app.show_caveats && app.focus == focus);
+        assert!(!app.caveats_take(KeyCode::Down));
+
         // Billing re-prices the TTL left unanswered, but keeps an answer the person gave.
         let ttl = app
             .groups
@@ -3994,5 +4042,26 @@ mod tests {
         // Members that agree share one chart.
         group.members[1] = member("subagents", "5m -> 1h", 90.0, 50.0);
         assert_eq!(charts(&group), 1);
+    }
+
+    #[test]
+    fn a_kept_row_names_its_profile_before_its_setting() {
+        let mut app = App::new(&[], Hero::default(), Tab::Measured, false, false);
+        app.hero.kept = vec![KeptItem {
+            host_label: None,
+            name: "Main-agent prompt cache TTL".into(),
+            value: "1h".into(),
+            saving_usd: Some(40.0),
+            up_to: true,
+            profile: Some("~/.claude-api-credits".into()),
+            default_value: Some("5m".into()),
+            summary: "Keeping 1h saves up to ~$40/mo.".into(),
+        }];
+        let row = app.render_kept_row(0, true, true, 40.0, 48).join("\n");
+        // The title leads with the profile, cut only where the path itself is too long, and
+        // the proof names it whole.
+        assert!(row.contains("+ [~/.claude-api"), "{row}"); // slash ok: the profile label passes through unchanged
+        assert!(row.contains("up to"), "{row}");
+        assert!(row.contains("On ~/.claude-api-credits:"), "{row}"); // slash ok: the profile label passes through unchanged
     }
 }

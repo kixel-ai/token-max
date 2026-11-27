@@ -1027,19 +1027,22 @@ fn piggy_progress(
     let found_line = if shared.tally
         && let Some((savings, _)) = shared.tally()
     {
-        // A saving that holds only under one billing default stays apart from measured ones.
-        let text = match savings.figures() {
-            _ if savings.usd().unwrap_or(0.0) < 1.0 => None,
-            (Some(measured), Some(up_to)) => {
-                Some(format!("+{measured} found, up to {up_to} more by billing"))
-            }
-            (Some(measured), None) => Some(format!("+{measured} found so far")),
-            (None, Some(up_to)) => Some(format!("up to {up_to} found, by billing")),
-            (None, None) => None,
+        // A saving that holds only under one billing default stays apart from measured ones,
+        // each amount whole: a room too narrow for both drops the billing one, never a figure.
+        let texts = match savings.figures() {
+            _ if savings.usd().unwrap_or(0.0) < 1.0 => vec![],
+            (Some(measured), Some(up_to)) => vec![
+                format!("+{measured} found, up to {up_to} more by billing"),
+                format!("+{measured} found so far"),
+            ],
+            (Some(measured), None) => vec![format!("+{measured} found so far")],
+            (None, Some(up_to)) => vec![format!("up to {up_to} found, by billing")],
+            (None, None) => vec![],
         };
-        text.map_or_else(String::new, |text| {
-            s("1;32", crate::terminal::fit(&text, right_room))
-        })
+        texts
+            .into_iter()
+            .find(|t| crate::terminal::cells(t) <= right_room)
+            .map_or_else(String::new, |text| s("1;32", &text))
     } else {
         String::new()
     };
@@ -2690,6 +2693,7 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
                     value: text(r.value),
                     saving_usd: r.saving_usd,
                     up_to: r.up_to,
+                    profile: r.profile.map(text),
                     default_value: r.default_value.map(text),
                     summary: text(r.summary),
                 }

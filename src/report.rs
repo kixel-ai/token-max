@@ -1746,6 +1746,8 @@ pub(crate) struct KeptRow {
     pub saving_usd: Option<f64>,
     /// Whether the saving holds only while a default is the other value.
     pub up_to: bool,
+    /// The profile it is kept on, when another profile keeping it compares differently.
+    pub profile: Option<String>,
     pub default_value: Option<String>,
     pub summary: String,
 }
@@ -1800,6 +1802,7 @@ impl Listing {
                     value: row.value.clone(),
                     saving_usd,
                     up_to,
+                    profile: None,
                     default_value,
                     summary,
                 },
@@ -1818,12 +1821,9 @@ impl Listing {
                     items.push(row.clone());
                 }
             } else {
-                let name = match profile.is_empty() {
-                    true => row.name.clone(),
-                    false => format!("{} ({profile})", row.name),
-                };
+                let profile = (!profile.is_empty()).then(|| profile.to_string());
                 items.push(KeptRow {
-                    name,
+                    profile,
                     ..row.clone()
                 });
             }
@@ -15750,10 +15750,18 @@ pub(crate) mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "Prompt cache TTL");
         listing.rows = vec![kept("work", 40.0), kept("home", 9.0)];
-        let names: Vec<String> = listing.kept().0.into_iter().map(|r| r.name).collect();
+        let names: Vec<(String, Option<String>)> = listing
+            .kept()
+            .0
+            .into_iter()
+            .map(|r| (r.name, r.profile))
+            .collect();
         assert_eq!(
             names,
-            ["Prompt cache TTL (work)", "Prompt cache TTL (home)"]
+            [
+                ("Prompt cache TTL".to_string(), Some("work".to_string())),
+                ("Prompt cache TTL".to_string(), Some("home".to_string()))
+            ]
         );
         // A saving that holds under one default only keeps saying so.
         let mut up_to = kept("work", 40.0);

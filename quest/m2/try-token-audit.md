@@ -3,7 +3,7 @@
 ## Goal
 
 The maintainer has run `/token-audit` on a real repository, and the skill is
-promoted where they choose, or they decided not to promote it.
+promoted in the README and on max.kixel.me.
 
 ## Plan
 

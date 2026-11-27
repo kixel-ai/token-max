@@ -1,4 +1,4 @@
-# Local validation; the merge queue runs this plus the Windows tests, and the macOS tests run after each merge.
+# Local validation; the merge queue runs this plus the Windows tests, and macOS runs the tests after merges that touch the build.
 # Cheapest first, so a dangling quest link fails before the build.
 check:
     quest check

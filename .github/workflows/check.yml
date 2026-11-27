@@ -3,10 +3,10 @@ name: Check
 permissions:
   contents: read
 
-# The merge queue tests each entry against the current base before it lands.
-# Pull requests run nothing: authors run `just check` before pushing, and the
-# queue catches the rest. No push trigger: main moves only to commits the queue
-# already tested.
+# The merge queue tests each entry against the current base. Pull requests run
+# nothing: authors run `just check` before pushing. The main ruleset requires no
+# check until Kixel Quest's queue takes token-max, so the queue lands an entry
+# without waiting on this run, and a failure files an issue instead of blocking.
 on:
   merge_group:
   workflow_call:
@@ -95,7 +95,8 @@ jobs:
   check:
     name: Check
     needs: [state, source, platform]
-    # A failed, cancelled, or skipped job fails the gate.
+    # A failed, cancelled, or skipped job fails the gate, except the platform
+    # tests a quest-only change skips.
     if: always()
     runs-on: ubuntu-24.04
     steps:
@@ -111,3 +112,29 @@ jobs:
             false) test "$PLATFORM" = skipped ;;
             *) exit 1 ;;
           esac
+
+  # The queue's bot triggers this run, and GitHub tells no one when it fails.
+  report:
+    name: Report
+    needs: check
+    if: failure() && github.event_name == 'merge_group'
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.event.merge_group.head_sha }}
+        run: |
+          title="Check fails in the merge queue"
+          body="Check failed on merge group $SHA: $RUN"
+          number=$(gh issue list --state open --search "in:title \"$title\"" --json number,title \
+            --jq "map(select(.title == \"$title\")) | first | .number // empty")
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi

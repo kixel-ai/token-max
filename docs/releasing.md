@@ -13,10 +13,11 @@ updates a "macOS tests fail on main" issue when they fail) and in the Check
 run a release makes. A change only to `quest/` and the agent docs
 (`AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`) runs `quest check` alone. The
 `Check` job aggregates them. A failed, cancelled, or skipped job fails it,
-apart from the platform tests a quest-only change skips. It is not a required
-check, so the queue lands without waiting on it until Kixel Quest's merge
-queue takes token-max. Check has no publication credentials or OIDC
-permission.
+apart from the platform tests a quest-only change skips. The `main` ruleset
+requires no check until Kixel Quest's merge queue takes token-max, so the
+queue lands without waiting on Check; a failed queue run opens or updates a
+"Check fails in the merge queue" issue. Check has no publication credentials
+or OIDC permission; only its report job may write issues.
 
 ## Binaries
 

@@ -1178,7 +1178,9 @@ transcript audit in any harness that reads Agent Skills.
 The installed `SKILL.md` only runs `token-max skill audit`, which prints the
 instructions from the installed `token-max`, so updating `token-max` updates
 the skill. When `token-max` is not on `PATH`, or is a release without
-`token-max skill`, the skill runs it through `npx @kixel/crabx`. The agent needs `jq`.
+`token-max skill`, the skill runs it through `npx @kixel/crabx`, and when that
+fails too, says it needs token-max 0.1.0 or newer, the first release with
+`token-max skill` and the first crabx runs. The agent needs `jq`.
 
 The agent reads every transcript line through the `jq` program
 `token-max skill filter` prints, locally or piped from `ssh` for a remote

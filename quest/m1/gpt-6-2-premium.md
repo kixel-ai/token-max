@@ -9,6 +9,7 @@ left unpriced, so fast-mode lines on Codex's own effort pick (`gpt-6.2-sol`,
 
 ## Plan
 
+- ✅ Kept by the maintainer at [kixel-ai/token-max#286](https://github.com/kixel-ai/token-max/pull/286#issuecomment-7216566816)'s pick, 2026-11-27 (rejected: drop it).
 - `premium_multiplier` in `src/prices.rs` lists no `gpt-6.2-*` model, so such
   a request prices as unknown today.
 - The [OpenAI price table](https://developers.openai.com/api/docs/pricing),

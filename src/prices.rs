@@ -138,14 +138,18 @@ fn service_tier<'a>(r: &'a Request, p: &'a BillingPart) -> Result<&'a str, &'sta
     // An advisor call records no tier of its own, and Priority Tier needs a commitment on
     // each model, so the call takes its executor's: standard when no executor iteration
     // records another tier, barring a commitment on the advisor model alone. A request
-    // that records no tier at all is standard only on Anthropic's own API, which is where
-    // a tier recorded as Priority would show.
+    // that records no tier at all is standard only when priced as Anthropic's API and no
+    // other iteration of it, a compaction one included, shows another tier.
     if p.kind == PartKind::Advisor {
         let mut recorded = executor_tiers(r).flatten().peekable();
         let standard = if recorded.peek().is_some() {
             recorded.all(|t| t == "default")
         } else {
             r.provider.as_deref() == Some("anthropic")
+                && r.parts
+                    .iter()
+                    .filter_map(|e| e.tier.as_deref().map(tier_name))
+                    .all(|t| t == "default")
         };
         return if standard {
             Ok("standard")
@@ -1288,7 +1292,7 @@ fn selected_rates(
     let tier = service_tier(r, p)?;
     if p.kind == PartKind::Advisor && p.tier.is_none() {
         assumptions.push(if executor_tiers(r).all(|t| t.is_none()) {
-            "no service tier is recorded on the request; its advisor call is priced at standard because the request ran on Anthropic's API and nothing on it shows Priority Tier, which a commitment on the advisor model alone would change".into()
+            "no service tier is recorded on the request; its advisor call is priced at standard because the request is priced as Anthropic's API and nothing on it shows Priority Tier, which a commitment on the advisor model alone would change".into()
         } else {
             "an advisor call records no service tier; priced at its executor's standard tier, which a Priority Tier commitment on the advisor model alone would change".into()
         });
@@ -1778,6 +1782,23 @@ mod tests {
         // Another provider with no tier evidence, and any Priority evidence, stay unpriced.
         assert_eq!(tierless("amazon-bedrock", None).total_usd, None);
         assert_eq!(tierless("anthropic", Some("priority")).total_usd, None);
+        // A compaction iteration that shows Priority is evidence too, though it is not the
+        // executor the advisor inherits from.
+        let mut r = make_request();
+        r.parts[0].tier = None;
+        let compaction = BillingPart {
+            kind: PartKind::Compaction,
+            tier: Some("priority".into()),
+            ..r.parts[0].clone()
+        };
+        let advisor = BillingPart {
+            kind: PartKind::Advisor,
+            tier: None,
+            speed: None,
+            ..r.parts[0].clone()
+        };
+        r.parts.extend([compaction, advisor.clone()]);
+        assert_eq!(price_part(&catalog, &r, &advisor).total_usd, None);
     }
 
     /// Recorded Codex usage, normalized as the reader does.

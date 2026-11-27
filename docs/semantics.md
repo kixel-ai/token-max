@@ -61,7 +61,7 @@ iterations exist, pricing uses that list alone, with
 each iteration's model. Advisor service tier is independent; an omitted tier is
 standard unless an executor iteration on the request (its message iterations, or
 its compaction ones when it has none) records another tier, or the request
-records none at all and did not run on Anthropic's API, as
+records none at all and is not priced as Anthropic's API, as
 [Advisor model](#advisor-model) explains. Unsupported iteration kinds stay unpriced. These semantics come from
 [threshold compaction](https://platform.claude.com/docs/en/build-with-claude/compaction-threshold)
 and [advisor billing](https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool),
@@ -1653,8 +1653,9 @@ request is (its message iterations, or its compaction ones only when it has
 none, as in a summary request), since Priority Tier is committed per model, and
 unknown when one is another tier. When the request records no tier at all, such as
 a reply through a gateway that strips it, the call is standard only on a request
-that ran on Anthropic's API, where a tier recorded as Priority would show; on
-another provider it is unknown. Unpriced requests are
+priced as Anthropic's API (a custom `ANTHROPIC_BASE_URL` included, whose upstream
+the record does not name) with no other iteration showing another tier; on another
+provider it is unknown. Unpriced requests are
 extrapolated from the priced ones, never below what each is known to cost.
 A T3 instance's requests count on the first line whose `advisorModel` its
 settings file owns, since its threads read that file; a line whose owner is

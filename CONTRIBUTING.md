@@ -12,7 +12,7 @@ conflicts or the queue refuses its head.
 CI runs no checks on pull requests, so run `just check` before pushing, and
 the independent review before requesting landing.
 Then use `quest merge <pr> --squash --land <full-head-sha>`, which enqueues
-the reviewed head, or arms auto-merge bound to it while checks are pending.
+the reviewed head.
 Never bypass the required checks or use `--direct`.
 
 Workflows use read-only credentials and GitHub-hosted runners; the one

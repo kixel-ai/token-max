@@ -74,6 +74,15 @@ fn readable_variable(name: &str) -> bool {
             .any(|p| p.variable == name)
 }
 
+/// The variables that move OpenCode's data directory or config, which only an OpenCode
+/// instance reads.
+const OPENCODE_LOCATIONS: [&str; 4] = [
+    "XDG_DATA_HOME",
+    "XDG_CONFIG_HOME",
+    "OPENCODE_CONFIG",
+    "OPENCODE_DB",
+];
+
 /// The variables only subagent discovery reads, whose secret value leaves just the subagent
 /// controls unresolved.
 pub(crate) const SUBAGENT_ENVIRONMENT: &[&str] = &[
@@ -255,7 +264,7 @@ impl<'de> Deserialize<'de> for Instance {
             .and_then(|v| serde_json::from_str::<String>(v.get()).ok())
             .unwrap_or_default();
         let (config_enabled, custom_models) = common_config(raw.config.as_deref());
-        if !matches!(driver.as_str(), "claudeAgent" | "codex") {
+        if !matches!(driver.as_str(), "claudeAgent" | "codex" | "opencode") {
             return Ok(Self {
                 enabled: raw.enabled.and_then(|v| serde_json::from_str(v.get()).ok()),
                 driver,
@@ -415,7 +424,9 @@ impl<'de> Deserialize<'de> for Environment {
                 value,
             });
         }
-        let allowed = readable_variable(&entry.name) && readable;
+        let allowed = (readable_variable(&entry.name)
+            || OPENCODE_LOCATIONS.contains(&entry.name.as_str()))
+            && readable;
         let value = if allowed {
             entry
                 .value
@@ -577,11 +588,8 @@ pub(crate) fn discover(
     options: &DiscoveryOptions,
     profiles: &mut Vec<Profile>,
 ) -> Result<Vec<T3State>, ScanError> {
-    let explicit = !options.claude_dirs.is_empty()
-        || !options.codex_dirs.is_empty()
-        || !options.t3_dirs.is_empty();
     let mut paths = Vec::new();
-    if !explicit {
+    if !options.explicit() {
         paths.push((Path::new(&options.home).join(".t3/userdata"), false));
         let dev = Path::new(&options.home).join(".t3/dev");
         if dev.exists() {
@@ -658,6 +666,7 @@ pub(crate) fn discover(
                 // Only the variables that choose its home or its provider stay.
                 instance.environment.retain(|e| {
                     matches!(e.name.as_str(), "CLAUDE_CONFIG_DIR" | "CODEX_HOME")
+                        || OPENCODE_LOCATIONS.contains(&e.name.as_str())
                         || crate::controls::CLAUDE_PROVIDERS
                             .iter()
                             .any(|p| p.variable == e.name)
@@ -705,6 +714,27 @@ pub(crate) fn discover(
             let harness = match instance.driver.as_str() {
                 "claudeAgent" => Harness::Claude,
                 "codex" => Harness::Codex,
+                // The transcript audit reads no OpenCode history.
+                "opencode" if !options.opencode => continue,
+                "opencode" => {
+                    if !slug(&id) {
+                        return Err(fail("invalid supported T3 provider identity", &file));
+                    }
+                    let found = opencode_instance(options, &state, &id, instance, &file)?;
+                    match found {
+                        Ok(profile) => profiles.push(profile),
+                        Err(exclusion) => {
+                            if exclusion.missing && named.contains(&id) {
+                                state.missing += 1;
+                            }
+                            if exclusion.unsupported {
+                                state.unsupported += 1;
+                            }
+                            state.exclusions.push(exclusion.reason);
+                        }
+                    }
+                    continue;
+                }
                 _ => {
                     state.unsupported += 1;
                     state.exclusions.push(if slug(&id) && slug(&instance.driver) {format!("T3 instance {id} ({}) is unsupported; its spend is excluded",instance.driver)} else {"T3 provider instance has an unsupported identity/driver; its spend is excluded".into()});
@@ -985,6 +1015,110 @@ pub(crate) fn discover(
     Ok(states)
 }
 
+/// Why a T3 OpenCode instance has no profile.
+struct Excluded {
+    reason: String,
+    /// Its data directory does not exist.
+    missing: bool,
+    /// Its history is somewhere token-max does not read.
+    unsupported: bool,
+}
+
+/// A T3 OpenCode instance's profile: the data directory and config the server T3 spawns
+/// reads, under T3's environment and the instance's own. An instance that connects to a
+/// server at `serverUrl` keeps its history wherever that server runs, so it is excluded.
+fn opencode_instance(
+    options: &DiscoveryOptions,
+    state: &T3State,
+    id: &str,
+    instance: Instance,
+    file: &Path,
+) -> Result<Result<Profile, Excluded>, ScanError> {
+    #[derive(Default, Deserialize)]
+    #[serde(default, rename_all = "camelCase")]
+    struct OpenCodeConfig {
+        server_url: String,
+    }
+    let enabled = instance.resolved_enabled();
+    let config = instance
+        .config
+        .map(|raw| serde_json::from_str::<OpenCodeConfig>(raw.get()))
+        .transpose()
+        .map_err(|_| fail("invalid supported T3 provider controls", file))?
+        .unwrap_or_default();
+    if !config.server_url.trim().is_empty() {
+        return Ok(Err(Excluded {
+            reason: format!(
+                "T3 instance {id} connects to an OpenCode server at its serverUrl, whose history token-max does not read; its spend is excluded"
+            ),
+            missing: false,
+            unsupported: true,
+        }));
+    }
+    let mut env = options.env.clone();
+    let mut own_environment = vec![];
+    for entry in instance.environment {
+        if !OPENCODE_LOCATIONS.contains(&entry.name.as_str()) {
+            continue;
+        }
+        let Some(value) = entry.value else {
+            return Ok(Err(Excluded {
+                reason: format!(
+                    "T3 instance {id} sets {} to a secret value, so its OpenCode history is not located; its spend is excluded",
+                    entry.name
+                ),
+                missing: false,
+                unsupported: true,
+            }));
+        };
+        own_environment.push(entry.name.clone());
+        env.insert(entry.name, value);
+    }
+    let native_root = crate::opencode::data_dir(&options.home, &env);
+    let root = match crate::discovery::realpath(&native_root) {
+        Ok(root) => root,
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            return Ok(Err(Excluded {
+                reason: format!("T3 instance {id}: native history home {native_root} is missing"),
+                missing: true,
+                unsupported: false,
+            }));
+        }
+        Err(_) => {
+            return Err(fail(
+                "cannot inspect T3 provider home",
+                Path::new(&native_root),
+            ));
+        }
+    };
+    let local = DiscoveryOptions {
+        env,
+        ..options.clone()
+    };
+    let key = profile_key(&state.path, id);
+    let mut profile = crate::opencode::profile(&local, root.clone(), root, &key)?;
+    let policy_unresolved = managed_policy_unresolved();
+    profile.t3 = Some(T3Instance {
+        state: state.path.clone(),
+        instance: id.into(),
+        enabled,
+        // T3's idle compaction drives Claude sessions only.
+        idle_mode: T3IdleMode::Off,
+        idle_owner: format!("{}:providerInstances.{id}", file.display()),
+        settings_unresolved: policy_unresolved,
+        limitations: if policy_unresolved {
+            vec![POLICY_GAP.into()]
+        } else {
+            vec![]
+        },
+        env: None,
+        inherited_window: true,
+        environment: own_environment,
+        retained_since: None,
+    });
+    Ok(Ok(profile))
+}
+
 /// Link explicit T3 idle run identity through the shared native summary/boundary owner.
 pub(crate) fn attribute_compactions(scan: &mut Scan, charges: &[CompactionCharge]) {
     for charge in charges {
@@ -1027,6 +1161,19 @@ pub(crate) struct NativeIds {
     last_message: (String, String),
 }
 impl NativeIds {
+    /// Record one OpenCode session's native id, and its parent's for a subagent; `session`
+    /// is the key the reader gave it.
+    pub(crate) fn opencode(&mut self, session: &str, native: &str, parent: Option<&str>) {
+        self.ids
+            .entry(identity(native))
+            .or_insert_with(|| native.into());
+        if let Some(parent) = parent {
+            let key = identity(parent);
+            self.ids.entry(key.clone()).or_insert_with(|| parent.into());
+            self.parents.insert(session.into(), key);
+        }
+    }
+
     /// Record one transcript record's native keys; `session` is the key the reader gave it.
     pub(crate) fn observe(&mut self, raw: &Map<String, Value>, harness: Harness, session: &str) {
         let payload = raw.get("payload").and_then(Value::as_object);
@@ -1223,7 +1370,8 @@ fn native_request<'a>(r: &'a Request, ids: &'a NativeIds) -> Option<NativeReques
         root,
         native_session: ids.ids.get(root)?,
         // T3 records turns for the main conversation only; a subagent shares its root's owner.
-        native_turns: if r.agent == Agent::Subagent {
+        native_turns: if r.agent == Agent::Subagent || r.harness == Harness::OpenCode {
+            // T3 records no OpenCode turn token-max joins; the session's owner decides.
             vec![]
         } else if r.harness == Harness::Codex {
             r.turn
@@ -1254,7 +1402,7 @@ fn native_request<'a>(r: &'a Request, ids: &'a NativeIds) -> Option<NativeReques
 // arbitrary JSON objects leave SQLite.
 const PROVIDER_THREADS: &str = "SELECT provider_thread_id, driver,
  json_extract(payload_json,'$.nativeThreadRef.nativeId'), provider_instance_id, updated_at<=?1
- FROM orchestration_v2_projection_provider_threads WHERE driver IN ('claudeAgent','codex')";
+ FROM orchestration_v2_projection_provider_threads WHERE driver IN ('claudeAgent','codex','opencode')";
 // A provider thread updated after the native bound owns its session only through an
 // earlier event that already linked it.
 const OWNER_EVENT: &str = "SELECT EXISTS (SELECT 1 FROM orchestration_v2_projection_provider_threads pt
@@ -1663,10 +1811,10 @@ fn metadata(
         .ok_or_else(|| Unavailable::Schema(format!("invalid native bound {bound}")))?;
     let boundary = guards::boundary(tx)?;
     let driver = |h: Harness| -> &'static str {
-        if h == Harness::Claude {
-            "claudeAgent"
-        } else {
-            "codex"
+        match h {
+            Harness::Claude => "claudeAgent",
+            Harness::Codex => "codex",
+            Harness::OpenCode => "opencode",
         }
     };
     // The native turn and item ids each selected native session needs.
@@ -1698,6 +1846,7 @@ fn metadata(
         };
         let driver = match driver.as_str() {
             "claudeAgent" => "claudeAgent",
+            "opencode" => "opencode",
             _ => "codex",
         };
         if !wanted.contains_key(&(driver, native.as_str())) {
@@ -4901,5 +5050,116 @@ mod tests {
         )
         .unwrap();
         assert!(data.turns[&*request.id].joined.is_none());
+    }
+
+    #[test]
+    fn a_t3_opencode_instance_owns_the_sessions_its_threads_name_and_their_subagents() {
+        use crate::test_support::{OPENCODE_START, opencode_database};
+        let w = Workspace::new();
+        let file = opencode_database(&w.home);
+        // A session OpenCode's own CLI ran, in the same database.
+        let native_db = Connection::open(&file).unwrap();
+        native_db
+            .execute(
+                "INSERT INTO session_v2 VALUES ('ses_cli', NULL, '/work/repo', '2.2.0', ?1)",
+                [OPENCODE_START + 10_000],
+            )
+            .unwrap();
+        let step = json!({"model": {"id": "zen-flash", "providerID": "opencode"},
+            "tokens": {"input": 1, "output": 1, "reasoning": 0, "cache": {"read": 0, "write": 0}}});
+        native_db
+            .execute(
+                "INSERT INTO session_message VALUES ('msg_cli', 'ses_cli', 'assistant', 1, ?1, ?2)",
+                params![OPENCODE_START + 10_000, step.to_string()],
+            )
+            .unwrap();
+        drop(native_db);
+        let root = state(
+            &w,
+            json!({"providerInstances": {
+                "opencode": {"driver": "opencode", "enabled": true},
+                "remote": {"driver": "opencode", "enabled": true,
+                    "config": {"serverUrl": "http://127.0.0.1:4096"}}
+            }}),
+        );
+        let db = db(&root);
+        db.execute(
+            "INSERT INTO orchestration_v2_projection_provider_threads VALUES('pt','thread','opencode','opencode','2026-01-01T00:00:10Z',?1)",
+            [json!({"nativeThreadRef": {"nativeId": "ses_main"}}).to_string()],
+        )
+        .unwrap();
+        let scan = scan(&w.scan_options()).unwrap();
+        let instance = scan
+            .profiles
+            .iter()
+            .find(|p| p.t3.as_ref().is_some_and(|t| t.instance == "opencode"))
+            .unwrap();
+        let native = scan
+            .profiles
+            .iter()
+            .find(|p| p.harness == Harness::OpenCode && p.t3.is_none())
+            .unwrap();
+        assert_eq!(instance.histories, native.histories);
+        let owners = |session: &str| -> Vec<Vec<String>> {
+            let key = identity(session);
+            scan.requests
+                .iter()
+                .filter(|r| *r.session == *key)
+                .map(|r| r.profiles.to_vec())
+                .collect()
+        };
+        // The thread T3 ran, and the subagent it started, are the instance's alone.
+        assert_eq!(
+            owners("ses_main"),
+            [[instance.id.as_str()], [instance.id.as_str()]]
+        );
+        assert_eq!(owners("ses_sub"), [[instance.id.as_str()]]);
+        assert_eq!(owners("ses_cli"), [[native.id.as_str()]]);
+        assert!(
+            scan.t3[0]
+                .exclusions
+                .iter()
+                .any(|e| e.starts_with("T3 instance remote connects to an OpenCode server"))
+        );
+    }
+
+    #[test]
+    fn a_t3_opencode_instance_reads_its_own_database() {
+        use crate::test_support::opencode_database;
+        let w = Workspace::new();
+        let native = opencode_database(&w.home);
+        let moved = w.home.join("moved.db");
+        std::fs::copy(&native, &moved).unwrap();
+        std::fs::remove_file(&native).unwrap();
+        state(
+            &w,
+            json!({"providerInstances": {"opencode": {"driver": "opencode", "enabled": true,
+                "environment": [{"name": "OPENCODE_DB", "value": moved.to_str().unwrap()}]}}}),
+        );
+        // `--defaults` keeps where the instance's history is.
+        for defaults in [false, true] {
+            let mut options = w.scan_options();
+            options.discovery.defaults = defaults;
+            let scan = scan(&options).unwrap();
+            assert!(
+                !scan.t3[0]
+                    .exclusions
+                    .iter()
+                    .any(|e| e.starts_with("T3 instance opencode")),
+                "{:?}",
+                scan.t3[0].exclusions
+            );
+            let instance = scan
+                .profiles
+                .iter()
+                .find(|p| p.t3.as_ref().is_some_and(|t| t.instance == "opencode"))
+                .unwrap();
+            assert!(
+                scan.requests
+                    .iter()
+                    .any(|r| r.profiles.contains(&instance.id)),
+                "defaults: {defaults}"
+            );
+        }
     }
 }

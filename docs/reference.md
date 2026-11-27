@@ -5,9 +5,11 @@ the accounting underneath.
 
 ## Running it
 
-`token-max doctor` prints the report, then, when stdin and stdout are both a
-terminal, walks through its changes. [`token-max vibes`](#vibes) prints the
-advice the transcripts can't price, which `doctor` leaves out.
+`token-max doctor` prints the report. When stdin and stdout are both a
+terminal, it instead offers its changes, as a [checklist](#the-checklist) or
+line by line in a walk that prints the report after its questions.
+[`token-max vibes`](#vibes) prints the advice the transcripts can't price,
+which `doctor` leaves out.
 [`token-max sessions`](#session-export) and [`token-max audit`](#transcript-audit)
 print JSON for other tools, and `token-max skill` installs and serves the
 [`token-audit` skill](#token-audit-skill). Bare
@@ -86,13 +88,13 @@ inline [checklist](#the-checklist) below the prompt. With `--plain` or
 `--details`, under `TERM=dumb`, or on a smaller terminal, it walks through them
 line by line, as the rest of this section says.
 
-On a terminal, `doctor` opens with one header line naming what it read: the
+After the scan, the line-by-line walk opens with one header line naming what it read: the
 requests, the sessions they ran in (each subagent counted with the session
 that spawned it), the window and their cost. The
 [savings against the defaults](#savings-against-the-defaults) line follows it,
 so a run with nothing to change still shows what the settings already save;
-with `--ssh`, one total across hosts and its one such line come first instead,
-and under `--defaults` there is no such line. It then walks through each change it can
+with `--ssh`, one total across hosts and its one such line come first instead.
+It then walks through each change it can
 make, after a headline counting its questions and the changes they cover,
 across every settings file, recommended and worth considering alike, biggest
 monthly saving first. Each change is a card. Its first line is a counter, such
@@ -171,7 +173,7 @@ variable in a Claude settings file's `env` block that no accepted change sets,
 and each in Codex's `shell_environment_policy.set`. Then one question asks whether to write the accepted
 changes, naming each file; nothing is written before that yes, end of input is a no,
 and a no says nothing was written. Each file is then written once, with every
-edit accepted for it. After the confirm, a **Not written** section per file
+edit accepted for it. After the confirm, a `NOT WRITTEN` section per file
 lists every edit left unwritten, whether declined at its question or at the
 confirm, one line per key as the report's closing sections show them, including
 the MCP server removals and `deniedMcpServers` entries offered after a yes and
@@ -235,9 +237,10 @@ taller than the window scrolls with PgUp and PgDn. `s` splits a section into
 its members, each checked on its own. A section that turns off MCP servers
 shows a second box, unchecked, for removing their configuration entries and
 blocking them by name, as the walk's follow-up question offers; `r` checks it.
-Settings already better than the defaults follow under `ALREADY GOOD`, each
-with what it saves against the default when measured. Steps by hand print after the
-checklist closes.
+Every setting the report keeps follows under `ALREADY GOOD`, each with what it
+saves against its default when measured; kept features saving under $1/mo fold
+into one count. Steps by hand print when `Enter` closes the checklist or after
+a write; `q` and `Esc` leave without them.
 
 Each row is a section across every host, as the walk asks it. `Tab` or `v`
 switches to `vibes`' cards from the same scan, each unchecked, each opening to
@@ -247,7 +250,7 @@ its offers, so `token-max vibes` applies them. A card that another card's
 change rebuilds, such as the advisor card once an Opus main default is
 checked, shows its rebuilt version, as the walk would ask it after a yes.
 
-`Enter` shows the checked edits as the diff the confirm below describes, its
+`Enter` shows the checked edits as the diff the confirm above describes, its
 long lines wrapped. `y` writes them; `Esc` goes back and `q` leaves with
 nothing written. A held or repeated Enter never writes, since `y` is its own
 key. After a write the checklist prints what each host wrote; when a later
@@ -372,8 +375,9 @@ host's changes). Splitting a section asks each member on its own, biggest
 saving first, naming its host, and a member whose name another host shares
 reads as `dataviz on devbox`. The last question offers to remove the servers
 that are off already on every host. The running total sums the accepted
-changes of every host, as a percent of the hosts' spend together. One report
-follows the walk, marked with each host's answers, and the confirm shows every
+changes of every host, as a percent of the hosts' spend together. After the
+line-by-line walk, one report follows, marked with each host's answers (the
+checklist prints none), and the confirm shows every
 host's diffs and names each file as `host:path`, such as
 `devbox:~/.claude/settings.json`.
 
@@ -402,11 +406,13 @@ cuts nothing short, so the run reports what it wrote and exits 0.
 ## Profiles
 
 Without directory flags, discovery includes `~/.claude`, `~/.codex`,
-`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and recognizable `~/.claude*` and `~/.codex*`
-profiles. Codex includes archived sessions; Claude includes nested subagents.
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, recognizable `~/.claude*` and `~/.codex*`
+profiles, and [OpenCode](#opencode)'s data directory. Codex includes archived
+sessions; Claude includes nested subagents.
 T3 instances are included from `~/.t3/userdata`, an existing `~/.t3/dev`,
-and `$T3CODE_HOME/userdata`. Repeatable `--claude-dir`, `--codex-dir` and
-`--t3-dir` flags select only those roots across both harnesses. `--t3-dir`
+and `$T3CODE_HOME/userdata`. Repeatable `--claude-dir`, `--codex-dir`,
+`--opencode-dir` and `--t3-dir` flags select only those roots across every
+harness. `--t3-dir`
 takes a state directory containing `settings.json` and optionally `statev2.sqlite`. `--details` shows every discovered root's selection. A missing or
 inaccessible explicitly selected root fails the run. Missing default roots do not.
 
@@ -433,6 +439,57 @@ server's use counts on every line that shares a settings file with the
 profiles that recorded it, so no line offers to turn off what one of its
 files used.
 
+### OpenCode
+
+An OpenCode profile is a data directory, `$XDG_DATA_HOME/opencode` or
+`~/.local/share/opencode` on every platform, and its history is the
+`opencode.db` there, or the database `OPENCODE_DB` names when the shell's
+OpenCode uses that directory (`:memory:` keeps none). `--opencode-dir` takes
+such a directory. Its settings are
+the global `config.json`, `opencode.json` and `opencode.jsonc` under
+`$XDG_CONFIG_HOME/opencode` or `~/.config/opencode`, merged in that order, and
+the file `OPENCODE_CONFIG` names when the shell's OpenCode uses that data
+directory. A session's project files are each `opencode.json` and
+`opencode.jsonc` from its repository root down to its directory, then the same
+files in each of those directories' `.opencode/`, which outrank them. A confirmed
+change is written to the global file with the highest precedence that exists,
+or a new `opencode.json`, keeping its comments, key order and layout; a change
+the file's shape cannot take, such as a key under a value that is no object,
+is shown as a step by hand instead. Credentials in the file, anything under
+a `headers`, `env`, `environment` or `oauth` key and any API key, show masked
+in the confirm's diff. The `sessions` export, T3's `opencode` instances and
+`--ssh` hosts read OpenCode the same way; `audit` does not.
+
+Every assistant step OpenCode recorded usage for is one request, priced from
+its recorded `providerID` and model ID (see [Prices](#prices)); OpenCode's own
+`cost` field is never read. Its main session and each subagent session it
+spawned, such as `explore`, are split as Claude Code's are. Skills, MCP
+servers and instruction files are sized from the instructions, skill listing
+and Code Mode catalog OpenCode 2 recorded for each session, and judged by their
+recorded uses: the `skill` tool's calls, a skill picked with `@` and a skill
+message count for a skill, and Code Mode calls for an MCP server. A skill is
+turned off with a `{"action": "skill", "resource": "<id>", "effect": "deny"}`
+rule appended to `permissions` when a global file orders its permissions there,
+since the last matching rule wins, and with `permission.skill.<id> = "deny"`
+otherwise. When a rule OpenCode reads later could allow the skill again, an
+agent's own `permissions`, a file `OPENCODE_CONFIG` names or a project the
+sessions ran in, the skill's line offers no switch. An MCP server is turned off with `disabled: true` under
+`mcp.servers.<name>`, or `enabled: false` under OpenCode 1's `mcp.<name>`, in
+the shape its file declares it; a file may mix both, and `mcp.servers` wins a
+name both declare. A server a project the sessions ran in
+declares, which replaces the global declaration there, gets a line with no
+switch, and so do OpenCode's built-in Code Mode namespaces, `browser` and
+`opencode`. A project whose settings cannot be read leaves every OpenCode
+switch to the person, and the report's coverage notes name its directory.
+Profiles that share a settings file but take different switches get lines of
+their own. A subagent model line credits a definition only when the run's
+model came through the provider it names. Subagent model lines name `agents.<name>.model`, whose variant (a
+`#variant` suffix, or `variant` in its object form) sets the effort, or
+OpenCode 1's `agent.<name>.model` and `variant`. The cache TTL, compaction, keepalive,
+audit and effort checks replay only Claude Code and Codex, so an OpenCode
+profile's spend counts in the report's totals but gets none of those lines.
+See [Replay semantics](semantics.md#opencode) for what each piece assumes.
+
 ## Prices
 
 The first online run fetches only `https://models.dev/api.json`, caching validated
@@ -450,6 +507,13 @@ and Claude Models on Google Cloud. That provider is read from the profile's
 settings file and the shell, not from project settings, so a project whose
 settings choose a different provider, or turn the profile's off, is still
 priced at the profile's catalog.
+
+An OpenCode request is priced only at the catalog entry of the provider and
+model it recorded, such as `opencode`, `opencode-go` or `anthropic`; a model
+that provider's catalog lacks stays unpriced, even when another provider
+lists it. OpenCode records no service tier, so every request is priced at the
+standard rate, and one cache-write count without its lifetime, so writes are
+priced at the catalog's cache-write rate, Anthropic's 5-minute one.
 
 ## Plans and API prices
 
@@ -584,13 +648,13 @@ setting that changes it. A section's row names the settings its members
 change, such as `skillOverrides.*`, and `--details` lists each member under it.
 
 The report ends with the edits its changes name, so the lines above stay one
-row each: an **Edits** section per settings file, named as `host:path` under
+row each: an `EDITS` section per settings file, named as `host:path` under
 `--ssh`, with one line per key. A list's added members share one line with
 their count, such as `permissions.deny += ScheduleWakeup, ReportFindings (2)`,
 and settings under one parent set to one value share one too, such as
 `skillOverrides.{a, b} = "off" (2)` for two skills turned off. `--details`
 shows each edit's exact JSON or TOML instead. Steps to take by hand, such as
-one a shell variable would override, follow in a **Steps by hand** section,
+one a shell variable would override, follow in a `STEPS BY HAND` section,
 named after its host under `--ssh`, each naming its line and why token-max
 can't take it.
 
@@ -602,11 +666,11 @@ Advice that the transcripts can't price, such as a provider's guidance, is no
 part of this report: [`token-max vibes`](#vibes) shows it, and `doctor` only
 offers to.
 
-The lines come in two groups. **Changes** come first: every line recommended
+The lines come in two groups. `CHANGES` come first: every line recommended
 (red, exit 1) or worth considering (yellow, exit 0), ranked together by what
 they save per 30 days, biggest first, with those whose saving was not
 measured after the rest. A feature turned off saves what it cost, assuming
-nothing else changes. **Everything else** follows, ranked by what it costs,
+nothing else changes. `EVERYTHING ELSE` follows, ranked by what it costs,
 biggest first, with lines whose cost is unknown or that have no figure after.
 When several profiles were read, each line also names the settings file that
 owns it, or the profile when no file does (see [Profiles](#profiles)); a
@@ -769,7 +833,7 @@ setting differs from its default gets a note under it naming the default and
 what the current value saves against it, such as `default 5m, saves $410/mo`,
 or `costs $12/mo more` when the current value costs more. The line shows on
 every run, including one with nothing left to change, and reads "No
-setting was found to differ from its Claude Code or Codex default." when none
+setting was found to differ from its Claude Code, Codex or OpenCode default." when none
 differs. A line whose current value is unknown gets no note, and that
 sentence does not claim it matches its default. On a terminal the same line
 also opens `doctor`'s walk, under its header, before the first question.
@@ -933,7 +997,8 @@ than adding its tools'.
 Removing a piece can also shift later cache writes and compaction, which this
 does not model. Claude requests without a recorded shape cannot price their
 context pieces. Codex prices rendered chronological context with a quarter-token
-per-character estimate; metadata-only pieces remain unknown.
+per-character estimate; metadata-only pieces remain unknown. OpenCode's pieces
+use the same estimate, each at the start of every request of its session.
 
 Comparisons use the requests priced under both options and extrapolate to the
 rest, assuming requests with missing usage resemble the measured ones, so a
@@ -994,7 +1059,11 @@ puts the verdict word back in place of the dot. Evidence cards keep their
 verdict words and only add color, and each names its claim. Redirected output
 is plain, and progress appears only on interactive stderr.
 Unicode decorations require a UTF-8 locale. Progress is one line that shows each
-phase in turn and clears itself before the report. While this host's
+phase in turn and clears itself before the report. With Unicode on a stderr at
+least 65 columns by 14 rows, it is instead a ten-row panel beside an animated
+piggy bank: the phase, a bar of the bytes read or the checks done, the
+sessions, requests and spend, and what the changes found so far save; the rest
+of this section describes the line. While this host's
 transcripts are read it is a bar of the bytes read out of the total discovery
 found, with the time left to read them at the rate so far; the analysis after
 reading has no measured fraction, so its phases show a spinner and how long
@@ -1043,10 +1112,10 @@ checks, the defaults figure, the changes found, the spend, the requests, the
 "up to" figures, the sessions, the tokens, then a count of what wasn't
 measured when nothing beside it was.
 
-On a terminal, `doctor` opens with its name, says it is about to scan this
-host's transcripts, and lists each profile root it found with its transcript
-files and their size, then the SSH destinations it adds, or how to add one with
-`--ssh`, before it asks how a profile pays.
+On a terminal, `doctor` and `vibes` open with token-max's name, say they are
+about to scan this host's transcripts, and list each profile root found with
+its transcript files and their size, then the SSH destinations added, or how to
+add one with `--ssh`, before asking how a profile pays.
 
 ## Machine-readable output
 
@@ -1164,7 +1233,7 @@ The object holds:
 - `totals`: the sessions, requests and cost in scope, and the sessions whose
   cost is a lower bound (`incomplete`).
 - `cacheMisses`: requests that lost cache reuse against the request before them
-  in the session, in all and `byCause`, and the costliest as `hotspots`, each
+  in the session, as `total` and `byCause`, and the costliest as `hotspots`, each
   with its `cause`, the `change` for a control change, the tokens rewritten or
   sent again, the gap and the cache lifetime it was compared with, the tools
   the earlier request's response called, and pointers to both. Claude records
@@ -1259,7 +1328,9 @@ nowhere else. `--project` writes the current directory's `.agents`, and
 its `.claude` when that exists. A directory two of them reach through a
 symlink is written once. A `SKILL.md` that already matches is left alone; one
 that differs, such as an edited copy, stops the install before anything is
-written, unless `--force` replaces it. Exit 0: printed or installed. Exit 2:
+written, unless `--force` replaces it. A `SKILL.md` that is a link and
+differs stops it even with `--force`, which never writes through a link, and
+under `--project` so does one that links outside the current directory. Exit 0: printed or installed. Exit 2:
 argument, read or write failure.
 
 `token-max vibes` has a `Token audit skill` card for each host,
@@ -1275,9 +1346,10 @@ instance's included, quoted when its path needs it, or `npx skills add` when
 none needs it. When Codex is missing it and neither `~/.agents` nor the shell's
 Codex home (`CODEX_HOME` or `~/.codex`) exists, the step first creates
 `~/.agents`, which a bare install then writes.
-With `--ssh`, each host looks in its own homes; the step runs there, where
-token-max may be only the cached copy `--ssh` put there and not on the `PATH`,
-so the card also names `npx @kixel/crabx token-max` for a host without it. `doctor`
+With `--ssh`, each host looks in its own homes and the step runs there. Every
+step also names `npx @kixel/crabx token-max` for a host where token-max isn't
+on the `PATH`, such as an `--ssh` destination holding only the cached copy
+`--ssh` put there. `doctor`
 has no line for it, and it sets no exit code.
 
 ## Cache TTL
@@ -1480,8 +1552,12 @@ stay unknown; `postTokens` alone cannot establish the full request.
 
 ## T3 Code
 
-T3's Claude Code and Codex instances reuse their native histories, including
-retained histories of disabled instances. Shared homes, Codex shadow-home
+T3's Claude Code, Codex and OpenCode instances reuse their native histories,
+including retained histories of disabled instances. An OpenCode instance owns
+the sessions its threads name and the subagent sessions they spawned; the rest
+of the database stays native OpenCode's. An OpenCode instance with a
+`serverUrl` runs on a server whose history token-max does not read, so its
+spend is an explicit coverage gap. Shared homes, Codex shadow-home
 symlinks and request identities are deduplicated. T3 Usage aggregates are never
 added to native billed requests. Unsupported providers are explicit coverage
 gaps. Each T3 state gets a line naming the model its
@@ -1561,11 +1637,12 @@ environment and reads its transcripts and settings, priced from the one catalog
 this host loads and sends it. For a report it runs `token-max doctor --ssh-scan`,
 which runs every check there and sends back only its finished report. For
 session lines it runs `token-max sessions --ssh-scan`, which sends back only
-the priced session lines of that host's transcripts. Either way its transcripts
+the priced session lines of that host's transcripts. For an audit it runs
+`token-max audit --ssh-scan`, which sends back only its ranked findings. Either way its transcripts
 and scan never leave it, and this host never holds more than its own scan.
 A destination may not be trustworthy, so this host reads at most 16 MiB of
-its report, its `vibes` advice or a walk's preview, 256 MiB of its session
-lines, 1 MiB of its profiles or of the files it wrote, and 1 KiB of its
+its report, its `vibes` advice or a walk's preview, 64 MiB of its audit
+findings, 256 MiB of its session lines, 1 MiB of its profiles or of the files it wrote, and 1 KiB of its
 header. A destination that sends more fails the run, naming the limit it
 passed. For scale, a report from a host with ten gigabytes of transcripts is
 about 170 KB, and all of that host's session lines about 12 MB.
@@ -1775,7 +1852,7 @@ an exit code.
 | [Auto-compact window](#auto-compact-window-cap) | Every compaction window line: Kixel's cap of 400K for Claude and 240K for Codex, beside `doctor`'s replay of it. |
 | [Main-session default](#main-session-default) | Every resolved main-session default: Kixel's pick of a model and effort beside what each recorded pair cost, and past `high` the provider's guidance. |
 | [Subagent default](#subagent-default) | A profile that sets `CLAUDE_CODE_SUBAGENT_EFFORT` or Codex's `agents.default_subagent_reasoning_effort`: past `high` the provider's guidance and the change to `high`, and an upgrade when the latest Claude Code ignores the variable. |
-| An instruction file | A CLAUDE.md of 200 lines or more, past Claude Code's [guidance](https://code.claude.com/docs/en/memory#write-effective-instructions), or an AGENTS.md at or above the byte budget Codex [loads](https://learn.chatgpt.com/docs/agent-configuration/agents-md), with what each 100 lines of it costs. |
+| An instruction file | A CLAUDE.md or CLAUDE.local.md of 200 lines or more, past Claude Code's [guidance](https://code.claude.com/docs/en/memory#write-effective-instructions), or an AGENTS.md at or above the byte budget Codex [loads](https://learn.chatgpt.com/docs/agent-configuration/agents-md), with what each 100 lines of it costs. |
 | Explore subagent | Claude's built-in Explore ran off Haiku: what it cost, the same tokens on the cheapest model, the model guide's tip, and the agent file that follows it as a step by hand. |
 | Fable weekly use | Any Fable request in the window: what they cost, and Anthropic's [plan rule](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan). |
 | [Advisor model](#advisor-model) | Every Claude settings file: with no `advisorModel`, the advisor one rank above the main-session default, citing Claude Code's [advisor page](https://code.claude.com/docs/en/advisor). |
@@ -1788,8 +1865,8 @@ their costs are measured; only the advice about them is here.
 
 On a terminal, the cards are a [checklist](#the-checklist), each unchecked:
 Space checks a card that names the settings to change, Enter shows the checked
-edits as a diff of each file and `y` writes them. With `--plain` or under
-`TERM=dumb`, such a card ends with `Change`, the edit and its file, and asks
+edits as a diff of each file and `y` writes them. With `--plain`, under
+`TERM=dumb`, or on a terminal too small for the checklist, such a card ends with `Change`, the edit and its file, and asks
 `Accept?` with `y`, `n` or `q` to stop, and the accepted edits are shown as a
 diff and written after a final yes. Every other card is shown with no question.
 Either way the write uses the checks, lock and [backups](#backups) `doctor`
@@ -1804,7 +1881,8 @@ has its card in `vibes`, and is not worth the question. A card whose setting a
 change `doctor` just wrote moves, such as the
 [compaction window](#auto-compact-window-cap), reads as it does after that
 change, and the count is taken after the writes. Under `--defaults`,
-`doctor` names no count, since `vibes` reads the settings as they are. With `--ssh`, each host's cards name their host, and
+`doctor` doesn't mention `vibes`, since its count would be of settings
+pretended away and `vibes` reads the settings as they are. With `--ssh`, each host's cards name their host, and
 each destination checks and writes its own files, as in
 [`doctor`'s walk](#on-ssh-hosts).
 

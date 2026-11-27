@@ -260,6 +260,7 @@ pub fn found(harness: Harness, root: &str, homes: &Homes<'_>) -> Found {
         Harness::Codex => {
             Path::new(home).join(".agents").is_dir() || Path::new(homes.active).is_dir()
         }
+        Harness::OpenCode => unreachable!("OpenCode profiles look for no skill"),
     };
     let at = |dir: &Path| {
         dir.join("skills")
@@ -276,6 +277,7 @@ pub fn found(harness: Harness, root: &str, homes: &Homes<'_>) -> Found {
             installed: at(&Path::new(home).join(".agents")) || at(Path::new(root)),
             default: bare,
         },
+        Harness::OpenCode => unreachable!("OpenCode profiles look for no skill"),
     }
 }
 
@@ -326,6 +328,7 @@ pub fn item(profiles: &[Profile], home: Option<&str>) -> Option<Item> {
         .map(|(p, _)| match p.harness {
             Harness::Claude => format!("Claude Code in {}", shown(&p.root)),
             Harness::Codex => format!("Codex in {}", shown(&p.root)),
+            Harness::OpenCode => unreachable!("OpenCode profiles look for no skill"),
         })
         .collect();
     // A T3 instance's own environment selects its home, which the shell may not.

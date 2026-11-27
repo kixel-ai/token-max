@@ -1131,8 +1131,9 @@ const TRIGGER_KEYS: [&str; 4] = [
     "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
 ];
 
-/// Resolve `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, or None when it is unset or cannot lower a
-/// trigger: Claude Code ignores a percentage at or above its default, which is below 100.
+/// Resolve `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, or None when it is unset or 100 or more, which
+/// never lowers a trigger. Claude Code also ignores one at or above its own default, which is
+/// undocumented, so a value below 100 is kept.
 fn percent_override(
     scopes: &[SettingsScope],
     env: &Env,
@@ -1979,6 +1980,7 @@ pub fn speed_controls(
         replacement: match harness {
             Harness::Claude => "fastMode: false; /fast off for an active session",
             Harness::Codex => "service_tier = \"default\"; /fast off for an active session",
+            Harness::OpenCode => unreachable!("OpenCode has no speed control"),
         }
         .into(),
         resolved: value.is_some(),

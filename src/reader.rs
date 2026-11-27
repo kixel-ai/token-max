@@ -879,6 +879,7 @@ impl FileState {
                     (Harness::Claude, true) => Agent::Subagent,
                     (Harness::Claude, false) => Agent::Main,
                     (Harness::Codex, _) => Agent::Unknown,
+                    (Harness::OpenCode, _) => unreachable!("OpenCode has no transcript files"),
                 },
                 model: None,
                 provider: None,
@@ -982,11 +983,13 @@ fn request(
             harness: snapshot.harness,
             session: context.session.clone(),
             agent: context.agent,
+            mode: None,
             model: context.model.clone(),
             provider: context.provider.clone(),
             api: match snapshot.harness {
                 Harness::Claude => Api::Messages,
                 Harness::Codex => Api::Responses,
+                Harness::OpenCode => Api::Unknown,
             },
             source: context.source.clone(),
             trigger: context.trigger.clone(),
@@ -1233,6 +1236,110 @@ impl Reader {
             .unwrap_or_else(PoisonError::into_inner) = Some(counts);
     }
 
+    /// Read every OpenCode database once, as the profiles that share it.
+    fn opencode(
+        &mut self,
+        profiles: &mut [Profile],
+        options: &crate::discovery::DiscoveryOptions,
+        native: &mut crate::t3::NativeIds,
+    ) -> Result<(), ScanError> {
+        let mut databases: IndexMap<String, Vec<String>> = IndexMap::default();
+        for p in profiles.iter().filter(|p| p.harness == Harness::OpenCode) {
+            for history in &p.histories {
+                databases
+                    .entry(history.clone())
+                    .or_default()
+                    .push(p.id.clone());
+            }
+        }
+        for (file, ids) in databases {
+            let history = crate::opencode::read(&file, &ids)?;
+            let file: Text = file.into();
+            for session in &history.sessions {
+                self.sessions.opencode(session, &file);
+                native.opencode(&session.key, &session.id, session.parent.as_deref());
+            }
+            // The project files each session's directory reads. A server one declares replaces
+            // the global one there, and a skill rule one sets follows the global ones, so a
+            // switch in the global file would not reach either.
+            let mut projects: HashMap<&str, Vec<crate::opencode::Server>> = HashMap::default();
+            let mut unresolved: Vec<&str> = vec![];
+            let mut reallowed = false;
+            for cwd in history.sessions.iter().filter_map(|s| s.cwd.as_deref()) {
+                if projects.contains_key(cwd) || unresolved.contains(&cwd) {
+                    continue;
+                }
+                match crate::opencode::project_layers(options, cwd) {
+                    Ok(layers) => {
+                        reallowed |= layers.iter().any(|l| crate::opencode::reallows(&l.config));
+                        // A project's declaration replaces the global one by name.
+                        let declared = crate::opencode::project_servers(&layers);
+                        projects.insert(cwd, declared);
+                    }
+                    Err(_) => unresolved.push(cwd),
+                }
+            }
+            for cwd in &unresolved {
+                self.issues.insert(
+                    format!(
+                        "OpenCode project settings under {cwd} could not be read, so OpenCode's MCP servers and skills there offer no switch"
+                    )
+                    .into(),
+                );
+            }
+            let global: Vec<String> = profiles
+                .iter()
+                .filter(|p| ids.contains(&p.id))
+                .flat_map(|p| crate::opencode::declared(&p.mcp_servers))
+                .map(|s| s.name)
+                .collect();
+            for p in profiles.iter_mut().filter(|p| ids.contains(&p.id)) {
+                if !unresolved.is_empty() {
+                    p.mcp_servers.clear();
+                } else {
+                    p.mcp_servers.retain(|entry| {
+                        crate::opencode::declared(std::slice::from_ref(entry))
+                            .iter()
+                            .all(|s| !projects.values().flatten().any(|n| n.name == s.name))
+                    });
+                }
+                if reallowed || !unresolved.is_empty() {
+                    p.settings.insert(
+                        crate::opencode::REALLOWED.into(),
+                        crate::model::Scalar::Bool(true),
+                    );
+                }
+            }
+            // The servers each session could call: the global ones its project leaves alone,
+            // and those its project declares switched on.
+            let servers: HashMap<Text, Vec<String>> = history
+                .sessions
+                .iter()
+                .map(|s| {
+                    let own: &[crate::opencode::Server] = s
+                        .cwd
+                        .as_deref()
+                        .and_then(|cwd| projects.get(cwd))
+                        .map_or(&[], Vec::as_slice);
+                    let kept = global
+                        .iter()
+                        .filter(|name| own.iter().all(|o| o.name != **name))
+                        .cloned();
+                    let enabled = own.iter().filter(|o| o.enabled).map(|o| o.name.clone());
+                    (s.key.clone(), kept.chain(enabled).collect())
+                })
+                .collect();
+            self.exposure.opencode(&file, &ids, &servers, &history);
+            for subagent in history.subagents {
+                self.spawned(subagent);
+            }
+            for r in history.requests {
+                self.add(r);
+            }
+        }
+        Ok(())
+    }
+
     fn add(&mut self, mut r: Request) {
         self.strings.request(&mut r);
         let answered = add(&mut self.requests, &mut self.strings, r);
@@ -1286,6 +1393,7 @@ impl Reader {
         let read = match snapshot.harness {
             Harness::Claude => self.claude(snapshot, file, raw, location, time, kept),
             Harness::Codex => self.codex(snapshot, file, raw, location, time, kept),
+            Harness::OpenCode => unreachable!("OpenCode has no transcript files"),
         };
         if let Err(error) = read {
             // Only a replay keeps records before the window; any other scan fails on one as
@@ -2373,6 +2481,22 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         if let Some(reading) = &options.reading {
             reading.read.store(finished, Ordering::Relaxed);
         }
+    }
+    // The transcript audit, the only replay-reach scan, covers Claude Code and Codex alone.
+    let opencode = options.reach != Reach::Replay;
+    if let Some(reading) = &options.reading
+        && opencode
+        && profiles
+            .iter()
+            .any(|p| p.harness == Harness::OpenCode && !p.histories.is_empty())
+    {
+        reading.step(Some("Reading OpenCode's database"));
+    }
+    if opencode {
+        reader.opencode(&mut profiles, &options.discovery, &mut native_ids)?;
+    }
+    if let Some(reading) = &options.reading {
+        reading.step(None);
     }
     let Reader {
         exposure,

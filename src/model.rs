@@ -215,7 +215,7 @@ impl Interner {
     }
 }
 
-/// The two locally supported transcript formats.
+/// The locally supported coding agents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Harness {
@@ -223,6 +223,8 @@ pub enum Harness {
     Claude,
     /// Codex.
     Codex,
+    /// OpenCode, whose history is one SQLite database rather than transcript files.
+    OpenCode,
 }
 
 impl Harness {
@@ -231,6 +233,7 @@ impl Harness {
         match self {
             Harness::Claude => "claude",
             Harness::Codex => "codex",
+            Harness::OpenCode => "opencode",
         }
     }
 
@@ -239,6 +242,16 @@ impl Harness {
         match self {
             Harness::Claude => "Claude Code",
             Harness::Codex => "Codex",
+            Harness::OpenCode => "OpenCode",
+        }
+    }
+
+    /// Whether token-max replays its cache and compaction settings: Claude Code's and
+    /// Codex's are, OpenCode's not yet.
+    pub fn replayed(self) -> bool {
+        match self {
+            Harness::Claude | Harness::Codex => true,
+            Harness::OpenCode => false,
         }
     }
 }
@@ -470,6 +483,9 @@ pub struct RequestMeta {
     pub harness: Harness,
     pub session: Text,
     pub agent: Agent,
+    /// The named agent that sent it, whose system prompt it opened with, such as OpenCode's
+    /// `build`; None where unrecorded.
+    pub mode: Option<Text>,
     pub model: Option<Text>,
     pub provider: Option<Text>,
     pub api: Api,
@@ -1092,7 +1108,8 @@ pub struct Profile {
     /// How a Claude profile pays, when doctor asked; None when unasked or for a cloud provider.
     pub billing: Option<Billing>,
     pub settings: IndexMap<String, Scalar>,
-    /// MCP server ids the settings file declares, which its own switches can turn off.
+    /// MCP server ids the settings file declares, which its own switches can turn off; for
+    /// OpenCode, each switched-on server's key path as a JSON list.
     pub mcp_servers: Vec<String>,
     pub compaction: CompactionControls,
     pub idle: Option<IdleControl>,
@@ -1225,6 +1242,12 @@ pub struct AgentDefinition {
     pub effort: Option<String>,
     /// When the file last changed, so runs from before a change are not attributed to it.
     pub modified: Option<Millis>,
+    /// The key that names its model and effort, where a harness has more than one: OpenCode
+    /// 2's `agents` or OpenCode 1's `agent`.
+    pub key: Option<String>,
+    /// The provider its model is selected through, where the harness names one, such as
+    /// OpenCode's `providerID`.
+    pub provider: Option<String>,
 }
 
 /// T3's three idle policies, independent of native Claude's interactive idle setting.
@@ -3043,7 +3066,16 @@ pub struct Calibration {
 pub enum ControlValue {
     Text(String),
     Bool(bool),
-    Skill { path: String, enabled: bool },
+    Skill {
+        path: String,
+        enabled: bool,
+    },
+    /// An OpenCode 2 `permissions` rule: `effect` for `action` on `resource`.
+    Rule {
+        action: String,
+        resource: String,
+        effect: String,
+    },
 }
 
 /// One settings.json change: set `path` to `value`, or add `value` to the list at `path`.
@@ -3142,7 +3174,8 @@ pub struct ContextCost {
     pub cost_per_use_usd: Option<f64>,
     /// "off" when never used, "consider" above the cost-per-use limit or when
     /// nonuse is unproven, else "keep"; None when unpriced, unswitchable, no
-    /// longer sent, tier-sensitive, or covered by a server-off verdict.
+    /// longer sent, tier-sensitive, covered by a server-off verdict, or auto memory, which its
+    /// own check judges.
     pub verdict: Option<Verdict>,
     /// Characters of the largest single result, for tool output.
     pub largest_characters: Option<i64>,

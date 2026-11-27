@@ -65,7 +65,8 @@ pub(crate) struct Hero {
     pub vibes_pending: usize,
     /// Already-good settings (shown with green `✓` in the Measured scorecard).
     pub kept: Vec<KeptItem>,
-    /// Count of remaining in-budget tools/skills folded into a single summary line.
+    /// Count of kept features (tools, skills, MCP servers and the like) saving under $1/mo,
+    /// folded into a single summary line.
     pub kept_features: usize,
 }
 
@@ -1357,9 +1358,8 @@ impl App {
                 let ok = if self.unicode { "✓" } else { "+" };
                 let n = self.hero.kept_features;
                 let msg = format!(
-                    "        {} {n} tool{} & skill{} within budget",
+                    "        {} {n} feature{} within budget",
                     self.style(GREEN, ok),
-                    if n == 1 { "" } else { "s" },
                     if n == 1 { "" } else { "s" },
                 );
                 body_blocks.push((false, vec![String::new(), self.style(DIM, &msg)]));

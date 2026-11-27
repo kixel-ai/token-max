@@ -116,6 +116,36 @@ impl Sessions {
         self.facts.get(session)?.repository.as_deref()
     }
 
+    /// Note an OpenCode session from its database row, which names everything a session's
+    /// records would.
+    pub(crate) fn opencode(&mut self, session: &crate::opencode::Session, file: &Text) {
+        let facts = self
+            .facts
+            .entry(session.key.clone())
+            .or_insert_with(|| Facts {
+                created: None,
+                id: None,
+                forked_from: None,
+                parent: None,
+                cwd: None,
+                repository: None,
+                branches: vec![],
+                before_window: None,
+                review: false,
+                files: vec![],
+            });
+        facts.created = Some(session.created);
+        facts.id = native(Some(&Value::from(session.id.as_str())));
+        facts.parent = session
+            .parent
+            .as_deref()
+            .and_then(|p| native(Some(&Value::from(p))));
+        facts.cwd = session.cwd.clone();
+        if !facts.files.contains(file) {
+            facts.files.push(file.clone());
+        }
+    }
+
     pub(crate) fn observe(&mut self, record: Record) {
         let index = match self.facts.get_index(self.last) {
             Some((key, _)) if key == record.session => self.last,
@@ -202,6 +232,7 @@ impl Sessions {
                 });
                 branch(git.and_then(|git| git.get("branch")))
             }
+            Harness::OpenCode => unreachable!("OpenCode sessions come from its database"),
         };
         let (Some(time), Some(name)) = (record.time, name) else {
             return;

@@ -12,9 +12,11 @@ macOS tests run after pushes to `main` (the `macOS` workflow, which opens or
 updates a "macOS tests fail on main" issue when they fail) and in the Check
 run a release makes. A change only to `quest/` and the agent docs
 (`AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`) runs `quest check` alone. The
-required `Check` job aggregates them. A failed, cancelled, or skipped job
-fails it, apart from the platform tests a quest-only change skips. Check has
-no publication credentials or OIDC permission.
+`Check` job aggregates them. A failed, cancelled, or skipped job fails it,
+apart from the platform tests a quest-only change skips. It is not a required
+check, so the queue lands without waiting on it until Kixel Quest's merge
+queue takes token-max. Check has no publication credentials or OIDC
+permission.
 
 ## Binaries
 
@@ -49,7 +51,8 @@ verify the archive against `sha256.sum` or with `gh attestation verify`.
 
 ## max.kixel.me
 
-`site/` is a Cloudflare Worker with only static assets and no code:
+`site/wrangler.jsonc` is a Cloudflare Worker serving `site/public/`, with only
+static assets and no code:
 `index.html`, `style.css` and `site.js` are the landing page, `fonts/` holds
 its two OFL fonts subset to Latin, `_redirects` sends `/install.sh` and
 `/install.ps1` to the latest release's installers, and `run.sh` and `run.ps1`
@@ -67,7 +70,7 @@ inline icons from
 page's own origin.
 
 The page's terminal is the maintainer's own `token-max doctor --defaults` over
-the last 30 days across their hosts, run from `nixos` with `--ssh` for the
+the last 29 days across their hosts, run from `nixos` with `--ssh` for the
 others, as HTML, with each host's EVERYTHING ELSE section cut to one line,
 since that section is long and names project files that can belong to private
 repositories, and each EDITS section cut the same way, since it names every

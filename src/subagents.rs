@@ -194,6 +194,8 @@ fn claude_definitions(dir: &str, project: Option<&str>) -> Result<Vec<AgentDefin
         };
         definitions.push(AgentDefinition {
             name,
+            key: None,
+            provider: None,
             modified: modified(&file),
             file,
             project: project.map(str::to_string),
@@ -250,6 +252,8 @@ fn codex_role_file(file: &str, declared: Option<&str>) -> Option<(String, bool, 
         model: role.get("model").and_then(label),
         effort: role.get("model_reasoning_effort").and_then(label),
         modified: modified(file),
+        key: None,
+        provider: None,
     };
     Some((name, described, definition))
 }
@@ -562,6 +566,8 @@ pub fn discover(
                 }
                 agents
             }
+            // Discovery read the global layers; project layers do not change agents yet.
+            Harness::OpenCode => profile.agents.clone(),
             Harness::Codex => {
                 let system_file = options.codex_system_config_file.as_str();
                 let system = settings(system_file, Harness::Codex)?;
@@ -668,6 +674,8 @@ enum Expect<'a> {
 struct Run<'a> {
     subagent: Option<&'a Subagent>,
     model: Option<&'a str>,
+    /// The provider its requests recorded, where the harness records one.
+    provider: Option<&'a str>,
     parent: Option<&'a str>,
     version: Option<&'a str>,
     cwd: Option<&'a str>,
@@ -984,6 +992,59 @@ fn codex_source(run: &Run<'_>, controls: &AgentControls, kind: &str) -> (ModelSo
     }
 }
 
+/// Where an OpenCode subagent run's model came from: its agent's `model`, else the model of
+/// the session that started it.
+fn opencode_source(run: &Run<'_>, controls: &AgentControls, kind: &str) -> (ModelSource, String) {
+    let Some(recorded) = run.model else {
+        return (ModelSource::Unknown, "no model was recorded".into());
+    };
+    let defined = definition(controls, kind).and_then(|d| Some((d, d.model.as_deref()?)));
+    if let Some((file, _)) = defined
+        && file.modified.is_none_or(|m| m > run.start)
+    {
+        return (
+            ModelSource::Unknown,
+            format!("{} changed after this run started", file.file),
+        );
+    }
+    let (source, detail, expect) = match defined {
+        Some((file, model)) => (
+            ModelSource::Definition,
+            format!(
+                "{}.{kind}.model = {model} in {}",
+                file.key.as_deref().unwrap_or("agents"),
+                file.file
+            ),
+            Expect::Model(model),
+        ),
+        None => (
+            ModelSource::Inherited,
+            "inherits the model of the session that started it".into(),
+            Expect::Parent,
+        ),
+    };
+    // The same model ID through another provider, or an unrecorded one, is not shown to be
+    // the one the definition selects.
+    let provider = defined.and_then(|(d, _)| d.provider.as_deref());
+    let other_provider = provider.is_some_and(|want| run.provider != Some(want));
+    if run.matches(&expect) && !other_provider {
+        (source, detail)
+    } else if matches!(expect, Expect::Parent) && run.parent.is_none() {
+        (
+            ModelSource::Unknown,
+            format!("{detail}, but the parent's model is not recorded"),
+        )
+    } else {
+        (
+            ModelSource::Unknown,
+            format!(
+                "ran on {}{recorded}, which current settings do not give ({detail})",
+                run.provider.map_or(String::new(), |p| format!("{p}/"))
+            ),
+        )
+    }
+}
+
 /// The file a Codex setting's owner names, else `fallback`.
 fn owner_file<'a>(owned: Option<&'a Owned>, fallback: &'a str) -> &'a str {
     owned
@@ -1000,6 +1061,20 @@ fn settings_text(
     native: bool,
 ) -> (String, String) {
     let mut texts = match profile.harness {
+        Harness::OpenCode => {
+            let defined = definition(controls, kind);
+            let file = defined.map_or(&*profile.settings_file, |d| &d.file);
+            match defined.and_then(|d| d.key.as_deref()) {
+                Some("agent") => (
+                    format!("agent.{kind}.model in {file}"),
+                    format!("agent.{kind}.variant in {file}"),
+                ),
+                _ => (
+                    format!("agents.{kind}.model in {file}"),
+                    format!("the variant in agents.{kind}.model in {file}"),
+                ),
+            }
+        }
         Harness::Claude if fork => (
             "none; a fork always runs on the main model".into(),
             "none; a fork runs at the main conversation's effort".into(),
@@ -1224,9 +1299,12 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
             let subagent = spawns.get(session).copied();
             let all = &history[session];
             let start = all[0].time;
+            // The model and the provider it came through, from one request.
+            let first = all.iter().find(|r| r.model.is_some());
             let run = Run {
                 subagent,
-                model: all.iter().find_map(|r| r.model.as_deref()),
+                model: first.and_then(|r| r.model.as_deref()),
+                provider: first.and_then(|r| r.provider.as_deref()),
                 parent: subagent
                     .and_then(|s| s.parent.as_deref())
                     .and_then(|p| parent_model(p, start)),
@@ -1258,6 +1336,7 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
                         (Some(reason), _) => (ModelSource::Unknown, reason.clone()),
                         (None, Harness::Claude) => claude_source(&run, controls, kind),
                         (None, Harness::Codex) => codex_source(&run, controls, kind),
+                        (None, Harness::OpenCode) => opencode_source(&run, controls, kind),
                     }
                 }
             };
@@ -1482,6 +1561,7 @@ mod tests {
         Run {
             subagent: Some(subagent),
             model: Some(model),
+            provider: None,
             parent: Some(parent),
             version: Some("2.1.322"),
             cwd: Some("/work/project/src"),
@@ -1497,11 +1577,40 @@ mod tests {
             model: model.map(str::to_string),
             effort: None,
             modified: Some(0),
+            key: None,
+            provider: None,
         }
     }
 
     fn source(run: &Run<'_>, controls: &AgentControls, kind: &str) -> ModelSource {
         claude_source(run, controls, kind).0
+    }
+
+    #[test]
+    fn an_opencode_definition_owns_its_model_only_through_its_provider() {
+        let subagent = spawn("explore");
+        let mut definition = defined("explore", Some("gpt-5"), None);
+        definition.provider = Some("openai".into());
+        let controls = AgentControls {
+            definitions: vec![definition],
+            ..AgentControls::default()
+        };
+        let mut through = run(&subagent, "gpt-5", "parent-model");
+        through.provider = Some("openai");
+        assert_eq!(
+            opencode_source(&through, &controls, "explore").0,
+            ModelSource::Definition
+        );
+        // No recorded provider shows nothing about which one the run used.
+        through.provider = None;
+        assert_eq!(
+            opencode_source(&through, &controls, "explore").0,
+            ModelSource::Unknown
+        );
+        through.provider = Some("openrouter");
+        let (source, detail) = opencode_source(&through, &controls, "explore");
+        assert_eq!(source, ModelSource::Unknown);
+        assert!(detail.starts_with("ran on openrouter/gpt-5"), "{detail}");
     }
 
     #[test]

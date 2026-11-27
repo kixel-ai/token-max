@@ -26,7 +26,8 @@ copy.addEventListener("click", async () => {
 const term = document.querySelector(".term");
 const button = document.querySelector(".replay");
 const steps = [...term.querySelectorAll(".step")];
-// A finished run rests on the report's count of changes rather than its last line.
+// A finished run rests on the report's headline (the hosts' total under --ssh, else its count
+// of changes) rather than its last line.
 const screen = term.querySelector(".body");
 const rest = () => {
 	const top = term.querySelector(".rest").getBoundingClientRect().top;

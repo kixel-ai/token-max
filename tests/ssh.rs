@@ -240,6 +240,8 @@ fn analysis(home: &Path, since: Option<i64>, max_cost_per_use_usd: f64) -> Repor
         env: Env::default(),
         claude_dirs: vec![],
         codex_dirs: vec![],
+        opencode_dirs: vec![],
+        opencode: true,
         t3_dirs: vec![],
         managed_settings_file: format!("{home}/managed-settings.json"),
         codex_system_config_file: format!("{home}/system.toml"),
@@ -2234,7 +2236,7 @@ fn audits_from_every_host_rank_together_with_each_pointer_on_its_host() {
 
     // A destination may send no more entries than this host asked for.
     let header = hosts.header();
-    let shape = r#"{"harness":"claude","session":null,"parent":null,"subagent":false,"cwd":null,"requests":1,"costUsd":1,"complete":true,"skippedLines":0,"inputTokens":0,"cacheReadTokens":0,"cacheHitRatio":null,"peakInputTokens":0,"startInputTokens":null,"compactions":0,"toolCalls":0,"toolErrors":null,"streak":null,"at":{"host":null,"file":"f","line":1},"earlyLines":[]}"#;
+    let shape = r#"{"harness":"claude","session":null,"parent":null,"subagent":false,"cwd":null,"requests":1,"costUsd":1,"complete":true,"skippedLines":0,"inputTokens":0,"cacheReadTokens":0,"cacheHitRatio":null,"peakInputTokens":0,"startInputTokens":null,"compactions":0,"toolCalls":0,"toolErrors":null,"streak":null,"at":{"host":null,"file":"f","line":1},"earlyLines":[],"errorLines":[]}"#;
     hosts.host("flood");
     hosts.fake(
         "flood",

@@ -199,13 +199,8 @@ pub enum Outcome {
         offers: Option<Box<Offers>>,
     },
     /// The destination's answer to [`Answer::Review`], once it checked the answers against
-    /// its files: each file's text as the accepted changes would change it, for the confirm,
-    /// and how many files that is.
-    #[serde(rename_all = "camelCase")]
-    Reviewed {
-        preview: String,
-        files: usize,
-    },
+    /// its files.
+    Reviewed(Reviewed),
     /// The destination's answer to [`Answer::Write`]: the files it wrote.
     Wrote {
         written: Vec<Written>,
@@ -225,6 +220,15 @@ pub enum Outcome {
         audit: Box<Audit>,
     },
     Error(ScanError),
+}
+
+/// A destination's review of the walk's answers: each file's text as the accepted changes
+/// would change it, for the confirm, and how many files and changes that is.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Reviewed {
+    pub preview: String,
+    pub files: usize,
+    pub changes: usize,
 }
 
 /// What this host sends a destination after its report for a walk.

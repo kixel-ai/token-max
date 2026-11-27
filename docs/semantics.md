@@ -423,7 +423,7 @@ are not additive. Dollars are API-price equivalents, not invoices.
 
 Current idle controls resolve user, project, local and managed settings, with
 the active profile's environment applied to environment controls. Project files
-are read at the recorded working directory; `settings.local.json` is also read
+are read at the recorded working directory; on Unix, `settings.local.json` is also read
 at the main checkout of its Git root when that repository is user-owned and is
 not the home directory. Absent directories or working-directory metadata leave ownership
 unresolved. Project TTL/window owners are preserved when a profile-level change
@@ -1146,9 +1146,10 @@ means unknown dollars, not zero.
 
 Claude's default is off; per-session opt-in suppresses a saved true preference
 at startup. Managed false, environment disable, unsupported selected models and
-project/local overrides take precedence. A Claude cloud provider or custom
-`ANTHROPIC_BASE_URL`, or a Codex `model_provider` other than `openai`, leaves
-the current speed unresolved, with no verdict. Only active-profile shell environment
+project/local overrides take precedence. When a saved premium preference would
+otherwise be active, a Claude cloud provider or custom `ANTHROPIC_BASE_URL`, or
+a Codex `model_provider` other than `openai`, leaves the current speed
+unresolved, with no verdict. Only active-profile shell environment
 is applied. The tool observes local files, not live session toggles, CLI
 `--settings`, server policy or availability checks. Codex gates default on in
 current documented versions; fast/priority and ultrafast use independent gates.

@@ -1026,6 +1026,49 @@ mod tests {
         );
     }
 
+    /// A reply from a gateway that records no service tier anywhere still bills its advisor,
+    /// at the advisor model's standard rates on Anthropic's API.
+    #[test]
+    fn an_advisor_is_priced_when_the_reply_records_no_service_tier() {
+        let w = Workspace::new();
+        let mut reply = reply("session", "r", "2026-11-01T00:00:01Z", "main", "high");
+        let usage = reply["message"]["usage"].clone();
+        let iteration = |kind: &str, model: Option<&str>| {
+            let mut i = usage.clone();
+            i["type"] = json!(kind);
+            if let Some(model) = model {
+                i["model"] = json!(model);
+            }
+            i
+        };
+        reply["message"]["usage"]["iterations"] = json!([
+            iteration("message", None),
+            iteration("advisor_message", Some("claude-haiku-5-5")),
+        ]);
+        for iteration in reply["message"]["usage"]["iterations"]
+            .as_array_mut()
+            .unwrap()
+        {
+            iteration.as_object_mut().unwrap().remove("service_tier");
+        }
+        reply["message"]["usage"]
+            .as_object_mut()
+            .unwrap()
+            .remove("service_tier");
+        write(
+            &w.claude.join("projects/project/session.jsonl"),
+            &[reply],
+            "",
+        );
+        let sessions = export(&scan(&w.scan_options()).unwrap(), &prices()).unwrap();
+        let advisor = sessions[0]
+            .models
+            .iter()
+            .find(|m| m.model.as_deref() == Some("claude-haiku-5-5"))
+            .unwrap();
+        assert!(advisor.cost_usd > Usd::default(), "{advisor:?}");
+    }
+
     #[test]
     fn repositories_come_from_the_record_or_else_the_checkout_now_at_cwd() {
         let w = Workspace::new();

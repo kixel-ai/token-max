@@ -148,14 +148,13 @@ HOME="$TEST_ROOT/homes/$host" PATH="$TEST_ROOT/remote/$host:$TEST_PATH" exec sh 
     fn invoke(&self, name: &str, args: &[&str]) -> Command {
         let mut command = Command::new(BIN);
         let path = std::env::var("PATH").unwrap();
-        command
+        support::isolated(&mut command)
             .args([
                 name,
                 "--prices-file",
                 fixture("prices.json").to_str().unwrap(),
             ])
             .args(args)
-            .env_clear()
             .env("HOME", self.root.join("homes/local"))
             .env(
                 "PATH",
@@ -175,9 +174,8 @@ HOME="$TEST_ROOT/homes/$host" PATH="$TEST_ROOT/remote/$host:$TEST_PATH" exec sh 
     /// The first line `doctor --ssh-scan` prints: the header naming this build.
     fn header(&self) -> String {
         // Held open: a destination stops when its stdin closes.
-        let mut child = Command::new(BIN)
+        let mut child = support::isolated(&mut Command::new(BIN))
             .args(["doctor", "--ssh-scan"])
-            .env_clear()
             .env("HOME", self.root.join("homes/empty"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

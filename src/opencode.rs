@@ -1636,6 +1636,50 @@ mod tests {
         assert!(!format!("{history:?}").contains("SYNTHETIC_"));
     }
 
+    /// A summary step, or one the compaction agent ran, is a compaction request, which the
+    /// compaction checks price apart from the turns.
+    #[test]
+    fn a_summary_or_compaction_agent_step_is_a_compaction() {
+        let w = Workspace::new();
+        let file = opencode_database(&w.home);
+        let db = Connection::open(&file).unwrap();
+        let tokens = json!({"input": 10, "output": 1, "reasoning": 0, "cache": {"read": 0, "write": 0}});
+        let model = json!({"id": "zen-flash", "providerID": "opencode"});
+        for (id, seq, data) in [
+            (
+                "msg_summary",
+                4,
+                json!({"model": model, "agent": "build", "summary": true, "tokens": tokens}),
+            ),
+            (
+                "msg_compaction",
+                5,
+                json!({"model": model, "agent": "compaction", "tokens": tokens}),
+            ),
+        ] {
+            db.execute(
+                "INSERT INTO session_message VALUES (?1, 'ses_main', 'assistant', ?2, 1, ?3)",
+                rusqlite::params![id, seq, data.to_string()],
+            )
+            .unwrap();
+        }
+        drop(db);
+        let history = read(&text(&file), &["profile".into()]).unwrap();
+        let kinds: Vec<(&str, PartKind, Option<&str>)> = history
+            .requests
+            .iter()
+            .map(|r| (&*r.id, r.parts[0].kind, r.source.as_deref()))
+            .collect();
+        let id = |message: &str| format!("opencode:{}", identity(message));
+        let compaction = (PartKind::Compaction, Some("compaction"));
+        for message in ["msg_summary", "msg_compaction"] {
+            let found = kinds.iter().find(|(i, ..)| *i == id(message)).unwrap();
+            assert_eq!((found.1, found.2), compaction, "{message}");
+        }
+        let turn = kinds.iter().find(|(i, ..)| *i == id("msg_1")).unwrap();
+        assert_eq!((turn.1, turn.2), (PartKind::Message, None));
+    }
+
     #[test]
     fn opencode_2_rules_deny_a_skill_by_the_last_rule_naming_it() {
         let config = json!({"permissions": [

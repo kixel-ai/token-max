@@ -26,6 +26,7 @@ CREATE INDEX orchestration_v2_projection_runs_delegated_delivery_idx ON orchestr
 CREATE INDEX orchestration_v2_projection_runs_recovery_idx ON orchestration_v2_projection_runs(status, thread_id) WHERE status IN ('queued', 'preparing', 'starting', 'running', 'waiting');
 CREATE UNIQUE INDEX orchestration_v2_projection_runs_thread_ordinal_idx ON orchestration_v2_projection_runs(thread_id, ordinal);
 CREATE INDEX orchestration_v2_projection_runs_thread_status_idx ON orchestration_v2_projection_runs(thread_id, status);
+CREATE INDEX orchestration_v2_projection_threads_subagent_result_idx ON orchestration_v2_projection_threads(thread_id, json_extract(payload_json, '$.lineage.parentThreadId')) WHERE CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.lineage.relationshipToParent') = 'subagent' AND json_extract(payload_json, '$.lineage.parentThreadId') IS NOT NULL AND json_extract(payload_json, '$.forkedFrom.type') = 'node' ELSE 0 END;
 CREATE INDEX orchestration_v2_projection_requests_recovery_idx ON orchestration_v2_projection_runtime_requests(thread_id) WHERE status = 'pending';
 CREATE INDEX orchestration_v2_projection_runtime_requests_thread_status_idx ON orchestration_v2_projection_runtime_requests(thread_id, status);
 CREATE INDEX orchestration_v2_projection_context_transfers_target_thread_idx ON orchestration_v2_projection_context_transfers(target_thread_id, status);

@@ -464,13 +464,17 @@ turned off with a `{"action": "skill", "resource": "<id>", "effect": "deny"}`
 rule appended to `permissions` when a global file orders its permissions there,
 since the last matching rule wins, and with `permission.skill.<id> = "deny"`
 otherwise. When a rule OpenCode reads later could allow the skill again, an
-agent's own `permissions` or a file `OPENCODE_CONFIG` names, the skill's line
-offers no switch. An MCP server is turned off with `disabled: true` under
+agent's own `permissions`, a file `OPENCODE_CONFIG` names or a project the
+sessions ran in, the skill's line offers no switch. An MCP server is turned off with `disabled: true` under
 `mcp.servers.<name>`, or `enabled: false` under OpenCode 1's `mcp.<name>`, in
 the shape its file declares it. A server a project the sessions ran in
 declares, which replaces the global declaration there, gets a line with no
 switch, and so do OpenCode's built-in Code Mode namespaces, `browser` and
-`opencode`. Subagent model lines name `agents.<name>.model`, whose variant (a
+`opencode`. A project whose settings cannot be read leaves every OpenCode
+switch to the person, and the report's coverage notes name its directory.
+Profiles that share a settings file but take different switches get lines of
+their own. A subagent model line credits a definition only when the run's
+model came through the provider it names. Subagent model lines name `agents.<name>.model`, whose variant (a
 `#variant` suffix, or `variant` in its object form) sets the effort, or
 OpenCode 1's `agent.<name>.model` and `variant`. The cache TTL, compaction, keepalive,
 audit and effort checks replay only Claude Code and Codex, so an OpenCode

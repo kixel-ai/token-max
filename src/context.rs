@@ -1014,7 +1014,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         .map(|p| (p.id.as_str(), crate::rows::settings_key(p)))
         .collect();
     let mut sources: IndexSet<Vec<&str>> = IndexSet::default();
-    let mut owners: HashMap<Vec<&str>, usize> = HashMap::default();
+    let mut owners: HashMap<(Vec<&str>, Vec<&str>), usize> = HashMap::default();
     let mut owner_files: Vec<Vec<&str>> = vec![];
     let mut owner_profiles: Vec<IndexSet<&str>> = vec![];
     let mut rows: IndexMap<(usize, usize), Row> = IndexMap::default();
@@ -1064,11 +1064,27 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         let mut keys: Vec<&str> = source.iter().map(|p| files[p].as_str()).collect();
         keys.sort_unstable();
         keys.dedup();
-        let owner = match owners.get(&keys) {
+        // OpenCode profiles sharing a settings file can still take different switches, through
+        // a file that outranks it or a project's own declarations; each such set of switches
+        // is a line of its own, so no line offers one profile another's switch.
+        let mut switches: Vec<&str> = vec![];
+        if r.harness == Harness::OpenCode {
+            let own = input
+                .profiles
+                .iter()
+                .filter(|p| p.harness == Harness::OpenCode && r.profiles.contains(&p.id));
+            for p in own {
+                switches.extend(p.settings.keys().map(String::as_str));
+                switches.extend(p.mcp_servers.iter().map(String::as_str));
+            }
+            switches.sort_unstable();
+            switches.dedup();
+        }
+        let owner = match owners.get(&(keys.clone(), switches.clone())) {
             Some(&id) => id,
             None => {
                 let id = owner_files.len();
-                owners.insert(keys.clone(), id);
+                owners.insert((keys.clone(), switches), id);
                 owner_files.push(keys);
                 owner_profiles.push(IndexSet::default());
                 shaped_requests.push(0);

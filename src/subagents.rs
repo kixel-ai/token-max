@@ -195,6 +195,7 @@ fn claude_definitions(dir: &str, project: Option<&str>) -> Result<Vec<AgentDefin
         definitions.push(AgentDefinition {
             name,
             key: None,
+            provider: None,
             modified: modified(&file),
             file,
             project: project.map(str::to_string),
@@ -252,6 +253,7 @@ fn codex_role_file(file: &str, declared: Option<&str>) -> Option<(String, bool, 
         effort: role.get("model_reasoning_effort").and_then(label),
         modified: modified(file),
         key: None,
+        provider: None,
     };
     Some((name, described, definition))
 }
@@ -672,6 +674,8 @@ enum Expect<'a> {
 struct Run<'a> {
     subagent: Option<&'a Subagent>,
     model: Option<&'a str>,
+    /// The provider its requests recorded, where the harness records one.
+    provider: Option<&'a str>,
     parent: Option<&'a str>,
     version: Option<&'a str>,
     cwd: Option<&'a str>,
@@ -1019,7 +1023,12 @@ fn opencode_source(run: &Run<'_>, controls: &AgentControls, kind: &str) -> (Mode
             Expect::Parent,
         ),
     };
-    if run.matches(&expect) {
+    // The same model ID through another provider is not the one the definition selects.
+    let provider = defined.and_then(|(d, _)| d.provider.as_deref());
+    let other_provider = provider
+        .zip(run.provider)
+        .is_some_and(|(want, ran)| want != ran);
+    if run.matches(&expect) && !other_provider {
         (source, detail)
     } else if matches!(expect, Expect::Parent) && run.parent.is_none() {
         (
@@ -1029,7 +1038,10 @@ fn opencode_source(run: &Run<'_>, controls: &AgentControls, kind: &str) -> (Mode
     } else {
         (
             ModelSource::Unknown,
-            format!("ran on {recorded}, which current settings do not give ({detail})"),
+            format!(
+                "ran on {}{recorded}, which current settings do not give ({detail})",
+                run.provider.map_or(String::new(), |p| format!("{p}/"))
+            ),
         )
     }
 }
@@ -1291,6 +1303,7 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
             let run = Run {
                 subagent,
                 model: all.iter().find_map(|r| r.model.as_deref()),
+                provider: all.iter().find_map(|r| r.provider.as_deref()),
                 parent: subagent
                     .and_then(|s| s.parent.as_deref())
                     .and_then(|p| parent_model(p, start)),
@@ -1547,6 +1560,7 @@ mod tests {
         Run {
             subagent: Some(subagent),
             model: Some(model),
+            provider: None,
             parent: Some(parent),
             version: Some("2.1.322"),
             cwd: Some("/work/project/src"),
@@ -1563,11 +1577,33 @@ mod tests {
             effort: None,
             modified: Some(0),
             key: None,
+            provider: None,
         }
     }
 
     fn source(run: &Run<'_>, controls: &AgentControls, kind: &str) -> ModelSource {
         claude_source(run, controls, kind).0
+    }
+
+    #[test]
+    fn an_opencode_definition_owns_its_model_only_through_its_provider() {
+        let subagent = spawn("explore");
+        let mut definition = defined("explore", Some("gpt-5"), None);
+        definition.provider = Some("openai".into());
+        let controls = AgentControls {
+            definitions: vec![definition],
+            ..AgentControls::default()
+        };
+        let mut through = run(&subagent, "gpt-5", "parent-model");
+        through.provider = Some("openai");
+        assert_eq!(
+            opencode_source(&through, &controls, "explore").0,
+            ModelSource::Definition
+        );
+        through.provider = Some("openrouter");
+        let (source, detail) = opencode_source(&through, &controls, "explore");
+        assert_eq!(source, ModelSource::Unknown);
+        assert!(detail.starts_with("ran on openrouter/gpt-5"), "{detail}");
     }
 
     #[test]

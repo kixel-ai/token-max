@@ -1259,36 +1259,70 @@ impl Reader {
                 self.sessions.opencode(session, &file);
                 native.opencode(&session.key, &session.id, session.parent.as_deref());
             }
-            // A server a project its sessions ran in declares replaces the global one there,
-            // so a switch in the global file would not reach it; it keeps no switch.
-            let cwds: crate::collections::IndexSet<&str> = history
-                .sessions
+            // The project files each session's directory reads. A server one declares replaces
+            // the global one there, and a skill rule one sets follows the global ones, so a
+            // switch in the global file would not reach either.
+            let mut projects: HashMap<&str, Vec<String>> = HashMap::default();
+            let mut unresolved: Vec<&str> = vec![];
+            let mut reallowed = false;
+            for cwd in history.sessions.iter().filter_map(|s| s.cwd.as_deref()) {
+                if projects.contains_key(cwd) || unresolved.contains(&cwd) {
+                    continue;
+                }
+                match crate::opencode::project_layers(options, cwd) {
+                    Ok(layers) => {
+                        reallowed |= layers.iter().any(|l| crate::opencode::reallows(&l.config));
+                        let names = layers
+                            .iter()
+                            .flat_map(|l| crate::opencode::servers(&l.config))
+                            .map(|s| s.name)
+                            .collect();
+                        projects.insert(cwd, names);
+                    }
+                    Err(_) => unresolved.push(cwd),
+                }
+            }
+            for cwd in &unresolved {
+                self.issues.insert(
+                    format!(
+                        "OpenCode project settings under {cwd} could not be read, so OpenCode's MCP servers and skills there offer no switch"
+                    )
+                    .into(),
+                );
+            }
+            let global: Vec<String> = profiles
                 .iter()
-                .filter_map(|s| s.cwd.as_deref())
+                .filter(|p| ids.contains(&p.id))
+                .flat_map(|p| crate::opencode::declared(&p.mcp_servers))
+                .map(|s| s.name)
                 .collect();
-            let mut project: crate::collections::IndexSet<String> = Default::default();
-            for cwd in cwds {
-                for layer in crate::opencode::project_layers(options, cwd)? {
-                    project.extend(
-                        crate::opencode::servers(&layer.config)
-                            .into_iter()
-                            .map(|s| s.name),
+            for p in profiles.iter_mut().filter(|p| ids.contains(&p.id)) {
+                if !unresolved.is_empty() {
+                    p.mcp_servers.clear();
+                } else {
+                    p.mcp_servers.retain(|entry| {
+                        crate::opencode::declared(std::slice::from_ref(entry))
+                            .iter()
+                            .all(|s| !projects.values().flatten().any(|n| *n == s.name))
+                    });
+                }
+                if reallowed || !unresolved.is_empty() {
+                    p.settings.insert(
+                        crate::opencode::REALLOWED.into(),
+                        crate::model::Scalar::Bool(true),
                     );
                 }
             }
-            let mut servers: Vec<String> = project.iter().cloned().collect();
-            for p in profiles.iter_mut().filter(|p| ids.contains(&p.id)) {
-                let declared: Vec<String> = crate::opencode::declared(&p.mcp_servers)
-                    .into_iter()
-                    .map(|s| s.name)
-                    .collect();
-                p.mcp_servers.retain(|entry| {
-                    crate::opencode::declared(std::slice::from_ref(entry))
-                        .iter()
-                        .all(|s| !project.contains(&s.name))
-                });
-                servers.extend(declared);
-            }
+            // The servers each session could call: the global ones and its own project's.
+            let servers: HashMap<Text, Vec<String>> = history
+                .sessions
+                .iter()
+                .map(|s| {
+                    let own = s.cwd.as_deref().and_then(|cwd| projects.get(cwd));
+                    let names = global.iter().chain(own.into_iter().flatten()).cloned();
+                    (s.key.clone(), names.collect())
+                })
+                .collect();
             self.exposure.opencode(&file, &ids, &servers, &history);
             for subagent in history.subagents {
                 self.spawned(subagent);

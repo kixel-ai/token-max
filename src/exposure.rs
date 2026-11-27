@@ -1101,7 +1101,7 @@ impl ExposureCollector {
         &mut self,
         file: &Text,
         profiles: &[String],
-        servers: &[String],
+        servers: &HashMap<Text, Vec<String>>,
         history: &crate::opencode::History,
     ) {
         use crate::opencode::Use;
@@ -1219,12 +1219,21 @@ impl ExposureCollector {
                         };
                         self.invocation(target("opencode-skill", id), invoke, call.time);
                     }
+                    // A tool named `<server>_<tool>` for one server this session could call;
+                    // a name two servers could own credits neither.
                     Use::Tool(name) => {
-                        let owner = servers.iter().find_map(|server| {
-                            let tool = name.strip_prefix(server.as_str())?.strip_prefix('_')?;
-                            Some((server, tool))
-                        });
-                        if let Some((server, tool)) = owner {
+                        let mut owners: Vec<(&String, &str)> = servers
+                            .get(&session.key)
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|server| {
+                                let tool = name.strip_prefix(server.as_str())?.strip_prefix('_')?;
+                                Some((server, tool))
+                            })
+                            .collect();
+                        owners.sort_unstable_by(|a, b| a.0.cmp(b.0));
+                        owners.dedup_by(|a, b| a.0 == b.0);
+                        if let [(server, tool)] = owners.as_slice() {
                             self.call(&call.id, &format!("mcp__{server}__{tool}"), Some(call.time));
                         }
                     }

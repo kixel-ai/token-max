@@ -356,24 +356,35 @@ fn glob(pattern: &str, text: &str) -> bool {
 /// skill again: an agent's own rules, which OpenCode appends after the global ones, or a
 /// layer `layers` reads after `file`. A skill switch is then left to the person.
 pub(crate) fn skills_reallowed(layers: &[Layer], file: &str) -> bool {
-    let allows = |rules: Option<&Value>| {
-        skill_rules(rules)
-            .iter()
-            .any(|(_, effect)| *effect != "deny")
-    };
-    let agents = layers.iter().any(|layer| {
-        ["agent", "agents"].iter().any(|key| {
-            members(layer.config.get(*key))
-                .values()
-                .any(|agent| allows(agent.get(RULES)))
-        })
-    });
+    let agents = layers.iter().any(|layer| agents_reallow(&layer.config));
     let later = layers
         .iter()
         .skip_while(|l| l.file != file)
         .skip(1)
-        .any(|l| allows(l.config.get(RULES)));
+        .any(|l| reallows(&l.config));
     agents || later
+}
+
+/// Whether a list of `permissions` holds a skill rule that is not a denial.
+fn allows(rules: Option<&Value>) -> bool {
+    skill_rules(rules)
+        .iter()
+        .any(|(_, effect)| *effect != "deny")
+}
+
+/// Whether an agent a config defines has its own rule that could allow a skill.
+fn agents_reallow(config: &Map<String, Value>) -> bool {
+    ["agent", "agents"].iter().any(|key| {
+        members(config.get(*key))
+            .values()
+            .any(|agent| allows(agent.get(RULES)))
+    })
+}
+
+/// Whether a config read after the global ones, such as a project's, has a rule that
+/// could allow a skill the global file denies.
+pub(crate) fn reallows(config: &Map<String, Value>) -> bool {
+    allows(config.get(RULES)) || agents_reallow(config)
 }
 
 /// An OpenCode config with `edits` applied and the keys at `removals` deleted, keeping its
@@ -419,24 +430,27 @@ pub(crate) fn edit(text: &str, edits: &[Edit], removals: &[&[String]]) -> Result
                 let list = node
                     .array_value_or_create(last)
                     .ok_or_else(|| format!("{} is not a list", edit.path.join(".")))?;
-                // A permission rule already in force is the last one naming its action and
-                // resource; anything else is held anywhere in the list.
-                let same = |v: &Value| {
-                    v == &edit.value
-                        || (edit.value.get("action").is_some()
-                            && v.get("action") == edit.value.get("action")
-                            && v.get("resource") == edit.value.get("resource"))
-                };
                 let elements: Vec<Value> = list
                     .elements()
                     .iter()
                     .filter_map(|e| parse_config(&e.to_string()))
                     .collect();
-                let held = elements
-                    .iter()
-                    .rev()
-                    .find(|v| same(v))
-                    .is_some_and(|v| v == &edit.value);
+                fn text<'v>(v: &'v Value, key: &str) -> Option<&'v str> {
+                    v.get(key).and_then(Value::as_str)
+                }
+                let held = match (text(&edit.value, "action"), text(&edit.value, "resource")) {
+                    // A permission rule is in force when the last rule matching its action
+                    // and resource, a wildcard's included, has its effect.
+                    (Some(action), Some(resource)) => elements
+                        .iter()
+                        .rev()
+                        .find(|v| {
+                            text(v, "action") == Some(action)
+                                && text(v, "resource").is_some_and(|p| glob(p, resource))
+                        })
+                        .is_some_and(|v| text(v, "effect") == text(&edit.value, "effect")),
+                    _ => elements.contains(&edit.value),
+                };
                 if !held {
                     list.append(input(&edit.value));
                 }
@@ -461,23 +475,38 @@ fn input(value: &Value) -> CstInputValue {
     }
 }
 
-/// A model selection's model ID and variant, in either form OpenCode 2 accepts:
-/// `provider/model#variant`, where the model ID may hold more slashes and the variant is
-/// optional, or `{"providerID", "model", "variant"}`.
-fn model_reference(value: &Value) -> Option<(String, Option<String>)> {
+/// A model selection, in either form OpenCode 2 accepts.
+struct Selection {
+    provider: Option<String>,
+    model: String,
+    variant: Option<String>,
+}
+
+/// Read a model selection: `provider/model#variant`, where the model ID may hold more
+/// slashes and the variant is optional, or `{"providerID", "model", "variant"}`.
+fn model_reference(value: &Value) -> Option<Selection> {
     if let Some(selection) = value.as_object() {
         let field = |key: &str| selection.get(key).and_then(Value::as_str).map(String::from);
-        return Some((field("model")?, field("variant")));
+        return Some(Selection {
+            provider: field("providerID"),
+            model: field("model")?,
+            variant: field("variant"),
+        });
     }
     let reference = value.as_str()?;
     let (model, variant) = match reference.split_once('#') {
         Some((model, variant)) => (model, Some(variant.to_string())),
         None => (reference, None),
     };
-    Some((
-        model.split_once('/').map_or(model, |(_, m)| m).to_string(),
+    let (provider, model) = match model.split_once('/') {
+        Some((provider, model)) => (Some(provider.to_string()), model),
+        None => (None, model),
+    };
+    Some(Selection {
+        provider,
+        model: model.to_string(),
         variant,
-    ))
+    })
 }
 
 /// Subagent model and effort controls: each `agents.<name>` (OpenCode 2) or `agent.<name>`
@@ -487,9 +516,9 @@ fn agent_controls(layers: &[Layer]) -> AgentControls {
     let mut definitions: IndexMap<String, AgentDefinition> = IndexMap::default();
     let mut session = None;
     for layer in layers {
-        if let Some((model, _)) = layer.config.get("model").and_then(model_reference) {
+        if let Some(selection) = layer.config.get("model").and_then(model_reference) {
             session = Some(Owned {
-                value: model,
+                value: selection.model,
                 owner: format!("{}:model", layer.file),
             });
         }
@@ -505,14 +534,16 @@ fn agent_controls(layers: &[Layer]) -> AgentControls {
                         effort: None,
                         modified: None,
                         key: Some(key.into()),
+                        provider: None,
                     });
-                if let Some((model, variant)) = agent.get("model").and_then(model_reference) {
-                    entry.model = Some(model);
+                if let Some(selection) = agent.get("model").and_then(model_reference) {
+                    entry.model = Some(selection.model);
+                    entry.provider = selection.provider;
                     entry.file = layer.file.clone();
                     entry.modified = modified(&layer.file);
                     entry.key = Some(key.into());
-                    if variant.is_some() {
-                        entry.effort = variant;
+                    if selection.variant.is_some() {
+                        entry.effort = selection.variant;
                     }
                 }
                 if let Some(variant) = agent.get("variant").and_then(Value::as_str) {
@@ -1600,6 +1631,10 @@ mod tests {
             json!({"action": "skill", "resource": "c", "effect": "deny"})
         );
         assert_eq!(edit(&edited, &edits, &[]).unwrap(), edited);
+        // A later wildcard allow outranks the denial, so it is appended again.
+        let wildcard = "{ \"permissions\": [{ \"action\": \"skill\", \"resource\": \"c\", \"effect\": \"deny\" }, { \"action\": \"skill\", \"resource\": \"c*\", \"effect\": \"allow\" }] }";
+        let rules = parse_config(&edit(wildcard, &edits, &[]).unwrap()).unwrap();
+        assert_eq!(rules["permissions"].as_array().unwrap().len(), 3);
         // A denial an allow follows is no longer in force, so it is appended again.
         let allowed = "{ \"permissions\": [{ \"action\": \"skill\", \"resource\": \"c\", \"effect\": \"deny\" }, { \"action\": \"skill\", \"resource\": \"c\", \"effect\": \"allow\" }] }";
         let rules = parse_config(&edit(allowed, &edits, &[]).unwrap()).unwrap();
@@ -1708,12 +1743,28 @@ mod tests {
             [text(&repo)],
         )
         .unwrap();
+        // `docs_x_find` is `docs_x`'s outside the repository, and could be `docs`'s too in it.
+        let step = |id: &str| {
+            json!({"model": {"id": "zen-flash", "providerID": "opencode"},
+                "time": {"created": OPENCODE_START + 9_000},
+                "tokens": {"input": 1, "output": 1, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+                "content": [{"type": "tool", "id": id, "name": "docs_x_find",
+                    "state": {"status": "completed"}}]})
+            .to_string()
+        };
+        for (id, session) in [("msg_outside", "ses_main"), ("msg_inside", "ses_repo")] {
+            db.execute(
+                "INSERT INTO session_message VALUES (?1, ?2, 'assistant', 9, ?3, ?4)",
+                rusqlite::params![id, session, OPENCODE_START + 9_000, step(id)],
+            )
+            .unwrap();
+        }
         drop(db);
         let config = w.home.join(".config/opencode/opencode.json");
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
         std::fs::write(
             &config,
-            r#"{"mcp": {"servers": {"docs": {"type": "remote", "url": "https://g"}, "kept": {"type": "remote", "url": "https://k"}}}}"#,
+            r#"{"mcp": {"servers": {"local": {"type": "remote", "url": "https://g"}, "docs_x": {"type": "remote", "url": "https://x"}, "kept": {"type": "remote", "url": "https://k"}}}}"#,
         )
         .unwrap();
         let mut options = w.scan_options();
@@ -1733,7 +1784,41 @@ mod tests {
             .into_iter()
             .map(|s| s.name)
             .collect();
-        assert_eq!(names, ["kept"]);
+        assert_eq!(names, ["docs_x", "kept"]);
+        let calls: Vec<(&str, u64)> = scan
+            .exposure
+            .tool_calls
+            .iter()
+            .map(|c| (c.name.as_str(), c.calls))
+            .filter(|(name, _)| name.contains("docs"))
+            .collect();
+        assert_eq!(calls, [("mcp__docs_x__find", 1)]);
+        // A project whose settings cannot be read leaves OpenCode's switches to the person
+        // and says why, without failing the scan.
+        let broken = w.home.join("broken");
+        std::fs::create_dir_all(&broken).unwrap();
+        std::fs::write(broken.join("opencode.json"), "{ nope").unwrap();
+        let db = Connection::open(&file).unwrap();
+        db.execute(
+            "INSERT INTO session_v2 VALUES ('ses_broken', NULL, ?1, '2.2.0', 1)",
+            [text(&broken)],
+        )
+        .unwrap();
+        drop(db);
+        let scan = crate::reader::scan(&options).unwrap();
+        let profile = scan
+            .profiles
+            .iter()
+            .find(|p| p.harness == Harness::OpenCode)
+            .unwrap();
+        assert!(profile.mcp_servers.is_empty());
+        assert!(profile.settings.contains_key(REALLOWED));
+        assert!(
+            scan.coverage
+                .issues
+                .iter()
+                .any(|i| i.contains("could not be read"))
+        );
     }
 
     #[test]

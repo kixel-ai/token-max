@@ -1245,6 +1245,9 @@ pub struct AgentDefinition {
     /// The key that names its model and effort, where a harness has more than one: OpenCode
     /// 2's `agents` or OpenCode 1's `agent`.
     pub key: Option<String>,
+    /// The provider its model is selected through, where the harness names one, such as
+    /// OpenCode's `providerID`.
+    pub provider: Option<String>,
 }
 
 /// T3's three idle policies, independent of native Claude's interactive idle setting.

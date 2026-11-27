@@ -76,6 +76,8 @@ pub(crate) struct KeptItem {
     pub name: String,
     pub value: String,
     pub saving_usd: Option<f64>,
+    /// Whether the saving holds only while a default is the other value.
+    pub up_to: bool,
     pub default_value: Option<String>,
     pub summary: String,
 }
@@ -152,6 +154,9 @@ pub(crate) struct VibeRow {
     /// Which of `versions` shows, as [`resolve_vibes`] picks it.
     pub shown: usize,
     pub checked: bool,
+    /// Shown without its change, which `doctor` offers for this host once its checklist
+    /// closes, as an SSH destination's cards are while `doctor`'s checklist runs.
+    pub read_only: bool,
 }
 
 /// One version of a vibes card, and the change it offers.
@@ -236,6 +241,10 @@ struct MemberItem {
     entries_count: usize,
     denials_count: usize,
     checked: bool,
+    /// Whether the person checked or unchecked it, so a billing change keeps their answer.
+    answered: bool,
+    /// Removals the offer leaves by hand, the step and why, printed once it is accepted.
+    manual: Vec<(String, String)>,
     /// Also remove the configuration entries and add the `deniedMcpServers` entries the offer
     /// names, which the plain walk asks apart after a yes: off until chosen with `r`.
     extras: bool,
@@ -298,7 +307,8 @@ pub(crate) struct App {
     show_minor: bool,
     show_caveats: bool,
     diff: Option<DiffPreview>,
-    diff_scroll: usize,
+    /// Rows scrolled down the diff, clamped by each render to what the diff has.
+    diff_scroll: std::cell::Cell<usize>,
     /// Rows scrolled into a focused block taller than the list's window, clamped by each
     /// render to what the block has.
     block_scroll: std::cell::Cell<usize>,
@@ -351,6 +361,14 @@ impl App {
                     entries_count: offer.entries.len(),
                     denials_count: offer.denials.len(),
                     checked: false,
+                    answered: false,
+                    manual: offer
+                        .manual
+                        .iter()
+                        .map(|(step, reason)| {
+                            (home_in(step, walking.style.home.as_deref()), reason.clone())
+                        })
+                        .collect(),
                     extras: false,
                 };
                 // Costly tradeoffs (e.g. a single $87/mo skill like `dataviz`) stay ungrouped
@@ -380,6 +398,15 @@ impl App {
                     server: terminal_text(&entry.server),
                     checked: false,
                 });
+            }
+            // Servers that are off but can't be removed for the person, as the walk lists them.
+            for (step, reason) in &walking.offers.cleanup_by_hand {
+                by_hand.push((
+                    label.clone(),
+                    "MCP servers that are off".into(),
+                    home_in(step, walking.style.home.as_deref()),
+                    reason.clone(),
+                ));
             }
             for fix in &walking.offers.by_hand {
                 if let How::Manual { step, reason } = &fix.how {
@@ -439,7 +466,7 @@ impl App {
             show_minor: false,
             show_caveats: false,
             diff: None,
-            diff_scroll: 0,
+            diff_scroll: std::cell::Cell::new(0),
             block_scroll: std::cell::Cell::new(0),
             whole: std::cell::Cell::new(false),
             wrote: false,
@@ -483,6 +510,25 @@ impl App {
         } else {
             "no settings were changed"
         }
+    }
+
+    /// The steps by hand to print on leaving: each change's that is one, the cleanup of
+    /// servers that are off, and the removals an accepted change leaves by hand.
+    fn steps_by_hand(&self) -> Vec<(Option<String>, String, String, String)> {
+        let mut steps = self.by_hand.clone();
+        for m in self.groups.iter().flat_map(|g| &g.members) {
+            if m.checked {
+                for (step, reason) in &m.manual {
+                    steps.push((
+                        m.host_label.clone(),
+                        m.fix.name.clone(),
+                        step.clone(),
+                        reason.clone(),
+                    ));
+                }
+            }
+        }
+        steps
     }
 
     /// Whether there are zero interactive items to prompt on in Measured mode.
@@ -637,12 +683,12 @@ impl App {
                 let all_checked = g.members.iter().all(|m| m.checked);
                 let next = !all_checked;
                 for m in &mut g.members {
-                    m.checked = next;
+                    (m.checked, m.answered) = (next, true);
                 }
             }
             Focus::Member(gi, mi) => {
                 let m = &mut self.groups[gi].members[mi];
-                m.checked = !m.checked;
+                (m.checked, m.answered) = (!m.checked, true);
             }
             Focus::Cleanup(ci) => {
                 self.cleanups[ci].checked = !self.cleanups[ci].checked;
@@ -735,6 +781,7 @@ impl App {
         });
         for g in &mut self.groups {
             for m in &mut g.members {
+                m.answered = true;
                 if any_safe_unchecked {
                     m.checked = !g.minor
                         && !m.fix.suggested
@@ -748,13 +795,13 @@ impl App {
 
     /// Cycle live billing mode (`Auto -> API -> Plan`) and re-sync unset main TTL check states.
     pub(crate) fn cycle_billing(&mut self) {
-        if !self.has_unset_main_ttl {
+        if self.tab != Tab::Measured || !self.has_unset_main_ttl {
             return;
         }
         self.billing = self.billing.next();
         for g in &mut self.groups {
             for m in &mut g.members {
-                if is_unset_main_ttl(&m.fix) {
+                if is_unset_main_ttl(&m.fix) && !m.answered {
                     let eff = effective_saving(&m.fix, self.billing).unwrap_or(0.0);
                     m.checked = eff >= MINOR_THRESHOLD_USD && !m.fix.suggested;
                 }
@@ -838,7 +885,8 @@ impl App {
     }
 
     /// Render the Hero Savings Card with generous padding and clean wrapping (never cuts off mid-sentence).
-    fn render_hero(&self, w: usize) -> Vec<String> {
+    /// The summary box; `compact` keeps only its headline, unboxed, for a short terminal.
+    fn render_hero(&self, w: usize, compact: bool) -> Vec<String> {
         let box_w = w.saturating_sub(2);
         let inner = box_w.saturating_sub(6); // 2-space inner margin on both sides
         let (tl, tr, bl, br, hz, vt) = if self.unicode {
@@ -858,6 +906,7 @@ impl App {
         ];
 
         let mut body_lines: Vec<String> = vec![];
+        let headline_rows;
         match self.tab {
             Tab::Measured => {
                 let sel = self.selected_usd();
@@ -941,6 +990,7 @@ impl App {
                         body_lines.extend(right);
                     }
                 }
+                headline_rows = body_lines.len();
 
                 let mut parts = vec![];
                 if self.hero.sessions > 0 {
@@ -1020,6 +1070,7 @@ impl App {
                         &format!("{count} unmeasured tips{}no verdict", self.sep())
                     )
                 ));
+                headline_rows = 1;
                 body_lines.push(self.style(
                     DIM,
                     "Tips transcripts can't price. Unchecked by default — Space to opt in.",
@@ -1027,6 +1078,14 @@ impl App {
             }
         }
 
+        if compact {
+            let mut out: Vec<String> = body_lines[..headline_rows]
+                .iter()
+                .map(|l| trim_ansi(&format!("  {l}"), w))
+                .collect();
+            out.push(String::new());
+            return out;
+        }
         for line in body_lines {
             let padded = pad_ansi(&line, inner);
             out.push(format!(" {}  {padded}  {}", border(vt), border(vt)));
@@ -1043,7 +1102,7 @@ impl App {
     }
 
     fn render_list(&self, w: usize, max_rows: usize) -> Vec<String> {
-        let mut head = self.render_hero(w);
+        let mut head = vec![];
 
         // Optional tab strip when both Measured and Vibes are relevant.
         if !self.start_vibes_only && (self.hero.vibes_pending > 0 || self.vibes.is_some()) {
@@ -1118,14 +1177,14 @@ impl App {
                 let gap = w.saturating_sub(cells(&left) + cells(right) + 2).max(1);
                 foot.push(self.style(DIM, &format!("{left}{}{right}", " ".repeat(gap))));
             }
-            if !self.by_hand.is_empty() {
+            let by_hand = self.steps_by_hand().len();
+            if by_hand > 0 {
                 foot.push(self.style(
                     DIM,
                     &self.fit_text(
                         &format!(
-                            "  ! {} step{} by hand (shown after writing)",
-                            self.by_hand.len(),
-                            if self.by_hand.len() == 1 { "" } else { "s" }
+                            "  ! {by_hand} step{} by hand (shown after writing)",
+                            if by_hand == 1 { "" } else { "s" }
                         ),
                         w,
                     ),
@@ -1155,8 +1214,9 @@ impl App {
             }
         }
 
+        // Caveats read in the body, which scrolls, so they never push the keys off the frame.
+        let mut caveats = vec![];
         if self.show_caveats && !self.hero.caveats.is_empty() {
-            foot.push(String::new());
             let bullet = if self.unicode { "·" } else { "-" };
             for c in &self.hero.caveats {
                 for wrapped in wrap_text(
@@ -1169,9 +1229,10 @@ impl App {
                 )
                 .lines()
                 {
-                    foot.push(self.style(DIM, wrapped));
+                    caveats.push(self.style(DIM, wrapped));
                 }
             }
+            caveats.push(String::new());
         }
 
         if let Some(err) = &self.status_error {
@@ -1287,8 +1348,22 @@ impl App {
             }
         }
 
-        // Window body lines so head + body + foot <= max_rows.
-        let budget = max_rows.saturating_sub(head.len() + foot.len()).max(4);
+        if !caveats.is_empty() {
+            for block in &mut body_blocks {
+                block.0 = false;
+            }
+            body_blocks.insert(0, (true, caveats));
+        }
+
+        // Window body lines so head + body + foot <= max_rows, the summary shrinking to its
+        // headline when the body would get fewer than four.
+        let mut hero = self.render_hero(w, false);
+        if hero.len() + head.len() + foot.len() + 4 > max_rows {
+            hero = self.render_hero(w, true);
+        }
+        hero.append(&mut head);
+        let head = hero;
+        let budget = max_rows.saturating_sub(head.len() + foot.len()).max(2);
         let (body, max_scroll) = window_blocks(
             &body_blocks,
             budget,
@@ -1634,6 +1709,7 @@ impl App {
             .unwrap_or_default();
 
         let usd_text = match k.saving_usd {
+            Some(u) if u > 0.0 && k.up_to => format!("up to +{}/mo", about(u)),
             Some(u) if u > 0.0 => format!("+{}/mo", about(u)),
             _ => "good".into(),
         };
@@ -1789,6 +1865,12 @@ impl App {
                 if !item.sources.is_empty() {
                     paragraphs.push(format!("Source: {}", item.sources.join(" ")));
                 }
+                if v.read_only && matches!(item.how, Some(How::Edit(_))) {
+                    paragraphs.push(
+                        "Its edit is offered on this host once this checklist closes, when doctor asks to show vibes' advice."
+                            .into(),
+                    );
+                }
                 for paragraph in paragraphs {
                     for line in wrap_text(
                         &paragraph,
@@ -1842,9 +1924,49 @@ impl App {
                 ttl_count += 1;
             }
         }
-        if ttl_count > 0 && (five > 0.0 || one > 0.0) {
+        // One chart speaks for the group only when every member was replayed and all favor
+        // the same TTL; otherwise each member shows its own comparison.
+        let winners: Vec<bool> = g
+            .members
+            .iter()
+            .filter_map(|m| match m.fix.proof {
+                Some(Proof::CacheTtl {
+                    five_m_usd,
+                    one_h_usd,
+                    ..
+                }) => Some(one_h_usd <= five_m_usd),
+                _ => None,
+            })
+            .collect();
+        let agree = winners.windows(2).all(|w| w[0] == w[1]);
+        if ttl_count == g.members.len() && agree && (five > 0.0 || one > 0.0) {
             out.push(trim_ansi(&format!("      {pipe}"), w));
             out.extend(self.render_ttl_chart(five, one, reqs, wrap_w, &pipe, w));
+        } else if ttl_count > 0 {
+            for m in &g.members {
+                out.push(trim_ansi(&format!("      {pipe}"), w));
+                let name = member_name(m, &m.fix.section.member);
+                out.push(trim_ansi(
+                    &format!(
+                        "      {pipe} {}",
+                        self.style(BOLD, &format!("{name}: {}", m.fix.value))
+                    ),
+                    w,
+                ));
+                match m.fix.proof {
+                    Some(Proof::CacheTtl {
+                        five_m_usd,
+                        one_h_usd,
+                        requests,
+                    }) => out.extend(
+                        self.render_ttl_chart(five_m_usd, one_h_usd, requests, wrap_w, &pipe, w),
+                    ),
+                    _ => out.push(trim_ansi(
+                        &format!("      {pipe} {}", self.style(DIM, "not replayed")),
+                        w,
+                    )),
+                }
+            }
         } else {
             // Render EVERY member on its own clean row with a proportional bar + exact saving — never cut off names!
             out.push(trim_ansi(&format!("      {pipe}"), w));
@@ -2117,10 +2239,12 @@ impl App {
             String::new(),
         ];
 
+        let backups: Vec<String> = diff
+            .backups
+            .iter()
+            .map(|b| self.style(DIM, &self.fit_text(&format!("  {b}"), w)))
+            .collect();
         let mut foot = vec![];
-        for b in &diff.backups {
-            foot.push(self.style(DIM, &self.fit_text(&format!("  {b}"), w)));
-        }
         if let Some(err) = &self.status_error {
             foot.push(self.style(RED, &self.fit_text(&format!("  ! {err}"), w)));
         }
@@ -2136,14 +2260,22 @@ impl App {
             w,
         ));
 
-        let raw_lines: Vec<String> = diff.text.lines().flat_map(|l| wrap_ansi(l, w)).collect();
+        let mut raw_lines: Vec<String> = diff.text.lines().flat_map(|l| wrap_ansi(l, w)).collect();
+        // Backups stay beside the keys while five diff rows still fit, else they scroll last.
+        if head.len() + foot.len() + backups.len() + 5 <= max_rows {
+            foot.splice(0..0, backups);
+        } else {
+            raw_lines.push(String::new());
+            raw_lines.extend(backups);
+        }
         let mut budget = max_rows.saturating_sub(head.len() + foot.len()).max(4);
         // A diff that scrolls gives one of its rows to the scroll line, so the keys stay on screen.
         if raw_lines.len() > budget {
             budget = budget.saturating_sub(1).max(1);
         }
         let max_scroll = raw_lines.len().saturating_sub(budget);
-        let scroll = self.diff_scroll.min(max_scroll);
+        let scroll = self.diff_scroll.get().min(max_scroll);
+        self.diff_scroll.set(scroll);
         let slice = &raw_lines[scroll..(scroll + budget).min(raw_lines.len())];
         head.extend(slice.iter().cloned());
         if max_scroll > 0 {
@@ -2193,7 +2325,7 @@ pub(crate) fn run(
         let width = style.width.unwrap_or(80).clamp(48, 104);
         let mut stdout = io::stdout().lock();
         let failed = |_| ScanError::new(format!("cannot use the terminal; {}", app.unchanged()));
-        for line in app.render_hero(width) {
+        for line in app.render_hero(width, false) {
             writeln!(stdout, "{line}").map_err(failed)?;
         }
         if !app.hero.kept.is_empty() {
@@ -2210,7 +2342,7 @@ pub(crate) fn run(
             }
             writeln!(stdout).map_err(failed)?;
         }
-        write_by_hand(&mut stdout, &app.by_hand, style.color).map_err(failed)?;
+        write_by_hand(&mut stdout, &app.steps_by_hand(), style.color).map_err(failed)?;
         stdout.flush().map_err(failed)?;
         return Ok(ExitKind::Done);
     }
@@ -2231,7 +2363,10 @@ pub(crate) fn run(
 
         let Ok(ev) = event::read() else {
             viewport.clear(&mut stdout).ok();
-            return Ok(ExitKind::Done);
+            return Err(ScanError::new(format!(
+                "cannot read the terminal; {}",
+                app.unchanged()
+            )));
         };
         let TermEvent::Key(KeyEvent {
             code,
@@ -2384,7 +2519,7 @@ pub(crate) fn run(
                             "{}",
                             app.style(DIM, &format!("  Nothing selected; {}.", app.unchanged()))
                         );
-                        let _ = write_by_hand(&mut stdout, &app.by_hand, app.color);
+                        let _ = write_by_hand(&mut stdout, &app.steps_by_hand(), app.color);
                         let _ = stdout.flush();
                         return Ok(ExitKind::Done);
                     }
@@ -2398,7 +2533,7 @@ pub(crate) fn run(
                     match result {
                         Ok(diff) => {
                             app.diff = Some(diff);
-                            app.diff_scroll = 0;
+                            app.diff_scroll.set(0);
                             app.diff_tab = app.tab;
                             app.screen = Screen::Diff;
                         }
@@ -2427,10 +2562,10 @@ pub(crate) fn run(
                     return Ok(ExitKind::Done);
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
-                    app.diff_scroll = app.diff_scroll.saturating_sub(1);
+                    app.diff_scroll.set(app.diff_scroll.get().saturating_sub(1));
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    app.diff_scroll = app.diff_scroll.saturating_add(1);
+                    app.diff_scroll.set(app.diff_scroll.get().saturating_add(1));
                 }
                 // Enter opened this screen, so writing takes `y`: a held or doubled Enter, which
                 // a terminal sends as more presses, never writes before the diff is read.
@@ -2478,7 +2613,7 @@ pub(crate) fn run(
                     for line in &written.lines {
                         let _ = writeln!(stdout, "  {}", app.style(DIM, line));
                     }
-                    let _ = write_by_hand(&mut stdout, &app.by_hand, app.color);
+                    let _ = write_by_hand(&mut stdout, &app.steps_by_hand(), app.color);
                     let _ = stdout.flush();
                     return Ok(ExitKind::Done);
                 }
@@ -3258,6 +3393,7 @@ mod tests {
                     name: "Subagent prompt cache TTL".into(),
                     value: "1h".into(),
                     saving_usd: Some(3545.0),
+                    up_to: false,
                     default_value: Some("5m".into()),
                     summary: "Default is 5m — keeping 1h saves ~$3,545/mo.".into(),
                 },
@@ -3266,6 +3402,7 @@ mod tests {
                     name: "Fast mode".into(),
                     value: "off".into(),
                     saving_usd: None,
+                    up_to: false,
                     default_value: None,
                     summary: "Already at the recommended value (off).".into(),
                 },
@@ -3366,6 +3503,7 @@ mod tests {
                 versions: vec![version(vec![], 0, vec![Origin::Vibe(0)])],
                 shown: 0,
                 checked: false,
+                read_only: false,
             },
             VibeRow {
                 host: 0,
@@ -3376,6 +3514,7 @@ mod tests {
                 ],
                 shown: 0,
                 checked: true,
+                read_only: false,
             },
         ];
         resolve_vibes(&mut rows);
@@ -3410,6 +3549,7 @@ mod tests {
                 versions: vec![version(vec![], 3, vec![])],
                 shown: 0,
                 checked,
+                read_only: false,
             })
             .collect();
         assert_eq!(
@@ -3448,11 +3588,26 @@ mod tests {
                 entries_count: 2,
                 denials_count: 1,
                 checked: true,
+                answered: false,
+                manual: vec![(
+                    "remove it from /etc/managed.json".into(),
+                    "it is managed".into(),
+                )],
                 extras: false,
             }],
             split: false,
             minor: false,
         });
+        // A removal left by hand prints once its change is accepted, as the walk prints it.
+        let step = |app: &App| {
+            app.steps_by_hand()
+                .iter()
+                .any(|(_, _, step, _)| step == "remove it from /etc/managed.json")
+        };
+        assert!(step(&app));
+        app.groups[0].members[0].checked = false;
+        assert!(!step(&app));
+        app.groups[0].members[0].checked = true;
         let frame = app.render(90, 40).join("\n");
         assert!(
             frame.contains("[ ] also remove 2 config entries and block 1"),
@@ -3514,6 +3669,8 @@ mod tests {
                 entries_count: 0,
                 denials_count: 0,
                 checked: false,
+                answered: false,
+                manual: vec![],
                 extras: false,
             })
             .collect();
@@ -3659,7 +3816,7 @@ mod tests {
             backups: vec!["Backs up ~/.claude/settings.json first.".into()],
         });
         for scroll in [0, 1000] {
-            app.diff_scroll = scroll;
+            app.diff_scroll.set(scroll);
             let out = app.render(80, 23);
             assert!(app.whole.get(), "{out:?}");
             assert!(
@@ -3724,6 +3881,15 @@ mod tests {
         }];
         let hero = Hero {
             monthly_spend: 3000.0,
+            sessions: 1234,
+            requests: 123_456,
+            spend_text: "$3,000".into(),
+            credit: Some("Already saving ~$96/mo (16%) vs defaults".into()),
+            caveats: vec![
+                "A caveat long enough to wrap over several lines of a narrow pane.".into();
+                4
+            ],
+            vibes_pending: 3,
             ..Hero::default()
         };
         let mut app = App::new(&hosts, hero, Tab::Measured, false, false);
@@ -3738,6 +3904,95 @@ mod tests {
             text.contains("up to ~$913/mo ± $91 more by billing"),
             "{text}"
         );
+
+        // At the smallest supported size the summary shrinks to its headline so the keys stay,
+        // with a proof open and with the caveats, which scroll in the body.
+        app.expanded = app.current_focus();
+        for caveats in [false, true] {
+            app.show_caveats = caveats;
+            let out = app.render(48, 19);
+            assert!(app.whole.get(), "{out:#?}");
+            assert!(
+                out.last().unwrap().contains("[Enter] Review diff"),
+                "{out:#?}"
+            );
+            assert!(out.join("\n").contains("Save ~$1,234/mo"), "{out:#?}");
+        }
+        app.show_caveats = false;
+
+        // Billing re-prices the TTL left unanswered, but keeps an answer the person gave.
+        let ttl = app
+            .groups
+            .iter()
+            .position(|g| g.members[0].fix.name.starts_with("Main-agent"))
+            .unwrap();
+        app.focus = app
+            .visible_rows()
+            .iter()
+            .position(|f| *f == Focus::Group(ttl))
+            .unwrap();
+        app.toggle_focused();
+        assert!(!app.groups[ttl].members[0].checked);
+        for _ in 0..3 {
+            app.cycle_billing();
+            assert!(!app.groups[ttl].members[0].checked);
+        }
+        // `b` belongs to the Measured tab.
+        app.tab = Tab::Vibes;
+        let billing = app.billing;
+        app.cycle_billing();
+        assert_eq!(app.billing, billing);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_group_writing_different_ttls_proves_each_member() {
+        let app = App::new(&[], Hero::default(), Tab::Measured, false, false);
+        let member = |name: &str, value: &str, five: f64, one: f64| {
+            let section = Section {
+                kind: Kind::CacheTtl,
+                label: "Prompt cache TTL".into(),
+                member: name.into(),
+                location: None,
+            };
+            MemberItem {
+                host: 0,
+                host_label: None,
+                offer_index: 0,
+                fix: Fix {
+                    proof: Some(Proof::CacheTtl {
+                        five_m_usd: five,
+                        one_h_usd: one,
+                        requests: 100,
+                    }),
+                    ..sample_fix(name, value, (five - one).abs(), false, section, "/s")
+                },
+                entries_count: 0,
+                denials_count: 0,
+                checked: true,
+                answered: false,
+                manual: vec![],
+                extras: false,
+            }
+        };
+        let mut group = Group {
+            host_label: None,
+            members: vec![
+                member("main", "5m -> 1h", 400.0, 100.0),
+                member("subagents", "1h -> 5m", 50.0, 90.0),
+            ],
+            split: false,
+            minor: false,
+        };
+        let charts = |group: &Group| {
+            app.render_group_proof(group, 80)
+                .iter()
+                .filter(|l| l.contains("Replayed cache cost"))
+                .count()
+        };
+        assert_eq!(charts(&group), 2);
+        // Members that agree share one chart.
+        group.members[1] = member("subagents", "5m -> 1h", 90.0, 50.0);
+        assert_eq!(charts(&group), 1);
     }
 }

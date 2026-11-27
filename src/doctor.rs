@@ -1015,8 +1015,8 @@ pub(crate) fn retention_how(control: &RetentionControl, days: u64, profile: &Pro
     )
 }
 
-/// How to move a main-session default to the maintainer's pick in `profile`'s settings,
-/// the model and the effort in one edit; None when the default is the pick or one they accept.
+/// How to move a main-session default to Kixel's pick in `profile`'s settings,
+/// the model and the effort in one edit; None when the default is the pick or one Kixel accepts.
 pub(crate) fn default_how(control: &EffortControl, profile: &Profile) -> Option<How> {
     if crate::effort::accepted(control, profile.harness) {
         return None;

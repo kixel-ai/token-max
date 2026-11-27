@@ -1,7 +1,7 @@
 //! `token-max vibes`: the advice the transcripts can't price, apart from `doctor`'s
 //! measured lines.
 //!
-//! Each item is a card naming whose advice it is: a provider's page or the maintainer's
+//! Each item is a card naming whose advice it is: a provider's page or Kixel's
 //! pick. An item that names the settings to change is offered as one edit, through
 //! `doctor`'s walk and confirm. Nothing here is a verdict or sets an exit code.
 
@@ -30,7 +30,7 @@ pub struct Item {
     pub what: String,
     /// The advice, with what was measured beside it.
     pub text: String,
-    /// Whose advice it is: the provider's pages, or the maintainer's pick.
+    /// Whose advice it is: the provider's pages, or Kixel's pick.
     pub sources: Vec<String>,
     /// The settings change it names, which the walk offers; None for a card with no question.
     pub how: Option<How>,

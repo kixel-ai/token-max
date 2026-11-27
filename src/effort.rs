@@ -26,7 +26,7 @@ const SOURCES: [&str; 5] = [
 /// A main-session model and effort.
 pub type Pair = (&'static str, &'static str);
 
-/// The maintainer's pick of a main-session default for each harness, then the other
+/// Kixel's pick of a main-session default for each harness, then the other
 /// defaults they accept as fine.
 const PICKS: [(Harness, Pair, &[Pair]); 2] = [
     (
@@ -41,7 +41,7 @@ const PICKS: [(Harness, Pair, &[Pair]); 2] = [
     ),
 ];
 
-/// The maintainer's pick of a main-session default for `harness`, and the other defaults
+/// Kixel's pick of a main-session default for `harness`, and the other defaults
 /// they accept.
 pub fn pick(harness: Harness) -> (Pair, &'static [Pair]) {
     let (_, pick, accepted) = PICKS
@@ -51,7 +51,7 @@ pub fn pick(harness: Harness) -> (Pair, &'static [Pair]) {
     (*pick, accepted)
 }
 
-/// Whether a resolved default is the maintainer's pick for `harness` or one they accept.
+/// Whether a resolved default is Kixel's pick for `harness` or one Kixel accepts.
 pub fn accepted(control: &EffortControl, harness: Harness) -> bool {
     let (pick, others) = pick(harness);
     let current = (control.model.as_deref(), control.effective.as_deref());

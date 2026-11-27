@@ -1687,16 +1687,16 @@ flags), and asks the same question about [how a profile pays](#how-a-profile-pay
 
 Each piece of advice is a card: the setting or feature, the change advised
 when it names one, what the setting does, the advice beside what was measured,
-and `Source`, which says whose advice it is, a provider's page or the
-maintainer's pick. A card has no verdict and no saving, and nothing here sets
+and `Source`, which says whose advice it is, a provider's page or
+Kixel's pick. A card has no verdict and no saving, and nothing here sets
 an exit code.
 
 | Card | When |
 | --- | --- |
 | [Bash timeout cap](#bash-timeout-cap) | Every Claude settings file: the cap beside the long waits measured under it. |
 | [Transcript retention](#transcript-retention) | A Claude profile whose `cleanupPeriodDays` is under 365, the default of 30 included: the disk its transcripts take, and the change to 365. |
-| [Auto-compact window](#auto-compact-window-cap) | Every compaction window line: the maintainer's cap of 400K for Claude and 240K for Codex, beside `doctor`'s replay of it. |
-| [Main-session default](#main-session-default) | Every resolved main-session default: the maintainer's pick of a model and effort beside what each recorded pair cost, and past `high` the provider's guidance. |
+| [Auto-compact window](#auto-compact-window-cap) | Every compaction window line: Kixel's cap of 400K for Claude and 240K for Codex, beside `doctor`'s replay of it. |
+| [Main-session default](#main-session-default) | Every resolved main-session default: Kixel's pick of a model and effort beside what each recorded pair cost, and past `high` the provider's guidance. |
 | [Subagent default](#subagent-default) | A profile that sets `CLAUDE_CODE_SUBAGENT_EFFORT` or Codex's `agents.default_subagent_reasoning_effort`: past `high` the provider's guidance and the change to `high`, and an upgrade when the latest Claude Code ignores the variable. |
 | An instruction file | A CLAUDE.md of 200 lines or more, past Claude Code's [guidance](https://code.claude.com/docs/en/memory#write-effective-instructions), or an AGENTS.md at or above the byte budget Codex [loads](https://learn.chatgpt.com/docs/agent-configuration/agents-md), with what each 100 lines of it costs. |
 | Explore subagent | Claude's built-in Explore ran off Haiku: what it cost, the same tokens on the cheapest model, the model guide's tip, and the agent file that follows it as a step by hand. |
@@ -1746,7 +1746,7 @@ main-agent TTL change for the profile, the card offers no edit and asks for
 `token-max vibes` again, which compares the cap with the new TTL. It advises 240000 ms
 under a 5m cache and 3300000 ms under 1h, a margin that leaves room for the
 model's reply on either side of the wait, whenever the cap is anything else: a
-higher cap comes down, and a lower one goes up. That margin is the maintainer's pick, not a measurement, and the card
+higher cap comes down, and a lower one goes up. That margin is Kixel's pick, not a measurement, and the card
 says so. A cap already there, or one with no TTL to compare with or an owner
 T3 left unsettled, has a card that advises nothing.
 
@@ -1780,7 +1780,7 @@ and to compare, and a deleted transcript is gone: the setting stops only future
 deletion. Claude Desktop and Cowork transcripts are exempt from the sweep by
 default, so the period is not a limit on every transcript. When a profile's value is under 365, the card advises 365 and says how
 much disk the transcripts the scan read take today, from their sizes. A year is
-the maintainer's pick: a longer period grows disk without bound for a heavy
+Kixel's pick: a longer period grows disk without bound for a heavy
 user, and 90 days loses longer comparisons. The card names whose file sets the
 value; the edit goes in the user's settings file, and a managed file's value,
 which outranks it, is a step by hand. Project and local settings are not read, and a
@@ -1795,11 +1795,11 @@ lists no setting that deletes old `sessions/`.
 
 Every [compaction window](#compaction-window) line gets a card capping the
 window at 400K tokens for Claude Code and 240K for Codex. The cap is for output
-quality, not cost, and it is the maintainer's pick. For Claude the card also
+quality, not cost, and it is Kixel's pick. For Claude the card also
 cites Anthropic's [context windows](https://platform.claude.com/docs/en/build-with-claude/context-windows)
 page, which says accuracy and recall degrade as a context grows. No OpenAI page
-says how Codex's output changes with the window, so its card rests on the
-maintainer's pick alone and says so.
+says how Codex's output changes with the window, so its card rests on
+Kixel's pick alone and says so.
 
 The card advises the cap when the window is above it, including an unset
 window on a native-1M Claude model, which compacts near 967K. A window at or
@@ -1836,14 +1836,14 @@ the scan read it.
 
 ### Main-session default
 
-The maintainer's pick of a main-session default is Claude Opus 5.5
+Kixel's pick of a main-session default is Claude Opus 5.5
 (`claude-opus-5-5`) at `medium` for Claude Code and Sol 6.2 (`gpt-6.2-sol`)
 at `high` for Codex; Opus 5.5 at `high` and Sol 6.2 at `xhigh` are fine
 defaults too (`PICKS` in `src/effort.rs`). Each resolved
 [`Main-session effort`](#main-session-effort) line gets a card comparing the
 model and the level it runs at with the pick. Any other default, a different
-model or a different level, is advised to move to the pick, and one the
-maintainer accepts has a card that advises nothing. The card shows what each
+model or a different level, is advised to move to the pick, and one
+Kixel accepts has a card that advises nothing. The card shows what each
 recorded model and effort pair cost, as the line does; a different model or
 effort changes the output tokens, so what the pick would cost is not measured.
 Past `high`, it also quotes the provider's guidance: for Claude, `xhigh` and
@@ -1855,7 +1855,7 @@ Past `high`, it also quotes the provider's guidance: for Claude, `xhigh` and
 Codex, `xhigh` and `max` cite OpenAI's
 [reasoning guide](https://developers.openai.com/api/docs/guides/reasoning)
 (`xhigh` only where evals show a benefit; `max` for the most complex tasks,
-evaluated against `xhigh`). A default the maintainer accepts gets no caution,
+evaluated against `xhigh`). A default Kixel accepts gets no caution,
 so Sol 6.2 at `xhigh` is not warned against. An unresolved default, such as a
 T3 thread's, has no card.
 
@@ -1893,7 +1893,7 @@ effort. Unset, subagents follow the main session, which the
 card.
 
 Past `high`, the card quotes the same provider guidance as the main-session
-card and offers the maintainer's pick, `high`, which every model that takes
+card and offers Kixel's pick, `high`, which every model that takes
 effort accepts. The edit sets the variable where it is set now: `env` in the
 profile's Claude `settings.json` or the key in its Codex `config.toml`. A
 shell variable, a T3 instance's own `environment` entry, or another file that
@@ -1921,7 +1921,7 @@ their model attribution.
 
 ### Auto memory in vibes
 
-The maintainer's pick: a lasting fact about a project belongs in its
+Kixel's pick: a lasting fact about a project belongs in its
 repository, where it is reviewed and every host and teammate sees it, not
 saved silently on one machine by Claude Code's auto memory
 (`autoMemoryEnabled`) or Codex memories (`features.memories`). So when memory
@@ -2052,7 +2052,7 @@ never offers to change it. A default token-max cannot resolve, such as a T3
 thread's selection, is unknown.
 
 Each resolved default gets a [`Main-session default`](#main-session-default)
-card in `vibes`, which suggests the maintainer's pick and quotes the
+card in `vibes`, which suggests Kixel's pick and quotes the
 provider's guidance past `high`. See
 [default effort](semantics.md#main-session-effort) for how the default
 resolves.
@@ -2147,7 +2147,7 @@ conversation at its own rates. Each Claude settings file gets a
 `ANTHROPIC_MODEL`, else the latest recorded main-session model.
 
 With no `advisorModel` set, the card suggests one rank above that default,
-the maintainer's pick: `opus` for a Haiku or Sonnet main, `fable` for an Opus
+Kixel's pick: `opus` for a Haiku or Sonnet main, `fable` for an Opus
 main, and none for a Fable main, which Claude Code pairs only with a Fable
 advisor. It cites the page's claim that a faster main model with a stronger
 advisor "typically costs less than running the stronger model throughout",

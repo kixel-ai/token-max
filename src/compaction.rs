@@ -6201,7 +6201,7 @@ mod tests {
             near(first.summary_cost.total_usd.map(Usd::to_f64), 1.23);
             near(first.prefix_cost.total_usd.map(Usd::to_f64), 0.05);
             near(window(&first_check, 20000).savings_usd, 4.5702);
-            // `vibes` caps Codex at 240k, with the maintainer's pick as its only source, and
+            // `vibes` caps Codex at 240k, with Kixel's pick as its only source, and
             // writes the key the line names.
             let card = |s: &Scan| {
                 crate::report::advice(&report(s), ReportOptions::default())

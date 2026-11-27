@@ -993,15 +993,19 @@ fn piggy_progress(
     let found_line = if shared.tally
         && let Some((savings, _)) = shared.tally()
     {
-        let usd = savings.usd().unwrap_or(0.0);
-        if usd >= 1.0 {
-            s(
-                "1;32",
-                &format!("+~{}/mo found so far", crate::report::about(usd)),
-            )
-        } else {
-            String::new()
-        }
+        // A saving that holds only under one billing default stays apart from measured ones.
+        let text = match savings.figures() {
+            _ if savings.usd().unwrap_or(0.0) < 1.0 => None,
+            (Some(measured), Some(up_to)) => {
+                Some(format!("+{measured} found, up to {up_to} more by billing"))
+            }
+            (Some(measured), None) => Some(format!("+{measured} found so far")),
+            (None, Some(up_to)) => Some(format!("up to {up_to} found, by billing")),
+            (None, None) => None,
+        };
+        text.map_or_else(String::new, |text| {
+            s("1;32", crate::terminal::fit(&text, right_room))
+        })
     } else {
         String::new()
     };
@@ -2590,6 +2594,7 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
                     name: text(r.name),
                     value: text(r.value),
                     saving_usd: r.saving_usd,
+                    up_to: r.up_to,
                     default_value: r.default_value.map(text),
                     summary: text(r.summary),
                 }
@@ -3327,6 +3332,7 @@ fn run_tui(walk: Walk) -> Result<(), ScanError> {
                         versions,
                         shown: 0,
                         checked: false,
+                        read_only: offers.is_none(),
                     });
                 }
             }

@@ -1742,7 +1742,7 @@ fn flat(text: &str) -> String {
 
 /// Each walked home's settings: a 1h TTL, and a Bash cap that outlasts it, which `vibes`
 /// offers to lower on every host with a saving not measured. The compaction window is at the
-/// maintainer's cap and an advisor is set, so their cards ask nothing.
+/// Kixel's cap and an advisor is set, so their cards ask nothing.
 const HOME_SETTINGS: &str = r#"{"promptCacheTtl":"1h","autoCompactWindow":400000,"advisorModel":"fable","cleanupPeriodDays":365,"env":{"BASH_MAX_TIMEOUT_MS":"7200000"}}"#;
 
 /// [`HOME_SETTINGS`] with the cap lowered under the TTL, as accepting its change writes them.

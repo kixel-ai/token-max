@@ -449,7 +449,7 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     // Settings pretended away are not the ones vibes reads, so --defaults names no count.
     let (_, report, _) = invoke("doctor", &["--defaults"]);
     assert!(!report.contains("token-max vibes"), "{report}");
-    // A cap already at the margin, a window at the maintainer's and an advisor already set
+    // A cap already at the margin, a window at Kixel's and an advisor already set
     // keep their cards, and doctor has nothing to name.
     w.settings(
         r#"{"promptCacheTtl":"1h","autoCompactWindow":400000,"advisorModel":"fable","cleanupPeriodDays":365,"env":{"BASH_MAX_TIMEOUT_MS":"3300000"}}"#,
@@ -543,7 +543,7 @@ fn vibes_advises_memory_off_when_most_sessions_ran_in_a_repository() {
         std::fs::write(w.transcript(), text).unwrap();
     };
     session(&repo.join("src"), &[]);
-    // Memory is on by default; a 55m cap under a 1h cache, a window at the maintainer's cap,
+    // Memory is on by default; a 55m cap under a 1h cache, a window at Kixel's cap,
     // a year of transcripts and an advisor already set leave the other cards quiet.
     w.settings(
         r#"{"promptCacheTtl":"1h","autoCompactWindow":400000,"advisorModel":"fable","cleanupPeriodDays":365,"env":{"BASH_MAX_TIMEOUT_MS":"3300000"}}"#,

@@ -478,7 +478,7 @@ fn model_setting(owner: &str, settings_file: &str) -> Option<(String, String)> {
     Some((file.into(), key.into()))
 }
 
-/// The main-session default as `vibes` shows it: the maintainer's pick beside the default
+/// The main-session default as `vibes` shows it: Kixel's pick beside the default
 /// the settings give, the provider's guidance past `high`, and what each recorded model and
 /// effort pair cost. None when the default is unresolved.
 fn default_item(e: &EffortCheck, profile: &str, how: Option<How>, out: &Out<'_>) -> Option<Item> {
@@ -629,7 +629,7 @@ struct SubagentLine<'a> {
 }
 
 /// The default subagent effort as `vibes` shows it: the level and the model it pairs with,
-/// past `high` the provider's guidance and the maintainer's pick of `high`, and an upgrade
+/// past `high` the provider's guidance and Kixel's pick of `high`, and an upgrade
 /// when the latest Claude Code ignores the variable. None when no setting names one, as
 /// subagents then follow the main session, which its own card covers.
 fn subagent_item(line: &SubagentLine<'_>, out: &Out<'_>) -> Option<Item> {
@@ -1744,6 +1744,8 @@ pub(crate) struct KeptRow {
     pub name: String,
     pub value: String,
     pub saving_usd: Option<f64>,
+    /// Whether the saving holds only while a default is the other value.
+    pub up_to: bool,
     pub default_value: Option<String>,
     pub summary: String,
 }
@@ -1755,6 +1757,7 @@ impl Listing {
         use crate::defaults::Saving;
 
         let mut items: Vec<KeptRow> = vec![];
+        let mut candidates: Vec<(&str, KeptRow)> = vec![];
         let mut other_features = 0usize;
         for row in self.rows.iter().filter(|r| r.mark == Mark::Keep) {
             let (saving_usd, default_value) = match &row.baseline {
@@ -1769,6 +1772,10 @@ impl Listing {
                 }
                 None => (None, None),
             };
+            let up_to = row
+                .baseline
+                .as_ref()
+                .is_some_and(|b| matches!(b.saving, Saving::UpTo(_)));
             let is_core_setting = row.group.is_none();
             let saves_meaningfully = saving_usd.is_some_and(|u| u >= 1.0);
             if !is_core_setting && !saves_meaningfully {
@@ -1777,30 +1784,47 @@ impl Listing {
             }
             let summary = match (&default_value, saving_usd) {
                 (Some(def), Some(usd)) => format!(
-                    "Default is {def} — keeping {} saves ~{}/mo.",
+                    "Default is {def} — keeping {} saves {}~{}/mo.",
                     row.value,
+                    if up_to { "up to " } else { "" },
                     about(usd)
                 ),
                 (Some(def), None) => format!("Already set to {} (default {def}).", row.value),
                 (None, _) if !row.what.is_empty() => row.what.clone(),
                 (None, _) => format!("Already at the recommended value ({}).", row.value),
             };
-            if let Some(existing) = items
-                .iter_mut()
-                .find(|k| k.name == row.name && k.value == row.value)
-            {
-                if saving_usd.unwrap_or(0.0) > existing.saving_usd.unwrap_or(0.0) {
-                    existing.saving_usd = saving_usd;
-                    existing.default_value = default_value;
-                    existing.summary = summary;
-                }
-            } else {
-                items.push(KeptRow {
+            candidates.push((
+                row.profile.as_str(),
+                KeptRow {
                     name: row.name.clone(),
                     value: row.value.clone(),
                     saving_usd,
+                    up_to,
                     default_value,
                     summary,
+                },
+            ));
+        }
+        // Profiles keeping one setting at one value share a row only when their comparisons
+        // are interchangeable; otherwise each row names its profile.
+        for (profile, row) in &candidates {
+            let same = |k: &KeptRow| k.name == row.name && k.value == row.value;
+            let interchangeable = candidates.iter().filter(|(_, k)| same(k)).all(|(_, k)| {
+                (k.saving_usd, k.up_to, &k.default_value)
+                    == (row.saving_usd, row.up_to, &row.default_value)
+            });
+            if interchangeable {
+                if !items.iter().any(same) {
+                    items.push(row.clone());
+                }
+            } else {
+                let name = match profile.is_empty() {
+                    true => row.name.clone(),
+                    false => format!("{} ({profile})", row.name),
+                };
+                items.push(KeptRow {
+                    name,
+                    ..row.clone()
                 });
             }
         }
@@ -6218,7 +6242,7 @@ fn allowlist_note(p: &Profile, model: &str, main: Option<&str>) -> Option<String
 }
 
 /// The main-session default once the Main-session default card's edit is written: the
-/// maintainer's pick, named by the setting the edit writes. None when the edit leaves the
+/// Kixel's pick, named by the setting the edit writes. None when the edit leaves the
 /// model as it is.
 fn written_default(control: &EffortControl, p: &Profile) -> Option<EffortControl> {
     let ((model, _), _) = crate::effort::pick(p.harness);
@@ -6381,7 +6405,7 @@ enum Doctor {
     Wrote(i64),
 }
 
-/// A compaction line's window as `vibes` shows it beside the maintainer's cap: the window
+/// A compaction line's window as `vibes` shows it beside Kixel's cap: the window
 /// left after `doctor`'s change, what `doctor`'s replay priced the cap at, and how the card
 /// relates to that line's verdict. Its name and what it does are the caller's.
 fn window_item(c: &CompactionCheck, profile: &Profile, doctor: Doctor, out: &Out<'_>) -> Item {
@@ -8137,9 +8161,11 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
         let ttl_changes: Vec<Origin> = checks
             .iter()
             .filter(|(i, result, _)| {
+                // Every profile the TTL line's setting covers, not only its lead: a T3
+                // instance can share the native TTL yet sit on a Bash line of its own.
                 matches!(result, CheckResult::Ttl(t)
                     if t.bucket == crate::model::Bucket::Main
-                        && cap.profiles.contains(&t.base.profile))
+                        && t.base.profiles.iter().any(|p| cap.profiles.contains(p)))
                     && fixes.iter().any(|f| {
                         f.origins.contains(&Origin::Check(*i)) && matches!(f.how, How::Edit(_))
                     })
@@ -15661,5 +15687,75 @@ pub(crate) mod tests {
             ),
             "{plain}"
         );
+    }
+
+    #[test]
+    fn every_bash_card_under_a_written_ttl_asks_for_a_fresh_run() {
+        let (mut report, _) = synthetic_report_with("{}");
+        let index = report
+            .checks
+            .iter()
+            .position(|c| matches!(c, CheckResult::Ttl(t) if t.bucket == Bucket::Main))
+            .unwrap();
+        // A T3 instance shares the native profile's TTL setting, yet a Bash default of its
+        // own puts it on a Bash line apart, which the TTL line does not lead.
+        let CheckResult::Ttl(ttl) = &mut report.checks[index] else {
+            unreachable!()
+        };
+        ttl.base.profiles.push("t3".into());
+        let mut t3 = report.bash[0].clone();
+        (t3.profile, t3.profiles) = ("t3".into(), vec!["t3".into()]);
+        report.bash.push(t3);
+        let fixes = crate::doctor::fixes(&report, false);
+        assert!(
+            fixes
+                .iter()
+                .any(|f| f.origins.contains(&super::Origin::Check(index)))
+        );
+        let cards: Vec<Item> = format_report(&report, &fixes, ReportOptions::default())
+            .vibes
+            .into_iter()
+            .filter(|i| i.name.starts_with("Bash timeout cap"))
+            .collect();
+        assert_eq!(cards.len(), 2);
+        for card in &cards {
+            assert_eq!(card.after.len(), 1, "{}", card.name);
+            assert_eq!(card.after[0].origins, [super::Origin::Check(index)]);
+            assert!(card.after[0].item.how.is_none());
+        }
+    }
+
+    #[test]
+    fn kept_rows_share_a_line_only_when_their_comparisons_match() {
+        let (report, _) = synthetic_report_with("{}");
+        let mut listing = format_report(&report, &[], ReportOptions::default());
+        let mut row = listing.rows[0].clone();
+        (row.mark, row.group) = (Mark::Keep, None);
+        (row.name, row.value) = ("Prompt cache TTL".into(), "1h".into());
+        let kept = |profile: &str, usd: f64| Row {
+            profile: profile.into(),
+            baseline: Some(crate::defaults::Baseline {
+                default: "5m".into(),
+                saving: crate::defaults::Saving::Saves(usd),
+                margin: None,
+            }),
+            ..row.clone()
+        };
+        listing.rows = vec![kept("work", 40.0), kept("home", 40.0)];
+        let (rows, _) = listing.kept();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "Prompt cache TTL");
+        listing.rows = vec![kept("work", 40.0), kept("home", 9.0)];
+        let names: Vec<String> = listing.kept().0.into_iter().map(|r| r.name).collect();
+        assert_eq!(
+            names,
+            ["Prompt cache TTL (work)", "Prompt cache TTL (home)"]
+        );
+        // A saving that holds under one default only keeps saying so.
+        let mut up_to = kept("work", 40.0);
+        up_to.baseline.as_mut().unwrap().saving = crate::defaults::Saving::UpTo(40.0);
+        listing.rows = vec![up_to];
+        let (rows, _) = listing.kept();
+        assert!(rows[0].up_to && rows[0].summary.contains("saves up to ~$40/mo"));
     }
 }

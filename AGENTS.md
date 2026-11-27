@@ -6,11 +6,10 @@ configuration is asserted, not measured; this tool shows its evidence.
 
 Every line of `doctor` is measured: replayed from the user's own transcripts at
 public API prices, naming what the replay holds constant and what it could not
-measure. The maintainer's preferences never become a verdict. Advice the
-transcripts can't price lives in `token-max vibes` instead: a provider's
-guidance, such as Claude Code's 200-line CLAUDE.md advice, the maintainer's
-picks, and a setting whose saving is a guess, such as the Bash timeout cap.
-Each is a card naming whose advice it is, with no verdict and no effect on an
+measure. Kixel's preferences never become a verdict. Advice the transcripts
+can't price lives in `token-max vibes` instead: a provider's guidance, such as
+Claude Code's 200-line CLAUDE.md advice, Kixel's picks, and a setting whose
+saving is a guess, such as the Bash timeout cap. Each is a card naming whose advice it is, with no verdict and no effect on an
 exit code. Say plainly when a cost can't be measured
 rather than hiding the setting or guessing a number. A cost measured on only some
 requests is extrapolated to the rest, marked with `~` and its margin of error,

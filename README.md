@@ -104,6 +104,7 @@ token-max doctor --since 2026-11-01  # only sessions from that date on
 token-max doctor --details           # the evidence behind every line
 token-max doctor --ssh devbox       # this host and devbox, each change made on its own host
 token-max vibes                      # advice the transcripts can't price, with no verdict
+token-max skill install              # the token-audit skill, then ask your agent for /token-audit
 token-max doctor --help
 ```
 
@@ -140,8 +141,11 @@ for how to read each line, and its sections for each check.
 - [Reference](https://github.com/kixel-ai/token-max/blob/main/docs/reference.md):
   every flag, report section and check, including `--ssh`, T3 Code
   and the `token-max sessions` export of each session's cost, branches and
-  repositories, and the `token-max audit` hotspots of a repository's sessions,
-  from this host or over SSH.
+  repositories.
+- [Token audit](https://github.com/kixel-ai/token-max/blob/main/docs/reference.md#token-audit-skill):
+  the `token-audit` skill, which has Claude Code or Codex read the
+  `token-max audit` hotspots of a repository's sessions, from this host or over
+  SSH, and offer fixes for the waste no setting changes.
 - [Replay semantics](https://github.com/kixel-ai/token-max/blob/main/docs/semantics.md):
   the accounting, assumptions, sources and limits.
 - [Plans](https://github.com/kixel-ai/token-max/tree/main/quest):

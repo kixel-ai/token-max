@@ -5,4 +5,4 @@ compatibility: Requires token-max and jq.
 allowed-tools: Bash(token-max skill audit) Bash(token-max audit *)
 ---
 
-Run `token-max skill audit` and follow what it prints. If `token-max` is not installed, run `npx @kixel/crabx token-max skill audit` instead and prefix every `token-max` command it names the same way, or point the user to https://max.kixel.me to install it.
+Run `token-max skill audit` and follow what it prints. If `token-max` is not installed, or is too old to have `token-max skill audit`, run `npx @kixel/crabx token-max skill audit` instead and prefix every `token-max` command it names the same way, or point the user to https://max.kixel.me to install it.

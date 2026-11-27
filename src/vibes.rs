@@ -122,6 +122,9 @@ const OPENCODE_PROMPT_CACHE: Needs = Needs::opencode(3, 2);
 /// The open OpenAI issue on gpt-6.2 never caching a Responses request's instructions.
 const GPT_6_2_INSTRUCTIONS: &str = "https://github.com/openai/codex/issues/62312";
 
+/// The user's report that OpenCode 2.3.2 moved its system prompt into a developer message.
+const OPENCODE_PROMPT_REPORT: &str = "https://x.com/TekonBurns/status/2123525121168314876";
+
 /// A card advising an OpenCode upgrade when `profile`'s latest session ran a release before
 /// 2.3.2 and sent any request to gpt-6.2-sol or gpt-6.2-astra. None for any other profile,
 /// and for a version that is unrecorded or not plain digits, which may already send the
@@ -131,7 +134,16 @@ pub fn opencode_upgrade(profile: &Profile, requests: &[Request], arrow: &str) ->
         return None;
     }
     let mine = || requests.iter().filter(|r| r.profiles.contains(&profile.id));
-    let latest = mine().max_by_key(|r| r.time)?;
+    // A session records the version that created it, so a resumed older session is not the
+    // latest: the latest is the one whose first request came last.
+    let mut first: crate::collections::HashMap<&str, &Request> = Default::default();
+    for r in mine() {
+        let entry = first.entry(&*r.session).or_insert(r);
+        if r.time < entry.time {
+            *entry = r;
+        }
+    }
+    let latest = first.into_values().max_by_key(|r| r.time)?;
     let upgrade = OPENCODE_PROMPT_CACHE.upgrade([(profile, latest.version.as_deref())])?;
     let model = mine()
         .filter(|r| r.session == latest.session)
@@ -143,11 +155,13 @@ pub fn opencode_upgrade(profile: &Profile, requests: &[Request], arrow: &str) ->
         value: format!("{ran} {arrow} {}", OPENCODE_PROMPT_CACHE.number()),
         what: String::new(),
         text: format!(
-            "gpt-6.2-sol and gpt-6.2-astra never cache a Responses request's top-level instructions, but they do cache the same text sent as a leading developer message, so a session that sends OpenCode's system prompt as instructions pays full input price for it on every request. A user's report says OpenCode 2.3.2 moved the prompt into that message. {}: {}. What the uncached prompt cost is not measured.",
-            upgrade.why(&format!("Caching it on {model}")),
+            "gpt-6.2-sol and gpt-6.2-astra never cache a Responses request's top-level instructions, but they do cache the same text sent as a leading developer message, so a session that sends OpenCode's system prompt as instructions pays full input price for it on every request. A user's report says OpenCode 2.3.2 moved the prompt into that message. Caching it on {model} needs {OPENCODE_PROMPT_CACHE} or later, but OpenCode {ran} created the latest session: {}. What the uncached prompt cost is not measured.",
             upgrade.step()
         ),
-        sources: vec![format!("OpenAI's open issue: {GPT_6_2_INSTRUCTIONS}")],
+        sources: vec![
+            format!("OpenAI's open issue: {GPT_6_2_INSTRUCTIONS}"),
+            format!("The user's report: {OPENCODE_PROMPT_REPORT}"),
+        ],
         how: None,
         quiet: false,
         after: vec![],

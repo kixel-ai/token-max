@@ -1132,13 +1132,15 @@ fn sessions_exports_an_opencode_database_the_directory_flag_selects() {
     assert_eq!(std::fs::read(&file).unwrap(), before);
 }
 
-/// `vibes` advises an OpenCode upgrade only when the profile's latest session ran a plain
-/// version before 2.3.2 and sent a request to gpt-6.2, citing the issue and pricing nothing.
+/// `vibes` advises an OpenCode upgrade only when a plain version before 2.3.2 created the
+/// profile's latest session, which sent a request to gpt-6.2, citing the issue and pricing
+/// nothing.
 #[test]
 fn vibes_advises_an_opencode_upgrade_when_its_latest_session_ran_gpt_6_2_before_2_3_2() {
-    // Each session: its ID, version, start and model; the latest session decides.
-    type Session = (&'static str, &'static str, i64, &'static str);
-    let cases: [(&[Session], bool); 6] = [
+    // Each step: its session's ID and the version that created it, its start and model; a
+    // session's first step creates it, and the session created last decides.
+    type Step = (&'static str, &'static str, i64, &'static str);
+    let cases: [(&[Step], bool); 7] = [
         (&[("ses_old", "2.3.1", 0, "gpt-6.2-sol")], true),
         // An older session on gpt-6.2 is not the latest, which ran another model.
         (
@@ -1153,6 +1155,15 @@ fn vibes_advises_an_opencode_upgrade_when_its_latest_session_ran_gpt_6_2_before_
             &[
                 ("ses_a", "2.2.0", 0, "gpt-6.2-sol"),
                 ("ses_b", "2.3.2", 10_000, "gpt-6.2-sol"),
+            ],
+            false,
+        ),
+        // Resuming a session 2.2.0 created doesn't make it the latest.
+        (
+            &[
+                ("ses_a", "2.2.0", 0, "gpt-6.2-sol"),
+                ("ses_b", "2.3.2", 10_000, "gpt-6.2-sol"),
+                ("ses_a", "2.2.0", 20_000, "gpt-6.2-sol"),
             ],
             false,
         ),
@@ -1174,10 +1185,10 @@ fn vibes_advises_an_opencode_upgrade_when_its_latest_session_ran_gpt_6_2_before_
                data TEXT NOT NULL);",
         )
         .unwrap();
-        for &(id, version, offset, model) in sessions {
+        for (seq, &(id, version, offset, model)) in sessions.iter().enumerate() {
             let start = 1767225600000_i64 + offset;
             db.execute(
-                "INSERT INTO session_v2 VALUES (?1, NULL, '/work', ?2, ?3)",
+                "INSERT OR IGNORE INTO session_v2 VALUES (?1, NULL, '/work', ?2, ?3)",
                 rusqlite::params![id, version, start],
             )
             .unwrap();
@@ -1187,8 +1198,8 @@ fn vibes_advises_an_opencode_upgrade_when_its_latest_session_ran_gpt_6_2_before_
                 "tokens": {"input": 1000, "output": 10, "reasoning": 0, "cache": {"read": 0, "write": 0}},
             });
             db.execute(
-                "INSERT INTO session_message VALUES (?1, ?2, 'assistant', 1, 1, ?3)",
-                rusqlite::params![format!("msg_{id}"), id, step.to_string()],
+                "INSERT INTO session_message VALUES (?1, ?2, 'assistant', ?3, ?3, ?4)",
+                rusqlite::params![format!("msg_{seq}"), id, seq as i64, step.to_string()],
             )
             .unwrap();
         }
@@ -1209,12 +1220,12 @@ fn vibes_advises_an_opencode_upgrade_when_its_latest_session_ran_gpt_6_2_before_
                 "{stdout}"
             );
             assert!(
-                stdout.contains("Caching it on gpt-6.2-sol needs OpenCode 2.3.2 or later, but its latest session ran 2.3.1: upgrade OpenCode. What the uncached prompt cost is not measured"),
+                stdout.contains("Caching it on gpt-6.2-sol needs OpenCode 2.3.2 or later, but OpenCode 2.3.1 created the latest session: upgrade OpenCode. What the uncached prompt cost is not measured"),
                 "{stdout}"
             );
             assert!(
                 stdout.contains(
-                    "Source  OpenAI's open issue: https://github.com/openai/codex/issues/62312\n"
+                    "Source  OpenAI's open issue: https://github.com/openai/codex/issues/62312 The user's report: https://x.com/TekonBurns/status/2123525121168314876\n"
                 ),
                 "{stdout}"
             );

@@ -28,7 +28,7 @@ use crate::report::{Listing, Origin, ReportOptions, format_report, opening_note,
 use crate::safe::{ScanError, display};
 use crate::sessions::{Session, export};
 use crate::ssh::{self, Reply, Scope};
-use crate::terminal::{WrapOptions, wrap_text};
+use crate::terminal::{BOLD, BRAND, DIM, GREEN, Look, WrapOptions, paint, wrap_text};
 use crate::totals::{Counts, Totals};
 use crate::tui::{self, Bridge, DiffPreview, ExitKind, Hero, Tab, VibeRow, WriteResult};
 use crate::upgrade::{self, Check, Install};
@@ -406,13 +406,6 @@ fn clear_progress() -> MutexGuard<'static, ProgressState> {
         shown.cells = 0;
     }
     shown
-}
-
-/// How the progress line draws.
-#[derive(Clone, Copy)]
-struct Look {
-    color: bool,
-    unicode: bool,
 }
 
 /// The progress line, redrawn on its own thread so the reading bar moves while the scan holds
@@ -895,11 +888,11 @@ fn bar(
         ("#".repeat(full), "-".repeat(track - full))
     };
     let plain = format!("{lead}{open}{done}{todo}{close}{rest}");
-    let line = if look.color {
-        format!("{lead}{open}\x1b[35m{done}\x1b[2m{todo}\x1b[0m{close}{rest}")
-    } else {
-        plain.clone()
-    };
+    let line = format!(
+        "{lead}{open}{}{}{close}{rest}",
+        paint(&done, BRAND, look.color),
+        paint(&todo, DIM, look.color)
+    );
     (line, plain)
 }
 
@@ -912,33 +905,28 @@ fn piggy_progress(
     tick: usize,
     room: usize,
 ) -> Vec<String> {
-    let color = shared.look.color;
-    let s = |code: &str, text: &str| {
-        if color {
-            format!("\x1b[{code}m{text}\x1b[0m")
-        } else {
-            text.to_string()
-        }
-    };
+    let look = shared.look;
+    let s = |code: &str, text: &str| paint(text, code, look.color);
     const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     // Advance coin drop every 2 ticks (~200ms per stage) for a smooth, unhurried drop.
-    let pig = tui::piggy_lines(color, true, tick / 2);
+    let pig = tui::piggy_lines(look.color, true, tick / 2);
     let right_room = room.saturating_sub(37);
-    let spin = s("1;35", FRAMES[tick % FRAMES.len()]);
+    let brand = format!("{BOLD};{BRAND}");
+    let spin = s(&brand, FRAMES[tick % FRAMES.len()]);
 
     // Row 1: Brand wordmark
     let wordmark = format!(
         "{}{}  {}",
-        s("1", "token-"),
-        s("1;35", "max"),
-        s("2", crate::upgrade::VERSION)
+        s(BOLD, "token-"),
+        s(&brand, "max"),
+        s(DIM, crate::upgrade::VERSION)
     );
 
     // Row 3: Active phase with braille spinner
     let phase_line = format!(
         "{spin} {}",
         s(
-            "1",
+            BOLD,
             crate::terminal::fit(&format!("{phase}…"), right_room.saturating_sub(3))
         )
     );
@@ -955,20 +943,7 @@ fn piggy_progress(
     let bar_line = if let Some(p) = reading {
         let frac = (p.read as f64 / p.total.max(1) as f64).clamp(0.0, 1.0);
         let track = right_room.saturating_sub(24).clamp(10, 26);
-        let filled = ((frac * track as f64).round() as usize).min(track);
-        let bar = format!(
-            "{}{}{}",
-            s("35", &"━".repeat(filled)),
-            if filled < track {
-                s("35", "╸")
-            } else {
-                String::new()
-            },
-            s(
-                "2",
-                &"─".repeat(track.saturating_sub(filled + usize::from(filled < track)))
-            )
-        );
+        let bar = crate::terminal::bar(frac, track, BRAND, look);
         let pct = format!(" {:>3.0}%", frac * 100.0);
         let eta = if p.elapsed >= Duration::from_secs(1) && frac >= 0.02 {
             let left = p.elapsed.as_secs_f64() * (1.0 - frac) / frac;
@@ -982,74 +957,38 @@ fn piggy_progress(
             crate::report::size(p.total)
         );
         let bytes_fit = crate::terminal::fit(&bytes, right_room.saturating_sub(track + 5));
-        format!("{bar}{}{}", s("1", &pct), s("2", bytes_fit))
+        format!("{bar}{}{}", s(BOLD, &pct), s(DIM, bytes_fit))
     } else if let Some((done, of)) = checked
         && of > 0
     {
-        let frac = (done as f64 / of as f64).clamp(0.0, 1.0);
         let track = right_room.saturating_sub(18).clamp(10, 26);
-        let filled = ((frac * track as f64).round() as usize).min(track);
-        let bar = format!(
-            "{}{}{}",
-            s("35", &"━".repeat(filled)),
-            if filled < track {
-                s("35", "╸")
-            } else {
-                String::new()
-            },
-            s(
-                "2",
-                &"─".repeat(track.saturating_sub(filled + usize::from(filled < track)))
-            )
-        );
-        format!("{bar}  {}", s("2", &format!("{done}/{of} checks")))
+        let bar = crate::terminal::bar(done as f64 / of as f64, track, BRAND, look);
+        format!("{bar}  {}", s(DIM, &format!("{done}/{of} checks")))
     } else {
         String::new()
     };
 
-    // Row 5: Real live counts (sessions, requests, API spend)
+    // Rows 5 and 6: the plain progress line's counts, then its savings, each row dropping
+    // the least useful figure first when they don't fit.
+    let row = |pieces: Vec<Piece>, style: &str| {
+        // Every piece follows two spaces, which the row's start doesn't need.
+        let (text, _) = fit(pieces, None, 0, right_room + 2);
+        match text.trim_start() {
+            "" => String::new(),
+            text => s(style, text),
+        }
+    };
     let counts_line = shared
         .counts()
-        .map(|c| {
-            let mut parts = vec![];
-            if c.sessions > 0 {
-                parts.push(format!("{} sessions", crate::report::count(c.sessions)));
-            }
-            if c.requests > 0 {
-                parts.push(format!("{} reqs", crate::report::count(c.requests)));
-            }
-            if let Some(spent) = c.spend {
-                parts.push(crate::report::spend_text(
-                    spent.usd,
-                    spent.margin,
-                    spent.floor,
-                    spent.partial,
-                ));
-            }
-            s("2", crate::terminal::fit(&parts.join(" · "), right_room))
-        })
+        .map(|c| row(figures(&c), DIM))
         .unwrap_or_default();
-
-    // Row 6: Real live savings found so far
     let found_line = if shared.tally
-        && let Some((savings, _)) = shared.tally()
+        && let Some((savings, credit)) = shared.tally()
     {
-        // A saving that holds only under one billing default stays apart from measured ones,
-        // each amount whole: a room too narrow for both drops the billing one, never a figure.
-        let texts = match savings.figures() {
-            _ if savings.usd().unwrap_or(0.0) < 1.0 => vec![],
-            (Some(measured), Some(up_to)) => vec![
-                format!("+{measured} found, up to {up_to} more by billing"),
-                format!("+{measured} found so far"),
-            ],
-            (Some(measured), None) => vec![format!("+{measured} found so far")],
-            (None, Some(up_to)) => vec![format!("up to {up_to} found, by billing")],
-            (None, None) => vec![],
-        };
-        texts
-            .into_iter()
-            .find(|t| crate::terminal::cells(t) <= right_room)
-            .map_or_else(String::new, |text| s("1;32", &text))
+        row(
+            tallies(&savings, credit.as_ref()),
+            &format!("{BOLD};{GREEN}"),
+        )
     } else {
         String::new()
     };
@@ -2734,7 +2673,7 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
             }
             (Some(sum), Some(listing)) if !advice => {
                 let credit = sum.credit("this host's").map_or_else(String::new, |c| {
-                    let note = opening_note(&c, sum.partial);
+                    let note = opening_note(&c, sum.spend.partial);
                     let note = if note.is_empty() {
                         note
                     } else {
@@ -2763,12 +2702,7 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
                 h.requests = sum.requests;
                 h.sessions = sum.sessions;
                 h.monthly_spend = sum.monthly;
-                h.spend_text = crate::report::spend_text(
-                    sum.spend,
-                    sum.margin,
-                    sum.floor,
-                    sum.partial,
-                );
+                h.spend_text = sum.spend.text();
                 h.credit = sum
                     .credit
                     .as_ref()
@@ -3988,17 +3922,48 @@ mod tests {
         );
     }
 
+    /// The loading panel shows the plain line's figures, dropping the least useful first
+    /// when its column is narrow.
+    #[test]
+    fn the_panel_counts_as_the_plain_line_does() {
+        let look = Look {
+            color: false,
+            unicode: true,
+        };
+        let shown = Shown::new(look, Arc::new(Reading::default()), None, false);
+        *shown.reading.counts.lock().unwrap() = Some(Counts {
+            requests: 1234,
+            tokens: 5_600_000,
+            sessions: 7,
+            spend: None,
+        });
+        let row = |room| {
+            piggy_progress("Checking settings", None, &shown, 0, room)
+                .into_iter()
+                .find(|line| line.contains("requests"))
+                .map(|line| line.trim_end().rsplit("   ").next().unwrap().to_string())
+        };
+        assert_eq!(
+            row(120).as_deref(),
+            Some("1,234 requests  7 sessions  5.6M tokens")
+        );
+        assert_eq!(row(70).as_deref(), Some("1,234 requests  7 sessions"));
+    }
+
     /// The line counts this host as its scan reads, then ends on the hosts' total as the
     /// report adds it, whichever order their results arrive in.
     #[test]
     fn the_counts_end_on_the_hosts_total() {
         use crate::model::Margin;
-        let host = |requests, spend, margin| Totals {
+        let host = |requests, usd, margin| Totals {
             requests,
             tokens: requests * 1000,
             sessions: requests / 10,
-            spend,
-            margin: Some(Margin::Usd(margin)),
+            spend: crate::totals::Spent {
+                usd,
+                margin: Some(Margin::Usd(margin)),
+                ..Default::default()
+            },
             ..Totals::default()
         };
         let (here, there) = (host(700, 41.3, 0.7), host(300, 12.1, 2.4));

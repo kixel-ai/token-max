@@ -23,8 +23,10 @@ use crate::model::{
 };
 use crate::prices::{TIER_SENSITIVITY, TIER_SIGNS, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
-use crate::terminal::{BOLD, DIM, GREEN, RED, WrapOptions, YELLOW, cells, wrap_spans};
-use crate::totals::Finding;
+use crate::terminal::{
+    BOLD, DIM, GREEN, RED, WrapOptions, YELLOW, cells, wrap_escaped, wrap_spans,
+};
+use crate::totals::{Finding, Spent};
 use crate::vibes::Item;
 
 /// How to lay out the text report; presentation never changes the analysis.
@@ -1099,15 +1101,8 @@ struct Out<'a> {
 /// This host's spend over the report's window, the base of every percent.
 #[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Spend {
-    /// The total, extrapolated over unpriced requests, plus `floor`.
-    pub(crate) usd: f64,
-    /// How far the extrapolated part may be off; None when nothing was extrapolated.
-    pub(crate) margin: Option<Margin>,
-    /// What the profiles that priced none of their requests are known to cost, a lower bound
-    /// with nothing to extrapolate from.
-    pub(crate) floor: f64,
-    /// Whether some profile priced none of its requests, even one with no known charge.
-    pub(crate) partial: bool,
+    /// What the window's requests cost at API prices.
+    pub(crate) spent: Spent,
     since: Option<Millis>,
     until: Millis,
     /// What hosts joined spend every 30 days, each at its own window's rate; None for one
@@ -1122,48 +1117,28 @@ fn window_start(scan: &Scan) -> Option<Millis> {
 
 impl Spend {
     pub(crate) fn new(report: &Report) -> Self {
-        let crate::totals::Spent {
-            usd,
-            margin,
-            floor,
-            partial,
-        } = crate::totals::Spent::of(&report.historical);
         Spend {
-            usd,
-            margin,
-            floor,
-            partial,
+            spent: Spent::of(&report.historical),
             since: window_start(&report.scan),
             until: generated_at(report),
             rate: None,
         }
     }
 
-    /// Another host's spend added to this one. Hosts are separate samples, so their margins
-    /// combine in quadrature; the window spans both.
-    fn merge(&mut self, other: &Spend) {
-        self.rate = Some(self.monthly() + other.monthly());
-        self.usd += other.usd;
-        self.margin = Margin::independent(self.margin, other.margin);
-        self.floor += other.floor;
-        self.partial |= other.partial;
-        self.since = match (self.since, other.since) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
-        self.until = self.until.max(other.until);
-    }
-
-    /// The total as the title writes it, such as "~$9,392 ± $4.72", "at least $120", or
-    /// "~$9,392 ± $4.72 plus at least $120" when only some profiles priced nothing.
-    fn text(&self) -> String {
-        spend_text(self.usd, self.margin, self.floor, self.partial)
+    /// The spend of the hosts `totals` adds up, whose windows can differ, so each percent
+    /// of a saving is of their 30-day rates added up.
+    fn joined(totals: &crate::totals::Totals) -> Self {
+        Spend {
+            spent: totals.spend,
+            rate: Some(totals.monthly),
+            ..Spend::default()
+        }
     }
 
     /// What this host spends every 30 days at the window's rate.
     pub(crate) fn monthly(&self) -> f64 {
         self.rate
-            .unwrap_or_else(|| monthly(self.usd, self.since, Some(self.until)))
+            .unwrap_or_else(|| monthly(self.spent.usd, self.since, Some(self.until)))
     }
 
     /// The share of this host's spend that `usd`, spent within the window, makes.
@@ -1171,7 +1146,8 @@ impl Spend {
     /// A line's own window lies inside the host's, since a profile's history starts no
     /// earlier than the host's first request, so its total divides the host's directly.
     fn share(&self, usd: f64) -> Option<f64> {
-        (self.usd > 0.0).then(|| usd / self.usd)
+        let total = self.spent.usd;
+        (total > 0.0).then(|| usd / total)
     }
 
     /// The share of this host's spend that `usd` every 30 days makes, at the window's rate.
@@ -1181,58 +1157,43 @@ impl Spend {
     }
 }
 
-/// A spend of `usd` as the title writes it, `floor` of it from profiles that priced none of
-/// their requests, `partial` when there is one.
-pub(crate) fn spend_text(usd: f64, margin: Option<Margin>, floor: f64, partial: bool) -> String {
-    let measured = usd - floor;
-    if !partial {
-        approx(usd, margin, "")
-    } else if measured == 0.0 && margin.is_none() {
-        format!("at least {}", about(floor))
-    } else if floor > 0.0 {
-        format!(
-            "{} plus at least {}",
-            approx(measured, margin, ""),
-            about(floor)
-        )
-    } else {
-        format!(
-            "{} plus requests with no known price",
-            approx(measured, margin, "")
-        )
-    }
-}
-
 impl<'a> Out<'a> {
     /// The profile whose controls a check's line reports.
     fn lead(&self, r: &Common<'_>) -> Option<&'a Profile> {
         self.profiles.get(r.profile).copied()
     }
+    /// `report`'s text, its profiles named and its percents of its spend.
     fn new(report: &'a Report, options: ReportOptions<'a>) -> Self {
-        let mut profiles = IndexMap::default();
+        let home = match options.host {
+            Some(host) => host.home.map(str::to_string),
+            None => std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned()),
+        };
+        let mut out = Out::bare(options, home, Spend::new(report));
         for p in &report.scan.profiles {
-            profiles.insert(p.id.as_str(), p);
+            out.profiles.insert(p.id.as_str(), p);
         }
+        out.removed = report
+            .scan
+            .t3
+            .iter()
+            .flat_map(|s| {
+                s.removed
+                    .keys()
+                    .map(|i| (crate::t3::profile_key(&s.path, i), i.as_str()))
+            })
+            .collect();
+        out
+    }
+    /// Text that names no profile, with paths shown from `home` and percents of `spend`.
+    fn bare(options: ReportOptions<'a>, home: Option<String>, spend: Spend) -> Self {
         Out {
-            spend: Spend::new(report),
             text: String::new(),
             options,
             arrow: if options.unicode { "→" } else { "->" },
-            home: match options.host {
-                Some(host) => host.home.map(str::to_string),
-                None => std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned()),
-            },
-            profiles,
-            removed: report
-                .scan
-                .t3
-                .iter()
-                .flat_map(|s| {
-                    s.removed
-                        .keys()
-                        .map(|i| (crate::t3::profile_key(&s.path, i), i.as_str()))
-                })
-                .collect(),
+            home,
+            profiles: IndexMap::default(),
+            removed: crate::collections::HashMap::default(),
+            spend,
         }
     }
     fn line(&mut self, text: &str, indent: usize, style: &str) {
@@ -1243,16 +1204,16 @@ impl<'a> Out<'a> {
     }
     /// A line of spans, each in its own style, wrapped inside the margin with rows hanging
     /// at `continuation` cells when given.
-    fn spans(&mut self, spans: &[(&str, &str)], indent: usize, continuation: Option<usize>) {
-        // Escape metadata before wrapping or adding our own ANSI. Long paths are
+    fn spans<T: AsRef<str>>(
+        &mut self,
+        spans: &[(T, &str)],
+        indent: usize,
+        continuation: Option<usize>,
+    ) {
+        // Metadata is escaped before wrapping or adding our own ANSI. Long paths are
         // hard-wrapped, never shortened; wide characters use terminal cell widths.
-        let escaped: Vec<(String, &str)> = spans
-            .iter()
-            .map(|(text, style)| (terminal_text(text), *style))
-            .collect();
-        let escaped: Vec<(&str, &str)> = escaped.iter().map(|(t, s)| (t.as_str(), *s)).collect();
-        let wrapped = wrap_spans(
-            &escaped,
+        let wrapped = wrap_escaped(
+            spans,
             WrapOptions {
                 width: self.options.width,
                 indent: indent + MARGIN,
@@ -1285,7 +1246,6 @@ impl<'a> Out<'a> {
                 ]
             })
             .collect();
-        let spans: Vec<(&str, &str)> = spans.iter().map(|(t, s)| (t.as_str(), *s)).collect();
         self.spans(&spans, 0, None);
     }
     /// The markers of a line with a verdict and one without.
@@ -1314,7 +1274,6 @@ impl<'a> Out<'a> {
             let rule = if self.options.unicode { "─" } else { "-" };
             spans.push((format!(" {}", rule.repeat(room - used)), DIM));
         }
-        let spans: Vec<(&str, &str)> = spans.iter().map(|(t, s)| (t.as_str(), *s)).collect();
         self.spans(&spans, 0, None);
     }
     /// A dim note about what was read, such as a T3 state's coverage.
@@ -1494,7 +1453,7 @@ pub fn totals_section(
     let mut text = totals_title(totals, hosts, options);
     let saving = totals.savings.text("Changes offered", "these hosts'");
     let credit = totals.credit("these hosts'").unwrap_or_default();
-    let note = opening_note(&credit, totals.partial);
+    let note = opening_note(&credit, totals.spend.partial);
     for (line, style) in [(saving, PLAIN), (credit, PLAIN), (note, DIM)] {
         if line.is_empty() {
             continue;
@@ -1519,7 +1478,7 @@ fn totals_title(
     hosts: usize,
     options: ReportOptions<'_>,
 ) -> String {
-    let spent = spend_text(totals.spend, totals.margin, totals.floor, totals.partial);
+    let spent = totals.spend.text();
     let name = format!("token-max: total over {hosts} hosts");
     let read = format!(
         "  {} requests and {} tokens in {}, {spent} at API prices",
@@ -1623,23 +1582,7 @@ pub(crate) fn closing(
     title: &str,
     options: ReportOptions<'_>,
 ) -> String {
-    let mut out = Out {
-        text: String::new(),
-        options,
-        arrow: if options.unicode { "→" } else { "->" },
-        home: None,
-        profiles: IndexMap::default(),
-        removed: crate::collections::HashMap::default(),
-        spend: Spend {
-            usd: 0.0,
-            margin: None,
-            floor: 0.0,
-            partial: false,
-            since: None,
-            until: 0,
-            rate: None,
-        },
-    };
+    let mut out = Out::bare(options, None, Spend::default());
     for (file, lines) in remaining.files(options.details) {
         out.section(&format!("{title}  {file}"));
         for line in lines {
@@ -1887,7 +1830,8 @@ impl Listing {
             options,
             whose: "these hosts'".into(),
             home: None,
-            spend: Spend::default(),
+            // Every percent is of the hosts' spend together.
+            spend: Spend::joined(totals),
             credit: totals.credit.clone(),
             remaining: vec![],
             hosts: vec![],
@@ -1902,10 +1846,8 @@ impl Listing {
             if index == 0 {
                 joined.head = listing.head.clone();
                 joined.home = listing.home.clone();
-                joined.spend = listing.spend;
             } else {
                 joined.head.merge(&listing.head);
-                joined.spend.merge(&listing.spend);
             }
             let offset = fixes;
             for mut row in listing.rows {
@@ -1924,8 +1866,8 @@ impl Listing {
                 evidence: escape(listing.evidence),
             });
         }
-        // Every percent is of the hosts' spend together.
-        joined.head.savings.set_share(joined.spend.monthly());
+        // The totals already add up every host's savings, each a share of their spend.
+        joined.head.savings = totals.savings;
         for row in &mut joined.rows {
             row.reshare(&joined.spend);
         }
@@ -1933,15 +1875,7 @@ impl Listing {
     }
 
     fn with_list(&self, review: Option<Review<'_>>) -> String {
-        let mut out = Out {
-            text: String::new(),
-            options: self.options,
-            arrow: if self.options.unicode { "→" } else { "->" },
-            home: self.home.clone(),
-            profiles: IndexMap::default(),
-            removed: crate::collections::HashMap::default(),
-            spend: self.spend,
-        };
+        let mut out = Out::bare(self.options, self.home.clone(), self.spend);
         out.text.push_str(&self.notes);
         // The headline follows the title directly unless --details put notes between them.
         if !out.text.is_empty() {
@@ -1978,7 +1912,6 @@ impl Listing {
             .filter(|r| r.mark == Mark::Consider)
             .count();
         let headline = headline(changes, considered);
-        let headline: Vec<(&str, &str)> = headline.iter().map(|(t, s)| (t.as_str(), *s)).collect();
         out.spans(&headline, 0, None);
         // Every setting is at its default already, so what the changes save from there
         // replaces the comparison with the defaults.
@@ -1996,13 +1929,13 @@ impl Listing {
         }
         if out.options.details {
             let spend = self.spend;
-            let spent = spend.text();
+            let spent = spend.spent.text();
             // With a profile that priced nothing, the base is only what could be priced, so a share can read high.
-            let base = if !spend.partial && spend.margin.is_some() {
+            let base = if !spend.spent.partial && spend.spent.margin.is_some() {
                 format!(
                     "{whose} spend over the window, {spent}, extrapolated from the requests that could be priced"
                 )
-            } else if !spend.partial {
+            } else if !spend.spent.partial {
                 format!("{whose} spend over the window, {spent}")
             } else {
                 format!(
@@ -2197,7 +2130,6 @@ fn details(report: &Report, out: &mut Out<'_>) {
     let arrow = out.arrow;
     out.section("EVIDENCE");
     let requests = &report.scan.requests;
-    let earliest = requests.first().map(|r| r.time);
     out.field(
         "Window",
         &format!(
@@ -2207,7 +2139,7 @@ fn details(report: &Report, out: &mut Out<'_>) {
             } else {
                 "explicit --since"
             },
-            instant(report.scan.since.or(earliest)),
+            instant(window_start(&report.scan)),
             report.generated_at
         ),
     );
@@ -5311,7 +5243,6 @@ fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
             let gap = if i == 0 { "" } else { "  " };
             spans.push((format!("{gap}{text}"), style));
         }
-        let spans: Vec<(&str, &str)> = spans.iter().map(|(t, s)| (t.as_str(), *s)).collect();
         out.spans(&spans, nested, Some(nested + indent));
         if let Some(baseline) = &row.baseline {
             out.line(&baseline.text(), nested + indent, DIM);
@@ -7243,13 +7174,9 @@ pub(crate) fn check_tally(
 pub(crate) fn context_tally(context: &[ContextCost], scan: &Scan, now: Millis) -> Vec<Finding> {
     // Only the spend's window reads here, and the spend is not yet summed.
     let spend = Spend {
-        usd: 0.0,
-        margin: None,
-        floor: 0.0,
-        partial: false,
         since: window_start(scan),
         until: now,
-        rate: None,
+        ..Spend::default()
     };
     setting_rows(context)
         .filter(|c| piece_mark(c, &scan.profiles).is_some())
@@ -7586,9 +7513,9 @@ struct Head {
 }
 
 impl Head {
-    /// Another host's head added to this one, whose prices every host shares.
+    /// Another host's head added to this one, whose prices every host shares. The savings
+    /// are left to the hosts' totals, which already add them up.
     fn merge(&mut self, other: &Head) {
-        self.savings.merge(&other.savings);
         self.tilde |= other.tilde;
         self.left.merge(&other.left);
         self.background |= other.background;
@@ -7605,7 +7532,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
     let coverage = &report.scan.coverage;
     let spend = out.spend;
     let many = report.scan.profiles.len() > 1;
-    let spent = spend.text();
+    let spent = spend.spent.text();
     let read = match spend.since {
         Some(since) if coverage.requests > 0 => format!(
             "{} requests in {} from {} to {} ({}), {spent} at API prices",
@@ -9240,7 +9167,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
         sampled(&scratch.text)
     };
     // A switched-off feature's baseline can carry the only margin, in its line and the credit.
-    let tilde = spend.margin.is_some()
+    let tilde = spend.spent.margin.is_some()
         || rows
             .iter()
             .any(|r| r.margin.is_some() || r.baseline.as_ref().is_some_and(|b| b.margin.is_some()))
@@ -10400,6 +10327,15 @@ pub(crate) mod tests {
             options,
         );
         assert_eq!(joined.rows.len(), 2 * here.rows.len());
+        // The totals' savings and spend are what adding up each host's own come to.
+        let mut savings = here.head.savings;
+        savings.merge(&here.head.savings);
+        savings.set_share(2.0 * here.spend.monthly());
+        assert_eq!(joined.head.savings, savings);
+        let mut spent = here.spend.spent;
+        spent.merge(&here.spend.spent);
+        assert_eq!(joined.spend.spent, spent);
+        assert_eq!(joined.spend.monthly(), 2.0 * here.spend.monthly());
         let (mine, theirs) = joined.rows.split_at(here.rows.len());
         for (alone, (mine, theirs)) in here.rows.iter().zip(mine.iter().zip(theirs)) {
             assert_eq!(mine.host, None);
@@ -12544,23 +12480,12 @@ pub(crate) mod tests {
 
     #[test]
     fn instruction_files_cost_per_line_and_warn_over_the_providers_size_guidance() {
-        let out = Out {
-            text: String::new(),
-            options: ReportOptions::default(),
-            arrow: "->",
-            home: None,
-            profiles: IndexMap::default(),
-            removed: Default::default(),
-            spend: Spend {
-                usd: 0.0,
-                margin: None,
-                floor: 0.0,
-                partial: false,
-                since: Some(0),
-                until: 30 * DAY as Millis,
-                rate: None,
-            },
+        let spend = Spend {
+            since: Some(0),
+            until: 30 * DAY as Millis,
+            ..Spend::default()
         };
+        let out = Out::bare(ReportOptions::default(), None, spend);
         let file = |harness, name: &str, bytes, lines| {
             let mut c = context_piece(ContextKind::Instructions, name, None, Some(4.0), None);
             c.harness = harness;
@@ -14716,9 +14641,9 @@ pub(crate) mod tests {
         assert_eq!(ttl.base.recommended, whole_ttl.base.recommended);
         assert!(matches!(ttl.base.margin, Some(Margin::Usd(m)) if m > 0.0));
         assert_eq!(whole_ttl.base.margin, None);
-        let spend = Spend::new(&partial);
+        let spend = Spend::new(&partial).spent;
         assert!(!spend.partial && matches!(spend.margin, Some(Margin::Usd(_))));
-        assert_eq!(Spend::new(&whole).margin, None);
+        assert_eq!(Spend::new(&whole).spent.margin, None);
         let summary = text(&partial, None, true);
         let title = summary.lines().next().unwrap();
         assert!(title.contains(", ~$") && title.contains(" ± "), "{title}");
@@ -14768,10 +14693,10 @@ pub(crate) mod tests {
         // $300 over a 30-day host window: a profile that spent $10 in one day of it is 3%,
         // however short its own history, while $10 every 30 days is 3% of the rate.
         let spend = Spend {
-            usd: 300.0,
-            margin: None,
-            floor: 0.0,
-            partial: false,
+            spent: Spent {
+                usd: 300.0,
+                ..Spent::default()
+            },
             since: Some(0),
             until: 30 * DAY as Millis,
             rate: None,
@@ -14784,7 +14709,10 @@ pub(crate) mod tests {
         };
         assert_eq!(week.share(10.0), Some(10.0 / 300.0));
         assert_eq!(week.of_month(10.0), Some(10.0 / 600.0));
-        let none = Spend { usd: 0.0, ..spend };
+        let none = Spend {
+            spent: Spent::default(),
+            ..spend
+        };
         assert_eq!((none.share(1.0), none.of_month(1.0)), (None, None));
     }
 
@@ -14840,35 +14768,6 @@ pub(crate) mod tests {
         assert_eq!(share_text(0.004).as_deref(), Some("<1%"));
         assert_eq!(share_text(1.0).as_deref(), Some("100%"));
         assert_eq!(share_text(1.49), None);
-    }
-
-    #[test]
-    fn a_spend_partly_extrapolated_keeps_its_margin_beside_the_lower_bound() {
-        let spend = |usd, margin, floor, partial| Spend {
-            usd,
-            margin,
-            floor,
-            partial,
-            since: None,
-            until: 0,
-            rate: None,
-        };
-        assert_eq!(spend(100.0, None, 0.0, false).text(), "$100");
-        assert_eq!(
-            spend(100.0, Some(Margin::Usd(4.0)), 0.0, false).text(),
-            "~$100 ± $4"
-        );
-        assert_eq!(spend(100.0, None, 100.0, true).text(), "at least $100");
-        // One profile extrapolated, another with nothing priced: never a bare "at least".
-        assert_eq!(
-            spend(130.0, Some(Margin::Usd(4.0)), 30.0, true).text(),
-            "~$100 ± $4 plus at least $30"
-        );
-        // A profile with nothing priced and no known charge still marks the total partial.
-        assert_eq!(
-            spend(100.0, Some(Margin::Usd(4.0)), 0.0, true).text(),
-            "~$100 ± $4 plus requests with no known price"
-        );
     }
 
     #[test]

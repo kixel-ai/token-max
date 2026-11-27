@@ -25,7 +25,7 @@ use crate::report::{
     list, plural, recommendations, share_text,
 };
 use crate::safe::{ScanError, terminal_text};
-use crate::terminal::{BOLD, DIM, GREEN, RED, WrapOptions, YELLOW, wrap_spans};
+use crate::terminal::{BOLD, BRAND, DIM, GREEN, RED, WrapOptions, YELLOW, paint, wrap_escaped};
 use crate::version::{Needs, Upgrade};
 
 /// Whose spend a share is of, for a host's own changes.
@@ -1862,24 +1862,19 @@ pub(crate) struct Prompt {
 impl Style {
     /// Spans wrapped `indent` cells in, rows after the first at `continuation` when given,
     /// each styled on a color terminal, ending with a line break.
-    pub(crate) fn spans(
+    pub(crate) fn spans<T: AsRef<str>>(
         &self,
-        spans: &[(&str, &str)],
+        spans: &[(T, &str)],
         width: Option<usize>,
         indent: usize,
         continuation: Option<usize>,
     ) -> String {
-        let escaped: Vec<(String, &str)> = spans
-            .iter()
-            .map(|(text, style)| (terminal_text(text), *style))
-            .collect();
-        let escaped: Vec<(&str, &str)> = escaped.iter().map(|(t, s)| (t.as_str(), *s)).collect();
         let options = WrapOptions {
             width,
             indent,
             continuation,
         };
-        format!("{}\n", wrap_spans(&escaped, options, self.color))
+        format!("{}\n", wrap_escaped(spans, options, self.color))
     }
 
     /// A line of the walk, inside its margin.
@@ -1894,13 +1889,8 @@ impl Style {
 
     /// A raw line, such as a settings fragment, that stays whole so it can be copied.
     fn raw(&self, text: &str, indent: usize, style: &str) -> String {
-        let text = terminal_text(text);
-        let pad = " ".repeat(indent);
-        if self.color && !style.is_empty() {
-            format!("{pad}\x1b[{style}m{text}\x1b[0m\n")
-        } else {
-            format!("{pad}{text}\n")
-        }
+        let text = paint(&terminal_text(text), style, self.color);
+        format!("{}{text}\n", " ".repeat(indent))
     }
 
     /// The walk's heading: how many questions about how many changes, then that nothing is
@@ -1970,11 +1960,11 @@ impl Style {
         let counter = format!("{} ", card.counter);
         let mut text = self.spans(
             &[
-                (&counter, DIM),
+                (counter.as_str(), DIM),
                 (card.name, BOLD),
-                (&gap, ""),
+                (gap.as_str(), ""),
                 (figure, figure_style),
-                (&share, DIM),
+                (share.as_str(), DIM),
             ],
             width,
             MARGIN,
@@ -1990,7 +1980,7 @@ impl Style {
             (value, _) => format!("{value}  "),
         };
         if !value.is_empty() {
-            text += &self.spans(&[(&value, ""), (verdict, color)], width, body, None);
+            text += &self.spans(&[(value.as_str(), ""), (verdict, color)], width, body, None);
         }
         let label = card
             .rows
@@ -2798,8 +2788,6 @@ const WORDMARK: [(&str, &str); 2] = [
     ("▀█▀ █▀█ █▄▀ █▀▀ █▄ █ ", "▄▄ █▀▄▀█ ▄▀█ ▀▄▀"),
     (" █  █▄█ █ █ ██▄ █ ▀█ ", "   █ ▀ █ █▀█ █ █"),
 ];
-/// The logo's purple.
-const PURPLE: &str = "35";
 
 /// What doctor shows on a terminal before it asks anything: its name, what it is about to
 /// do, the transcripts it found on this host, and the SSH destinations it adds, or how to
@@ -2816,14 +2804,14 @@ pub fn opening(found: &[Found], destinations: &[String], style: &Style) -> Strin
         for ((token, max), (tail, tail_style)) in WORDMARK.iter().zip(tails) {
             let spans = [
                 (*token, BOLD),
-                (*max, PURPLE),
+                (*max, BRAND),
                 ("  ", ""),
                 (tail, tail_style),
             ];
             out.push_str(&style.spans(&spans, None, MARGIN, None));
         }
     } else {
-        let spans = [("token", BOLD), ("-max", PURPLE), (" ", ""), (version, DIM)];
+        let spans = [("token", BOLD), ("-max", BRAND), (" ", ""), (version, DIM)];
         out.push_str(&style.spans(&spans, style.width, MARGIN, None));
     }
     out.push('\n');

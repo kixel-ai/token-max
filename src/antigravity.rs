@@ -9,7 +9,7 @@
 //! `conversation_summaries.db` names each conversation's workspace and, for a subagent, the
 //! conversation that started it and its agent.
 
-use std::io::BufRead;
+use std::io::{BufRead, Read};
 use std::sync::Arc;
 
 use rusqlite::{Connection, OpenFlags};
@@ -421,7 +421,8 @@ fn read_transcript(
     let unreadable = |_| error("cannot read Antigravity transcript", file, 0);
     let (device, inode) = crate::reader::file_identity(&handle).map_err(unreadable)?;
     let bytes = handle.metadata().map_err(unreadable)?.len();
-    let reader = std::io::BufReader::new(handle);
+    // Read only the bytes the snapshot names, whatever Antigravity appends meanwhile.
+    let mut reader = std::io::BufReader::new(handle).take(bytes);
     let mut snapshot = Snapshot {
         file: file.into(),
         harness: Harness::Antigravity,
@@ -438,32 +439,33 @@ fn read_transcript(
     let mut created: Option<Millis> = None;
     // The one model every recorded request so far ran, or None once two differ.
     let mut only: Option<Option<String>> = None;
-    let mut lines = reader.split(b'\n').enumerate().peekable();
-    while let Some((index, line)) = lines.next() {
-        let line_number = index as u64 + 1;
-        let line =
-            line.map_err(|_| error("cannot read Antigravity transcript", file, line_number))?;
-        let last = lines.peek().is_none();
-        snapshot.lines += 1;
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let line_number = snapshot.lines + 1;
+        let read = reader
+            .read_until(b'\n', &mut line)
+            .map_err(|_| error("cannot read Antigravity transcript", file, line_number))?;
+        if read == 0 {
+            break;
+        }
+        // Antigravity ends every line it finishes with a newline, so a line without one is
+        // still being written: it is left for a later read, and leaves the conversation's
+        // export incomplete.
+        if line.pop() != Some(b'\n') {
+            snapshot.deferred_bytes = read as u64;
+            break;
+        }
+        snapshot.lines = line_number;
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let step: Step = match serde_json::from_slice(&line) {
-            Ok(step) => step,
-            // Antigravity may be writing the last line as it is read: it is left for a
-            // later read, and leaves the conversation's export incomplete.
-            Err(_) if last => {
-                snapshot.lines -= 1;
-                snapshot.deferred_bytes = line.len() as u64;
-                break;
-            }
-            Err(_) => {
-                return Err(error(
-                    "invalid Antigravity transcript line",
-                    file,
-                    line_number,
-                ));
-            }
+        let Ok(step) = serde_json::from_slice::<Step>(&line) else {
+            return Err(error(
+                "invalid Antigravity transcript line",
+                file,
+                line_number,
+            ));
         };
         let invalid = |_| error("invalid Antigravity token count", file, line_number);
         let time = step.created_at.as_deref().and_then(parse_instant);
@@ -511,7 +513,7 @@ fn read_transcript(
         if compaction {
             meta.source = Some("compaction".into());
         }
-        let step_index = step.step_index.unwrap_or(index as u64);
+        let step_index = step.step_index.unwrap_or(line_number - 1);
         let time = time.or(created).unwrap_or(0);
         requests.push(Request {
             evidence: RequestEvidence::Measured,
@@ -684,21 +686,23 @@ mod tests {
             .to_string()
         };
         // A first request with no model has no cache to prove one.
-        let cold = [step(None, 0)].join("\n");
+        let cold = [step(None, 0)].join("\n") + "\n";
         // Two models ran, so a cache read proves neither.
         let mixed = [
             step(Some("gemini-4-neon-high"), 0),
             step(Some("gemini-4-carbon-high"), 0),
             step(None, 100),
         ]
-        .join("\n");
+        .join("\n")
+            + "\n";
         // A request on an unknown model could have filled the cache the next one reads.
         let gap = [
             step(Some("gemini-4-neon-high"), 0),
             step(None, 0),
             step(None, 100),
         ]
-        .join("\n");
+        .join("\n")
+            + "\n";
         let ids = ["cold", "mixed", "gap"];
         for (id, text) in ids.into_iter().zip([cold, mixed, gap]) {
             std::fs::create_dir_all(crate::discovery::dirname(&file(id))).unwrap();
@@ -759,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_transcripts_last_line_may_be_unfinished() {
+    fn only_an_unterminated_last_line_may_be_unfinished() {
         let w = crate::test_support::Workspace::new();
         let (root, _) = synthetic(&w);
         let file = join(&[
@@ -780,6 +784,10 @@ mod tests {
         std::fs::write(&file, &text).unwrap();
         let finished = read(&root, std::slice::from_ref(&file), &["p".into()]).unwrap();
         assert_eq!(finished.snapshots[0].deferred_bytes, 0);
+        // A finished line that doesn't parse fails the scan, even the last.
+        std::fs::write(&file, format!("{text}{{\"type\":\n")).unwrap();
+        let error = read(&root, std::slice::from_ref(&file), &["p".into()]).unwrap_err();
+        assert_eq!(error.message, "invalid Antigravity transcript line");
         std::fs::write(&file, format!("{{\"type\":\n{text}")).unwrap();
         let error = read(&root, std::slice::from_ref(&file), &["p".into()]).unwrap_err();
         assert_eq!(error.message, "invalid Antigravity transcript line");

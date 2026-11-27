@@ -1246,10 +1246,10 @@ into the step's type, index, time, model and three counts, `input_tokens`,
 `cache_read_tokens` and `output_tokens`; its content, thinking and tool
 arguments are skipped unread. A step with any count is one request, and a
 `CHECKPOINT` step, which summarizes the conversation, is a compaction request.
-An unparseable line fails the scan unless it is the file's last, which
-Antigravity may still be writing; that line is left unread, as Claude Code's
-unfinished last line is, and its conversation's `sessions` row is marked
-incomplete. `conversation_summaries.db` is opened the way
+Antigravity ends every line it finishes with a newline, so a last line without
+one is still being written: it is left unread, as Claude Code's unfinished last
+line is, and its conversation's `sessions` row is marked incomplete. Any
+finished line that doesn't parse fails the scan. `conversation_summaries.db` is opened the way
 OpenCode's database is, and only conversation IDs, workspace URIs, agent names
 and parent IDs leave SQLite.
 
@@ -1266,7 +1266,7 @@ write, so every request records zero writes.
 
 A step that records no model is priced at the conversation's model only when
 it read the conversation's cache and every earlier request in the conversation
-recorded one model: Gemini keeps an implicit cache per model, so only that model
+ran one model, by its record or by this same rule: Gemini keeps an implicit cache per model, so only that model
 could serve the read. On the maintainer's host every `CHECKPOINT` records no
 model and reads hundreds of thousands of cached tokens, so this prices them;
 any other such step stays unpriced and is extrapolated over.

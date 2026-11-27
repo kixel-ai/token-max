@@ -553,8 +553,8 @@ Antigravity records no service tier, so every request is priced at the
 standard rate. Gemini's implicit cache bills reads and no writes, so a
 request's uncached input is priced as ordinary input. A request whose step
 records no model is priced at its conversation's model only when it read the
-conversation's cache and every earlier request in the conversation recorded
-that one model, since Gemini caches per model; otherwise it stays unpriced.
+conversation's cache and every earlier request in the conversation ran that
+one model, by its record or by this same rule, since Gemini caches per model; otherwise it stays unpriced.
 
 ## Plans and API prices
 

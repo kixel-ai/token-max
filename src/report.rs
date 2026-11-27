@@ -7340,20 +7340,18 @@ pub(crate) fn sessions(scan: &crate::model::Scan) -> u64 {
     roots.len() as u64
 }
 
-/// How many history files the scan read outside the transcript reader, OpenCode's
-/// databases and Antigravity's transcripts, which are no snapshots.
+/// How many OpenCode databases the scan read, which are no snapshots.
 fn databases(scan: &Scan) -> usize {
     let files: HashSet<&str> = scan
         .profiles
         .iter()
-        .filter(|p| p.harness.own_reader())
+        .filter(|p| p.harness == Harness::OpenCode)
         .flat_map(|p| p.histories.iter().map(String::as_str))
         .collect();
     files.len()
 }
 
-/// Whether the scan read no history: no transcript file, OpenCode database or Antigravity
-/// transcript.
+/// Whether the scan read no history: no transcript file or OpenCode database.
 fn no_history(scan: &Scan) -> bool {
     scan.snapshots.is_empty() && databases(scan) == 0
 }

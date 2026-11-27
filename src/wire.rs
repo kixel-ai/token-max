@@ -21,7 +21,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::audit::{Audit, Filter};
 use crate::collections::IndexMap;
@@ -35,46 +34,22 @@ use crate::totals::Totals;
 use crate::vibes::Item;
 
 /// This build's identity: the package version and a fingerprint of the types a stream carries,
-/// the price catalog, report and session lines included.
+/// the price catalog, report and session lines included, which `build.rs` hashes from their
+/// source files.
 ///
 /// Unpublished builds share a version, so the fingerprint keeps two different builds of the
 /// same version from misreading each other's streams.
-pub fn build() -> String {
-    let schema = Sha256::digest(
-        [
-            include_str!("wire.rs"),
-            include_str!("prices.rs"),
-            include_str!("model.rs"),
-            include_str!("sessions.rs"),
-            include_str!("audit.rs"),
-            include_str!("repository.rs"),
-            include_str!("totals.rs"),
-            // Its `Credit` is a field of the totals a report carries.
-            include_str!("defaults.rs"),
-            // Its `Total` is a field of the totals a report carries, and its offers and
-            // answers cross for a walk, with `mcp.rs`'s entries and `report.rs`'s choices.
-            include_str!("doctor.rs"),
-            include_str!("mcp.rs"),
-            include_str!("report.rs"),
-            // Its `ScanError` is the stream's error outcome.
-            include_str!("safe.rs"),
-            // Its items are what `vibes` carries.
-            include_str!("vibes.rs"),
-        ]
-        .concat(),
-    );
-    format!(
-        "{}+{}",
-        env!("CARGO_PKG_VERSION"),
-        crate::safe::hex(&schema[..6])
-    )
-}
+pub const IDENTITY: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "+",
+    env!("TOKEN_MAX_WIRE_SCHEMA")
+);
 
 /// The first value of every stream, written before the scan starts.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Header {
-    /// The sender's [`build`]; this host reads streams only from its own build.
+    /// The sender's [`IDENTITY`]; this host reads streams only from its own build.
     pub token_max_scan: String,
 }
 
@@ -509,7 +484,7 @@ mod tests {
         write(
             &mut bytes,
             &Header {
-                token_max_scan: build(),
+                token_max_scan: IDENTITY.to_owned(),
             },
         )
         .unwrap();
@@ -531,7 +506,7 @@ mod tests {
         };
         let header = |stream: &mut Stream<&[u8]>| stream.value::<Header>(Limit::HEADER).unwrap();
         let mut stream = Stream::new(&bytes[..], Limit::NONE);
-        assert_eq!(header(&mut stream).token_max_scan, build());
+        assert_eq!(header(&mut stream).token_max_scan, IDENTITY);
         assert!(matches!(
             outcome(&mut stream).unwrap(),
             Outcome::Report { listing, change: true, .. }

@@ -557,7 +557,7 @@ pub fn connect(
             );
         }
     };
-    let local = wire::build();
+    let local = wire::IDENTITY;
     if header.token_max_scan != local {
         let remote = terminal_text(&header.token_max_scan);
         let ran = terminal_text(&ran);
@@ -1028,7 +1028,7 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
     });
     let mut stdout = BufWriter::with_capacity(1 << 16, io::stdout().lock());
     let header = Header {
-        token_max_scan: wire::build(),
+        token_max_scan: wire::IDENTITY.to_owned(),
     };
     if wire::write(&mut stdout, &header).is_err() {
         return 2;

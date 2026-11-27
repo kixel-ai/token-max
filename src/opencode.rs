@@ -314,13 +314,18 @@ pub(crate) fn switched_off(config: &Map<String, Value>) -> Vec<Control> {
     result
 }
 
-/// Each `skill` rule of a `permissions` list: its resource pattern and effect, in order.
+/// Each rule of a `permissions` list that can match the `skill` action, a wildcard
+/// action's included: its resource pattern and effect, in order.
 fn skill_rules(rules: Option<&Value>) -> Vec<(&str, &str)> {
     let rules = rules.and_then(Value::as_array);
     rules
         .into_iter()
         .flatten()
-        .filter(|rule| rule.get("action").and_then(Value::as_str) == Some("skill"))
+        .filter(|rule| {
+            rule.get("action")
+                .and_then(Value::as_str)
+                .is_some_and(|action| glob(action, "skill"))
+        })
         .filter_map(|rule| {
             let field = |key: &str| rule.get(key).and_then(Value::as_str);
             Some((field("resource")?, field("effect")?))
@@ -337,17 +342,25 @@ fn effect<'a>(rules: &[(&str, &'a str)], id: &str) -> Option<&'a str> {
         .map(|(_, effect)| *effect)
 }
 
-/// Whether `text` matches `pattern`, where `*` matches any run of characters.
+/// Whether `text` matches `pattern` as OpenCode's permission wildcards do: `*` matches any
+/// run of characters and `?` any one.
 fn glob(pattern: &str, text: &str) -> bool {
-    match pattern.split_once('*') {
-        None => pattern == text,
-        Some((head, rest)) => {
-            let Some(text) = text.strip_prefix(head) else {
-                return false;
-            };
-            (0..=text.len())
-                .filter(|&i| text.is_char_boundary(i))
+    let mut chars = pattern.chars();
+    match chars.next() {
+        None => text.is_empty(),
+        Some('*') => {
+            let rest = chars.as_str();
+            text.char_indices()
+                .map(|(i, _)| i)
+                .chain([text.len()])
                 .any(|i| glob(rest, &text[i..]))
+        }
+        Some(c) => {
+            let mut text_chars = text.chars();
+            match text_chars.next() {
+                Some(t) if c == '?' || c == t => glob(chars.as_str(), text_chars.as_str()),
+                _ => false,
+            }
         }
     }
 }
@@ -445,7 +458,7 @@ pub(crate) fn edit(text: &str, edits: &[Edit], removals: &[&[String]]) -> Result
                         .iter()
                         .rev()
                         .find(|v| {
-                            text(v, "action") == Some(action)
+                            text(v, "action").is_some_and(|p| glob(p, action))
                                 && text(v, "resource").is_some_and(|p| glob(p, resource))
                         })
                         .is_some_and(|v| text(v, "effect") == text(&edit.value, "effect")),
@@ -1631,6 +1644,11 @@ mod tests {
             json!({"action": "skill", "resource": "c", "effect": "deny"})
         );
         assert_eq!(edit(&edited, &edits, &[]).unwrap(), edited);
+        // A wildcard action's allow outranks the denial too.
+        let any_action = "{ \"permissions\": [{ \"action\": \"skill\", \"resource\": \"c\", \"effect\": \"deny\" }, { \"action\": \"*\", \"resource\": \"?\", \"effect\": \"allow\" }] }";
+        let rules = parse_config(&edit(any_action, &edits, &[]).unwrap()).unwrap();
+        assert_eq!(rules["permissions"].as_array().unwrap().len(), 3);
+        assert!(glob("do?s", "docs") && glob("*", "") && !glob("do?s", "dos"));
         // A later wildcard allow outranks the denial, so it is appended again.
         let wildcard = "{ \"permissions\": [{ \"action\": \"skill\", \"resource\": \"c\", \"effect\": \"deny\" }, { \"action\": \"skill\", \"resource\": \"c*\", \"effect\": \"allow\" }] }";
         let rules = parse_config(&edit(wildcard, &edits, &[]).unwrap()).unwrap();
@@ -1752,7 +1770,24 @@ mod tests {
                     "state": {"status": "completed"}}]})
             .to_string()
         };
-        for (id, session) in [("msg_outside", "ses_main"), ("msg_inside", "ses_repo")] {
+        // A project that switches `docs` off leaves `docs_x` the only owner.
+        let off = w.home.join("off");
+        std::fs::create_dir_all(off.join(".git")).unwrap();
+        std::fs::write(
+            off.join("opencode.json"),
+            r#"{"mcp": {"servers": {"docs": {"type": "remote", "url": "https://p", "disabled": true}}}}"#,
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO session_v2 VALUES ('ses_off', NULL, ?1, '2.2.0', 1)",
+            [text(&off)],
+        )
+        .unwrap();
+        for (id, session) in [
+            ("msg_outside", "ses_main"),
+            ("msg_inside", "ses_repo"),
+            ("msg_off", "ses_off"),
+        ] {
             db.execute(
                 "INSERT INTO session_message VALUES (?1, ?2, 'assistant', 9, ?3, ?4)",
                 rusqlite::params![id, session, OPENCODE_START + 9_000, step(id)],
@@ -1792,7 +1827,7 @@ mod tests {
             .map(|c| (c.name.as_str(), c.calls))
             .filter(|(name, _)| name.contains("docs"))
             .collect();
-        assert_eq!(calls, [("mcp__docs_x__find", 1)]);
+        assert_eq!(calls, [("mcp__docs_x__find", 2)]);
         // A project whose settings cannot be read leaves OpenCode's switches to the person
         // and says why, without failing the scan.
         let broken = w.home.join("broken");

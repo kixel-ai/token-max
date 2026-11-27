@@ -1262,7 +1262,7 @@ impl Reader {
             // The project files each session's directory reads. A server one declares replaces
             // the global one there, and a skill rule one sets follows the global ones, so a
             // switch in the global file would not reach either.
-            let mut projects: HashMap<&str, Vec<String>> = HashMap::default();
+            let mut projects: HashMap<&str, Vec<crate::opencode::Server>> = HashMap::default();
             let mut unresolved: Vec<&str> = vec![];
             let mut reallowed = false;
             for cwd in history.sessions.iter().filter_map(|s| s.cwd.as_deref()) {
@@ -1272,12 +1272,9 @@ impl Reader {
                 match crate::opencode::project_layers(options, cwd) {
                     Ok(layers) => {
                         reallowed |= layers.iter().any(|l| crate::opencode::reallows(&l.config));
-                        let names = layers
-                            .iter()
-                            .flat_map(|l| crate::opencode::servers(&l.config))
-                            .map(|s| s.name)
-                            .collect();
-                        projects.insert(cwd, names);
+                        // A project's declaration replaces the global one by name.
+                        let declared = crate::opencode::servers(&crate::opencode::merged(&layers));
+                        projects.insert(cwd, declared);
                     }
                     Err(_) => unresolved.push(cwd),
                 }
@@ -1303,7 +1300,7 @@ impl Reader {
                     p.mcp_servers.retain(|entry| {
                         crate::opencode::declared(std::slice::from_ref(entry))
                             .iter()
-                            .all(|s| !projects.values().flatten().any(|n| *n == s.name))
+                            .all(|s| !projects.values().flatten().any(|n| n.name == s.name))
                     });
                 }
                 if reallowed || !unresolved.is_empty() {
@@ -1313,14 +1310,23 @@ impl Reader {
                     );
                 }
             }
-            // The servers each session could call: the global ones and its own project's.
+            // The servers each session could call: the global ones its project leaves alone,
+            // and those its project declares switched on.
             let servers: HashMap<Text, Vec<String>> = history
                 .sessions
                 .iter()
                 .map(|s| {
-                    let own = s.cwd.as_deref().and_then(|cwd| projects.get(cwd));
-                    let names = global.iter().chain(own.into_iter().flatten()).cloned();
-                    (s.key.clone(), names.collect())
+                    let own: &[crate::opencode::Server] = s
+                        .cwd
+                        .as_deref()
+                        .and_then(|cwd| projects.get(cwd))
+                        .map_or(&[], Vec::as_slice);
+                    let kept = global
+                        .iter()
+                        .filter(|name| own.iter().all(|o| o.name != **name))
+                        .cloned();
+                    let enabled = own.iter().filter(|o| o.enabled).map(|o| o.name.clone());
+                    (s.key.clone(), kept.chain(enabled).collect())
                 })
                 .collect();
             self.exposure.opencode(&file, &ids, &servers, &history);

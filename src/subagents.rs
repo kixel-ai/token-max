@@ -1023,11 +1023,10 @@ fn opencode_source(run: &Run<'_>, controls: &AgentControls, kind: &str) -> (Mode
             Expect::Parent,
         ),
     };
-    // The same model ID through another provider is not the one the definition selects.
+    // The same model ID through another provider, or an unrecorded one, is not shown to be
+    // the one the definition selects.
     let provider = defined.and_then(|(d, _)| d.provider.as_deref());
-    let other_provider = provider
-        .zip(run.provider)
-        .is_some_and(|(want, ran)| want != ran);
+    let other_provider = provider.is_some_and(|want| run.provider != Some(want));
     if run.matches(&expect) && !other_provider {
         (source, detail)
     } else if matches!(expect, Expect::Parent) && run.parent.is_none() {
@@ -1599,6 +1598,12 @@ mod tests {
         assert_eq!(
             opencode_source(&through, &controls, "explore").0,
             ModelSource::Definition
+        );
+        // No recorded provider shows nothing about which one the run used.
+        through.provider = None;
+        assert_eq!(
+            opencode_source(&through, &controls, "explore").0,
+            ModelSource::Unknown
         );
         through.provider = Some("openrouter");
         let (source, detail) = opencode_source(&through, &controls, "explore");

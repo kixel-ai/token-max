@@ -1206,8 +1206,9 @@ instruction state for, prices no pieces; its requests still count. A Code
 Mode namespace is OpenCode's own when it is `browser` or `opencode`, and gets a
 tool line with no switch; any other is an MCP server's, with T3 Code's
 `t3-code-` and an ID named `t3-code`. A direct tool named `<server>_<tool>`
-is credited to the one server, global or from the session's own project, whose
-name it starts with; a name two such servers could own credits neither. A session whose database rows OpenCode 2
+is credited to the one switched-on server, global or from the session's own
+project, whose name it starts with; a project's declaration replaces a global
+one of the same name, and a name two such servers could own credits neither. A session whose database rows OpenCode 2
 has only partly migrated is read from both session tables, OpenCode 2's row
 winning for a session in both.
 

@@ -199,10 +199,12 @@ pub enum Outcome {
         offers: Option<Box<Offers>>,
     },
     /// The destination's answer to [`Answer::Review`], once it checked the answers against
-    /// its files: each file's text as the accepted changes would change it, for the confirm.
+    /// its files: each file's text as the accepted changes would change it, for the confirm,
+    /// and how many files that is.
     #[serde(rename_all = "camelCase")]
     Reviewed {
         preview: String,
+        files: usize,
     },
     /// The destination's answer to [`Answer::Write`]: the files it wrote.
     Wrote {

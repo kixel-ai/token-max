@@ -819,9 +819,9 @@ impl Remote {
         }
     }
 
-    /// The destination's preview of each file the walk's `events` would write, once it
-    /// checked them against its files; nothing is written there yet.
-    pub fn review(&mut self, events: &[Event]) -> Result<String, ScanError> {
+    /// The destination's preview of each file the walk's `events` would write, and how many
+    /// files that is, once it checked them against its files; nothing is written there yet.
+    pub fn review(&mut self, events: &[Event]) -> Result<(String, usize), ScanError> {
         let answer = Answer::Review {
             events: events.to_vec(),
         };
@@ -830,7 +830,7 @@ impl Remote {
             false => "during the walk; no settings were changed there",
         };
         match self.exchange(&answer, Limit::PREVIEW, doing)? {
-            Outcome::Reviewed { preview } => Ok(preview),
+            Outcome::Reviewed { preview, files } => Ok((preview, files)),
             _ => Err(self.session.wrong_result(None)),
         }
     }
@@ -1204,8 +1204,9 @@ fn walk_here(
                 // of the answers leaves to this host.
                 let reviewed = walked.owner.plan(&events)?;
                 let preview = preview(&reviewed, &walked.style);
+                let files = reviewed.file_count();
                 plan = Some(reviewed);
-                Ok(Some(Outcome::Reviewed { preview }))
+                Ok(Some(Outcome::Reviewed { preview, files }))
             }
             Answer::Write => match plan.take() {
                 Some(plan) => write_plan(&plan).map(|written| {

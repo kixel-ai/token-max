@@ -3177,32 +3177,23 @@ fn run_tui(walk: Walk) -> Result<(), ScanError> {
                     has_work.push(false);
                     continue;
                 }
+                // Every event but a no is a change: a yes, a removal, a denial, a cleanup.
                 change_count += host_events
                     .iter()
-                    .filter(|e| {
-                        matches!(
-                            e,
-                            crate::doctor::Event::Choose { yes: true, .. }
-                                | crate::doctor::Event::Cleanup { .. }
-                        )
-                    })
+                    .filter(|e| !matches!(e, crate::doctor::Event::Choose { yes: false, .. }))
                     .count();
                 let shown = match &mut host.side {
                     Side::Here { owner, .. } => {
                         let plan = owner.plan(host_events)?;
                         let shown = preview(&plan, &host.style);
-                        if !shown.is_empty() {
-                            file_count += 1;
-                        }
+                        file_count += plan.file_count();
                         plans.push(Some(plan));
                         shown
                     }
                     Side::There { remote, .. } => {
-                        let shown = remote.review(host_events)?;
+                        let (shown, files) = remote.review(host_events)?;
                         let safe = crate::safe::remote_text(&shown, self.style.color);
-                        if !safe.is_empty() {
-                            file_count += 1;
-                        }
+                        file_count += files;
                         plans.push(None);
                         safe
                     }
@@ -3219,7 +3210,7 @@ fn run_tui(walk: Walk) -> Result<(), ScanError> {
             self.measured_work = has_work;
             Ok(DiffPreview {
                 text,
-                file_count: file_count.max(1),
+                file_count,
                 change_count,
                 backups: vec![],
             })
@@ -3243,17 +3234,16 @@ fn run_tui(walk: Walk) -> Result<(), ScanError> {
                     has_work.push(false);
                     continue;
                 }
+                // Every event but a no is a change: a yes, a removal, a denial.
                 change_count += host_events
                     .iter()
-                    .filter(|e| matches!(e, crate::doctor::Event::Choose { yes: true, .. }))
+                    .filter(|e| !matches!(e, crate::doctor::Event::Choose { yes: false, .. }))
                     .count();
                 let shown = if let Some(owner) = self.vibes_owners.get(idx).and_then(Option::as_ref)
                 {
                     let plan = owner.plan(host_events)?;
                     let shown = preview(&plan, &host.style);
-                    if !shown.is_empty() {
-                        file_count += 1;
-                    }
+                    file_count += plan.file_count();
                     plans.push(Some(plan));
                     shown
                 } else {
@@ -3261,18 +3251,14 @@ fn run_tui(walk: Walk) -> Result<(), ScanError> {
                         Side::Here { owner, .. } => {
                             let plan = owner.plan(host_events)?;
                             let shown = preview(&plan, &host.style);
-                            if !shown.is_empty() {
-                                file_count += 1;
-                            }
+                            file_count += plan.file_count();
                             plans.push(Some(plan));
                             shown
                         }
                         Side::There { remote, .. } => {
-                            let shown = remote.review(host_events)?;
+                            let (shown, files) = remote.review(host_events)?;
                             let safe = crate::safe::remote_text(&shown, self.style.color);
-                            if !safe.is_empty() {
-                                file_count += 1;
-                            }
+                            file_count += files;
                             plans.push(None);
                             safe
                         }
@@ -3290,7 +3276,7 @@ fn run_tui(walk: Walk) -> Result<(), ScanError> {
             self.vibes_work = has_work;
             Ok(DiffPreview {
                 text,
-                file_count: file_count.max(1),
+                file_count,
                 change_count,
                 backups: vec![],
             })
@@ -3618,7 +3604,7 @@ fn settle(
                 shown
             }
             Side::There { remote, offers } => {
-                let shown = remote.review(selection.events())?;
+                let (shown, _) = remote.review(selection.events())?;
                 let label = host.label.clone();
                 let theirs = selection.choices(offers);
                 choices.extend(theirs.into_iter().map(|(o, c)| (label.clone(), o, c)));

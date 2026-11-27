@@ -1,25 +1,20 @@
 # Landing
 
-PRs into `main` land by squash through GitHub's merge queue, which runs the
-`Check` workflow on each entry against the current `main` (`just check` in the
-Nix dev shell, plus the Windows tests, or only `quest check` when nothing
-outside `quest/` and the agent docs changed). The `main` ruleset requires no
-check until Kixel Quest's merge queue takes token-max, so the queue lands an
-entry without waiting on `Check`; a failed run opens or updates a "Check fails
-in the merge queue" issue, which means fixing `main`. The
+PRs into `main` land by squash through GitHub's merge queue, which tests
+each entry against the current `main` with the required `Check` job
+(`just check` in the Nix dev shell, plus the Windows tests, or only
+`quest check` when nothing outside `quest/` and the agent docs changed). The
 macOS tests run after pushes to `main` and file an issue when they fail; a
 newer push replaces a pending run, so an intermediate merge may go untested. A
 branch only behind `main` needs no merge; merge `main` only when the PR
 conflicts or the queue refuses its head.
 
-CI runs no checks on pull requests, so run `just check` before pushing, and
-the independent review before requesting landing.
+Run local checks and the independent review before requesting landing.
 Then use `quest merge <pr> --squash --land <full-head-sha>`, which enqueues
-the reviewed head.
-Never bypass the queue or use `--direct`.
+the reviewed head, or arms auto-merge bound to it while checks are pending.
+Never bypass the required checks or use `--direct`.
 
-Workflows use read-only credentials and GitHub-hosted runners; the
-exceptions are the `Queue report` workflow after a failed merge-queue `Check`
-and the `macOS` workflow's report job after a push to `main`, which run no
-repository code and may write issues. Publication credentials belong
+Workflows use read-only credentials and GitHub-hosted runners; the one
+exception is the `macOS` workflow's report job, which runs no repository code
+after a push to `main` and may write issues. Publication credentials belong
 only to the separate protected release path.

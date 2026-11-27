@@ -5,19 +5,16 @@ binaries on a GitHub Release with the same `v<version>` tag. Nothing is
 published by a PR, tag, or merge. `Cargo.toml` is the only version source
 and `--version` reports it.
 
-The read-only `Check` workflow runs in the merge queue, not on pull requests.
-It runs `just check` (formatting, clippy with warnings as errors, the
-synthetic tests and `quest check`) on Linux, and the tests on Windows. The
-macOS tests run after pushes to `main` (the `macOS` workflow, which opens or
-updates a "macOS tests fail on main" issue when they fail) and in the Check
-run a release makes. A change only to `quest/` and the agent docs
+The read-only `Check` workflow runs `just check` (formatting, clippy with
+warnings as errors, the synthetic tests and `quest check`) on Linux, and the
+tests on Windows. The macOS tests run after pushes to `main` (the `macOS`
+workflow, which opens or updates a "macOS tests fail on main" issue when they
+fail) and in the Check run a release makes. A change only to `quest/` and the agent docs
 (`AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`) runs `quest check` alone. The
-`Check` job aggregates them. A failed, cancelled, or skipped job fails it,
-apart from the platform tests a quest-only change skips. The `main` ruleset
-requires no check until Kixel Quest's merge queue takes token-max, so the
-queue lands without waiting on Check; a failed queue run makes the separate
-`Queue report` workflow open or update a "Check fails in the merge queue"
-issue. Check has no publication credentials or OIDC permission.
+required `Check` job aggregates them. A failed, cancelled, or skipped job
+fails it, apart from the platform tests a quest-only change skips, so a
+skipped draft run cannot satisfy the gate. PR jobs have no publication
+credentials or OIDC permission.
 
 ## Binaries
 

@@ -60,9 +60,6 @@ Baseline from the m2 run (2026-11-27, main at 104ec46), before its fixes:
   4,250,884, aarch64-darwin 3,774,108, windows zip 5,599,366, source.tar.gz
   1,756,394, crate 842,687.
 
-Since m2, Check runs only in the merge queue, so the baseline's 1,970
-pull-request minutes drop to none; compare queue runs against queue runs.
-
 Check first: the gate latency and Windows job time after the m2 fixes, whether
 the `macOS` workflow failed on `main` and filed its issue, and the release
 assets against the sizes above.

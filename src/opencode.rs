@@ -684,6 +684,39 @@ fn shell_env(options: &crate::discovery::DiscoveryOptions, root: &str) -> Env {
     }
 }
 
+/// Only what a layer sets for the Anthropic prompt cache, so a kept stack holds none of the
+/// keys or headers the rest of its file may.
+fn cache_only(layer: &Layer) -> Layer {
+    let object = |key: &str, value: Value| Value::Object(Map::from_iter([(key.into(), value)]));
+    let cache = |settings: &Value| {
+        let cache = settings.pointer("/settings/cache")?.clone();
+        Some(object("settings", object("cache", cache)))
+    };
+    let mut config = Map::new();
+    if let Some(warming) = layer.config.get("warming") {
+        config.insert("warming".into(), warming.clone());
+    }
+    let anthropic = members(layer.config.get("providers")).get(ANTHROPIC);
+    let mut kept = anthropic
+        .and_then(cache)
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    let models: Map<String, Value> = members(anthropic.and_then(|a| a.get("models")))
+        .iter()
+        .filter_map(|(id, model)| Some((id.clone(), cache(model)?)))
+        .collect();
+    if !models.is_empty() {
+        kept.insert("models".into(), Value::Object(models));
+    }
+    if !kept.is_empty() {
+        config.insert("providers".into(), object(ANTHROPIC, Value::Object(kept)));
+    }
+    Layer {
+        file: layer.file.clone(),
+        config,
+    }
+}
+
 /// The layers a data directory's shell reads for the Anthropic prompt cache, around whichever
 /// project's files a session's directory adds.
 #[derive(Clone, Debug, PartialEq)]
@@ -697,18 +730,18 @@ pub(crate) struct CacheStack {
 
 impl CacheStack {
     /// The stack `files` and `env`'s inline config make, with user settings in `settings_file`.
-    fn of(files: Vec<Layer>, env: &Env, settings_file: &str) -> Self {
+    fn of(files: &[Layer], env: &Env, settings_file: &str) -> Self {
         let content = env.get("OPENCODE_CONFIG_CONTENT").filter(|c| !c.is_empty());
         let inline = match content.map(|c| parse_config(c)) {
-            Some(Some(Value::Object(config))) => Some(vec![Layer {
+            Some(Some(Value::Object(config))) => Some(vec![cache_only(&Layer {
                 file: "OPENCODE_CONFIG_CONTENT".into(),
                 config,
-            }]),
+            })]),
             Some(_) => None,
             None => Some(vec![]),
         };
         Self {
-            files,
+            files: files.iter().map(cache_only).collect(),
             inline,
             settings_file: settings_file.into(),
         }
@@ -834,7 +867,7 @@ pub(crate) fn profile(
         }
     };
     // `OPENCODE_CONFIG_CONTENT` is read after every file, so it outranks them.
-    let cache = CacheStack::of(layers.clone(), env, &settings_file);
+    let cache = CacheStack::of(&layers, env, &settings_file);
     // One lifetime covers every agent, so both buckets hold it; the TTL line reads the main.
     let ttl = cache.ttl(&[]);
     let warms = cache.warms(&[]);
@@ -2181,6 +2214,28 @@ mod tests {
         assert_eq!(check.base.current, Some(Ttl::OneHour));
         assert!(check.base.owner.starts_with("OPENCODE_CONFIG_CONTENT:"));
         assert_eq!(check.base.action, crate::model::Action::Keep);
+    }
+
+    #[test]
+    fn a_cache_layer_keeps_only_the_anthropic_cache_settings() {
+        let layer = Layer {
+            file: "/c/opencode.json".into(),
+            config: json!({"warming": false,
+                "mcp": {"servers": {"docs": {"headers": {"Authorization": "Bearer SECRET"}}}},
+                "providers": {"anthropic": {"settings": {"apiKey": "SECRET",
+                    "cache": {"ttl": "1h"}},
+                    "models": {"m": {"settings": {"apiKey": "SECRET", "cache": {"warming": {}}}},
+                        "n": {"settings": {"apiKey": "SECRET"}}}}}})
+            .as_object()
+            .unwrap()
+            .clone(),
+        };
+        assert_eq!(
+            Value::Object(cache_only(&layer).config),
+            json!({"warming": false, "providers": {"anthropic": {
+                "settings": {"cache": {"ttl": "1h"}},
+                "models": {"m": {"settings": {"cache": {"warming": {}}}}}}}})
+        );
     }
 
     #[test]

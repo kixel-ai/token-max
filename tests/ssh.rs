@@ -647,7 +647,7 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     assert_eq!(remote.suggested, Some(3_300_000));
     let w = &remote.waits;
     assert_eq!((w.calls, w.long, w.timed_out, w.polling), (1, 1, 1, 1));
-    assert!(w.miss_cost.total_usd.unwrap().to_f64() > 0.0);
+    assert!(w.miss_estimate.unwrap().usd > 0.0);
 
     // `doctor` leaves the cap to `vibes`, which it names once for every host.
     let (_, stdout, stderr) = hosts.run(&["--ssh", "devbox", "--details"]);

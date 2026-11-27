@@ -7,10 +7,12 @@ use std::cmp::Reverse;
 use serde_json::{Map, Value};
 
 use crate::collections::IndexMap;
-use crate::controls::{Env, ScopedEnvironment, SettingsScope, members, scoped_environment};
+use crate::controls::{
+    Env, ScopedEnvironment, SettingsScope, highest, invalid, members, scoped_environment,
+};
 use crate::model::{
-    Action, Agent, CheckBase, EffortCheck, EffortControl, EffortRun, Evidence, Harness, Location,
-    Millis, Owned, Profile, Request, Scan,
+    Action, Agent, CheckBase, EffortCheck, EffortControl, EffortRun, Evidence, Harness, Millis,
+    Owned, Profile, Request, Scan,
 };
 use crate::prices::{Catalog, Sample, Sum, price_request};
 use crate::safe::ScanError;
@@ -71,16 +73,6 @@ const LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 /// A level's rank in [`LEVELS`].
 fn rank(level: &str) -> Option<usize> {
     LEVELS.iter().position(|l| *l == level)
-}
-
-fn invalid(message: impl Into<String>, file: &str) -> ScanError {
-    ScanError::at(
-        message,
-        Location {
-            file: file.into(),
-            line: 1,
-        },
-    )
 }
 
 /// How Claude Code treats one model's effort, from its model configuration docs.
@@ -196,14 +188,6 @@ pub(crate) const NO_MODEL: &str =
 
 /// Why it is unknown when only requests whose owner T3 could not settle recorded one.
 pub(crate) const UNSETTLED_MODEL: &str = "no setting names the model, and the main-session requests that recorded one may be a T3 thread's, since T3 could not settle their owner";
-
-/// The setting's value at `key` in the highest scope that sets it, with that scope.
-pub(crate) fn highest<'a>(scopes: &[SettingsScope<'a>], key: &str) -> Option<(&'a Value, &'a str)> {
-    scopes
-        .iter()
-        .rev()
-        .find_map(|s| s.config.get(key).map(|v| (v, s.file)))
-}
 
 /// A Claude level setting's value: a string Claude Code accepts there, or an error.
 fn claude_level<'a>(

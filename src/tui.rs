@@ -22,7 +22,7 @@ use crate::doctor::{
     Event, Fix, How, Kind, Proof, Reason, Style, Total, Walking, home_in, section_value, target,
     why,
 };
-use crate::report::{Origin, UP_TO, about, share_text};
+use crate::report::{Origin, UP_TO, about, count, plural, share_text};
 use crate::safe::{ScanError, terminal_text};
 use crate::terminal::{WrapOptions, cells, fit, wrap_text};
 use crate::vibes::Item as VibeItem;
@@ -55,7 +55,6 @@ pub(crate) fn fits() -> bool {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Hero {
     pub requests: u64,
-    pub tokens: u64,
     pub sessions: u64,
     pub spend_text: String,
     pub monthly_spend: f64,
@@ -426,12 +425,7 @@ impl App {
         // Rank members inside each group and groups overall by largest saving first.
         for g in &mut groups {
             g.members
-                .sort_by(|a, b| match (a.fix.saving, b.fix.saving) {
-                    (Some(x), Some(y)) => y.total_cmp(&x),
-                    (Some(_), None) => std::cmp::Ordering::Less,
-                    (None, Some(_)) => std::cmp::Ordering::Greater,
-                    (None, None) => std::cmp::Ordering::Equal,
-                });
+                .sort_by(|a, b| crate::report::by_saving(a.fix.saving, b.fix.saving));
             let usd = group_usd(g, BillingMode::Auto);
             let is_minor = usd.is_some_and(|u| u < MINOR_THRESHOLD_USD);
             g.minor = is_minor;
@@ -442,15 +436,10 @@ impl App {
             }
         }
         groups.sort_by(|a, b| {
-            match (
+            crate::report::by_saving(
                 group_usd(a, BillingMode::Auto),
                 group_usd(b, BillingMode::Auto),
-            ) {
-                (Some(x), Some(y)) => y.total_cmp(&x),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => std::cmp::Ordering::Equal,
-            }
+            )
         });
 
         Self {
@@ -1013,10 +1002,10 @@ impl App {
 
                 let mut parts = vec![];
                 if self.hero.sessions > 0 {
-                    parts.push(format!("{} sessions", commas(self.hero.sessions)));
+                    parts.push(format!("{} sessions", count(self.hero.sessions)));
                 }
                 if self.hero.requests > 0 {
-                    parts.push(format!("{} reqs", commas(self.hero.requests)));
+                    parts.push(format!("{} reqs", count(self.hero.requests)));
                 }
                 if !self.hero.spend_text.is_empty() {
                     parts.push(format!("{} API value", self.hero.spend_text));
@@ -1184,8 +1173,8 @@ impl App {
                     ">"
                 };
                 let left = format!(
-                    "  {tri} {minor_cnt} minor tweak{} under $1/mo (+{}/mo)",
-                    if minor_cnt == 1 { "" } else { "s" },
+                    "  {tri} {} under $1/mo (+{}/mo)",
+                    plural(minor_cnt, "minor tweak"),
                     about(minor_usd)
                 );
                 let right = if self.show_minor {
@@ -1202,8 +1191,8 @@ impl App {
                     DIM,
                     &self.fit_text(
                         &format!(
-                            "  ! {by_hand} step{} by hand (shown after writing)",
-                            if by_hand == 1 { "" } else { "s" }
+                            "  ! {} by hand (shown after writing)",
+                            plural(by_hand, "step")
                         ),
                         w,
                     ),
@@ -1219,10 +1208,7 @@ impl App {
                 } else {
                     ">"
                 };
-                let left = format!(
-                    "  {tri} {quiet_cnt} already-aligned item{}",
-                    if quiet_cnt == 1 { "" } else { "s" }
-                );
+                let left = format!("  {tri} {}", plural(quiet_cnt, "already-aligned item"));
                 let right = if self.show_minor {
                     "[m] hide"
                 } else {
@@ -1358,9 +1344,9 @@ impl App {
                 let ok = if self.unicode { "✓" } else { "+" };
                 let n = self.hero.kept_features;
                 let msg = format!(
-                    "        {} {n} feature{} within budget",
+                    "        {} {} within budget",
                     self.style(GREEN, ok),
-                    if n == 1 { "" } else { "s" },
+                    plural(n, "feature"),
                 );
                 body_blocks.push((false, vec![String::new(), self.style(DIM, &msg)]));
             }
@@ -1548,7 +1534,7 @@ impl App {
             {
                 tags.push(format!(
                     "used {}x ({}/use)",
-                    commas(uses),
+                    count(uses),
                     about(cost_per_use_usd)
                 ));
             } else if suggested {
@@ -1935,13 +1921,18 @@ impl App {
         rows
     }
 
+    /// The bar down a proof drawer's left edge.
+    fn proof_pipe(&self) -> String {
+        self.style(BRAND, if self.unicode { "│" } else { "|" })
+    }
+
     /// Render the expandable inline proof drawer for a group (lists every member cleanly with bars, no cutoffs, no file paths).
     fn render_group_proof(&self, g: &Group, w: usize) -> Vec<String> {
         if g.members.len() == 1 {
             return self.render_fix_proof(&g.members[0].fix, w);
         }
-        let pipe = self.style(BRAND, if self.unicode { "│" } else { "|" });
-        let wrap_w = w.saturating_sub(11).max(20);
+        let pipe = self.proof_pipe();
+        let wrap_w = proof_wrap(w);
         let mut out = vec![];
 
         // If members are CacheTtl with Proof::CacheTtl, show aggregated real 5m vs 1h cost chart!
@@ -2063,8 +2054,8 @@ impl App {
 
     /// Render the expandable inline proof drawer for a single `Fix` (no file paths, short human prose).
     fn render_fix_proof(&self, fix: &Fix, w: usize) -> Vec<String> {
-        let pipe = self.style(BRAND, if self.unicode { "│" } else { "|" });
-        let wrap_w = w.saturating_sub(11).max(20);
+        let pipe = self.proof_pipe();
+        let wrap_w = proof_wrap(w);
         let mut out = vec![];
 
         // The report line's own words: what the setting does, then what was measured.
@@ -2110,16 +2101,14 @@ impl App {
                         threshold_usd,
                         uses,
                         requests,
-                        wrap_w,
-                        &pipe,
                         w,
                     ));
                 }
                 Proof::Unused { requests, tokens } => {
                     let tok = tokens
-                        .map(|t| format!(" (~{} tok/req)", commas(t.max(0) as u64)))
+                        .map(|t| format!(" (~{} tok/req)", count(t.max(0))))
                         .unwrap_or_default();
-                    let line = format!("0 uses across {} requests{tok}", commas(requests));
+                    let line = format!("0 uses across {} requests{tok}", count(requests));
                     out.push(trim_ansi(
                         &format!("      {pipe} {}", self.style(DIM, &line)),
                         w,
@@ -2159,10 +2148,7 @@ impl App {
         let col5 = if one_wins { RED } else { GREEN };
         let col1 = if one_wins { GREEN } else { RED };
         let diff = (five_m_usd - one_h_usd).abs();
-        let hdr = format!(
-            "Replayed cache cost on {} reqs (per 30d):",
-            commas(requests)
-        );
+        let hdr = format!("Replayed cache cost on {} reqs (per 30d):", count(requests));
         let r5 = format!(
             "5m TTL  {}  {}/mo{}",
             make_bar(five_m_usd, col5),
@@ -2190,20 +2176,16 @@ impl App {
         ]
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "pure formatting helper for cost-per-use chart"
-    )]
     fn render_cpu_chart(
         &self,
         cost_per_use: f64,
         threshold: f64,
         uses: u64,
         requests: u64,
-        wrap_w: usize,
-        pipe: &str,
         w: usize,
     ) -> Vec<String> {
+        let pipe = self.proof_pipe();
+        let wrap_w = proof_wrap(w);
         let max_v = cost_per_use.max(threshold).max(0.01);
         let bar_w = wrap_w.saturating_sub(30).clamp(8, 20);
         let (fch, rch) = if self.unicode {
@@ -2226,10 +2208,9 @@ impl App {
             String::new()
         };
         let hdr = format!(
-            "Cost vs usage ({} use{} across {} reqs):",
-            commas(uses),
-            if uses == 1 { "" } else { "s" },
-            commas(requests)
+            "Cost vs usage ({} across {} reqs):",
+            plural(uses, "use"),
+            count(requests)
         );
         let rb = format!(
             "Budget  {}  {}/use",
@@ -2262,12 +2243,10 @@ impl App {
                     self.style(
                         DIM,
                         &format!(
-                            "{}{} change{} across {} file{}",
+                            "{}{} across {}",
                             self.sep(),
-                            diff.change_count,
-                            if diff.change_count == 1 { "" } else { "s" },
-                            diff.file_count,
-                            if diff.file_count == 1 { "" } else { "s" }
+                            plural(diff.change_count, "change"),
+                            plural(diff.file_count, "file")
                         )
                     )
                 ),
@@ -2642,8 +2621,7 @@ pub(crate) fn run(
                     drop(_raw);
 
                     let ok = if app.unicode { "✓" } else { "OK" };
-                    let count = written.files_written;
-                    let files = format!("{count} file{}", if count == 1 { "" } else { "s" });
+                    let files = plural(written.files_written, "file");
                     let headline = match saved {
                         Some(saved) => format!(
                             "  {} {} updated {files}",
@@ -3131,17 +3109,9 @@ fn window_blocks(
     (out, 0)
 }
 
-/// Format an integer with comma thousands separators.
-pub(crate) fn commas(n: u64) -> String {
-    let s = n.to_string();
-    let mut out = String::with_capacity(s.len() + s.len() / 3);
-    for (i, ch) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    out
+/// The width a proof drawer's text wraps to in a `w`-column terminal.
+fn proof_wrap(w: usize) -> usize {
+    w.saturating_sub(11).max(20)
 }
 
 /// Display cell width of `s`, ignoring ANSI SGR escape sequences.
@@ -3426,7 +3396,6 @@ mod tests {
         }];
         let hero = Hero {
             requests: 10_000,
-            tokens: 500_000_000,
             sessions: 120,
             spend_text: "$1,000".into(),
             monthly_spend: 1000.0,

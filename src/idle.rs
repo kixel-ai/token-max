@@ -18,11 +18,11 @@ use crate::controls::{Env, SettingsScope, idle_controls, window_control};
 use crate::discovery::locale_compare;
 use crate::model::{
     Action, ActivationCohort, Agent, BillingPart, CheckBase, CompactionCharge, CompactionCheck,
-    ContextDelta, Cost, Coverage, Estimate, EventKind, Evidence, Harness, Id, IdleAttribution,
-    IdleCheck, IdleControl, IdleScenario, IdleSensitivity, Millis, OnOff, PartKind, PerBucket,
-    PeriodCounts, PeriodKind, PeriodOutcome, PeriodStatus, Profile, Request, ReturnTiming, Scalar,
-    Scan, ScenarioWindow, StructuralEvent, Text, Ttl, TtlCheck, TtlControl, Usage, UsageEstimate,
-    Usd, WindowControl,
+    Cost, Coverage, Estimate, EventKind, Evidence, Harness, Id, IdleAttribution, IdleCheck,
+    IdleControl, IdleScenario, IdleSensitivity, Millis, OnOff, PartKind, PerBucket, PeriodCounts,
+    PeriodKind, PeriodOutcome, PeriodStatus, Profile, Request, ReturnTiming, Scalar, Scan,
+    ScenarioWindow, StructuralEvent, Text, Ttl, TtlCheck, TtlControl, Usage, UsageEstimate, Usd,
+    WindowControl,
 };
 use crate::prices::{
     Catalog, PRICE_SOURCES, Pairs, Sum, add_costs, price_components, price_part, server_cost,
@@ -549,14 +549,6 @@ fn activate<'r>(periods: &mut [Period<'r>], cohorts: &Cohorts<'r>) {
     }
 }
 
-/// Which context-size groups each canonical period's charges count toward.
-struct SizeGroups {
-    /// Each period's group, by its first-seen context size.
-    of: Vec<usize>,
-    /// For a canonical period whose request other periods share, those periods' groups.
-    shared: HashMap<usize, Vec<usize>>,
-}
-
 /// How a run activates unobserved summaries and sizes them.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Mode {
@@ -707,38 +699,27 @@ struct RunState<'r> {
     /// Expected resumed summaries in the session in progress, and in each finished one.
     resumed: f64,
     resumed_sessions: Vec<f64>,
-    /// Charges per context size; only point runs, which report them, keep any.
-    by_size: Option<Vec<Option<Sum>>>,
     /// Boundaries already charged, which another session sharing them must not charge again.
     charged: HashSet<&'r Id>,
 }
 
 impl RunState<'_> {
-    /// An empty run, keeping charges for each of `sizes` context sizes when given.
-    fn new(sizes: Option<usize>) -> Self {
+    /// An empty run.
+    fn new() -> Self {
         Self {
             total: Sum::new(),
             session: Sum::new(),
             sessions: vec![],
             resumed: 0.0,
             resumed_sessions: vec![],
-            by_size: sizes.map(|n| vec![None; n]),
             charged: HashSet::default(),
         }
     }
 
-    /// Charge a canonical period, and each context size whose periods share its request.
-    fn charge(&mut self, sizes: &SizeGroups, period: Option<usize>, cost: &Cost, weight: f64) {
+    /// Charge a period's cost at the share of runs that reach it.
+    fn charge(&mut self, cost: &Cost, weight: f64) {
         self.total.add_scaled(cost, weight);
         self.session.add_scaled(cost, weight);
-        if let (Some(period), Some(by_size)) = (period, &mut self.by_size) {
-            let shared = sizes.shared.get(&period).into_iter().flatten();
-            for &size in std::iter::once(&sizes.of[period]).chain(shared) {
-                by_size[size]
-                    .get_or_insert_with(Sum::new)
-                    .add_scaled(cost, weight);
-            }
-        }
     }
 
     /// Close the session in progress, unpriced when its replay `failed`.
@@ -754,12 +735,6 @@ impl RunState<'_> {
         Run {
             sessions: self.sessions,
             adjustment: self.total.cost(),
-            by_size: self
-                .by_size
-                .unwrap_or_default()
-                .into_iter()
-                .map(|s| s.map(Sum::cost))
-                .collect(),
             resumed: self.resumed_sessions,
         }
     }
@@ -770,18 +745,8 @@ struct Run {
     adjustment: Cost,
     /// Each session's charges, in replay order.
     sessions: Vec<Cost>,
-    /// Charges per context size; only point runs, which report them, keep any.
-    by_size: Vec<Option<Cost>>,
     /// Each session's expected resumed summaries.
     resumed: Vec<f64>,
-}
-
-impl Run {
-    fn size(&self, size: usize) -> Cow<'_, Cost> {
-        self.by_size[size]
-            .as_ref()
-            .map_or_else(|| Cow::Owned(zero_cost()), Cow::Borrowed)
-    }
 }
 
 /// One event in a session's replay, in time order.
@@ -836,7 +801,6 @@ struct Runner<'r, 'x> {
     /// The first period with each request identity, which owns its charges. The reader keeps
     /// one request per identity, so periods sharing a request share its session.
     canonical: Vec<usize>,
-    sizes: SizeGroups,
     sessions: Vec<Session<'r>>,
 }
 
@@ -845,7 +809,6 @@ impl<'r, 'x> Runner<'r, 'x> {
         context: &'x Profiled<'r>,
         index: &'x ReplayIndex<'r>,
         periods: &'x [Period<'r>],
-        sizes: &IndexMap<Option<i64>, u64>,
         ttls: &Ttls,
     ) -> Self {
         let mut first: HashMap<&str, usize> = HashMap::default();
@@ -854,20 +817,6 @@ impl<'r, 'x> Runner<'r, 'x> {
             .enumerate()
             .map(|(i, p)| *first.entry(&*p.previous.id).or_insert(i))
             .collect();
-        let of: Vec<usize> = periods
-            .iter()
-            .map(|p| {
-                sizes
-                    .get_index_of(&p.context_tokens)
-                    .expect("every period's size is counted")
-            })
-            .collect();
-        let mut shared: HashMap<usize, Vec<usize>> = HashMap::default();
-        for (i, &c) in canonical.iter().enumerate() {
-            if c != i {
-                shared.entry(c).or_default().push(of[i]);
-            }
-        }
         let mut runner = Self {
             catalog: context.catalog,
             since: context.since,
@@ -875,7 +824,6 @@ impl<'r, 'x> Runner<'r, 'x> {
             index,
             periods,
             canonical,
-            sizes: SizeGroups { of, shared },
             sessions: vec![],
         };
         runner.sessions = runner.ticks(context, ttls, false);
@@ -960,7 +908,6 @@ impl<'r, 'x> Runner<'r, 'x> {
         };
         let catalog = self.catalog;
         let since = self.since;
-        let sizes = &self.sizes;
         for session in sessions {
             let mut states = vec![State {
                 weight: 1.0,
@@ -1022,10 +969,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                                     && is_message(part)
                             });
                             let Some(c) = usable else {
-                                ledger.charge(
-                                    sizes,
-                                    Some(active),
-                                    &unknown_cost(
+                                ledger.charge(&unknown_cost(
                                         "no compatible linked summary and full post-compaction prefix calibration, or summary pricing cohort is ambiguous",
                                     ),
                                     weight,
@@ -1042,10 +986,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                             let retained = (g.prefix - g.output).min(g.read);
                             let window = item.window.expect("usable calibration has a window");
                             if retained < 0 || g.prefix >= input || g.prefix >= window {
-                                ledger.charge(
-                                    sizes,
-                                    Some(active),
-                                    &unknown_cost(
+                                ledger.charge(&unknown_cost(
                                         "calibrated full post-compaction prefix does not shrink this eligible context",
                                     ),
                                     weight,
@@ -1092,7 +1033,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                                 None => unknown_cost("outside-main summary TTL is unresolved"),
                                 Some(_) => price_part(catalog, sample.summary_request, &summary),
                             };
-                            ledger.charge(sizes, Some(active), &cost, weight);
+                            ledger.charge(&cost, weight);
                             if item.next.is_some() {
                                 ledger.resumed += weight;
                             }
@@ -1197,7 +1138,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                                         zero_cost()
                                     };
                                     if linked.map_or(e.time, |l| l.time) >= since {
-                                        ledger.charge(sizes, Some(active), &cost, state.weight);
+                                        ledger.charge(&cost, state.weight);
                                     }
                                     if item.next.is_some() {
                                         ledger.resumed += state.weight;
@@ -1211,10 +1152,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                                     }
                                     match (e.pre_tokens, full) {
                                         (Some(pre), Some(full)) => state.path.offset += pre - full,
-                                        _ => ledger.charge(
-                                            sizes,
-                                            Some(active),
-                                            &unknown_cost(
+                                        _ => ledger.charge(&unknown_cost(
                                                 "applied idle has no pre-context and full resumed-prefix geometry for the off path",
                                             ),
                                             state.weight,
@@ -1243,7 +1181,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                                             "counterfactual input to a later unmatched compaction is unknown",
                                         )
                                     });
-                                    ledger.charge(sizes, state.path.active, &extra, state.weight);
+                                    ledger.charge(&extra, state.weight);
                                 }
                                 let path = &mut state.path;
                                 path.offset = 0;
@@ -1299,7 +1237,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                                 };
                                 if r.time >= since {
                                     let cost = changed_cost(catalog, r, p, next.as_deref());
-                                    ledger.charge(sizes, state.path.active, &cost, state.weight);
+                                    ledger.charge(&cost, state.weight);
                                 }
                                 if conversation {
                                     let path = &mut state.path;
@@ -1320,7 +1258,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                 for &i in &session.periods {
                     if periods[i].kind.status == PeriodStatus::Unknown {
                         let cost = unknown_cost(periods[i].kind.reason);
-                        ledger.charge(sizes, Some(self.canonical[i]), &cost, 1.0);
+                        ledger.charge(&cost, 1.0);
                     }
                 }
             }
@@ -1751,8 +1689,8 @@ impl<'a> Profiled<'a> {
         // The first pass finds what needs every period but not their activation.
         let mut cohorts = Cohorts::default();
         let mut counts = PeriodCounts::default();
-        // Context sizes in first-seen order, with their period counts.
-        let mut sizes: IndexMap<Option<i64>, u64> = IndexMap::default();
+        // Context sizes in first-seen order.
+        let mut sizes: IndexSet<Option<i64>> = IndexSet::default();
         let mut idle_events: HashSet<&Id> = HashSet::default();
         let mut applicable = false;
         for (session, _, periods) in sessions() {
@@ -1763,7 +1701,7 @@ impl<'a> Profiled<'a> {
             }
             for p in &periods {
                 counts.add(p.kind, p.confirmed);
-                *sizes.entry(p.context_tokens).or_default() += 1;
+                sizes.insert(p.context_tokens);
                 if let Some(b) = p.boundary {
                     idle_events.insert(&b.id);
                 }
@@ -1825,8 +1763,7 @@ impl<'a> Profiled<'a> {
             (true, Mode::Larger),
             (true, Mode::Late),
         ];
-        let mut states =
-            MODES.map(|(_, mode)| RunState::new((mode == Mode::Point).then_some(sizes.len())));
+        let mut states = MODES.map(|_| RunState::new());
         // Whether idle compaction could change each session: a period that could trigger, or
         // an applied one that off undoes.
         let mut acting: Vec<bool> = vec![];
@@ -1840,7 +1777,7 @@ impl<'a> Profiled<'a> {
                 ) || p.boundary.is_some()
             }));
             activate(&mut periods, &cohorts);
-            let runner = Runner::new(self, index, &periods, &sizes, ttls);
+            let runner = Runner::new(self, index, &periods, ttls);
             for (state, mode) in states.iter_mut().zip(MODES) {
                 runner.run(self, ttls, mode, state);
                 state.end_session(failed);
@@ -1849,10 +1786,10 @@ impl<'a> Profiled<'a> {
         let [off, on, closed, open, larger, late] = states.map(RunState::finish);
         // A fraction's run needs every session again, so it builds them again.
         let run = |mode: Mode| {
-            let mut state = RunState::new(None);
+            let mut state = RunState::new();
             for (_, failed, mut periods) in sessions() {
                 activate(&mut periods, &cohorts);
-                let runner = Runner::new(self, index, &periods, &sizes, ttls);
+                let runner = Runner::new(self, index, &periods, ttls);
                 runner.run(self, ttls, (true, mode), &mut state);
                 state.end_session(failed);
             }
@@ -1924,17 +1861,6 @@ impl<'a> Profiled<'a> {
                 .abs()
                     < 1e-6
         );
-        let by_context = sizes
-            .into_iter()
-            .enumerate()
-            .map(|(size, (tokens, periods))| ContextDelta {
-                tokens,
-                periods,
-                delta_usd: difference(&on.size(size), &off.size(size))
-                    .total_usd
-                    .map(Usd::to_f64),
-            })
-            .collect();
         let elapsed = self.now - self.since;
         IdleScenario {
             baseline: baseline.to_string(),
@@ -1951,7 +1877,7 @@ impl<'a> Profiled<'a> {
             monthly_delta: delta
                 .filter(|_| elapsed > 0)
                 .map(|d| d.scale(30.0 * 86_400_000.0 / elapsed as f64)),
-            by_context,
+            context_sizes: sizes.into_iter().collect(),
             activation_cohorts,
             sensitivity: IdleSensitivity {
                 closed_delta: closed,
@@ -3500,7 +3426,6 @@ mod tests {
                 trigger: Some("manual".into()),
                 pre_tokens: Some(300_000),
                 post_tokens: Some(2000),
-                duration_ms: Some(1000),
                 usable_window: None,
                 tool: None,
                 t3: None,
@@ -4171,12 +4096,7 @@ mod tests {
         };
         let c = check_with(&s, 200.0, &policies);
         let current = &c.current_settings;
-        let sizes: Vec<(Option<i64>, u64)> = current
-            .by_context
-            .iter()
-            .map(|g| (g.tokens, g.periods))
-            .collect();
-        assert_eq!(sizes, [(Some(300_000), 1)]);
+        assert_eq!(current.context_sizes, [Some(300_000)]);
         near(Some(current.cost.off.known_usd.to_f64()), 2.4);
         assert_eq!(current.delta.map(|d| d.usd), None);
         assert_eq!(c.usage_estimates.len(), 1);
@@ -4631,7 +4551,7 @@ mod tests {
     }
 
     #[test]
-    fn by_context_groups_sizes_in_first_seen_order_across_sessions() {
+    fn context_sizes_are_distinct_in_first_seen_order_across_sessions() {
         let target = vec![
             in_session(request("a", 100.0, 300_000), "a"),
             in_session(request("b", 100.0, 250_000), "b"),
@@ -4639,20 +4559,9 @@ mod tests {
         ];
         let c = check(&data(target, vec![]), 200.0);
         let a = &c.after_recommendations;
-        let groups: Vec<(Option<i64>, u64)> =
-            a.by_context.iter().map(|g| (g.tokens, g.periods)).collect();
         assert_eq!(
-            groups,
-            [(Some(20_000), 1), (Some(300_000), 2), (Some(250_000), 1)]
-        );
-        // Each final period only adds its summary, so a size's delta sums its own periods':
-        // two $0.10 summaries at 300k, and a cheaper one at 250k.
-        near(a.by_context[1].delta_usd, 0.2);
-        let smaller = a.by_context[2].delta_usd.unwrap();
-        assert!(smaller > 0.0 && smaller < 0.1, "{smaller}");
-        near(
-            a.delta.map(|d| d.usd),
-            a.by_context.iter().filter_map(|g| g.delta_usd).sum(),
+            a.context_sizes,
+            [Some(20_000), Some(300_000), Some(250_000)]
         );
     }
 

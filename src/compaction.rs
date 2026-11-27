@@ -2839,7 +2839,6 @@ mod tests {
                 trigger: Some("auto".into()),
                 pre_tokens: Some(300000),
                 post_tokens: Some(2000),
-                duration_ms: Some(1000),
                 usable_window: None,
                 tool: None,
                 t3: None,

@@ -7,7 +7,7 @@ use crate::model::{
     BashCap, BashCapControl, BashWaits, Cost, EventKind, Harness, Id, Millis, Profile, Request,
     RequestEvidence, Scan, StructuralEvent, Ttl, Usd,
 };
-use crate::prices::{Catalog, Sample, add_costs, known_cost, unit_rates, unknown_cost, zero_cost};
+use crate::prices::{Catalog, Sample, known_cost, unit_rates, unknown_cost, zero_cost};
 
 /// Claude Code's pages on the timeout variables, the Bash tool and the cache's lifetime.
 pub(crate) const SOURCES: [&str; 3] = [
@@ -211,7 +211,6 @@ fn check(
             costs.push(miss(catalog, issuing, next));
         }
     }
-    let miss_cost = add_costs(&costs);
     let mut sample = Sample::default();
     for cost in &costs {
         sample.add_cost(cost);
@@ -249,7 +248,6 @@ fn check(
             unknown,
             timed_out,
             polling,
-            miss_cost,
             miss_estimate,
         },
     }
@@ -473,7 +471,7 @@ mod tests {
             .unwrap();
         let rates = unit_rates(&prices(), next, &next.parts[0]).unwrap();
         let expected = 100_000.0 * (rates.write5m - rates.read);
-        assert!((w.miss_cost.total_usd.unwrap().to_f64() - expected).abs() < 1e-9);
+        assert!((w.miss_estimate.unwrap().usd - expected).abs() < 1e-9);
         // The cap is advice with an edit, and no line or verdict of the measured report.
         let text = format_report(
             &report,
@@ -550,7 +548,7 @@ mod tests {
         let next = data.requests.iter().find(|r| r.time > START).unwrap();
         let rates = unit_rates(&prices(), next, &next.parts[0]).unwrap();
         let expected = 100_000.0 * (rates.write5m - rates.read);
-        assert!((waits.miss_cost.total_usd.unwrap().to_f64() - expected).abs() < 1e-9);
+        assert!((waits.miss_estimate.unwrap().usd - expected).abs() < 1e-9);
     }
 
     #[test]

@@ -268,14 +268,8 @@ impl Limit {
     }
 
     /// The sum of `steps`, for the whole stream of an audit that reads each once.
-    pub const fn stream(steps: &[Self]) -> Self {
-        let mut bytes = 0;
-        let mut at = 0;
-        while at < steps.len() {
-            bytes += steps[at].bytes;
-            at += 1;
-        }
-        Self::new(bytes, "in all")
+    pub fn stream(steps: &[Self]) -> Self {
+        Self::new(steps.iter().map(|s| s.bytes).sum(), "in all")
     }
 }
 

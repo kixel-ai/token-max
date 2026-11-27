@@ -52,7 +52,7 @@ struct Branch {
 }
 
 /// What a session's records name, without content.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct Facts {
     /// When the session began: its first record, or for Codex its `session_meta`, since a
     /// fork's copied records keep their original times.
@@ -132,21 +132,7 @@ impl Sessions {
     /// Note a session its harness's own module read whole, such as an OpenCode database row,
     /// which names everything a session's records would.
     pub(crate) fn recorded(&mut self, session: &Native, file: &Text) {
-        let facts = self
-            .facts
-            .entry(session.key.clone())
-            .or_insert_with(|| Facts {
-                created: None,
-                id: None,
-                forked_from: None,
-                parent: None,
-                cwd: None,
-                repository: None,
-                branches: vec![],
-                before_window: None,
-                review: false,
-                files: vec![],
-            });
+        let facts = self.facts.entry(session.key.clone()).or_default();
         facts.created = Some(session.created);
         facts.id = native(Some(&Value::from(session.id.as_str())));
         facts.parent = session
@@ -165,18 +151,7 @@ impl Sessions {
             _ => {
                 let entry = self.facts.entry(record.session.clone());
                 let index = entry.index();
-                entry.or_insert_with(|| Facts {
-                    created: None,
-                    id: None,
-                    forked_from: None,
-                    parent: None,
-                    cwd: None,
-                    repository: None,
-                    branches: vec![],
-                    before_window: None,
-                    review: false,
-                    files: vec![],
-                });
+                entry.or_default();
                 index
             }
         };

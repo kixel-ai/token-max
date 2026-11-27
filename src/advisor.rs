@@ -25,7 +25,7 @@ const KEY: &str = "advisorModel";
 /// could be anything, a pasted credential included, and only the advisor card reads it.
 pub fn control(scopes: &[SettingsScope], env: &Env, user_file: &str) -> AdvisorControl {
     // A null outranks the files below it, as settings merge.
-    let (model, owner, invalid) = match crate::effort::highest(scopes, KEY) {
+    let (model, owner, invalid) = match crate::controls::highest(scopes, KEY) {
         Some((Value::Null, file)) => (None, format!("{file}:{KEY}"), false),
         Some((Value::String(m), file)) => match m.trim() {
             "" => (None, format!("{file}:{KEY}"), false),

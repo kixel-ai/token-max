@@ -984,16 +984,11 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
                 conditional_requests,
                 tier_sensitivity: tier_sensitivity(catalog, &requests),
                 cost: cost.cost(),
-                estimate: sample.estimate(requests.len() as u64).map(|e| {
-                    // Each unpriced request costs the priced mean, or what it is known to
-                    // cost when that is more.
-                    let mean = e.usd / requests.len() as f64;
-                    let raise: f64 = floors.iter().map(|&k| (k - mean).max(0.0)).sum();
-                    crate::model::Estimate {
-                        usd: e.usd + raise,
-                        ..e
-                    }
-                }),
+                estimate: crate::prices::floored(
+                    sample.estimate(requests.len() as u64),
+                    requests.len() as u64,
+                    &floors,
+                ),
             }
         })
         .collect();
@@ -1422,7 +1417,6 @@ mod tests {
                 trigger: Some("auto".into()),
                 pre_tokens: None,
                 post_tokens: None,
-                duration_ms: None,
                 usable_window: None,
                 tool: None,
                 t3: None,

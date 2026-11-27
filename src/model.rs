@@ -747,7 +747,6 @@ pub struct EventMeta {
     pub trigger: Option<String>,
     pub pre_tokens: Option<i64>,
     pub post_tokens: Option<i64>,
-    pub duration_ms: Option<i64>,
     pub tool: Option<Text>,
     /// The context window Codex last recorded as usable in this file, in tokens.
     pub usable_window: Option<i64>,
@@ -2276,9 +2275,8 @@ pub struct BashWaits {
     pub timed_out: u64,
     /// Long waits that slept in a polling loop.
     pub polling: u64,
-    /// Rewriting the prefix the next request could have read, priced at write minus read rates.
-    pub miss_cost: Cost,
-    /// `miss_cost` extrapolated from the priced misses to every one; None when none was priced.
+    /// Rewriting the prefix the next request could have read, priced at write minus read rates
+    /// and extrapolated from the priced misses to every one; None when none was priced.
     pub miss_estimate: Option<Estimate>,
 }
 
@@ -2397,14 +2395,6 @@ pub struct ScenarioWindow {
     pub value: Option<i64>,
 }
 
-/// The idle policy's cost difference for periods of one context size.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ContextDelta {
-    pub tokens: Option<i64>,
-    pub periods: u64,
-    pub delta_usd: Option<f64>,
-}
-
 /// How often the idle policy applied, for one client version and flag state.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ActivationCohort {
@@ -2443,7 +2433,8 @@ pub struct IdleScenario {
     /// Sessions with idle periods, and how many of them the on/off pair priced.
     pub coverage: Coverage,
     pub monthly_delta: Option<Estimate>,
-    pub by_context: Vec<ContextDelta>,
+    /// Each idle period's context size in tokens, distinct and in first-seen order.
+    pub context_sizes: Vec<Option<i64>>,
     pub activation_cohorts: Vec<ActivationCohort>,
     pub sensitivity: IdleSensitivity,
     pub unknown: Vec<String>,
@@ -2553,7 +2544,7 @@ pub struct KeepaliveCheck {
 /// Setting-specific evidence accompanies one common recommendation model.
 #[expect(
     clippy::large_enum_variant,
-    reason = "a report holds one result per check, too few for boxing to save memory worth the indirection"
+    reason = "a report holds a few dozen results at most, one per check and profile line, too few for boxing to save memory worth the indirection"
 )]
 #[derive(Clone, Debug, PartialEq)]
 pub enum CheckResult {
@@ -2611,7 +2602,6 @@ pub enum Category {
     McpResult,
     Instructions,
     Agents,
-    Hooks,
     PluginInstructions,
     AppInstructions,
     ManagedInstructions,
@@ -2633,7 +2623,6 @@ impl Category {
             Category::McpResult => "mcp-result",
             Category::Instructions => "instructions",
             Category::Agents => "agents",
-            Category::Hooks => "hooks",
             Category::PluginInstructions => "plugin-instructions",
             Category::AppInstructions => "app-instructions",
             Category::ManagedInstructions => "managed-instructions",
@@ -3053,22 +3042,11 @@ pub struct MemoryUse {
     pub request: Option<String>,
 }
 
-/// One request's character and token counts, for calibrating estimates.
-#[derive(Clone, Debug, PartialEq)]
-pub struct CalibrationSample {
-    pub request: Text,
-    pub characters: i64,
-    pub tokens: i64,
-}
-
 /// Character estimates are calibrated only within a matching model and client cohort.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Calibration {
     pub cohort: String,
-    pub samples: Vec<CalibrationSample>,
     pub tokens_per_character: f64,
-    pub range: (f64, f64),
-    pub assumptions: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------

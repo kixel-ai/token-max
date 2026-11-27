@@ -32,13 +32,21 @@ pub struct ScopedEnvironment {
 
 impl ScopedEnvironment {
     /// Whether a variable is exactly this string; settings may hold other JSON types.
-    fn is(&self, key: &str, text: &str) -> bool {
+    pub(crate) fn is(&self, key: &str, text: &str) -> bool {
         matches!(self.values.get(key), Some(Value::String(s)) if s == text)
     }
 }
 
+/// The setting's value at `key` in the highest scope that sets it, with that scope.
+pub(crate) fn highest<'a>(scopes: &[SettingsScope<'a>], key: &str) -> Option<(&'a Value, &'a str)> {
+    scopes
+        .iter()
+        .rev()
+        .find_map(|s| s.config.get(key).map(|v| (v, s.file)))
+}
+
 /// A settings error on the first line of the file that supplied the value.
-fn invalid(message: impl Into<String>, file: &str) -> ScanError {
+pub(crate) fn invalid(message: impl Into<String>, file: &str) -> ScanError {
     ScanError::at(
         message,
         Location {
@@ -723,11 +731,7 @@ pub fn compaction_controls(sources: &CompactionSources) -> Result<CompactionCont
             .as_deref()
             .is_some_and(|r| r.ends_with(['k', 'K', 'm', 'M']));
     let disabled = environment.is("DISABLE_AUTO_COMPACT", "1")
-        || scopes
-            .iter()
-            .rev()
-            .find_map(|s| s.config.get("autoCompactEnabled"))
-            == Some(&Value::Bool(false));
+        || highest(scopes, "autoCompactEnabled").map(|(v, _)| v) == Some(&Value::Bool(false));
     // The caller supplies the effective environment and its explicitly owned keys.
     let resolve = |model: Option<&str>| -> Result<WindowControl, ScanError> {
         let mut value: Option<&Value> = None;

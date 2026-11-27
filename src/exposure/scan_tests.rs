@@ -484,9 +484,7 @@ fn text_only_wire_requests_calibrate_matching_cohorts_and_keep_unknown_net_effec
     )
     .unwrap();
     let report = report(&data, 1.0);
-    let calibration = &report.exposure.calibration[0];
-    assert_eq!(calibration.samples.len(), 1);
-    assert_eq!(calibration.samples[0].tokens, 1000);
+    assert_eq!(report.exposure.calibration.len(), 1);
     assert_eq!(measure_size(Some("🌲木abc")).characters, Some(5));
     // Full requests list tools before the system prompt, matching the cache prefix.
     let order: Vec<Category> = data.exposure.requests[0]
@@ -1110,15 +1108,14 @@ fn attachments_take_their_latest_cache_position_and_media_or_copied_calls_do_not
     let report = report(&data, 1.0);
     let calibration = &report.exposure.calibration[0];
     // Only the text-only request calibrates, with its tool input counted.
-    assert_eq!(calibration.samples.len(), 1);
     let mut unsigned = first.clone();
     unsigned["content"][0]
         .as_object_mut()
         .unwrap()
         .remove("signature");
     let expected = length(&system) + tools.iter().map(length).sum::<usize>() + length(&unsigned);
-    assert_eq!(calibration.samples[0].characters, expected as i64);
     let ratio = calibration.tokens_per_character;
+    assert_eq!(ratio, 3000.0 / expected as f64);
     // The same call copied into a second file counts once, and still counts for
     // a row shared with a profile whose copy lacks it.
     assert_eq!(row(&report, "Artifact").profiles.len(), 2);

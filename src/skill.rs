@@ -252,32 +252,23 @@ pub struct Homes<'a> {
 /// Codex in `~/.agents/skills` or its deprecated `$CODEX_HOME/skills`. Only metadata is
 /// read, through any link.
 pub fn found(harness: Harness, root: &str, homes: &Homes<'_>) -> Found {
-    let home = homes.user;
-    // A bare install writes the Claude Code home the shell selects, and ~/.agents when it or
-    // the shell's Codex home exists.
-    let bare = match harness {
-        Harness::Claude => homes.active == root,
-        Harness::Codex => {
-            Path::new(home).join(".agents").is_dir() || Path::new(homes.active).is_dir()
-        }
-        Harness::OpenCode | Harness::Antigravity => {
-            unreachable!("OpenCode and Antigravity profiles look for no skill")
-        }
-    };
+    let agents = Path::new(homes.user).join(".agents");
     let at = |dir: &Path| {
         dir.join("skills")
             .join("token-audit")
             .join("SKILL.md")
             .is_file()
     };
+    // A bare install writes the Claude Code home the shell selects, and ~/.agents when it or
+    // the shell's Codex home exists.
     match harness {
         Harness::Claude => Found {
             installed: at(Path::new(root)),
-            default: bare,
+            default: homes.active == root,
         },
         Harness::Codex => Found {
-            installed: at(&Path::new(home).join(".agents")) || at(Path::new(root)),
-            default: bare,
+            installed: at(&agents) || at(Path::new(root)),
+            default: agents.is_dir() || Path::new(homes.active).is_dir(),
         },
         Harness::OpenCode | Harness::Antigravity => {
             unreachable!("OpenCode and Antigravity profiles look for no skill")
@@ -367,7 +358,7 @@ pub fn item(profiles: &[Profile], home: Option<&str>) -> Option<Item> {
     };
     let text = format!(
         "Not installed for {}. /token-audit has an agent run token-max audit and rank by dollars the waste no setting changes: commands that bust the prompt cache, bloated or repeated tool calls, always-loaded context the sessions never needed, and context they kept rediscovering. It offers each fix and makes it only after a yes. What it saves is not measured.",
-        crate::lsp::list(&names)
+        crate::report::list(&names)
     );
     // An --ssh destination runs a cached token-max that need not be on its PATH.
     const CRABX: &str = "Where token-max isn't on the PATH, such as on a host reached with --ssh, run it as `npx @kixel/crabx token-max`.";

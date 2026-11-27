@@ -22,7 +22,7 @@ use crate::model::{
 };
 use crate::report::{
     AT_LEAST, Choice, Listing, Origin, Recommendation, Source, UP_TO, about, approx, capitalize,
-    recommendations, share_text,
+    list, plural, recommendations, share_text,
 };
 use crate::safe::{ScanError, terminal_text};
 use crate::terminal::{BOLD, DIM, GREEN, RED, WrapOptions, YELLOW, wrap_spans};
@@ -2519,7 +2519,7 @@ pub struct Saved {
 
 /// "1 change" or "2 changes".
 fn changes(n: usize) -> String {
-    format!("{n} change{}", if n == 1 { "" } else { "s" })
+    plural(n, "change")
 }
 
 impl Total {
@@ -2805,7 +2805,7 @@ const PURPLE: &str = "35";
 /// do, the transcripts it found on this host, and the SSH destinations it adds, or how to
 /// add one.
 pub fn opening(found: &[Found], destinations: &[String], style: &Style) -> String {
-    let version = env!("CARGO_PKG_VERSION");
+    let version = crate::upgrade::VERSION;
     let mut out = String::from("\n");
     let art = crate::terminal::cells(WORDMARK[0].0) + crate::terminal::cells(WORDMARK[0].1);
     let fits = style
@@ -3716,12 +3716,7 @@ fn which(fixes: &[(&Fix, Option<&str>, &Style)]) -> String {
     let hosts: IndexSet<Option<&str>> = fixes.iter().map(|(_, h, _)| *h).collect();
     let spans = hosts.len() > 1;
     // A stable sort keeps the report's order among equal and unmeasured savings.
-    fixes.sort_by(|(a, ..), (b, ..)| match (a.saving, b.saving) {
-        (Some(a), Some(b)) => b.total_cmp(&a),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => std::cmp::Ordering::Equal,
-    });
+    fixes.sort_by(|(a, ..), (b, ..)| crate::report::by_saving(a.saving, b.saving));
     let names: Vec<String> = fixes
         .iter()
         .map(|&(f, host, style)| {
@@ -4095,12 +4090,7 @@ pub fn ask(
         });
     }
     // Biggest saving first, then those whose saving was not measured, in the report's order.
-    questions.sort_by(|a, b| match (a.usd(), b.usd()) {
-        (Some(a), Some(b)) => b.total_cmp(&a),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => std::cmp::Ordering::Equal,
-    });
+    questions.sort_by(|a, b| crate::report::by_saving(a.usd(), b.usd()));
     let (questions, skipped): (Vec<_>, Vec<_>) =
         questions.into_iter().partition(|q| q.together().asked());
     // Every host's servers that are off already, as one last question.
@@ -4122,8 +4112,8 @@ pub fn ask(
             output,
             "{}",
             style.headline(&format!(
-                "{count} question{}{about}, biggest saving first.",
-                if count == 1 { "" } else { "s" },
+                "{}{about}, biggest saving first.",
+                plural(count, "question"),
             ))
         )?;
     }
@@ -4302,24 +4292,15 @@ pub fn confirm(
         return Ok(false);
     }
     write!(output, "{}", confirm.preview)?;
-    let files = match names.split_last() {
-        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
-        _ => names.concat(),
-    };
+    let files = list(&names);
     let mut what = vec![];
     let changes: usize = confirm.hosts.iter().map(|(s, _)| s.changes).sum();
     if changes > 0 {
-        what.push(format!(
-            "{changes} accepted change{}",
-            if changes == 1 { "" } else { "s" }
-        ));
+        what.push(plural(changes, "accepted change"));
     }
     let removals: usize = confirm.hosts.iter().map(|(s, _)| s.removals).sum();
     if removals > 0 {
-        what.push(format!(
-            "{removals} removal{}",
-            if removals == 1 { "" } else { "s" }
-        ));
+        what.push(plural(removals, "removal"));
     }
     let denials: usize = confirm.hosts.iter().map(|(s, _)| s.denials).sum();
     if denials > 0 {
@@ -4328,10 +4309,7 @@ pub fn confirm(
             if denials == 1 { "y" } else { "ies" }
         ));
     }
-    let what = match what.split_last() {
-        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
-        _ => what.concat(),
-    };
+    let what = list(&what);
     let question = format!("Write the {what} to {files}?");
     yes_or_no(&question, style, input, output)
 }
@@ -4765,9 +4743,8 @@ pub fn wrote(written: &[Written], style: &Style) -> String {
             format!(" Backed up the old file to {}.", style.file(b))
         });
         let wrote = format!(
-            "Wrote {} edit{} to {}{landed}.{kept}",
-            w.edits,
-            if w.edits == 1 { "" } else { "s" },
+            "Wrote {} to {}{landed}.{kept}",
+            plural(w.edits, "edit"),
             style.file(&w.file)
         );
         text += &style.spans(&[(&wrote, GREEN)], style.width, MARGIN, None);

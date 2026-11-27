@@ -22,7 +22,7 @@ use crate::collections::{HashMap, HashSet, IndexMap};
 use crate::discovery::{git_dir, join, main_checkout, project_directories, realpath};
 use crate::doctor::{Edit, How, Op, Patch};
 use crate::model::{EventKind, Harness, Id, Millis, Profile, Scan, StructuralEvent, Text};
-use crate::report::plural;
+use crate::report::{list, plural};
 use crate::vibes::Item;
 
 /// One language server plugin of the official marketplace.
@@ -147,12 +147,12 @@ fn official(id: &str) -> bool {
     })
 }
 
-/// What a Claude tool event says for code intelligence, never a path.
+/// What a tool event says for code intelligence and `audit`, never a path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum File {
-    /// The language of the file a `Read`, `Edit`, `MultiEdit` or `Write` call named.
+    /// The language of the file a Claude `Read`, `Edit`, `MultiEdit` or `Write` call named.
     Language(Lsp),
-    /// The call returned a result that wasn't an error.
+    /// The call, Claude's or Codex's, returned a result that wasn't an error.
     Done,
 }
 
@@ -372,15 +372,15 @@ fn nearest(dir: &str) -> Option<&str> {
 /// holds the nearest directory still there, such as a removed worktree's parent, else that
 /// directory. A repository at `home` or above it, such as one of dotfiles, holds no project
 /// but `home` itself.
-fn project(cwd: &str, home: Option<&str>) -> String {
+fn project(cwd: &str, home: &str) -> String {
     let Some(dir) = nearest(cwd) else {
         return cwd.into();
     };
     // Named by its real path, so a symbolic link and its target are one project.
     let real = realpath(dir).unwrap_or_else(|_| dir.into());
-    let home = home.map(|h| realpath(h).unwrap_or_else(|_| h.into()));
+    let home = realpath(home).unwrap_or_else(|_| home.into());
     match checkout(&real) {
-        Some(c) if c != real && home.is_some_and(|h| Path::new(&h).starts_with(&c)) => real,
+        Some(c) if c != real && Path::new(&home).starts_with(&c) => real,
         Some(c) => c,
         None => real,
     }
@@ -597,7 +597,7 @@ pub fn lsp_use(scan: &Scan, since: Option<Millis>, now: Millis) -> Vec<LspUse> {
                             for dir in by_session.values().flatten() {
                                 let name = projects
                                     .entry(dir)
-                                    .or_insert_with(|| project(dir, Some(&plugins.home)));
+                                    .or_insert_with(|| project(dir, &plugins.home));
                                 *counts.entry(name.clone()).or_default() += 1;
                             }
                             language(lsp, plugins, installs, by_session.len(), shared, counts)
@@ -971,15 +971,6 @@ fn listed(paths: &[String], home: &dyn Fn(&str) -> String) -> String {
     list(&named)
 }
 
-/// `items` joined as prose: "a", "a and b", "a, b and c".
-pub(crate) fn list(items: &[String]) -> String {
-    match items {
-        [] => String::new(),
-        [one] => one.clone(),
-        [init @ .., last] => format!("{} and {last}", init.join(", ")),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1215,18 +1206,13 @@ mod tests {
         let parent = root.join("worktrees/x");
         fs::create_dir_all(&parent).unwrap();
         let gone = native_path(parent.join("t3-gone"));
-        assert_eq!(project(&gone, Some(&home)), native_path(&parent));
-        assert_eq!(project(&home, Some(&home)), home);
-        // Without a home to stop at, the dotfiles repository would claim it.
-        assert_eq!(project(&gone, None), home);
+        assert_eq!(project(&gone, &home), native_path(&parent));
+        assert_eq!(project(&home, &home), home);
         // A repository above home holds no project either, even for a directory outside it.
         let shared = root.join("shared/x");
         fs::create_dir_all(&shared).unwrap();
         let alex = native_path(root.join("alex"));
-        assert_eq!(
-            project(&native_path(&shared), Some(&alex)),
-            native_path(&shared)
-        );
+        assert_eq!(project(&native_path(&shared), &alex), native_path(&shared));
         // A link into a checkout is in that checkout's project.
         let repo = root.join("work/repo");
         fs::create_dir_all(repo.join(".git")).unwrap();
@@ -1235,17 +1221,11 @@ mod tests {
         {
             let link = root.join("current");
             std::os::unix::fs::symlink(repo.join("crates/a"), &link).unwrap();
-            assert_eq!(
-                project(&native_path(&link), Some(&home)),
-                native_path(&repo)
-            );
+            assert_eq!(project(&native_path(&link), &home), native_path(&repo));
             // So is a link to the checkout itself.
             let alias = root.join("alias");
             std::os::unix::fs::symlink(&repo, &alias).unwrap();
-            assert_eq!(
-                project(&native_path(&alias), Some(&home)),
-                native_path(&repo)
-            );
+            assert_eq!(project(&native_path(&alias), &home), native_path(&repo));
         }
     }
 

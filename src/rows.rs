@@ -128,7 +128,7 @@ pub fn settings_key(profile: &Profile) -> String {
 /// The owners of a profile's compaction windows, its default and each model's, which a
 /// line's profiles must all share.
 /// A percentage override lowers every trigger, so its value and owners join the windows'.
-pub fn window_owner(profile: &Profile) -> String {
+fn window_owner(profile: &Profile) -> String {
     let c = &profile.compaction;
     let percent = c.percent.as_ref().map(|p| format!("percent {:?}", p.value));
     std::iter::once(c.default.owner.as_str())

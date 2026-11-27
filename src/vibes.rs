@@ -511,7 +511,7 @@ pub fn hint(count: usize) -> String {
 fn pieces(count: usize) -> String {
     format!(
         "{} of advice the transcripts can't price",
-        crate::report::plural(count as u64, "piece")
+        crate::report::plural(count, "piece")
     )
 }
 

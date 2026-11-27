@@ -10,8 +10,8 @@ use serde_json::{Map, Value};
 use crate::controls::{
     CLAUDE_PROVIDERS, CompactionSources, Env, SettingsScope, TURN_END_KEY, bash_cap_control,
     claude_background, claude_background_env, claude_inbound, claude_memory, claude_provider,
-    codex_background, codex_memory, compaction_controls, idle_controls, js_string, members,
-    retention_control, scoped_environment, speed_controls,
+    codex_background, codex_memory, compaction_controls, highest, idle_controls, js_string,
+    members, retention_control, scoped_environment, speed_controls,
 };
 use crate::effort::{claude_effort, codex_catalog, codex_effort, latest_model};
 use crate::model::{
@@ -642,15 +642,11 @@ fn ttl_controls(sources: &TtlSources) -> PerBucket<TtlControl> {
     ];
     let scopes = scopes.unwrap_or(&default_scopes);
     let setting_owner = |key: &str| {
-        let source = scopes
-            .iter()
-            .rev()
-            .find(|s| s.config.contains_key(key))
-            .map_or(file, |s| s.file);
+        let source = highest(scopes, key).map_or(file, |(_, f)| f);
         format!("{source}:{key}")
     };
     let environment = scoped_environment(scopes, env);
-    let is = |key: &str| matches!(environment.values.get(key), Some(Value::String(s)) if s == "1");
+    let is = |key: &str| environment.is(key, "1");
     let env_owner = |key: &str| {
         environment
             .owners
@@ -1738,11 +1734,7 @@ pub(crate) fn codex_markers(
     scopes: &[SettingsScope],
     file: &str,
 ) -> Result<Vec<String>, ScanError> {
-    match scopes
-        .iter()
-        .rev()
-        .find_map(|s| s.config.get("project_root_markers"))
-    {
+    match highest(scopes, "project_root_markers").map(|(v, _)| v) {
         None => Ok(vec![".git".into()]),
         Some(Value::Array(values)) if values.iter().all(Value::is_string) => Ok(values
             .iter()
@@ -2428,11 +2420,7 @@ fn codex_speed(speed: &mut SpeedControl, sources: &CodexSpeedSources) -> Result<
         canonical,
         settings_file,
     } = *sources;
-    let base_tier = scopes
-        .iter()
-        .rev()
-        .find_map(|s| s.config.get("service_tier"))
-        .cloned();
+    let base_tier = highest(scopes, "service_tier").map(|(v, _)| v.clone());
     // `?? baseTier`: a null tier also falls back.
     let or_base =
         |tier: Option<&Value>| tier.filter(|t| !t.is_null()).cloned().or(base_tier.clone());

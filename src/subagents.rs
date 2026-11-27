@@ -375,10 +375,7 @@ fn codex_layer(
 
 /// Whether an environment value turns a Claude Code flag on.
 fn enabled(value: Option<&Value>) -> bool {
-    matches!(
-        js_string(value).to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+    value.and_then(crate::controls::env_flag) == Some(true)
 }
 
 /// Claude's subagent controls from settings scopes, lowest precedence first, and the

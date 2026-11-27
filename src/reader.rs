@@ -952,7 +952,6 @@ fn event(
             trigger: None,
             pre_tokens: None,
             post_tokens: None,
-            duration_ms: None,
             usable_window: context.usable_window,
             tool: None,
             t3: None,
@@ -1816,7 +1815,6 @@ impl Reader {
             if selected {
                 e.pre_tokens = count(meta.get("preTokens"))?;
                 e.post_tokens = count(meta.get("postTokens"))?;
-                e.duration_ms = count(meta.get("durationMs"))?;
             } else {
                 // A pre-window trigger still shows the current window; its other counts are never read.
                 e.pre_tokens = count(meta.get("preTokens")).ok().flatten();
@@ -1936,9 +1934,14 @@ impl Reader {
             && is(raw, "subtype", "turn_duration")
             && let Some(time) = time
         {
-            let mut e = event(snapshot, location, context, time, EventKind::TurnEnd, uuid);
-            e.duration_ms = count(raw.get("durationMs"))?;
-            self.add_event(e);
+            self.add_event(event(
+                snapshot,
+                location,
+                context,
+                time,
+                EventKind::TurnEnd,
+                uuid,
+            ));
         }
         Ok(())
     }

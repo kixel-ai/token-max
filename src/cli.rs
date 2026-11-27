@@ -931,7 +931,7 @@ fn piggy_progress(
         "{}{}  {}",
         s("1", "token-"),
         s("1;35", "max"),
-        s("2", env!("CARGO_PKG_VERSION"))
+        s("2", crate::upgrade::VERSION)
     );
 
     // Row 3: Active phase with braille spinner
@@ -1013,10 +1013,10 @@ fn piggy_progress(
         .map(|c| {
             let mut parts = vec![];
             if c.sessions > 0 {
-                parts.push(format!("{} sessions", tui::commas(c.sessions)));
+                parts.push(format!("{} sessions", crate::report::count(c.sessions)));
             }
             if c.requests > 0 {
-                parts.push(format!("{} reqs", tui::commas(c.requests)));
+                parts.push(format!("{} reqs", crate::report::count(c.requests)));
             }
             if let Some(spent) = c.spend {
                 parts.push(crate::report::spend_text(
@@ -1492,9 +1492,8 @@ struct Walk {
     command: Command,
     /// Show the exact JSON or TOML of the edits left to make.
     details: bool,
-    /// Use the rich inline crossterm TUI rather than plain line-by-line prompts.
-    rich_tui: bool,
-    /// Summary hero metadata for the interactive TUI.
+    /// Summary hero metadata, present when the walk uses the rich inline crossterm TUI rather
+    /// than plain line-by-line prompts.
     hero: Option<Hero>,
 }
 
@@ -1585,7 +1584,7 @@ enum Arrival {
 }
 
 /// What one host's scan is analyzed and printed with.
-pub struct Render<'a> {
+pub(crate) struct Render<'a> {
     /// The prices every request is costed with.
     pub catalog: &'a Catalog,
     /// Requests before this instant stay out of the report, when set.
@@ -1603,7 +1602,7 @@ pub struct Render<'a> {
 }
 
 /// One host's report and whether it recommends a change; all a destination sends.
-pub struct Printed {
+pub(crate) struct Printed {
     /// The report, which joins every other host's in a run of several.
     pub listing: Box<Listing>,
     /// Whether the report recommends a change.
@@ -1615,7 +1614,7 @@ pub struct Printed {
 }
 
 /// This host's own report, with the changes it names.
-pub struct Rendered {
+pub(crate) struct Rendered {
     /// The report and its totals.
     pub printed: Printed,
     /// The edits the report recommends, which the walk offers to apply.
@@ -1625,7 +1624,7 @@ pub struct Rendered {
 }
 
 /// Analyze one host's scan and print its report.
-pub fn render(scan: Scan, options: Render<'_>) -> Result<Rendered, ScanError> {
+pub(crate) fn render(scan: Scan, options: Render<'_>) -> Result<Rendered, ScanError> {
     let report = analyze(AnalyzeOptions {
         scan,
         catalog: options.catalog,
@@ -2017,7 +2016,7 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
         return Ok((Output::Text(help(HELP)), 0));
     }
     if values.version {
-        return Ok((Output::Text(format!("{}\n", env!("CARGO_PKG_VERSION"))), 0));
+        return Ok((Output::Text(format!("{}\n", crate::upgrade::VERSION)), 0));
     }
     Err(invalid())
 }
@@ -2464,7 +2463,7 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
         return Ok((Output::Text(help(text)), 0));
     }
     if values.version {
-        return Ok((Output::Text(format!("{}\n", env!("CARGO_PKG_VERSION"))), 0));
+        return Ok((Output::Text(format!("{}\n", crate::upgrade::VERSION)), 0));
     }
     let since = window(&values)?;
     let max_cost_per_use_usd = match values.max_cost_per_use.as_deref() {
@@ -2693,39 +2692,30 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
         details: values.details,
         host: None,
     };
-    // The settings each host already has right, for the TUI's scorecard; a destination's
-    // names are its own text, so they are escaped like the rest of what it sends.
+    // The settings each host already has right, for the TUI's scorecard, which escapes a
+    // destination's names as it does the rest of what that host sends.
     let mut kept = vec![];
     let mut kept_features = 0usize;
     if rich_tui {
         for (host, listing) in &listings {
             let (rows, extra) = listing.kept();
             kept_features += extra;
-            let text = |t: String| match host {
-                Some(_) => crate::safe::terminal_text(&t),
-                None => t,
-            };
             kept.extend(rows.into_iter().map(|r| {
                 tui::KeptItem {
                     host_label: host
                         .clone()
                         .or_else(|| (sections > 1).then(|| "this host".into())),
-                    name: text(r.name),
-                    value: text(r.value),
+                    name: r.name,
+                    value: r.value,
                     saving_usd: r.saving_usd,
                     up_to: r.up_to,
-                    profile: r.profile.map(text),
-                    default_value: r.default_value.map(text),
-                    summary: text(r.summary),
+                    profile: r.profile,
+                    default_value: r.default_value,
+                    summary: r.summary,
                 }
             }));
         }
-        kept.sort_by(|a, b| match (a.saving_usd, b.saving_usd) {
-            (Some(x), Some(y)) => y.total_cmp(&x),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
-        });
+        kept.sort_by(|a, b| crate::report::by_saving(a.saving_usd, b.saving_usd));
     }
     let listing = match (listings.len(), &sum) {
         (0, _) => None,
@@ -2771,7 +2761,6 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
             };
             if let Some(sum) = &sum {
                 h.requests = sum.requests;
-                h.tokens = sum.tokens;
                 h.sessions = sum.sessions;
                 h.monthly_spend = sum.monthly;
                 h.spend_text = crate::report::spend_text(
@@ -2794,7 +2783,6 @@ fn audit(args: &[String], command: Command) -> Result<(Output, u8), ScanError> {
             style,
             command,
             details: values.details,
-            rich_tui,
             hero,
         };
         return Ok((Output::Walk(Box::new(walk)), 0));
@@ -3011,7 +2999,7 @@ fn warn_upgrade(check: Check) {
 /// prints each host's report with the accepted ones first. Write them once the person confirms. After `doctor`'s walk, offer `vibes`' advice
 /// from the same scan and walk through it the same way.
 fn walk(walk: Walk) -> Result<(), ScanError> {
-    if walk.rich_tui {
+    if walk.hero.is_some() {
         return run_tui(walk);
     }
     let Walk {

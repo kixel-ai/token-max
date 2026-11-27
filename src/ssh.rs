@@ -31,6 +31,7 @@ use crate::model::Millis;
 use crate::reader::{Reach, ScanOptions, scan};
 use crate::safe::{ScanError, iso, terminal_text};
 use crate::sessions::{self, export};
+use crate::upgrade::VERSION;
 use crate::vibes::Item;
 use crate::wire::{self, Answer, Header, Job, Limit, Outcome, Paid, Request, Reviewed, Stream};
 
@@ -46,8 +47,6 @@ pub fn destination(value: &str) -> Result<(), ScanError> {
     }
     Ok(())
 }
-
-const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Where release archives are published.
 pub(crate) const RELEASES: &str = "https://github.com/kixel-ai/token-max/releases";

@@ -179,15 +179,15 @@ fn scaled(value: u64, units: [&str; 5]) -> String {
 }
 
 /// A whole number with commas between groups of three digits.
-pub(crate) fn count(value: impl Into<i128>) -> String {
-    let value = value.into();
+pub(crate) fn count(value: impl TryInto<i128, Error: std::fmt::Debug>) -> String {
+    let value: i128 = value.try_into().expect("every count fits in 128 bits");
     let digits = value.unsigned_abs().to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3 + 1);
     if value < 0 {
         out.push('-');
     }
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -763,10 +763,7 @@ fn effort_runs(e: &EffortCheck) -> String {
         .collect();
     if e.runs.len() > EFFORT_PAIRS {
         let more = e.runs.len() - EFFORT_PAIRS;
-        runs.push(format!(
-            "{more} more pair{}",
-            if more == 1 { "" } else { "s" }
-        ));
+        runs.push(plural(more, "more pair"));
     }
     format!("Ran {}.", runs.join("; "))
 }
@@ -1837,12 +1834,7 @@ impl Listing {
                 });
             }
         }
-        items.sort_by(|a, b| match (a.saving_usd, b.saving_usd) {
-            (Some(x), Some(y)) => y.total_cmp(&x),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
-        });
+        items.sort_by(|a, b| by_saving(a.saving_usd, b.saving_usd));
         (items, other_features)
     }
 
@@ -2342,13 +2334,9 @@ fn details(report: &Report, out: &mut Out<'_>) {
         out.section("Subagents");
         out.line(SUBAGENT_EVIDENCE, 0, PLAIN);
         for c in &report.subagents {
-            let names: Vec<String> = c.profiles.iter().map(|p| out.profile_name(p)).collect();
+            let names = out.profile_names(&c.profiles);
             out.blank();
-            out.line(
-                &format!("{} [{}]", subagent_name(c), names.join(", ")),
-                0,
-                BOLD,
-            );
+            out.line(&format!("{} [{names}]", subagent_name(c)), 0, BOLD);
             out.field(
                 "Runs",
                 &format!(
@@ -2387,8 +2375,7 @@ fn details(report: &Report, out: &mut Out<'_>) {
         out.section("Fable weekly use");
         for u in &report.fable {
             out.blank();
-            let names: Vec<String> = u.profiles.iter().map(|p| out.profile_name(p)).collect();
-            out.line(&names.join(", "), 0, BOLD);
+            out.line(&out.profile_names(&u.profiles), 0, BOLD);
             out.field("Requests", &plural(u.requests, "Fable request"));
             for w in &u.weeks {
                 out.estimate(
@@ -2413,12 +2400,12 @@ fn details(report: &Report, out: &mut Out<'_>) {
         out.section("Advisor model");
         for u in report.advisor.iter().filter(|u| u.calls > 0) {
             out.blank();
-            let names: Vec<String> = u.profiles.iter().map(|p| out.profile_name(p)).collect();
+            let names = out.profile_names(&u.profiles);
             let whose = match u.line {
                 AdvisorLine::Shared { .. } => "; shared, profile attribution unknown",
                 _ => "",
             };
-            out.line(&format!("{}{whose}", names.join(", ")), 0, BOLD);
+            out.line(&format!("{names}{whose}"), 0, BOLD);
             out.field(
                 "Calls",
                 &format!(
@@ -2445,8 +2432,7 @@ fn details(report: &Report, out: &mut Out<'_>) {
         out.section("Messages from other sessions");
         for u in &report.inbound {
             out.blank();
-            let names: Vec<String> = u.profiles.iter().map(|p| out.profile_name(p)).collect();
-            out.line(&names.join(", "), 0, BOLD);
+            out.line(&out.profile_names(&u.profiles), 0, BOLD);
             out.field("Value", &inbound_value(&u.control));
             out.field(
                 "Set in",
@@ -2505,16 +2491,11 @@ fn details(report: &Report, out: &mut Out<'_>) {
         );
     }
     for group in &report.historical {
-        let names: Vec<String> = group
-            .profiles
-            .iter()
-            .map(|id| out.profile_name(id))
-            .collect();
         out.field(
             "Estimated recorded-request cost",
             &format!(
                 "{}; {} requests; {}{}",
-                names.join(", "),
+                out.profile_names(&group.profiles),
                 group.requests,
                 money(&group.cost),
                 if group.profiles.len() > 1 {
@@ -2808,9 +2789,18 @@ const FABLE_RULE: &str = "on a Claude Max or Ultra plan or a Team or seat-based 
 const FABLE_PARTIAL: &str = "These figures are partial: the cap counts Fable use on every Claude surface, they cover only this profile's recorded sessions, and they may include requests paid with usage credits after the cap was reached. The weekly reset time is not recorded, and the limit is not published in tokens or dollars, so no share of it is shown.";
 
 /// A grouped count with the noun in the right number, such as "1,024 runs".
-pub(crate) fn plural(n: impl Into<i128>, noun: &str) -> String {
-    let n = n.into();
+pub(crate) fn plural(n: impl TryInto<i128, Error: std::fmt::Debug>, noun: &str) -> String {
+    let n: i128 = n.try_into().expect("every count fits in 128 bits");
     format!("{} {noun}{}", count(n), if n == 1 { "" } else { "s" })
+}
+
+/// `items` joined as prose: "a", "a and b", "a, b and c".
+pub(crate) fn list(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+    }
 }
 
 /// Caveats on whose a profile's Fable requests were and which model ran, each a sentence.
@@ -3531,13 +3521,13 @@ fn card(result: &CheckResult, action: Option<Action>, out: &mut Out<'_>) {
                     "Idle context sizes",
                     &format!(
                         "{} distinct sizes ({} unknown); {}",
-                        scenario.by_context.len(),
+                        scenario.context_sizes.len(),
                         scenario
-                            .by_context
+                            .context_sizes
                             .iter()
-                            .filter(|s| s.tokens.is_none())
+                            .filter(|s| s.is_none())
                             .count(),
-                        token_range(scenario.by_context.iter().filter_map(|s| s.tokens))
+                        token_range(scenario.context_sizes.iter().flatten().copied())
                     ),
                 );
                 for g in &scenario.periods.groups {
@@ -4605,7 +4595,7 @@ fn context_guidance(c: &ContextCost, profiles: &[Profile], name: &str) -> Vec<St
     };
     vec![format!(
         "{name}: {}, {} UTF-8 bytes{}.{budget}",
-        plural(size.lines as u64, "recorded line"),
+        plural(size.lines, "recorded line"),
         count(size.bytes as u64),
         if c.harness == Harness::Codex {
             ", including any headers or wrappers"
@@ -5129,12 +5119,7 @@ fn by_share(a: &Row, b: &Row) -> std::cmp::Ordering {
             .is_some_and(|(verb, _)| verb.starts_with("saves"));
         r.share.filter(|_| r.offered() == saving)
     };
-    match (rank(a), rank(b)) {
-        (Some(a), Some(b)) => b.total_cmp(&a),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => std::cmp::Ordering::Equal,
-    }
+    by_saving(rank(a), rank(b))
 }
 
 /// Every row, ranked: the changes by what they save, then everything else by what it costs.
@@ -5845,7 +5830,7 @@ const CODEX_AGENTS_DOCS: &str = "https://learn.chatgpt.com/docs/agent-configurat
 fn instruction_row(c: &ContextCost, out: &Out<'_>) -> Row {
     let mut row = Row::new(Mark::Info, out.home(&c.name), instructions_what(c));
     if let Some(size) = c.instruction_size.filter(|size| size.lines > 0) {
-        row.value = plural(size.lines as u64, "line");
+        row.value = plural(size.lines, "line");
     }
     row.evidence = match instruction_saving(c, out) {
         Some(saving) => format!("{saving} No setting turns it off."),
@@ -5956,7 +5941,7 @@ fn instruction_saving(c: &ContextCost, out: &Out<'_>) -> Option<String> {
     Some(if short {
         format!(
             "Its {} cost about {figure}, which removing them saves, {assuming}",
-            plural(lines as u64, "line")
+            plural(lines, "line")
         )
     } else {
         format!(
@@ -9323,12 +9308,12 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
     if report.context.is_empty() {
         return;
     }
-    let since = report
-        .scan
+    // The rate each piece's row projects its saving at, as `piece_saving` does.
+    let spend = &out.spend;
+    let scale = spend
         .since
-        .or(report.scan.requests.first().map(|r| r.time));
-    let until = generated_at(report);
-    let span = since.map(|since| ((until - since) as f64).max(DAY));
+        .filter(|&since| spend.until > since)
+        .map(|_| monthly(1.0, spend.since, Some(spend.until)));
     let many = report.scan.profiles.len() > 1;
     out.section("What each piece of context costs");
     out.line(
@@ -9362,8 +9347,7 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
             Some(Estimate { usd, margin }) => format!(
                 "{}{}{}",
                 approx(usd, margin, ""),
-                span.map_or_else(String::new, |span| {
-                    let scale = 30.0 * DAY / span;
+                scale.map_or_else(String::new, |scale| {
                     match margin {
                         None => format!(" (about {} per 30 days)", about(usd * scale)),
                         Some(m) => format!(
@@ -9805,11 +9789,7 @@ pub(crate) mod tests {
                 ..Default::default()
             },
             monthly_delta: delta.map(|usd| Estimate { usd, margin: None }),
-            by_context: vec![ContextDelta {
-                tokens: Some(100_000),
-                periods: 2,
-                delta_usd: Some(-0.5),
-            }],
+            context_sizes: vec![Some(100_000)],
             activation_cohorts: vec![ActivationCohort {
                 version: "2.1.314".into(),
                 client: "cli".into(),
@@ -15512,6 +15492,12 @@ pub(crate) mod tests {
         let details = text(&report, Some(200), true);
         assert!(details.contains("\n  1 change recommended.\n"), "{details}");
         assert!(!details.contains("No applicable"));
+        // The piece's 30-day figure is the rate its row's saving projects, even from an hour.
+        assert!(
+            details.contains("$1 (about $720 per 30 days)")
+                && details.contains("$5 (about $3,600 per 30 days)"),
+            "{details}"
+        );
     }
 
     #[test]

@@ -15,11 +15,10 @@ use crate::skills::skill_file;
 use crate::context::synced_short;
 use crate::controls::js_string;
 use crate::model::{
-    Calibration, CalibrationSample, Category, Component, Exposure, ExposureScan, ExposureView,
-    Harness, Id, Ids, Interner, Invocation, InvocationKind, InvocationStatus, Linkage, Location,
-    MemoryAccess, MemoryUse, Millis, Owner, Profile, Profiles, References, Request,
-    RequestEvidence, ResultTotals, Scope, Size, Snapshot, Text, TextCoverage, ToolCalls,
-    ToolResults, Via,
+    Calibration, Category, Component, Exposure, ExposureScan, ExposureView, Harness, Id, Ids,
+    Interner, Invocation, InvocationKind, InvocationStatus, Linkage, Location, MemoryAccess,
+    MemoryUse, Millis, Owner, Profile, Profiles, References, Request, RequestEvidence,
+    ResultTotals, Scope, Size, Snapshot, Text, TextCoverage, ToolCalls, ToolResults, Via,
 };
 use crate::safe::{self, ScanError, identity, label, object};
 
@@ -72,30 +71,16 @@ pub fn calibrate(scan: &ExposureScan, requests: &[Request]) -> Vec<Calibration> 
             _ => continue,
         };
         let key = cohort(r);
-        let (c, total_tokens, total_characters) =
-            result.entry(key.clone()).or_insert_with(|| {
-                (
-                    Calibration {
-                        cohort: key,
-                        samples: vec![],
-                        tokens_per_character: 0.0,
-                        range: (f64::INFINITY, f64::NEG_INFINITY),
-                        assumptions: vec![
-                            "empirical text-only wire serialization ratio includes framing; transfer to components is estimated".into(),
-                            "observed sample extrema are sensitivity scenarios, not guaranteed bounds".into(),
-                        ],
-                    },
-                    0,
-                    0,
-                )
-            });
-        let ratio = tokens as f64 / characters as f64;
-        c.samples.push(CalibrationSample {
-            request: r.id.clone(),
-            characters,
-            tokens,
+        let (c, total_tokens, total_characters) = result.entry(key.clone()).or_insert_with(|| {
+            (
+                Calibration {
+                    cohort: key,
+                    tokens_per_character: 0.0,
+                },
+                0,
+                0,
+            )
         });
-        c.range = (c.range.0.min(ratio), c.range.1.max(ratio));
         // Integer sums are exact, as the floating sums they replace are below 2^53.
         *total_tokens += tokens;
         *total_characters += characters;
@@ -4680,9 +4665,8 @@ mod tests {
             c.cohort,
             identity(r#"["claude","claude-opus-5-5","anthropic"]"#)
         );
-        assert_eq!(c.samples.len(), 2);
+        // Requests a and b, 80 tokens over 400 characters; c is another model and d has two parts.
         assert_eq!(c.tokens_per_character, 80.0 / 400.0);
-        assert_eq!(c.range, (0.1, 0.5));
     }
 
     #[test]

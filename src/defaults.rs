@@ -643,7 +643,7 @@ impl Credit {
         if self.priced() + self.unmeasured == 0 {
             return "No setting was found to differ from its Claude Code, Codex, OpenCode or Antigravity default.".into();
         }
-        let settings = |n: usize| format!("{n} setting{}", if n == 1 { "" } else { "s" });
+        let settings = |n: usize| crate::report::plural(n, "setting");
         // "saves" for one setting, "save" for several.
         let verb = |n: usize, plural: &str| {
             if n == 1 {
@@ -691,9 +691,7 @@ impl Credit {
         for (i, sentence) in sentences.iter().enumerate() {
             if i > 0 {
                 text += ". ";
-                let mut chars = sentence.chars();
-                text.extend(chars.next().map(|c| c.to_ascii_uppercase()));
-                text.extend(chars);
+                text += &crate::report::capitalize(sentence);
             } else {
                 text += sentence;
             }

@@ -24,17 +24,11 @@ use crate::doctor::{
 };
 use crate::report::{Origin, UP_TO, about, count, plural, share_text};
 use crate::safe::{ScanError, terminal_text};
-use crate::terminal::{WrapOptions, cells, fit, wrap_text};
+use crate::terminal::{
+    BOLD, BRAND, DIM, GREEN, Look, RED, RESET, Token, WrapOptions, YELLOW, cells, fit, paint,
+    tokens, wrap_text,
+};
 use crate::vibes::Item as VibeItem;
-
-/// ANSI style codes used when `color` is enabled.
-const RESET: &str = "\x1b[0m";
-const BOLD: &str = "\x1b[1m";
-const DIM: &str = "\x1b[2m";
-const RED: &str = "\x1b[31m";
-const GREEN: &str = "\x1b[32m";
-const YELLOW: &str = "\x1b[33m";
-const BRAND: &str = "\x1b[35m";
 
 /// Minimum monthly saving (USD) to appear unfolded in the main checklist.
 const MINOR_THRESHOLD_USD: f64 = 1.0;
@@ -872,12 +866,22 @@ impl App {
         lines.into_iter().map(|l| trim_ansi(&l, w)).collect()
     }
 
+    /// `text` in SGR `code`, such as `GREEN`, when the checklist draws in color.
     fn style(&self, code: &str, text: &str) -> String {
-        if self.color && !code.is_empty() {
-            format!("{code}{text}{RESET}")
-        } else {
-            text.to_string()
-        }
+        paint(text, code, self.color)
+    }
+
+    /// A bar `width` cells wide, its first `ratio` filled in `code` and the rest dim.
+    fn bar(&self, ratio: f64, width: usize, code: &str) -> String {
+        crate::terminal::bar(
+            ratio,
+            width,
+            code,
+            Look {
+                color: self.color,
+                unicode: self.unicode,
+            },
+        )
     }
 
     fn arrow(&self) -> &'static str {
@@ -941,7 +945,7 @@ impl App {
                     let ok = if self.unicode { "✓" } else { "OK" };
                     vec![format!(
                         "{} {}",
-                        self.style(&format!("{BOLD}{GREEN}"), &format!("{ok} All clear")),
+                        self.style(&format!("{BOLD};{GREEN}"), &format!("{ok} All clear")),
                         self.style(DIM, "no changes recommended")
                     )]
                 } else {
@@ -969,7 +973,7 @@ impl App {
                         .map(str::to_string)
                         .collect()
                     };
-                    let green = format!("{BOLD}{GREEN}");
+                    let green = format!("{BOLD};{GREEN}");
                     let mut lines: Vec<String> = if cells(&first) + cells(&pct) <= inner {
                         vec![format!(
                             "{}{}",
@@ -1035,18 +1039,10 @@ impl App {
                     let bar_w = inner
                         .saturating_sub(cells(label_left) + cells(&label_right))
                         .clamp(10, 36);
-                    let filled = ((ratio * bar_w as f64).round() as usize).min(bar_w);
-                    let rest = bar_w - filled;
-                    let (fch, rch) = if self.unicode {
-                        ("█", "░")
-                    } else {
-                        ("#", "-")
-                    };
                     body_lines.push(format!(
-                        "{}{}{}{}",
+                        "{}{}{}",
                         self.style(DIM, label_left),
-                        self.style(GREEN, &fch.repeat(filled)),
-                        self.style(YELLOW, &rch.repeat(rest)),
+                        self.bar(ratio, bar_w, GREEN),
                         self.style(DIM, &label_right),
                     ));
                 }
@@ -1072,7 +1068,7 @@ impl App {
                 });
                 body_lines.push(format!(
                     "{} {}",
-                    self.style(&format!("{BOLD}{BRAND}"), "token-max vibes"),
+                    self.style(&format!("{BOLD};{BRAND}"), "token-max vibes"),
                     self.style(
                         DIM,
                         &format!("{count} unmeasured tips{}no verdict", self.sep())
@@ -1121,12 +1117,12 @@ impl App {
             let m_lbl = format!(" Measured ({m_cnt}) ");
             let v_lbl = format!(" Vibes ({v_cnt}) ");
             let m_tab = if self.tab == Tab::Measured {
-                self.style(&format!("{BOLD}{BRAND}"), &format!("[{m_lbl}]"))
+                self.style(&format!("{BOLD};{BRAND}"), &format!("[{m_lbl}]"))
             } else {
                 self.style(DIM, &m_lbl)
             };
             let v_tab = if self.tab == Tab::Vibes {
-                self.style(&format!("{BOLD}{BRAND}"), &format!("[{v_lbl}]"))
+                self.style(&format!("{BOLD};{BRAND}"), &format!("[{v_lbl}]"))
             } else {
                 self.style(DIM, &v_lbl)
             };
@@ -1252,7 +1248,7 @@ impl App {
         let checked = self.checked_count();
         let primary = if checked > 0 {
             self.style(
-                &format!("{BOLD}{GREEN}"),
+                &format!("{BOLD};{GREEN}"),
                 &format!("[Enter] Review diff ({checked})"),
             )
         } else {
@@ -1398,10 +1394,10 @@ impl App {
         let any_checked = g.members.iter().any(|m| m.checked);
         let box_str = if all_checked {
             let chk = if self.unicode { "✓" } else { "x" };
-            self.style(&format!("{BOLD}{GREEN}"), &format!("[{chk}]"))
+            self.style(&format!("{BOLD};{GREEN}"), &format!("[{chk}]"))
         } else if any_checked {
             let half = if self.unicode { "◐" } else { "~" };
-            self.style(&format!("{BOLD}{YELLOW}"), &format!("[{half}]"))
+            self.style(&format!("{BOLD};{YELLOW}"), &format!("[{half}]"))
         } else {
             self.style(DIM, "[ ]")
         };
@@ -1417,10 +1413,10 @@ impl App {
         let dot = if usd.is_none() {
             self.style(DIM, if self.unicode { "○" } else { "o" })
         } else if suggested {
-            self.style(&format!("{BOLD}{YELLOW}"), "!")
+            self.style(&format!("{BOLD};{YELLOW}"), "!")
         } else {
             self.style(
-                &format!("{BOLD}{RED}"),
+                &format!("{BOLD};{RED}"),
                 if self.unicode { "✗" } else { "x" },
             )
         };
@@ -1461,25 +1457,11 @@ impl App {
         let bar_w = if w >= 72 { 10 } else { 0 };
         let bar_str = if bar_w > 0 {
             let ratio = match (usd, max_usd > 0.0) {
-                (Some(u), true) if u > 0.0 => (u / max_usd).clamp(0.0, 1.0),
+                (Some(u), true) if u > 0.0 => u / max_usd,
                 _ => 0.0,
             };
-            let filled = if ratio > 0.0 {
-                ((ratio * bar_w as f64).round() as usize).clamp(1, bar_w)
-            } else {
-                0
-            };
-            let (fch, rch) = if self.unicode {
-                ("█", "░")
-            } else {
-                ("#", ".")
-            };
             let f_col = if any_checked { GREEN } else { DIM };
-            format!(
-                "{}{}  ",
-                self.style(f_col, &fch.repeat(filled)),
-                self.style(DIM, &rch.repeat(bar_w - filled))
-            )
+            format!("{}  ", self.bar(ratio, bar_w, f_col))
         } else {
             String::new()
         };
@@ -1502,7 +1484,7 @@ impl App {
         };
         let usd_padded = format!("{usd_text:>9}");
         let usd_styled = if any_checked && usd.is_some_and(|u| u > 0.0) {
-            self.style(&format!("{BOLD}{GREEN}"), &usd_padded)
+            self.style(&format!("{BOLD};{GREEN}"), &usd_padded)
         } else {
             self.style(DIM, &usd_padded)
         };
@@ -1703,7 +1685,7 @@ impl App {
             " ".into()
         };
         let check = self.style(
-            &format!("{BOLD}{GREEN}"),
+            &format!("{BOLD};{GREEN}"),
             if self.unicode { "✓" } else { "+" },
         );
         let host_tag = k
@@ -1720,18 +1702,7 @@ impl App {
         let bar_w = if w >= 72 && max_kept_usd > 0.0 { 10 } else { 0 };
         let bar_str = if bar_w > 0 {
             if let Some(u) = k.saving_usd.filter(|&u| u > 0.0) {
-                let ratio = (u / max_kept_usd).clamp(0.0, 1.0);
-                let filled = ((ratio * bar_w as f64).round() as usize).clamp(1, bar_w);
-                let (fch, rch) = if self.unicode {
-                    ("█", "░")
-                } else {
-                    ("#", ".")
-                };
-                format!(
-                    "{}{}  ",
-                    self.style(GREEN, &fch.repeat(filled)),
-                    self.style(DIM, &rch.repeat(bar_w - filled))
-                )
+                format!("{}  ", self.bar(u / max_kept_usd, bar_w, GREEN))
             } else {
                 " ".repeat(bar_w + 2)
             }
@@ -1836,7 +1807,7 @@ impl App {
             self.style(DIM, if self.unicode { " · " } else { " - " })
         } else if v.checked {
             let chk = if self.unicode { "✓" } else { "x" };
-            self.style(&format!("{BOLD}{GREEN}"), &format!("[{chk}]"))
+            self.style(&format!("{BOLD};{GREEN}"), &format!("[{chk}]"))
         } else {
             self.style(DIM, "[ ]")
         };
@@ -2012,11 +1983,6 @@ impl App {
                 .unwrap_or(10)
                 .min(wrap_w.saturating_sub(24).max(12));
             let bar_w = if wrap_w >= max_name + 22 { 10 } else { 0 };
-            let (fch, rch) = if self.unicode {
-                ("█", "░")
-            } else {
-                ("#", ".")
-            };
 
             for m in &g.members {
                 let usd = effective_saving(&m.fix, self.billing);
@@ -2028,16 +1994,7 @@ impl App {
                 let pad = " ".repeat(max_name.saturating_sub(cells(&name)));
                 let bar = if bar_w > 0 && top_member_usd > 0.0 {
                     let ratio = usd.unwrap_or(0.0) / top_member_usd;
-                    let filled = if ratio > 0.0 {
-                        ((ratio * bar_w as f64).round() as usize).clamp(1, bar_w)
-                    } else {
-                        0
-                    };
-                    format!(
-                        "  {}{}",
-                        self.style(GREEN, &fch.repeat(filled)),
-                        self.style(DIM, &rch.repeat(bar_w - filled))
-                    )
+                    format!("  {}", self.bar(ratio, bar_w, GREEN))
                 } else {
                     String::new()
                 };
@@ -2130,20 +2087,7 @@ impl App {
     ) -> Vec<String> {
         let max_v = five_m_usd.max(one_h_usd).max(0.01);
         let bar_w = wrap_w.saturating_sub(28).clamp(8, 22);
-        let (fch, rch) = if self.unicode {
-            ("█", "░")
-        } else {
-            ("#", ".")
-        };
-        let make_bar = |v: f64, col: &str| {
-            let n = ((v / max_v) * bar_w as f64).round() as usize;
-            let n = n.clamp(usize::from(v > 0.0), bar_w);
-            format!(
-                "{}{}",
-                self.style(col, &fch.repeat(n)),
-                self.style(DIM, &rch.repeat(bar_w - n))
-            )
-        };
+        let make_bar = |v: f64, col: &str| self.bar(v / max_v, bar_w, col);
         let one_wins = one_h_usd <= five_m_usd;
         let col5 = if one_wins { RED } else { GREEN };
         let col1 = if one_wins { GREEN } else { RED };
@@ -2188,20 +2132,7 @@ impl App {
         let wrap_w = proof_wrap(w);
         let max_v = cost_per_use.max(threshold).max(0.01);
         let bar_w = wrap_w.saturating_sub(30).clamp(8, 20);
-        let (fch, rch) = if self.unicode {
-            ("█", "░")
-        } else {
-            ("#", ".")
-        };
-        let make_bar = |v: f64, col: &str| {
-            let n = ((v / max_v) * bar_w as f64).round() as usize;
-            let n = n.clamp(usize::from(v > 0.0), bar_w);
-            format!(
-                "{}{}",
-                self.style(col, &fch.repeat(n)),
-                self.style(DIM, &rch.repeat(bar_w - n))
-            )
-        };
+        let make_bar = |v: f64, col: &str| self.bar(v / max_v, bar_w, col);
         let ratio = if threshold > 0.0 {
             format!("  ({:.0}x budget)", cost_per_use / threshold)
         } else {
@@ -2239,7 +2170,7 @@ impl App {
             trim_ansi(
                 &format!(
                     "  {} {}",
-                    self.style(&format!("{BOLD}{BRAND}"), "Review exact edits"),
+                    self.style(&format!("{BOLD};{BRAND}"), "Review exact edits"),
                     self.style(
                         DIM,
                         &format!(
@@ -2270,7 +2201,7 @@ impl App {
         foot.push(trim_ansi(
             &format!(
                 "  {}  {}  {}",
-                self.style(&format!("{BOLD}{GREEN}"), "[y] Write settings"),
+                self.style(&format!("{BOLD};{GREEN}"), "[y] Write settings"),
                 self.style(DIM, "[Esc] Back"),
                 self.style(DIM, "[q] Cancel"),
             ),
@@ -2625,12 +2556,12 @@ pub(crate) fn run(
                     let headline = match saved {
                         Some(saved) => format!(
                             "  {} {} updated {files}",
-                            app.style(&format!("{BOLD}{GREEN}"), &format!("{ok} {saved}")),
+                            app.style(&format!("{BOLD};{GREEN}"), &format!("{ok} {saved}")),
                             app.sep().trim(),
                         ),
                         None => format!(
                             "  {}",
-                            app.style(&format!("{BOLD}{GREEN}"), &format!("{ok} Updated {files}"))
+                            app.style(&format!("{BOLD};{GREEN}"), &format!("{ok} Updated {files}"))
                         ),
                     };
                     let _ = writeln!(stdout, "{headline}");
@@ -2719,28 +2650,18 @@ fn write_by_hand(
         return Ok(());
     }
     writeln!(out)?;
-    if color {
-        writeln!(out, "  {BOLD}STEPS BY HAND{RESET}")?;
-    } else {
-        writeln!(out, "  STEPS BY HAND")?;
-    }
+    writeln!(out, "  {}", paint("STEPS BY HAND", BOLD, color))?;
+    // A dot reads as a bullet only once dimmed, so plain text marks one with a dash.
+    let bullet = paint(if color { "·" } else { "-" }, DIM, color);
     for (host, name, step, reason) in steps {
         let prefix = host
             .as_deref()
             .map(|h| format!("[{}] ", terminal_text(h)))
             .unwrap_or_default();
-        let (name, step, reason) = (
-            terminal_text(name),
-            terminal_text(step),
-            terminal_text(reason),
-        );
-        if color {
-            writeln!(out, "  {DIM}·{RESET} {BOLD}{prefix}{name}{RESET}: {step}")?;
-            writeln!(out, "    {DIM}({reason}){RESET}")?;
-        } else {
-            writeln!(out, "  - {prefix}{name}: {step}")?;
-            writeln!(out, "    ({reason})")?;
-        }
+        let name = paint(&format!("{prefix}{}", terminal_text(name)), BOLD, color);
+        let reason = paint(&format!("({})", terminal_text(reason)), DIM, color);
+        writeln!(out, "  {bullet} {name}: {}", terminal_text(step))?;
+        writeln!(out, "    {reason}")?;
     }
     Ok(())
 }
@@ -2829,43 +2750,20 @@ pub(crate) fn piggy_lines(color: bool, unicode: bool, frame: usize) -> Vec<Strin
     let mut out = Vec::with_capacity(10);
     for [top, bot] in grid.as_chunks::<2>().0 {
         let mut line = String::with_capacity(128);
+        let fg = |pixel: u8| if pixel == b'P' { BRAND } else { GREEN };
         for (&t, &b) in top.iter().zip(bot.iter()) {
-            match (t, b) {
-                (b'.', b'.') => line.push(' '),
-                (a, c) if a == c => {
-                    if color {
-                        let fg = if a == b'P' { "35" } else { "32" };
-                        line.push_str(&format!("\x1b[{fg}m█{RESET}"));
-                    } else {
-                        line.push('█');
-                    }
-                }
-                (a, b'.') => {
-                    if color {
-                        let fg = if a == b'P' { "35" } else { "32" };
-                        line.push_str(&format!("\x1b[{fg}m▀{RESET}"));
-                    } else {
-                        line.push('▀');
-                    }
-                }
-                (b'.', c) => {
-                    if color {
-                        let fg = if c == b'P' { "35" } else { "32" };
-                        line.push_str(&format!("\x1b[{fg}m▄{RESET}"));
-                    } else {
-                        line.push('▄');
-                    }
-                }
-                (a, c) => {
-                    if color {
-                        let fg = if a == b'P' { "35" } else { "32" };
-                        let bg = if c == b'P' { "45" } else { "42" };
-                        line.push_str(&format!("\x1b[{fg};{bg}m▀{RESET}"));
-                    } else {
-                        line.push('▀');
-                    }
-                }
-            }
+            let (glyph, style) = match (t, b) {
+                (b'.', b'.') => (" ", String::new()),
+                (a, c) if a == c => ("█", fg(a).to_string()),
+                (a, b'.') => ("▀", fg(a).to_string()),
+                (b'.', c) => ("▄", fg(c).to_string()),
+                // The bottom pixel fills the cell's background, in the same color.
+                (a, c) => (
+                    "▀",
+                    format!("{};{}", fg(a), if c == b'P' { "45" } else { "42" }),
+                ),
+            };
+            line.push_str(&paint(glyph, &style, color));
         }
         out.push(line);
     }
@@ -2888,11 +2786,7 @@ fn play_coin_drop(out: &mut impl Write, viewport: &mut InlineViewport, color: bo
             .enumerate()
             .map(|(i, row)| {
                 if i == mid {
-                    let label = if color {
-                        format!("{BOLD}{GREEN}{msg}{RESET}")
-                    } else {
-                        msg.to_string()
-                    };
+                    let label = paint(msg, &format!("{BOLD};{GREEN}"), color);
                     format!("  {row}   {label}")
                 } else {
                     format!("  {row}")
@@ -3052,14 +2946,7 @@ fn window_blocks(
     }
     let focus_idx = blocks.iter().position(|(f, _)| *f).unwrap_or(0);
     let inner_budget = budget.saturating_sub(2).max(1);
-    let dim = |msg: String| {
-        let fitted = fit_plain(&msg, width, unicode);
-        if color {
-            format!("{DIM}{fitted}{RESET}")
-        } else {
-            fitted
-        }
-    };
+    let dim = |msg: String| paint(&fit_plain(&msg, width, unicode), DIM, color);
     let focused = &blocks[focus_idx].1;
     if focused.len() > inner_budget {
         let room = inner_budget.saturating_sub(1).max(1);
@@ -3116,21 +3003,18 @@ fn proof_wrap(w: usize) -> usize {
 
 /// Display cell width of `s`, ignoring ANSI SGR escape sequences.
 fn ansi_cells(s: &str) -> usize {
-    let mut plain = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' && chars.peek() == Some(&'[') {
-            chars.next();
-            for next in chars.by_ref() {
-                if next.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-        } else {
-            plain.push(c);
-        }
-    }
+    let plain: String = tokens(s)
+        .filter_map(|t| match t {
+            Token::Text(text) => Some(text),
+            _ => None,
+        })
+        .collect();
     cells(&plain)
+}
+
+/// The cells one character takes, as a styled row counts them.
+fn char_cells(c: char) -> usize {
+    cells(c.encode_utf8(&mut [0u8; 4]))
 }
 
 /// Fit plain text to at most `max_cells` display cells, adding an ellipsis when cut.
@@ -3172,41 +3056,36 @@ fn wrap_ansi(s: &str, max_cells: usize) -> Vec<String> {
     let mut used = 0usize;
     // The SGR sequences in effect since the last reset.
     let mut active = String::new();
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' && chars.peek() == Some(&'[') {
-            let mut seq = String::from(c);
-            seq.push(chars.next().expect("peeked '['"));
-            let mut code = String::new();
-            for next in chars.by_ref() {
-                seq.push(next);
-                if next.is_ascii_alphabetic() {
-                    if next == 'm' {
-                        if code.is_empty() || code == "0" {
-                            active.clear();
-                        } else {
-                            active.push_str(&seq);
-                        }
-                    }
-                    break;
+    for token in tokens(s) {
+        let text = match token {
+            Token::Text(text) => text,
+            Token::Sgr { seq, reset } => {
+                if reset {
+                    active.clear();
+                } else {
+                    active.push_str(seq);
                 }
-                code.push(next);
+                row.push_str(seq);
+                continue;
             }
-            row.push_str(&seq);
-            continue;
-        }
-        let mut buf = [0u8; 4];
-        let w = cells(c.encode_utf8(&mut buf));
-        if used + w > max_cells && used > 0 {
-            if !active.is_empty() {
-                row.push_str(RESET);
+            Token::Csi(seq) => {
+                row.push_str(seq);
+                continue;
             }
-            rows.push(std::mem::take(&mut row));
-            row.push_str(&active);
-            used = 0;
+        };
+        for c in text.chars() {
+            let w = char_cells(c);
+            if used + w > max_cells && used > 0 {
+                if !active.is_empty() {
+                    row.push_str(RESET);
+                }
+                rows.push(std::mem::take(&mut row));
+                row.push_str(&active);
+                used = 0;
+            }
+            row.push(c);
+            used += w;
         }
-        row.push(c);
-        used += w;
     }
     rows.push(row);
     rows
@@ -3220,31 +3099,24 @@ fn trim_ansi(s: &str, max_cells: usize) -> String {
     let mut out = String::with_capacity(s.len());
     let mut used = 0usize;
     let mut in_style = false;
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' && chars.peek() == Some(&'[') {
-            out.push(c);
-            out.push(chars.next().expect("peeked '['"));
-            let mut code = String::new();
-            for next in chars.by_ref() {
-                out.push(next);
-                if next.is_ascii_alphabetic() {
-                    if next == 'm' {
-                        in_style = code != "0" && !code.is_empty();
+    'cut: for token in tokens(s) {
+        match token {
+            Token::Text(text) => {
+                for c in text.chars() {
+                    let w = char_cells(c);
+                    if used + w > max_cells {
+                        break 'cut;
                     }
-                    break;
+                    out.push(c);
+                    used += w;
                 }
-                code.push(next);
             }
-            continue;
+            Token::Sgr { seq, reset } => {
+                out.push_str(seq);
+                in_style = !reset;
+            }
+            Token::Csi(seq) => out.push_str(seq),
         }
-        let mut buf = [0u8; 4];
-        let w = cells(c.encode_utf8(&mut buf));
-        if used + w > max_cells {
-            break;
-        }
-        out.push(c);
-        used += w;
     }
     if in_style {
         out.push_str(RESET);
@@ -3742,24 +3614,19 @@ mod tests {
 
     #[test]
     fn a_long_diff_line_wraps_whole() {
-        let long = format!("{GREEN}+ \"{}\"{RESET} tail", "x".repeat(230));
+        let long = format!(
+            "{} tail",
+            paint(&format!("+ \"{}\"", "x".repeat(230)), GREEN, true)
+        );
         let rows = wrap_ansi(&long, 80);
         assert_eq!(rows.len(), 3);
         let plain = |s: &str| {
-            let mut out = String::new();
-            let mut chars = s.chars();
-            while let Some(c) = chars.next() {
-                if c == '\u{1b}' {
-                    for n in chars.by_ref() {
-                        if n.is_ascii_alphabetic() {
-                            break;
-                        }
-                    }
-                } else {
-                    out.push(c);
-                }
-            }
-            out
+            tokens(s)
+                .filter_map(|t| match t {
+                    Token::Text(text) => Some(text.to_string()),
+                    _ => None,
+                })
+                .collect::<String>()
         };
         assert!(rows.iter().all(|r| ansi_cells(r) <= 80), "{rows:?}");
         assert_eq!(
@@ -3768,7 +3635,7 @@ mod tests {
         );
         // A row ending inside the style closes it, and the next reopens it.
         assert!(
-            rows[0].ends_with(RESET) && rows[1].starts_with(GREEN),
+            rows[0].ends_with(RESET) && rows[1].starts_with("\x1b[32m"),
             "{rows:?}"
         );
     }

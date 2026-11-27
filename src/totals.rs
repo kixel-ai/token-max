@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::defaults::Credit;
 use crate::doctor::{Fix, How, Placed, Saved, Total, place};
 use crate::model::{CheckResult, Estimate, HistoricalCost, Margin, Report, Request, Scan};
-use crate::report::{Spend, spend_text};
+use crate::report::{Spend, about, approx};
 
 /// One host's figures, or the sum of several.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -21,14 +21,8 @@ pub struct Totals {
     pub tokens: u64,
     /// Sessions, each subagent counted with the session that spawned it.
     pub sessions: u64,
-    /// What the requests cost at API prices, extrapolated over unpriced ones, plus `floor`.
-    pub spend: f64,
-    /// How far `spend` may be off; None when nothing was extrapolated.
-    pub margin: Option<Margin>,
-    /// What profiles that priced none of their requests are known to cost.
-    pub floor: f64,
-    /// Whether some profile priced none of its requests.
-    pub partial: bool,
+    /// What the requests cost at API prices.
+    pub spend: Spent,
     /// What the hosts spend every 30 days at their windows' rates, the base of a saving's share.
     pub monthly: f64,
     /// What the changes the report offers save every 30 days.
@@ -55,26 +49,19 @@ impl Totals {
             requests,
             tokens,
             sessions,
-            spend: spend.usd,
-            margin: spend.margin,
-            floor: spend.floor,
-            partial: spend.partial,
+            spend: spend.spent,
             monthly: spend.monthly(),
             savings,
             credit,
         }
     }
 
-    /// Another host's figures added to these. Hosts are separate samples, so their margins
-    /// combine in quadrature.
+    /// Another host's figures added to these.
     pub fn merge(&mut self, other: &Totals) {
         self.requests += other.requests;
         self.tokens += other.tokens;
         self.sessions += other.sessions;
-        self.spend += other.spend;
-        self.margin = Margin::independent(self.margin, other.margin);
-        self.floor += other.floor;
-        self.partial |= other.partial;
+        self.spend.merge(&other.spend);
         self.monthly += other.monthly;
         self.savings.merge(&other.savings);
         self.savings.set_share(self.monthly);
@@ -90,12 +77,7 @@ impl Totals {
             requests: self.requests,
             tokens: self.tokens,
             sessions: self.sessions,
-            spend: Some(Spent {
-                usd: self.spend,
-                margin: self.margin,
-                floor: self.floor,
-                partial: self.partial,
-            }),
+            spend: Some(self.spend),
         }
     }
 
@@ -198,6 +180,9 @@ impl Checked {
     }
 }
 
+/// What a tally that holds only while a default is the other value ends with.
+pub(crate) const BILLING: &str = ", depending on billing";
+
 /// One kind of figure after another as a progress line tallies them, each with its qualifier.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Tallied {
@@ -248,7 +233,7 @@ impl Counts {
 }
 
 /// What requests cost at API prices, extrapolated over the ones that could not be priced.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Spent {
     /// The total, extrapolated over unpriced requests, plus `floor`.
     pub usd: f64,
@@ -311,7 +296,8 @@ impl Spent {
         }
     }
 
-    /// Another host's spend added to this one, as [`Totals::merge`] adds it.
+    /// Another host's spend added to this one. Hosts are separate samples, so their margins
+    /// combine in quadrature.
     pub fn merge(&mut self, other: &Spent) {
         self.usd += other.usd;
         self.margin = Margin::independent(self.margin, other.margin);
@@ -319,9 +305,26 @@ impl Spent {
         self.partial |= other.partial;
     }
 
-    /// The spend as a report's header writes it, such as "~$9,392 ± $4.72".
+    /// The spend as a report's header writes it, such as "~$9,392 ± $4.72", "at least $120",
+    /// or "~$9,392 ± $4.72 plus at least $120" when only some groups priced nothing.
     pub fn text(&self) -> String {
-        spend_text(self.usd, self.margin, self.floor, self.partial)
+        let measured = self.usd - self.floor;
+        if !self.partial {
+            approx(self.usd, self.margin, "")
+        } else if measured == 0.0 && self.margin.is_none() {
+            format!("at least {}", about(self.floor))
+        } else if self.floor > 0.0 {
+            format!(
+                "{} plus at least {}",
+                approx(measured, self.margin, ""),
+                about(self.floor)
+            )
+        } else {
+            format!(
+                "{} plus requests with no known price",
+                approx(measured, self.margin, "")
+            )
+        }
     }
 }
 
@@ -340,7 +343,6 @@ pub fn tokens(r: &Request) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::report::spend_text;
 
     /// Two lines that make one edit, such as a compaction window for two profiles sharing a
     /// settings file, count once as the walk lists them: the bigger saving's line keeps it.
@@ -397,13 +399,16 @@ mod tests {
         assert_eq!(tallied.measured.as_deref(), Some("found $80/mo more"));
     }
 
-    fn host(requests: u64, spend: f64, margin: Option<Margin>, monthly: f64) -> Totals {
+    fn host(requests: u64, usd: f64, margin: Option<Margin>, monthly: f64) -> Totals {
         Totals {
             requests,
             tokens: requests * 10,
             sessions: requests / 10,
-            spend,
-            margin,
+            spend: Spent {
+                usd,
+                margin,
+                ..Spent::default()
+            },
             monthly,
             ..Totals::default()
         }
@@ -418,29 +423,49 @@ mod tests {
         assert_eq!(total.requests, 151);
         assert_eq!(total.tokens, 1510);
         assert_eq!(total.sessions, 15);
-        assert_eq!(total.spend, 1510.0);
+        assert_eq!(total.spend.usd, 1510.0);
         assert_eq!(total.monthly, 805.0);
         // 30 and 40 combine as 3-4-5.
-        assert_eq!(total.margin, Some(Margin::Usd(50.0)));
-        assert_eq!(
-            spend_text(total.spend, total.margin, total.floor, total.partial),
-            "~$1,510 ± $50"
-        );
+        assert_eq!(total.spend.margin, Some(Margin::Usd(50.0)));
+        assert_eq!(total.spend.text(), "~$1,510 ± $50");
     }
 
     #[test]
     fn a_host_with_no_spread_leaves_the_margin_unknown_and_a_floor_stays_a_floor() {
         let mut total = host(10, 100.0, Some(Margin::Usd(5.0)), 10.0);
         total.merge(&host(10, 20.0, Some(Margin::Unmeasured), 10.0));
-        assert_eq!(total.margin, Some(Margin::Unmeasured));
+        assert_eq!(total.spend.margin, Some(Margin::Unmeasured));
         let mut priced_none = host(5, 7.0, None, 1.0);
-        priced_none.floor = 7.0;
-        priced_none.partial = true;
+        priced_none.spend.floor = 7.0;
+        priced_none.spend.partial = true;
         let mut total = host(10, 100.0, None, 10.0);
         total.merge(&priced_none);
+        assert_eq!(total.spend.text(), "$100 plus at least $7");
+    }
+
+    #[test]
+    fn a_spend_partly_extrapolated_keeps_its_margin_beside_the_lower_bound() {
+        let spend = |usd, margin, floor, partial| Spent {
+            usd,
+            margin,
+            floor,
+            partial,
+        };
+        assert_eq!(spend(100.0, None, 0.0, false).text(), "$100");
         assert_eq!(
-            spend_text(total.spend, total.margin, total.floor, total.partial),
-            "$100 plus at least $7"
+            spend(100.0, Some(Margin::Usd(4.0)), 0.0, false).text(),
+            "~$100 ± $4"
+        );
+        assert_eq!(spend(100.0, None, 100.0, true).text(), "at least $100");
+        // One profile extrapolated, another with nothing priced: never a bare "at least".
+        assert_eq!(
+            spend(130.0, Some(Margin::Usd(4.0)), 30.0, true).text(),
+            "~$100 ± $4 plus at least $30"
+        );
+        // A profile with nothing priced and no known charge still marks the total partial.
+        assert_eq!(
+            spend(100.0, Some(Margin::Usd(4.0)), 0.0, true).text(),
+            "~$100 ± $4 plus requests with no known price"
         );
     }
 
@@ -472,6 +497,9 @@ mod tests {
         let one = host(7, 12.5, None, 12.5);
         let mut total = one.clone();
         total.merge(&one);
-        assert_eq!((total.requests, total.sessions, total.spend), (14, 0, 25.0));
+        assert_eq!(
+            (total.requests, total.sessions, total.spend.usd),
+            (14, 0, 25.0)
+        );
     }
 }

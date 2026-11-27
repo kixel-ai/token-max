@@ -1,4 +1,4 @@
-//! Terminal layout by display cells.
+//! Terminal layout by display cells, and the SGR styles text is drawn in.
 
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthChar;
@@ -13,6 +13,92 @@ pub(crate) const RED: &str = "31";
 pub(crate) const GREEN: &str = "32";
 /// Yellow text's SGR attribute, for an advisory.
 pub(crate) const YELLOW: &str = "33";
+/// Magenta text's SGR attribute, the brand's violet.
+pub(crate) const BRAND: &str = "35";
+/// The sequence that ends every style.
+pub(crate) const RESET: &str = "\x1b[0m";
+
+/// How styled output draws: in color or not, and with Unicode glyphs or ASCII.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Look {
+    pub color: bool,
+    pub unicode: bool,
+}
+
+/// `text` in SGR `style`, such as `RED` or "1;32"; as it is without `color` or a style.
+pub(crate) fn paint(text: &str, style: &str, color: bool) -> String {
+    if color && !style.is_empty() {
+        format!("\x1b[{style}m{text}{RESET}")
+    } else {
+        text.to_string()
+    }
+}
+
+/// A bar `width` cells wide, its first `ratio` filled in `style` and the rest dim. Any ratio
+/// above zero fills at least one cell, so a small figure still shows.
+pub(crate) fn bar(ratio: f64, width: usize, style: &str, look: Look) -> String {
+    let ratio = if ratio.is_nan() {
+        0.0
+    } else {
+        ratio.clamp(0.0, 1.0)
+    };
+    let filled = ((ratio * width as f64).round() as usize)
+        .max(usize::from(ratio > 0.0))
+        .min(width);
+    let (fill, rest) = if look.unicode {
+        ("█", "░")
+    } else {
+        ("#", ".")
+    };
+    format!(
+        "{}{}",
+        paint(&fill.repeat(filled), style, look.color),
+        paint(&rest.repeat(width - filled), DIM, look.color)
+    )
+}
+
+/// A piece of text styled with escape sequences, as [`tokens`] splits it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Token<'a> {
+    /// Text up to the next escape sequence.
+    Text(&'a str),
+    /// An SGR sequence, such as "\x1b[31m", and whether it ends every style.
+    Sgr { seq: &'a str, reset: bool },
+    /// Any other CSI sequence, which also takes no cells.
+    Csi(&'a str),
+}
+
+/// `text` split into its escape sequences and the text between them. A CSI sequence runs from
+/// its "\x1b[" through its final letter, or to the end when it has none.
+pub(crate) fn tokens(text: &str) -> impl Iterator<Item = Token<'_>> {
+    let mut rest = text;
+    std::iter::from_fn(move || {
+        if rest.is_empty() {
+            return None;
+        }
+        let Some(tail) = rest.strip_prefix("\x1b[") else {
+            let end = rest.find("\x1b[").unwrap_or(rest.len());
+            let (text, after) = rest.split_at(end);
+            rest = after;
+            return Some(Token::Text(text));
+        };
+        let end = tail
+            .find(|c: char| c.is_ascii_alphabetic())
+            .map_or(rest.len(), |at| 2 + at + 1);
+        let (seq, after) = rest.split_at(end);
+        rest = after;
+        Some(match seq.strip_suffix('m') {
+            Some(params) => {
+                let code = &params[2..];
+                Token::Sgr {
+                    seq,
+                    reset: code.is_empty() || code == "0",
+                }
+            }
+            None => Token::Csi(seq),
+        })
+    })
+}
 
 /// How to wrap: without a width, lines are only indented.
 #[derive(Clone, Copy, Debug, Default)]
@@ -169,7 +255,7 @@ pub fn wrap_spans(spans: &[(&str, &str)], options: WrapOptions, color: bool) -> 
         match c {
             '\n' => {
                 if !open.is_empty() {
-                    out.push_str("\x1b[0m");
+                    out.push_str(RESET);
                     open = "";
                 }
                 out.push_str(&" ".repeat(spaces));
@@ -180,7 +266,7 @@ pub fn wrap_spans(spans: &[(&str, &str)], options: WrapOptions, color: bool) -> 
             _ => {
                 let (_, style) = styles.next().expect("wrapping keeps every character");
                 if style != open && !open.is_empty() {
-                    out.push_str("\x1b[0m");
+                    out.push_str(RESET);
                 }
                 out.push_str(&" ".repeat(spaces));
                 spaces = 0;
@@ -195,10 +281,25 @@ pub fn wrap_spans(spans: &[(&str, &str)], options: WrapOptions, color: bool) -> 
         }
     }
     if !open.is_empty() {
-        out.push_str("\x1b[0m");
+        out.push_str(RESET);
     }
     out.push_str(&" ".repeat(spaces));
     out
+}
+
+/// Spans of text that may hold terminal controls, such as a file's name, escaped with
+/// `safe::terminal_text`, then wrapped and styled as [`wrap_spans`] does.
+pub(crate) fn wrap_escaped<T: AsRef<str>>(
+    spans: &[(T, &str)],
+    options: WrapOptions,
+    color: bool,
+) -> String {
+    let escaped: Vec<(String, &str)> = spans
+        .iter()
+        .map(|(text, style)| (crate::safe::terminal_text(text.as_ref()), *style))
+        .collect();
+    let escaped: Vec<(&str, &str)> = escaped.iter().map(|(t, s)| (t.as_str(), *s)).collect();
+    wrap_spans(&escaped, options, color)
 }
 
 fn wrap_line(input: &str, options: WrapOptions) -> String {
@@ -357,16 +458,65 @@ mod tests {
 
     /// `text` without SGR sequences.
     fn unstyled(text: &str) -> String {
-        let mut out = String::new();
-        for (i, part) in text.split('\x1b').enumerate() {
-            let skip = if i == 0 {
-                0
-            } else {
-                part.find('m').unwrap() + 1
-            };
-            out.push_str(&part[skip..]);
-        }
-        out
+        tokens(text)
+            .filter_map(|t| match t {
+                Token::Text(text) => Some(text),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tokens_split_escapes_from_text() {
+        let styled = "a\x1b[1;31mb\x1b[0mc\x1b[mé\x1b[2Jd\x1be\x1b[3";
+        assert_eq!(
+            tokens(styled).collect::<Vec<_>>(),
+            [
+                Token::Text("a"),
+                Token::Sgr {
+                    seq: "\x1b[1;31m",
+                    reset: false
+                },
+                Token::Text("b"),
+                Token::Sgr {
+                    seq: "\x1b[0m",
+                    reset: true
+                },
+                Token::Text("c"),
+                Token::Sgr {
+                    seq: "\x1b[m",
+                    reset: true
+                },
+                Token::Text("é"),
+                Token::Csi("\x1b[2J"),
+                // A lone escape is text; a sequence cut off runs to the end.
+                Token::Text("d\x1be"),
+                Token::Csi("\x1b[3"),
+            ]
+        );
+        // Every byte lands in exactly one token.
+        let joined: String = tokens(styled)
+            .map(|t| match t {
+                Token::Text(s) | Token::Sgr { seq: s, .. } | Token::Csi(s) => s,
+            })
+            .collect();
+        assert_eq!(joined, styled);
+    }
+
+    #[test]
+    fn a_bar_fills_its_ratio_and_shows_any_figure() {
+        let ascii = Look::default();
+        assert_eq!(bar(0.5, 4, GREEN, ascii), "##..");
+        assert_eq!(bar(0.0, 4, GREEN, ascii), "....");
+        assert_eq!(bar(0.01, 4, GREEN, ascii), "#...");
+        assert_eq!(bar(7.0, 4, GREEN, ascii), "####");
+        assert_eq!(bar(f64::NAN, 2, GREEN, ascii), "..");
+        assert_eq!(bar(0.5, 0, GREEN, ascii), "");
+        let look = Look {
+            color: true,
+            unicode: true,
+        };
+        assert_eq!(bar(0.5, 2, GREEN, look), "\x1b[32m█\x1b[0m\x1b[2m░\x1b[0m");
     }
 
     #[test]

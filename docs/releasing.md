@@ -7,7 +7,7 @@ and `--version` reports it.
 
 The read-only `Check` workflow runs `just check` (formatting, clippy with
 warnings as errors, the synthetic tests and `quest check`) on Linux, and the
-tests on Windows. The macOS tests run after each push to `main` (the `macOS`
+tests on Windows. The macOS tests run after pushes to `main` (the `macOS`
 workflow, which opens or updates a "macOS tests fail on main" issue when they
 fail) and in the Check run a release makes. A change only to `quest/` and the agent docs
 (`AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`) runs `quest check` alone. The

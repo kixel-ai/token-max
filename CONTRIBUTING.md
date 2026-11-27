@@ -4,7 +4,8 @@ PRs into `main` land by squash through GitHub's merge queue, which tests
 each entry against the current `main` with the required `Check` job
 (`just check` in the Nix dev shell, plus the Windows tests, or only
 `quest check` when nothing outside `quest/` and the agent docs changed). The
-macOS tests run after each merge to `main` and file an issue when they fail. A
+macOS tests run after pushes to `main` and file an issue when they fail; a
+newer push replaces a pending run, so an intermediate merge may go untested. A
 branch only behind `main` needs no merge; merge `main` only when the PR
 conflicts or the queue refuses its head.
 

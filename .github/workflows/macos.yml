@@ -1,6 +1,6 @@
 name: macOS
 
-# The macOS tests run after each push to main, outside pull requests and the
+# The macOS tests run after pushes to main, outside pull requests and the
 # merge queue: over 22 days of gate runs they never failed where Linux passed,
 # while waiting for one of the org's shared macOS runners held the gate up to an
 # hour. A release still runs them before publishing, through Check.

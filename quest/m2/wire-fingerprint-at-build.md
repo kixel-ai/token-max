@@ -21,8 +21,6 @@ digest in with `cargo:rustc-env`, printing `cargo:rerun-if-changed` for each
 file. Add `/build.rs` to the crate's `include` list, and check that the digest
 matches the one the current code computes for the same commit.
 
-## Waiting
-
-- Maintainer: Should the wire fingerprint be hashed at build time, trading a build script for 1.5 MB of binary?
-  - Hash in a build script with `sha2` as a build-dependency (Recommended) - removes the 1.5 MB, at the cost of a build script and a second, unoptimized `sha2` compile for the host, roughly a second of cold build, plus a re-run of the script (under 0.1 s) when a hashed file changes
-  - Keep embedding the sources - no build change; the binary keeps the text, which grew 64% in the week before the audit
+Decided 2026-11-27 (maintainer, /quest-run): ✅ hash the sources in a build
+script with `sha2` as a build-dependency (rejected: keep embedding the
+sources; drop the quest).

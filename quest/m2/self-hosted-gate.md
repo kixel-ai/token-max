@@ -9,6 +9,11 @@ longer depends on the org's shared GitHub-hosted runners.
 
 ## Plan
 
+Decided 2026-11-27 (maintainer, /quest-run): ✅ add a self-hosted Windows
+runner too, so the Windows tests stay on the gate (rejected: keep
+`windows-2025` as a listed exception; move Windows off the gate; drop the
+quest).
+
 Today `Plan`, `Source` and `Check` run on `ubuntu-24.04` and the Windows tests
 on `windows-2025`; the m2 `cost` audit moved the macOS tests off the gate to a
 run after each push to `main`. In the week it measured, waits for the org's
@@ -20,6 +25,12 @@ repositories each run their gate on a runner group of their own, such as
 - Linux jobs move to a `token-max` runner group on a NixOS CI host, labelled
   like the others (`token-max-queue`). `Source` already runs in the Nix dev
   shell, so the host needs only Nix.
+- The Windows tests move to a self-hosted Windows host in the same
+  `token-max-queue` group, labelled `windows` so `runs-on` picks it apart
+  from the Linux runners. Each job gets a fresh worker, such as a VM
+  restored from a clean snapshot with Rust and the MSVC build tools
+  preinstalled, under the same isolation rule as Linux below. Until that
+  host is registered, the Windows job stays on `windows-2025`.
 - Pull requests from forks would run their code on that host. Set the
   repository's fork-run approval to "Require approval for all outside
   collaborators", since GitHub's default asks only first-time contributors,
@@ -32,8 +43,6 @@ repositories each run their gate on a runner group of their own, such as
 
 ## Waiting
 
-- Maintainer (action): create a `token-max-queue` runner group allowing kixel-ai/token-max and register a runner on a NixOS CI host in it; an agent cannot, since registering takes an org admin's token and the hosts' configuration. Check with `gh api orgs/kixel-ai/actions/runner-groups --jq '.runner_groups[].name'`.
-- Maintainer: Where should the Windows tests run, given no self-hosted Windows runner exists and they failed where Linux passed in 13 of about 220 pull request runs in a week, each time in a test new to that branch?
-  - Keep `windows-2025` as a listed exception (Recommended) - its runner waits were p90 33 s, and the signal is worth keeping on the gate
-  - A self-hosted Windows host - meets the standard, at the cost of a Windows machine to maintain
-  - Move Windows off the gate to a run after each push to `main` - fastest gate, but Windows bugs would land and be fixed after the fact
+- Maintainer (PC): provision a Windows host for token-max's Windows tests, a machine or VM that can restore a clean snapshot per job, with Rust and the MSVC build tools installed; an agent cannot, since it needs the maintainer's hardware or a paid cloud account and a Windows license. Check that the host is reachable and `cargo --version` runs on it.
+- Maintainer (action): create a `token-max-queue` runner group in the kixel-ai org allowing kixel-ai/token-max; an agent cannot, since creating a runner group takes an org admin's token, which no agent holds. Check with `gh api orgs/kixel-ai/actions/runner-groups --jq '.runner_groups[].name'`.
+- Maintainer (action): register runners in `token-max-queue` on a NixOS CI host and on the Windows host; an agent cannot, since registration takes an org admin's token and changes the hosts' configuration. Check with `gh api orgs/kixel-ai/actions/runners --jq '.runners[] | [.name, .status, (.labels | map(.name) | join(","))] | @tsv'`.

@@ -2109,7 +2109,11 @@ mod tests {
             "/work/repo",
             &[(0, 0, 10_000), (20, 0, 10_500), (40, 0, 11_000)],
         );
-        let config = w.home.join(".config/opencode/opencode.jsonc");
+        let config = w
+            .home
+            .join(".config")
+            .join("opencode")
+            .join("opencode.jsonc");
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
         std::fs::write(&config, "{\n  // Mine.\n}\n").unwrap();
         let (report, check) = anthropic_check(&w);
@@ -2159,7 +2163,11 @@ mod tests {
         assert_eq!(check.base.current, None);
         assert_eq!(check.base.action, crate::model::Action::Advisory);
         std::fs::remove_file(repo.join("opencode.json")).unwrap();
-        let config = w.home.join(".config/opencode/opencode.json");
+        let config = w
+            .home
+            .join(".config")
+            .join("opencode")
+            .join("opencode.json");
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
         std::fs::write(
             &config,
@@ -2184,7 +2192,11 @@ mod tests {
             r#"{"providers": {"anthropic": {"settings": {"cache": {"ttl": "5m"}}}}}"#,
         )
         .unwrap();
-        let config = w.home.join(".config/opencode/opencode.json");
+        let config = w
+            .home
+            .join(".config")
+            .join("opencode")
+            .join("opencode.json");
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
         std::fs::write(&config, r#"{"warming": {"duration": "30 minutes"}}"#).unwrap();
         // Warming pings no replay prices, so its line only advises.
@@ -2233,7 +2245,11 @@ mod tests {
         let repo = w.home.join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
         anthropic_session(&file, &text(&repo), &[(0, 0, 10_000), (20, 0, 10_500)]);
-        let config = w.home.join(".config/opencode/opencode.json");
+        let config = w
+            .home
+            .join(".config")
+            .join("opencode")
+            .join("opencode.json");
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
         std::fs::write(&config, r#"{"warming": {"duration": "30 minutes"}}"#).unwrap();
         // The project turns the global warming off, so its sessions never warm.

@@ -110,6 +110,20 @@ pub(crate) fn tier_name(tier: &str) -> &str {
     }
 }
 
+/// The tier each executor iteration of `r` records, normalized. A summary request's executor
+/// iterations are compaction, so those count only when it has no message iteration.
+fn executor_tiers(r: &Request) -> impl Iterator<Item = Option<&str>> {
+    let kind = if r.parts.iter().any(|e| e.kind == PartKind::Message) {
+        PartKind::Message
+    } else {
+        PartKind::Compaction
+    };
+    r.parts
+        .iter()
+        .filter(move |e| e.kind == kind)
+        .map(|e| e.tier.as_deref().map(tier_name))
+}
+
 /// Choose a pricing scenario without promoting requested controls into billing evidence.
 fn service_tier<'a>(r: &'a Request, p: &'a BillingPart) -> Result<&'a str, &'static str> {
     if r.issues
@@ -122,24 +136,28 @@ fn service_tier<'a>(r: &'a Request, p: &'a BillingPart) -> Result<&'a str, &'sta
         return Ok(tier);
     }
     // An advisor call records no tier of its own, and Priority Tier needs a commitment on
-    // each model, so under an executor at standard the call is too, barring a commitment on
-    // the advisor model alone. A summary request's executor iterations are compaction, so
-    // those count only when the request has no message iteration.
+    // each model, so the call takes its executor's: standard when no executor iteration
+    // records another tier, barring a commitment on the advisor model alone. A request
+    // that records no tier at all is standard only when priced as Anthropic's API and no
+    // other iteration of it, a compaction one included, shows another tier.
     if p.kind == PartKind::Advisor {
-        let kind = if r.parts.iter().any(|e| e.kind == PartKind::Message) {
-            PartKind::Message
+        let mut recorded = executor_tiers(r).flatten().peekable();
+        let standard = if recorded.peek().is_some() {
+            recorded.all(|t| t == "default")
         } else {
-            PartKind::Compaction
+            // Without an executor iteration, as when a replay drops the idle summary that
+            // held the request's tier, nothing is left to show it.
+            r.provider.as_deref() == Some("anthropic")
+                && executor_tiers(r).next().is_some()
+                && r.parts
+                    .iter()
+                    .filter_map(|e| e.tier.as_deref().map(tier_name))
+                    .all(|t| t == "default")
         };
-        let mut executor = r
-            .parts
-            .iter()
-            .filter(|e| e.kind == kind)
-            .map(|e| e.tier.as_deref().map(tier_name));
-        let first = executor.next().flatten();
-        return match first {
-            Some("default") if executor.all(|t| t == first) => Ok("standard"),
-            _ => Err("an advisor call's service tier is not recorded"),
+        return if standard {
+            Ok("standard")
+        } else {
+            Err("an advisor call's service tier is not recorded")
         };
     }
     if r.harness != Harness::Codex
@@ -1276,9 +1294,11 @@ fn selected_rates(
     let mut factor = 1.0;
     let tier = service_tier(r, p)?;
     if p.kind == PartKind::Advisor && p.tier.is_none() {
-        assumptions.push(
-            "an advisor call records no service tier; priced at its executor's standard tier, which a Priority Tier commitment on the advisor model alone would change".into(),
-        );
+        assumptions.push(if executor_tiers(r).all(|t| t.is_none()) {
+            "no executor iteration records a service tier; its advisor call is priced at standard because the request is priced as Anthropic's API and nothing on it shows Priority Tier, which a commitment on the advisor model alone would change".into()
+        } else {
+            "an advisor call records no service tier; priced at its executor's standard tier, which a Priority Tier commitment on the advisor model alone would change".into()
+        });
     }
     if conditional_tier(r, p) {
         assumptions.push(format!(
@@ -1757,6 +1777,59 @@ mod tests {
         ];
         let last = summary.parts.last().unwrap();
         assert!(price_part(&catalog, &summary, last).total_usd.is_some());
+    }
+
+    #[test]
+    fn a_tierless_request_prices_its_advisor_at_standard_only_on_anthropics_api() {
+        let catalog = prices();
+        // The probe shape: the executor and the advisor both record no tier.
+        let tierless = |provider: &str, executor: Option<&str>| {
+            let mut r = make_request();
+            let mut meta = (*r.meta).clone();
+            meta.provider = Some(provider.into());
+            r.meta = meta.into();
+            r.parts[0].tier = executor.map(Into::into);
+            let advisor = BillingPart {
+                kind: PartKind::Advisor,
+                tier: None,
+                speed: None,
+                ..r.parts[0].clone()
+            };
+            r.parts.push(advisor.clone());
+            price_part(&catalog, &r, &advisor)
+        };
+        let standard = tierless("anthropic", Some("standard"));
+        assert!(standard.total_usd.is_some());
+        let none = tierless("anthropic", None);
+        assert_eq!(none.total_usd, standard.total_usd);
+        assert!(
+            none.assumptions
+                .iter()
+                .any(|a| a.starts_with("no executor iteration records a service tier"))
+        );
+        // Another provider with no tier evidence, and any Priority evidence, stay unpriced.
+        assert_eq!(tierless("amazon-bedrock", None).total_usd, None);
+        assert_eq!(tierless("anthropic", Some("priority")).total_usd, None);
+        // A compaction iteration that shows Priority is evidence too, though it is not the
+        // executor the advisor inherits from.
+        let mut r = make_request();
+        r.parts[0].tier = None;
+        let compaction = BillingPart {
+            kind: PartKind::Compaction,
+            tier: Some("priority".into()),
+            ..r.parts[0].clone()
+        };
+        let advisor = BillingPart {
+            kind: PartKind::Advisor,
+            tier: None,
+            speed: None,
+            ..r.parts[0].clone()
+        };
+        r.parts.extend([compaction, advisor.clone()]);
+        assert_eq!(price_part(&catalog, &r, &advisor).total_usd, None);
+        // An advisor alone has no executor iteration to show a tier.
+        r.parts = vec![advisor.clone()];
+        assert_eq!(price_part(&catalog, &r, &advisor).total_usd, None);
     }
 
     /// Recorded Codex usage, normalized as the reader does.

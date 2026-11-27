@@ -12,25 +12,25 @@ categories = ["command-line-utilities", "development-tools"]
 include = ["/src", "/skills/token-audit/SKILL.md", "/tests", "/test/fixtures", "/site/public/run.sh", "/site/public/run.ps1", "/docs/semantics.md", "/README.md", "/LICENSE"]
 
 [dependencies]
-crossterm = "0.29.0"
+crossterm = { version = "0.29.0", default-features = false, features = ["events", "windows"] }
 ctrlc = { version = "3.5.3", features = ["termination"] }
 foldhash = "0.2.0"
 indexmap = { version = "2.14.2", features = ["serde"] }
 rusqlite = { version = "0.43.0", features = ["bundled", "limits"] }
-jiff = "1.0.1"
+jiff = "1.0.3"
 jsonc-parser = { version = "0.34.0", default-features = false, features = ["cst", "serde"] }
 memchr = "2.8.3"
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 similar = "3.2.1"
 serde_json = { version = "1.0.154", features = ["float_roundtrip", "preserve_order", "raw_value"] }
-sha2 = "0.11.1"
+sha2 = "0.11.2"
 terminal_size = "0.4.4"
-toml = "1.2.1"
+toml = "1.2.3"
 unicode-segmentation = "1.13.3"
 unicode-width = "0.2.3"
 ureq = "3.5.2"
 mimalloc = "0.1.52"
-toml_edit = { version = "0.25.19", default-features = false, features = ["parse", "display"] }
+toml_edit = { version = "0.25.21", default-features = false, features = ["parse", "display"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.191"

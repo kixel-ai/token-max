@@ -985,10 +985,15 @@ fn piggy_progress(
     let found_line = if shared.tally
         && let Some((savings, credit)) = shared.tally()
     {
-        row(
-            tallies(&savings, credit.as_ref()),
-            &format!("{BOLD};{GREEN}"),
-        )
+        // The panel's column is narrow, so a billing qualifier takes its short form there and
+        // a saving that depends on billing still fits beside it on an 80-column terminal.
+        let mut pieces = tallies(&savings, credit.as_ref());
+        for piece in &mut pieces {
+            if let Some(amount) = piece.text.strip_suffix(crate::totals::BILLING) {
+                piece.text = format!("{amount} by billing");
+            }
+        }
+        row(pieces, &format!("{BOLD};{GREEN}"))
     } else {
         String::new()
     };
@@ -3948,6 +3953,26 @@ mod tests {
             Some("1,234 requests  7 sessions  5.6M tokens")
         );
         assert_eq!(row(70).as_deref(), Some("1,234 requests  7 sessions"));
+        // A saving that holds only under one billing default still fits at 80 columns, its
+        // qualifier short.
+        let shown = Shown::new(look, Arc::new(Reading::default()), None, true);
+        let mut checked = crate::totals::Checked::new(1, false);
+        let saved = crate::doctor::Saved {
+            saving: Some(20.0),
+            margin: None,
+            verb: crate::report::UP_TO,
+        };
+        let how = crate::doctor::How::Manual {
+            step: String::new(),
+            reason: String::new(),
+        };
+        checked.find([crate::totals::Finding::new(saved, how)]);
+        *shown.reading.checked.lock().unwrap() = Some(checked);
+        let found = piggy_progress("Checking settings", None, &shown, 0, 80)
+            .into_iter()
+            .find(|line| line.contains("billing"))
+            .map(|line| line.trim_end().rsplit("   ").next().unwrap().to_string());
+        assert_eq!(found.as_deref(), Some("found up to $20/mo more by billing"));
     }
 
     /// The line counts this host as its scan reads, then ends on the hosts' total as the

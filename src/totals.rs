@@ -180,6 +180,9 @@ impl Checked {
     }
 }
 
+/// What a tally that holds only while a default is the other value ends with.
+pub(crate) const BILLING: &str = ", depending on billing";
+
 /// One kind of figure after another as a progress line tallies them, each with its qualifier.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Tallied {

@@ -2606,8 +2606,9 @@ impl Total {
         });
         let up_to = (self.up_to.changes > 0).then(|| {
             format!(
-                "found up to {}{more}, depending on billing",
-                approx(self.up_to.usd, self.up_to.margin, "/mo")
+                "found up to {}{more}{}",
+                approx(self.up_to.usd, self.up_to.margin, "/mo"),
+                crate::totals::BILLING
             )
         });
         let unmeasured = (self.unmeasured > 0 && measured.is_none())

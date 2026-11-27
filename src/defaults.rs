@@ -574,7 +574,7 @@ impl Credit {
         let up_to = [&self.up_to, &self.up_to_more]
             .into_iter()
             .filter(|sum| sum.settings > 0)
-            .map(|sum| amount(sum, "up to ") + ", depending on billing")
+            .map(|sum| amount(sum, "up to ") + crate::totals::BILLING)
             .collect();
         let unmeasured = match self.unmeasured {
             _ if measured.is_some() => None,

@@ -328,13 +328,16 @@ pub fn item(profiles: &[Profile], home: Option<&str>) -> Option<Item> {
         "Not installed for {}. /token-audit has an agent run token-max audit and rank by dollars the waste no setting changes: commands that bust the prompt cache, bloated or repeated tool calls, always-loaded context the sessions never needed, and context they kept rediscovering. It offers each fix and makes it only after a yes. What it saves is not measured.",
         crate::lsp::list(&names)
     );
+    // npx's global install reaches only the default homes, not a named Claude Code one.
+    let npx = if named.is_empty() {
+        ", or `npx skills add kixel-ai/token-max --skill token-audit -g`"
+    } else {
+        ""
+    };
     Some(card(
         text,
         Some(How::Manual {
-            step: format!(
-                "run {}, or `npx skills add kixel-ai/token-max --skill token-audit -g`, then start a new session",
-                steps.join(" and ")
-            ),
+            step: format!("run {}{npx}, then start a new session", steps.join(" and ")),
             reason: "doctor and vibes write only settings files, not skills".into(),
         }),
     ))
@@ -435,8 +438,8 @@ mod tests {
         .unwrap();
         let text = "Not installed for Claude Code in ~/.claude-work and Codex in ~/.codex. "; // slash ok: roots pass through unchanged
         assert!(both.text.starts_with(text), "{}", both.text);
-        let named = "run `token-max skill install --claude-dir ~/.claude-work` and `token-max skill install`, or "; // slash ok: roots pass through unchanged
-        assert!(step(both).starts_with(named));
+        let named = "run `token-max skill install --claude-dir ~/.claude-work` and `token-max skill install`, then start a new session"; // slash ok: roots pass through unchanged
+        assert_eq!(step(both), named);
         // A disabled T3 instance starts no session, so it is not counted; aliases share a card.
         let mut t3 = make_t3_profile("t", "/state/claude");
         t3.skill = Some(Found {

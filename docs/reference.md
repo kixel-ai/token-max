@@ -1218,7 +1218,7 @@ disabled T3 instance is left out. When every profile finds the skill, the card
 is quiet, so `doctor` doesn't offer `vibes` for it. Otherwise it names the
 profiles missing it and, as a step by hand, `token-max skill install`, with
 `--claude-dir` for each Claude Code home the shell doesn't select, or
-`npx skills add`. With `--ssh`, each host looks in its own homes. `doctor`
+`npx skills add` when none needs it. With `--ssh`, each host looks in its own homes. `doctor`
 has no line for it, and it sets no exit code.
 
 ## Cache TTL

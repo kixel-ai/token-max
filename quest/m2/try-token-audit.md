@@ -31,12 +31,13 @@ The installed skill runs `token-max skill audit`, which 0.0.1 lacks, so it
 works without `npx @kixel/crabx` only from
 [Release 0.1.0](/quest/m1/release-0.1.md) on.
 
+Decided 2026-11-27 (maintainer, /quest-run): ✅ keep this follow-up and
+promote the skill in the README and on max.kixel.me (rejected: README only;
+not yet; drop).
+
 ## Waiting
 
-- Maintainer: after token-max 0.1.0 is released, run `token-max skill install`, then ask Claude Code for `/token-audit` (or Codex for `$token-audit`) in a repository you work in, and judge whether its findings and fixes are worth promoting. Only the maintainer can judge the findings and post as themselves.
-  - Promote it on the README and max.kixel.me (Recommended) - it is the one feature that acts on waste no setting reaches, so it earns a place beside `doctor`
-  - Promote it on the README only - keeps the site's single run line about `doctor`
-  - Don't promote it yet - leaves it documented in the reference until its findings prove out
+- Maintainer (action): after token-max 0.1.0 is released, run `token-max skill install`, ask Claude Code for `/token-audit` (or Codex for `$token-audit`) in a repository you work in, then promote it in the README and on max.kixel.me with your own copy. Report anything to change as a new quest. Only the maintainer can judge the findings and post as themselves.
 
 ## Required
 

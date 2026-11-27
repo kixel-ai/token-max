@@ -6,9 +6,9 @@ Run the `code` audit: `quest audit code` prints what it checks, what each findin
 
 ## Plan
 
-Baseline: the m2 run (2026-11-27) read `5cb059f`, about 121k lines of Rust
+Baseline: the m2 run (2026-11-27) read `f882ccf`, about 121k lines of Rust
 in `src/` and `build.rs` (129k with `tests/`), up from 82k at the m1 run.
-Start from `git diff 5cb059f -- src build.rs tests`, split by area across
+Start from `git diff f882ccf -- src build.rs tests`, split by area across
 parallel readers: rendering (`report.rs`, `tally.rs`, `rows.rs`,
 `totals.rs`), commands and UI (`doctor.rs`, `tui.rs`, `cli.rs`, `vibes.rs`),
 ingestion (`discovery.rs`, `reader.rs`, `t3.rs`, `opencode.rs`,

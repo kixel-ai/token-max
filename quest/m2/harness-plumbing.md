@@ -37,13 +37,15 @@ The m2 code audit found these copies, each landed with its harness's support
   every call writes into a fresh zero `Cost`.
 - `discovery.rs` has OpenCode and Antigravity arms that no production path
   reaches: `policy_off`, `pretend_on`, `pretend_t3_projects_on` and
-  `settings` are only called for Claude and Codex profiles. OpenCode's
-  `--defaults` handles only the global file (`opencode::profile`), so a
-  switch an OpenCode project file turns off still shows off under
-  `--defaults`, unlike Claude Code's and Codex's. Recommended: route OpenCode
-  profiles through `pretend_t3_projects_on` and the per-directory loop, so
-  the arms run, and make the Antigravity arms `unreachable!`, as
-  `skill.rs` does.
+  `settings` are only called for Claude and Codex profiles. Under
+  `--defaults`, `DiscoveryOptions::settings` already strips an OpenCode
+  project file's switches as it reads the file, but `opencode::profile`
+  records `pretended_on` only from the global file, so `--defaults` names no
+  project file a switch came from, unlike Claude Code's and Codex's.
+  Recommended: keep that reset, and attribute project switches to their files
+  by routing OpenCode profiles through `pretend_t3_projects_on` and the
+  per-directory loop, so the OpenCode arms run. Make the Antigravity arms
+  `unreachable!`, as `skill.rs` does.
 - `antigravity::read_transcript` reimplements `reader::read_lines`. The
   differences look deliberate: it accepts an unterminated last line that
   parses, and doesn't count blank lines as skipped. Keep it unless

@@ -627,7 +627,7 @@ inherited; conflicting copied histories leave exposure unknown. Current effectiv
 enablement remains separately unresolved. No installed/current file size is used
 to establish historical exposure.
 
-`Report.exposure` publishes empirical calibration samples only for linked,
+`Report.exposure` calibrates one pooled tokens-per-character ratio per cohort, only from linked,
 measured, single-part, complete text-only inputs with a matching request/response
 model, grouped by harness, model and provider. Claude requests that record a
 shape and only known text message blobs are complete. A blob holding an image,
@@ -635,8 +635,7 @@ document or redacted thinking is not text and blocks calibration; a thinking
 block's opaque `signature` is dropped and every other field, tool input
 included, counts. It uses the observed input tokens per Unicode character
 of serialized system/messages/tools, including framing. Transfer to component
-text is an estimate; sample extrema are sensitivity scenarios, not guaranteed
-bounds. Recorded component token counts take precedence in the shared sizing
+text is an estimate. Recorded component token counts take precedence in the shared sizing
 primitive. Without matching calibration, output keeps characters and unknown
 tokens/dollars. Images, opaque blocks, deferred definitions, digest-only requests,
 and multi-iteration totals cannot calibrate partial text.

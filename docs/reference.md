@@ -515,9 +515,22 @@ read. Its model, such as `gemini-4-neon-high`, is split into the model,
 split as Claude Code's are, and a subagent model line names no setting, since
 token-max reads none that chooses one.
 
-Antigravity's transcripts record no prompt, so the cost of its MCP servers,
-skills, plugins and rules is unmeasured: none gets a line or a switch, and the
-report's assumptions say so. Its cache lifetime and compaction are not
+Each MCP server, skill and rule file Antigravity offers gets a line with the
+uses its transcripts record and says its cost is unmeasured, since no
+transcript records the prompt that carried it; none gets a verdict or a switch.
+Servers are those `config/mcp_config.json` under `GEMINI_HOME` and each enabled
+plugin's `mcp_config.json` declare, and those whose tools Antigravity cached in
+the profile's `mcp/`, as T3 Code's `t3-code` is; a server's uses are its
+`mcp_<server>_<tool>` calls. Skills are those in `config/skills` and
+`antigravity-cli/skills` under `GEMINI_HOME`, the profile's `builtin/skills`,
+each enabled plugin's `skills` and each conversation's workspace's
+`.agents/skills`; a skill's uses are `read_file` calls on its `SKILL.md`. Rule
+files are `GEMINI.md` and `AGENTS.md` in `GEMINI_HOME`, in each enabled
+plugin's `rules`, and in each directory from a conversation's workspace up to
+its repository's root; a rule file's uses are the window's conversations it
+applied to. A plugin is enabled unless `plugins.<dir>.enabled` in
+`config/config.json` turns it off or, with no entry there, its `plugin.json`
+ships it `disabled`; `--defaults` reads no `config.json`. Its cache lifetime and compaction are not
 replayed, so its spend counts in the report's totals but gets no cache TTL,
 compaction, keepalive or effort line. See
 [Replay semantics](semantics.md#antigravity) for what each piece assumes.

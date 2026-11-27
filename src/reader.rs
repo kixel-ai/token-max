@@ -1178,6 +1178,8 @@ struct Reader {
     subagents: IndexMap<Text, Subagent>,
     earlier: Vec<Request>,
     sessions: Sessions,
+    /// Each Antigravity MCP server, skill and rule file, with its window's uses.
+    antigravity: Vec<crate::antigravity::Feature>,
 }
 
 impl Reader {
@@ -1350,6 +1352,7 @@ impl Reader {
         &mut self,
         profiles: &[Profile],
         snapshots: &mut Vec<Snapshot>,
+        defaults: bool,
     ) -> Result<(), ScanError> {
         let mut roots: IndexMap<&str, (&[String], Vec<String>)> = IndexMap::default();
         for p in profiles
@@ -1364,6 +1367,9 @@ impl Reader {
         }
         for (root, (files, ids)) in roots {
             let history = crate::antigravity::read(root, files, &ids)?;
+            self.antigravity.extend(crate::antigravity::features(
+                root, &ids, &history, self.since, defaults,
+            )?);
             for (session, file) in &history.sessions {
                 self.sessions.recorded(session, file);
             }
@@ -2480,6 +2486,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         subagents: IndexMap::default(),
         earlier: vec![],
         sessions: Sessions::default(),
+        antigravity: vec![],
     };
     reader.exposure.roots(&profiles);
     // Bytes in the transcripts already read.
@@ -2541,7 +2548,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         {
             reading.step(Some("Reading Antigravity's transcripts"));
         }
-        reader.antigravity(&profiles, &mut snapshots)?;
+        reader.antigravity(&profiles, &mut snapshots, options.discovery.defaults)?;
     }
     if let Some(reading) = &options.reading {
         reading.step(None);
@@ -2561,6 +2568,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         subagents,
         earlier,
         sessions,
+        antigravity,
         ..
     } = reader;
     for (r, total_key) in legacy {
@@ -2835,7 +2843,10 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         roots,
         profiles,
         snapshots,
-        exposure: exposure.finish(&requests, &context_requests, since),
+        exposure: crate::model::ExposureScan {
+            antigravity,
+            ..exposure.finish(&requests, &context_requests, since)
+        },
         requests,
         events,
         cache_context: CacheContext {

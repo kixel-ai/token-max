@@ -1895,7 +1895,11 @@ mod tests {
     fn a_scan_prices_opencode_and_judges_its_skills_by_their_calls() {
         let w = Workspace::new();
         opencode_database(&w.home);
-        let config = w.home.join(".config/opencode/opencode.jsonc");
+        let config = w
+            .home
+            .join(".config")
+            .join("opencode")
+            .join("opencode.jsonc");
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
         std::fs::write(
             &config,

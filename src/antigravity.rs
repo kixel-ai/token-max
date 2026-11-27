@@ -823,7 +823,11 @@ mod tests {
         // rather than pricing a guess.
         assert!(text.contains("\"input_tokens\":1000,"));
         for count in ["1.5", "-1", "\"1000\""] {
-            let bad = text.replacen("\"input_tokens\":1000,", &format!("\"input_tokens\":{count},"), 1);
+            let bad = text.replacen(
+                "\"input_tokens\":1000,",
+                &format!("\"input_tokens\":{count},"),
+                1,
+            );
             std::fs::write(&file, bad).unwrap();
             let error = read(&root, std::slice::from_ref(&file), &["p".into()]).unwrap_err();
             assert_eq!(error.message, "invalid Antigravity token count", "{count}");

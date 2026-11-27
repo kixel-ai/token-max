@@ -2818,7 +2818,10 @@ mod tests {
             // Even a short request: the rates cannot be chosen without the threshold.
             let cost = at(model, 1_000);
             assert_eq!(cost.total_usd, None, "{model}");
-            assert!(cost.unknown.iter().any(|u| u == reason), "{model}: {cost:?}");
+            assert!(
+                cost.unknown.iter().any(|u| u == reason),
+                "{model}: {cost:?}"
+            );
         }
     }
 

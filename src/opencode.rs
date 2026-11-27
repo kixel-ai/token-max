@@ -1643,7 +1643,8 @@ mod tests {
         let w = Workspace::new();
         let file = opencode_database(&w.home);
         let db = Connection::open(&file).unwrap();
-        let tokens = json!({"input": 10, "output": 1, "reasoning": 0, "cache": {"read": 0, "write": 0}});
+        let tokens =
+            json!({"input": 10, "output": 1, "reasoning": 0, "cache": {"read": 0, "write": 0}});
         let model = json!({"id": "zen-flash", "providerID": "opencode"});
         for (id, seq, data) in [
             (

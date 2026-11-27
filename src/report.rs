@@ -586,7 +586,9 @@ fn default_item(e: &EffortCheck, profile: &str, how: Option<How>, out: &Out<'_>)
             "Kixel's pick of a default. OpenAI's guidance:",
             &[OPENAI_REASONING],
         ),
-        Harness::OpenCode => unreachable!("OpenCode has no effort control"),
+        Harness::OpenCode | Harness::Antigravity => {
+            unreachable!("OpenCode and Antigravity have no effort control")
+        }
     };
     Some(Item {
         name: tagged("Main-session default".into(), profile),
@@ -660,7 +662,7 @@ fn subagent_item(line: &SubagentLine<'_>, out: &Out<'_>) -> Option<Item> {
         Harness::Claude => {
             SUBAGENT_EFFORT_SINCE.unmet(crate::version::latest(&line.members, line.requests))
         }
-        Harness::Codex | Harness::OpenCode => None,
+        Harness::Codex | Harness::OpenCode | Harness::Antigravity => None,
     };
     if let Some(ignored) = &ignored {
         // An unrecorded or unreadable version may already read the variable.
@@ -709,7 +711,9 @@ fn subagent_item(line: &SubagentLine<'_>, out: &Out<'_>) -> Option<Item> {
             "Kixel's pick of a subagent default. OpenAI's guidance:".into(),
             OPENAI_REASONING.into(),
         ],
-        Harness::OpenCode => unreachable!("OpenCode has no subagent effort control"),
+        Harness::OpenCode | Harness::Antigravity => {
+            unreachable!("OpenCode and Antigravity have no subagent effort control")
+        }
     };
     if ignored.is_some() {
         sources.push(CLAUDE_CHANGELOG.into());
@@ -2273,7 +2277,7 @@ fn details(report: &Report, out: &mut Out<'_>) {
             .filter(|c| c.verdict == Some(Verdict::Off))
             .count();
     if no_history(&report.scan) {
-        out.line("No transcript histories found. Select an existing profile with --claude-dir, --codex-dir or --opencode-dir; run after using that agent.", 0, PLAIN);
+        out.line("No transcript histories found. Select an existing profile with --claude-dir, --codex-dir, --opencode-dir or --antigravity-dir; run after using that agent.", 0, PLAIN);
     } else if coverage.requests == 0 {
         out.line(
             "No selected requests. Try an earlier --since or select another profile.",
@@ -2695,6 +2699,7 @@ fn subagent_name(c: &SubagentCost) -> String {
         (Harness::Codex, kind) if c.native => format!("Codex {kind} subagent"),
         (Harness::Codex, kind) => format!("{kind} agent role"),
         (Harness::OpenCode, kind) => format!("OpenCode {kind} agent"),
+        (Harness::Antigravity, kind) => format!("Antigravity {kind} agent"),
     }
 }
 
@@ -3843,7 +3848,9 @@ fn setting_name(result: &CheckResult) -> String {
         CheckResult::Memory(m) => match m.harness {
             Harness::Codex => CODEX_MEMORY.into(),
             Harness::Claude => CLAUDE_MEMORY.into(),
-            Harness::OpenCode => unreachable!("OpenCode has no memory check"),
+            Harness::OpenCode | Harness::Antigravity => {
+                unreachable!("OpenCode and Antigravity have no memory check")
+            }
         },
         CheckResult::Effort(_) => "Main-session effort".into(),
         CheckResult::Background(b) => match b.feature {
@@ -4392,6 +4399,7 @@ fn instructions_what(c: &ContextCost) -> String {
         Harness::OpenCode => {
             "Instructions OpenCode loads from this file into each session it applies to."
         }
+        Harness::Antigravity => unreachable!("Antigravity records no instructions"),
     }
     .into()
 }
@@ -4570,7 +4578,7 @@ fn context_guidance(c: &ContextCost, profiles: &[Profile], name: &str) -> Vec<St
                     omission.append = true;
                     vec![format!("Exposure: {} omits this server's initial tools.", control_text(&omission, Harness::Codex))]
                 }).unwrap_or_default(),
-            Harness::OpenCode => vec![],
+            Harness::OpenCode | Harness::Antigravity => vec![],
         };
     }
     if c.kind != ContextKind::Instructions {
@@ -4587,7 +4595,7 @@ fn context_guidance(c: &ContextCost, profiles: &[Profile], name: &str) -> Vec<St
             count(n as u64)
         ),
         (Harness::Codex, Err(reason)) => format!(" {reason}"),
-        (Harness::Claude | Harness::OpenCode, _) => String::new(),
+        (Harness::Claude | Harness::OpenCode | Harness::Antigravity, _) => String::new(),
     };
     vec![format!(
         "{name}: {}, {} UTF-8 bytes{}.{budget}",
@@ -4705,7 +4713,7 @@ fn output_cap(report: &Report, c: &ContextCost) -> Option<Cap> {
                 None,
             ),
         },
-        Harness::Claude | Harness::OpenCode => return None,
+        Harness::Claude | Harness::OpenCode | Harness::Antigravity => return None,
     })
 }
 
@@ -7332,7 +7340,7 @@ pub(crate) fn sessions(scan: &crate::model::Scan) -> u64 {
     roots.len() as u64
 }
 
-/// How many OpenCode databases the scan read, which are history files but no snapshots.
+/// How many OpenCode databases the scan read, which are no snapshots.
 fn databases(scan: &Scan) -> usize {
     let files: HashSet<&str> = scan
         .profiles
@@ -7343,7 +7351,7 @@ fn databases(scan: &Scan) -> usize {
     files.len()
 }
 
-/// Whether the scan read no history: no transcript file, and no OpenCode database.
+/// Whether the scan read no history: no transcript file or OpenCode database.
 fn no_history(scan: &Scan) -> bool {
     scan.snapshots.is_empty() && databases(scan) == 0
 }
@@ -7355,7 +7363,7 @@ fn preamble(report: &Report, conditional: u64, out: &mut Out<'_>) {
     let coverage = &report.scan.coverage;
     if report.scan.defaults {
         out.line(
-            "As a user with no settings files would see it (--defaults): every user, project and local settings file, T3 Code's settings and the shell's setting variables are pretended away, so each setting is at its Claude Code, Codex or OpenCode default and every tool, skill and MCP server is on. Managed and system policy still apply.",
+            "As a user with no settings files would see it (--defaults): every user, project and local settings file, T3 Code's settings and the shell's setting variables are pretended away, so each setting is at its Claude Code, Codex, OpenCode or Antigravity default and every tool, skill and MCP server is on. Managed and system policy still apply.",
             0,
             PLAIN,
         );
@@ -7554,7 +7562,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
         preamble(report, conditional, out);
     }
     if no_history(&report.scan) {
-        out.line("No transcript histories found. Select a profile with --claude-dir, --codex-dir or --opencode-dir after using that agent.", 0, PLAIN);
+        out.line("No transcript histories found. Select a profile with --claude-dir, --codex-dir, --opencode-dir or --antigravity-dir after using that agent.", 0, PLAIN);
     } else if coverage.requests == 0 {
         out.line(
             "Try an earlier --since or select another profile.",

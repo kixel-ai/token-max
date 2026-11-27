@@ -248,7 +248,8 @@ fn analysis(
         claude_dirs: vec![],
         codex_dirs: vec![],
         opencode_dirs: vec![],
-        opencode: true,
+        antigravity_dirs: vec![],
+        unreplayed: true,
         t3_dirs: vec![],
         managed_settings_file: native_path(w.home.join("managed-settings.json")),
         codex_system_config_file: native_path(w.home.join("system.toml")),
@@ -1132,6 +1133,59 @@ fn sessions_exports_an_opencode_database_the_directory_flag_selects() {
     assert_eq!(std::fs::read(&file).unwrap(), before);
 }
 
+/// `--antigravity-dir` selects an Antigravity directory alone and exports each conversation
+/// with a recorded request, its effort split from the recorded model, and no text.
+#[test]
+fn sessions_exports_antigravity_conversations_the_directory_flag_selects() {
+    let w = Workspace::new();
+    let root = w.home.join("agy");
+    let logs = root.join("brain/conv-1/.system_generated/logs");
+    std::fs::create_dir_all(&logs).unwrap();
+    let steps = [
+        json!({"step_index": 0, "type": "USER_INPUT", "created_at": "2026-01-01T00:00:00Z",
+               "content": "SYNTHETIC_PRIVATE"}),
+        json!({"step_index": 1, "type": "PLANNER_RESPONSE", "created_at": "2026-01-01T00:00:01Z",
+               "model": "gemini-4-neon-high", "input_tokens": 1000, "cache_read_tokens": 0,
+               "output_tokens": 10, "thinking": "SYNTHETIC_PRIVATE"}),
+    ];
+    let file = logs.join("transcript.jsonl");
+    let text: String = steps.iter().map(|s| format!("{s}\n")).collect();
+    std::fs::write(&file, &text).unwrap();
+    w.fixture();
+    let prices = native_path(fixture("prices.json"));
+    let dir = native_path(&root);
+    let args = [
+        "sessions",
+        "--antigravity-dir",
+        &dir,
+        "--prices-file",
+        &prices,
+    ];
+    let (status, stdout, stderr) = run(&mut command(&w, &args));
+    assert_eq!((status, &*stderr), (0, ""));
+    assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
+    let lines: Vec<Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 1, "{stdout}");
+    assert_eq!(lines[0]["harness"], "antigravity");
+    assert_eq!(lines[0]["session"], "conv-1");
+    assert_eq!(lines[0]["files"], json!([native_path(&file)]));
+    assert_eq!(lines[0]["models"][0]["model"], "gemini-4-neon");
+    assert_eq!(lines[0]["models"][0]["effort"], "high");
+    assert_eq!(lines[0]["complete"], true);
+    // 1,000 input and 10 output tokens at the fixture's $3 and $15 per million.
+    assert!((lines[0]["costUsd"].as_f64().unwrap() - 0.00315).abs() < 1e-12);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
+    // A step Antigravity is still writing leaves the cost a lower bound.
+    std::fs::write(&file, format!("{text}{{\"step_index\": 2")).unwrap();
+    let (status, stdout, stderr) = run(&mut command(&w, &args));
+    assert_eq!((status, &*stderr), (0, ""));
+    let line: Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(line["complete"], false);
+}
+
 /// `vibes` advises an OpenCode upgrade only when a plain version before 2.3.2 created the
 /// profile's latest session, which sent a request to gpt-6.2, citing the issue and pricing
 /// nothing.
@@ -1344,7 +1398,8 @@ fn explicit_windows_match_the_library_replay() {
                 claude_dirs: vec![],
                 codex_dirs: vec![],
                 opencode_dirs: vec![],
-                opencode: true,
+                antigravity_dirs: vec![],
+                unreplayed: true,
                 t3_dirs: vec![],
                 managed_settings_file: native_path(w.home.join("managed-settings.json")),
                 codex_system_config_file: native_path(w.home.join("system.toml")),

@@ -161,7 +161,9 @@ fn check(
             _ if current.is_none() => false,
             Harness::Claude => carried != on,
             Harness::Codex => carried && !on,
-            Harness::OpenCode => unreachable!("OpenCode has no memory control"),
+            Harness::OpenCode | Harness::Antigravity => {
+                unreachable!("OpenCode and Antigravity have no memory control")
+            }
         })
         .count();
     // A memory row covers every profile of its settings file, while memory's own switch

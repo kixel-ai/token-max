@@ -1243,6 +1243,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
             "Claude prompt suggestions and session recaps, and Codex automatic recaps, are not logged; every other check's recorded baseline omits them and their cache refreshes",
             "Codex has no user cache-TTL control; its usage is priced but no TTL change is recommended",
             "OpenCode's cache, compaction and keepalive behavior is not replayed; its usage is priced but none of those changes is recommended for it",
+            "Antigravity's cache and compaction are not replayed, and its transcripts record no prompt: its usage is priced, but no cache or compaction change is recommended for it, and the cost of its MCP servers, skills and rules is unmeasured, so none is recommended on or off",
             "no summed per-check or joint savings total",
         ]
         .into_iter()

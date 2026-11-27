@@ -112,6 +112,7 @@ impl Needs {
             Harness::Claude => 2,
             Harness::Codex => 0,
             Harness::OpenCode => 2,
+            Harness::Antigravity => unreachable!("no check needs an Antigravity version"),
         }
     }
 

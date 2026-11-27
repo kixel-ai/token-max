@@ -715,7 +715,7 @@ pub(crate) fn discover(
                 "claudeAgent" => Harness::Claude,
                 "codex" => Harness::Codex,
                 // The transcript audit reads no OpenCode history.
-                "opencode" if !options.opencode => continue,
+                "opencode" if !options.unreplayed => continue,
                 "opencode" => {
                     if !slug(&id) {
                         return Err(fail("invalid supported T3 provider identity", &file));
@@ -729,6 +729,22 @@ pub(crate) fn discover(
                             }
                             if exclusion.unsupported {
                                 state.unsupported += 1;
+                            }
+                            state.exclusions.push(exclusion.reason);
+                        }
+                    }
+                    continue;
+                }
+                "antigravity" if !options.unreplayed => continue,
+                "antigravity" => {
+                    if !slug(&id) {
+                        return Err(fail("invalid supported T3 provider identity", &file));
+                    }
+                    match antigravity_instance(&state, &id, enabled, &file)? {
+                        Ok(profile) => profiles.push(profile),
+                        Err(exclusion) => {
+                            if exclusion.missing && named.contains(&id) {
+                                state.missing += 1;
                             }
                             state.exclusions.push(exclusion.reason);
                         }
@@ -1114,6 +1130,59 @@ fn opencode_instance(
         env: None,
         inherited_window: true,
         environment: own_environment,
+        retained_since: None,
+    });
+    Ok(Ok(profile))
+}
+
+/// A T3 Antigravity instance's profile: the `antigravity-acp` directory under the private
+/// `GEMINI_HOME` T3 gives the instance, `providers/antigravity/<SHA-256 of its ID>` in the
+/// state directory, whatever its environment says.
+fn antigravity_instance(
+    state: &T3State,
+    id: &str,
+    enabled: bool,
+    file: &Path,
+) -> Result<Result<Profile, Excluded>, ScanError> {
+    // T3 names the directory by the ID's SHA-256, as `identity` spells it.
+    let native_root = Path::new(&state.path)
+        .join("providers")
+        .join("antigravity")
+        .join(identity(id))
+        .join(crate::antigravity::ACP);
+    let root = match crate::discovery::realpath(&native_root.to_string_lossy()) {
+        Ok(root) => root,
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            return Ok(Err(Excluded {
+                reason: format!(
+                    "T3 instance {id}: native history home {} is missing",
+                    native_root.display()
+                ),
+                missing: true,
+                unsupported: false,
+            }));
+        }
+        Err(_) => return Err(fail("cannot inspect T3 provider home", &native_root)),
+    };
+    let key = profile_key(&state.path, id);
+    let mut profile = crate::antigravity::profile(root.clone(), root, &key)?;
+    let policy_unresolved = managed_policy_unresolved();
+    profile.t3 = Some(T3Instance {
+        state: state.path.clone(),
+        instance: id.into(),
+        enabled,
+        // T3's idle compaction drives Claude sessions only.
+        idle_mode: T3IdleMode::Off,
+        idle_owner: format!("{}:providerInstances.{id}", file.display()),
+        settings_unresolved: policy_unresolved,
+        limitations: if policy_unresolved {
+            vec![POLICY_GAP.into()]
+        } else {
+            vec![]
+        },
+        env: None,
+        inherited_window: true,
+        environment: vec![],
         retained_since: None,
     });
     Ok(Ok(profile))
@@ -1815,6 +1884,7 @@ fn metadata(
             Harness::Claude => "claudeAgent",
             Harness::Codex => "codex",
             Harness::OpenCode => "opencode",
+            Harness::Antigravity => "antigravity",
         }
     };
     // The native turn and item ids each selected native session needs.
@@ -2422,6 +2492,11 @@ pub(crate) fn enrich(
         .collect();
     for i in order {
         let r = &mut requests[i];
+        // T3 gives each Antigravity instance a history directory of its own, so the profile
+        // that read a request already owns it.
+        if r.harness == Harness::Antigravity {
+            continue;
+        }
         let subagent = r.agent == Agent::Subagent;
         let root = (r.harness, ids.root(&r.session).to_string());
         let rows = joins.get(&*r.id);
@@ -5121,6 +5196,72 @@ mod tests {
                 .iter()
                 .any(|e| e.starts_with("T3 instance remote connects to an OpenCode server"))
         );
+    }
+
+    #[test]
+    fn a_t3_antigravity_instance_owns_its_private_history() {
+        let w = Workspace::new();
+        // The CLI's own history, beside T3's, in conversations of its own.
+        let cli = w.home.join(".gemini/antigravity-cli");
+        crate::test_support::antigravity_root(&cli);
+        for id in ["main-id", "sub-id"] {
+            let brain = cli.join("brain");
+            std::fs::rename(brain.join(id), brain.join(format!("cli-{id}"))).unwrap();
+        }
+        let root = state(
+            &w,
+            json!({"providerInstances": {
+                "antigravity": {"driver": "antigravity", "enabled": true},
+                "gone": {"driver": "antigravity", "enabled": true}
+            }}),
+        );
+        crate::test_support::antigravity_root(
+            &root
+                .join("providers/antigravity")
+                .join(identity("antigravity"))
+                .join(crate::antigravity::ACP),
+        );
+        // T3 owns the instance's directory whether or not its database names the sessions.
+        for read in [false, true] {
+            if read {
+                db(&root);
+            }
+            let scan = scan(&w.scan_options()).unwrap();
+            let profile = |t3: bool| {
+                scan.profiles
+                    .iter()
+                    .find(|p| p.harness == Harness::Antigravity && p.t3.is_some() == t3)
+                    .unwrap()
+            };
+            let (instance, cli) = (profile(true), profile(false));
+            assert_eq!(instance.t3.as_ref().unwrap().instance, "antigravity");
+            let owners: HashSet<Vec<String>> = scan
+                .requests
+                .iter()
+                .filter(|r| r.harness == Harness::Antigravity)
+                .map(|r| r.profiles.to_vec())
+                .collect();
+            assert_eq!(
+                owners,
+                HashSet::from_iter([vec![instance.id.clone()], vec![cli.id.clone()]])
+            );
+            assert!(
+                scan.requests
+                    .iter()
+                    .all(|r| { !r.issues.iter().any(|i| i.starts_with(UNSETTLED)) })
+            );
+            let state = &scan.t3[0];
+            assert!(state.unresolved.is_empty(), "{:?}", state.unresolved);
+            assert_eq!(state.missing, 1);
+            assert!(
+                state
+                    .exclusions
+                    .iter()
+                    .any(|e| e.starts_with("T3 instance gone: native history home")),
+                "{:?}",
+                state.exclusions
+            );
+        }
     }
 
     #[test]

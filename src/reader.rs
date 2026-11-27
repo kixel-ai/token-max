@@ -563,7 +563,7 @@ fn kind_name(kind: EventKind) -> &'static str {
 }
 
 #[cfg(unix)]
-fn file_identity(file: &File) -> std::io::Result<(u64, u64)> {
+pub(crate) fn file_identity(file: &File) -> std::io::Result<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
     let info = file.metadata()?;
     Ok((info.dev(), info.ino()))
@@ -571,14 +571,14 @@ fn file_identity(file: &File) -> std::io::Result<(u64, u64)> {
 
 /// The volume serial number and file index, which discovery records for Windows snapshots.
 #[cfg(windows)]
-fn file_identity(file: &File) -> std::io::Result<(u64, u64)> {
+pub(crate) fn file_identity(file: &File) -> std::io::Result<(u64, u64)> {
     let info = winapi_util::file::information(file)?;
     Ok((info.volume_serial_number(), info.file_index()))
 }
 
 /// Discovery records no device or inode without them.
 #[cfg(not(any(unix, windows)))]
-fn file_identity(_file: &File) -> std::io::Result<(u64, u64)> {
+pub(crate) fn file_identity(_file: &File) -> std::io::Result<(u64, u64)> {
     Ok((0, 0))
 }
 
@@ -879,7 +879,9 @@ impl FileState {
                     (Harness::Claude, true) => Agent::Subagent,
                     (Harness::Claude, false) => Agent::Main,
                     (Harness::Codex, _) => Agent::Unknown,
-                    (Harness::OpenCode, _) => unreachable!("OpenCode has no transcript files"),
+                    (Harness::OpenCode | Harness::Antigravity, _) => {
+                        unreachable!("OpenCode and Antigravity are read by their own modules")
+                    }
                 },
                 model: None,
                 provider: None,
@@ -989,7 +991,9 @@ fn request(
             api: match snapshot.harness {
                 Harness::Claude => Api::Messages,
                 Harness::Codex => Api::Responses,
-                Harness::OpenCode => Api::Unknown,
+                Harness::OpenCode | Harness::Antigravity => {
+                    unreachable!("OpenCode and Antigravity are read by their own modules")
+                }
             },
             source: context.source.clone(),
             trigger: context.trigger.clone(),
@@ -1256,7 +1260,7 @@ impl Reader {
             let history = crate::opencode::read(&file, &ids)?;
             let file: Text = file.into();
             for session in &history.sessions {
-                self.sessions.opencode(session, &file);
+                self.sessions.recorded(session, &file);
                 native.opencode(&session.key, &session.id, session.parent.as_deref());
             }
             // The project files each session's directory reads. A server one declares replaces
@@ -1340,6 +1344,40 @@ impl Reader {
         Ok(())
     }
 
+    /// Read every Antigravity root's transcripts once, as the profiles that read it. A T3
+    /// instance's root is its own, so its sessions need no join to T3's threads.
+    fn antigravity(
+        &mut self,
+        profiles: &[Profile],
+        snapshots: &mut Vec<Snapshot>,
+    ) -> Result<(), ScanError> {
+        let mut roots: IndexMap<&str, (&[String], Vec<String>)> = IndexMap::default();
+        for p in profiles
+            .iter()
+            .filter(|p| p.harness == Harness::Antigravity)
+        {
+            roots
+                .entry(&p.root)
+                .or_insert_with(|| (&p.histories, vec![]))
+                .1
+                .push(p.id.clone());
+        }
+        for (root, (files, ids)) in roots {
+            let history = crate::antigravity::read(root, files, &ids)?;
+            for (session, file) in &history.sessions {
+                self.sessions.recorded(session, file);
+            }
+            for subagent in history.subagents {
+                self.spawned(subagent);
+            }
+            for r in history.requests {
+                self.add(r);
+            }
+            snapshots.extend(history.snapshots);
+        }
+        Ok(())
+    }
+
     fn add(&mut self, mut r: Request) {
         self.strings.request(&mut r);
         let answered = add(&mut self.requests, &mut self.strings, r);
@@ -1393,7 +1431,9 @@ impl Reader {
         let read = match snapshot.harness {
             Harness::Claude => self.claude(snapshot, file, raw, location, time, kept),
             Harness::Codex => self.codex(snapshot, file, raw, location, time, kept),
-            Harness::OpenCode => unreachable!("OpenCode has no transcript files"),
+            Harness::OpenCode | Harness::Antigravity => {
+                unreachable!("OpenCode and Antigravity are read by their own modules")
+            }
         };
         if let Err(error) = read {
             // Only a replay keeps records before the window; any other scan fails on one as
@@ -2483,17 +2523,25 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         }
     }
     // The transcript audit, the only replay-reach scan, covers Claude Code and Codex alone.
-    let opencode = options.reach != Reach::Replay;
-    if let Some(reading) = &options.reading
-        && opencode
-        && profiles
+    let unreplayed = options.reach != Reach::Replay;
+    let any = |profiles: &[Profile], harness| {
+        profiles
             .iter()
-            .any(|p| p.harness == Harness::OpenCode && !p.histories.is_empty())
-    {
-        reading.step(Some("Reading OpenCode's database"));
-    }
-    if opencode {
+            .any(|p| p.harness == harness && !p.histories.is_empty())
+    };
+    if unreplayed {
+        if let Some(reading) = &options.reading
+            && any(&profiles, Harness::OpenCode)
+        {
+            reading.step(Some("Reading OpenCode's database"));
+        }
         reader.opencode(&mut profiles, &options.discovery, &mut native_ids)?;
+        if let Some(reading) = &options.reading
+            && any(&profiles, Harness::Antigravity)
+        {
+            reading.step(Some("Reading Antigravity's transcripts"));
+        }
+        reader.antigravity(&profiles, &mut snapshots)?;
     }
     if let Some(reading) = &options.reading {
         reading.step(None);

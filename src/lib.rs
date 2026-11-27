@@ -3,6 +3,7 @@
 
 mod advisor;
 mod allowlist;
+mod antigravity;
 mod audit;
 mod background;
 mod bash;

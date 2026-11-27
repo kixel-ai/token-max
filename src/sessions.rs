@@ -30,6 +30,19 @@ pub(crate) struct Record<'a> {
     pub selected: bool,
 }
 
+/// A session a harness's own module read whole: its own ID, the session that spawned it,
+/// where it ran and the harness version that created it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Native {
+    /// The reader's key, an identity of `id`.
+    pub key: Text,
+    pub id: String,
+    pub parent: Option<String>,
+    pub cwd: Option<Text>,
+    pub version: Option<Text>,
+    pub created: Millis,
+}
+
 /// A Git branch a session's records name, from the first to the last that named it.
 #[derive(Clone, Debug, PartialEq)]
 struct Branch {
@@ -116,9 +129,9 @@ impl Sessions {
         self.facts.get(session)?.repository.as_deref()
     }
 
-    /// Note an OpenCode session from its database row, which names everything a session's
-    /// records would.
-    pub(crate) fn opencode(&mut self, session: &crate::opencode::Session, file: &Text) {
+    /// Note a session its harness's own module read whole, such as an OpenCode database row,
+    /// which names everything a session's records would.
+    pub(crate) fn recorded(&mut self, session: &Native, file: &Text) {
         let facts = self
             .facts
             .entry(session.key.clone())
@@ -232,7 +245,9 @@ impl Sessions {
                 });
                 branch(git.and_then(|git| git.get("branch")))
             }
-            Harness::OpenCode => unreachable!("OpenCode sessions come from its database"),
+            Harness::OpenCode | Harness::Antigravity => {
+                unreachable!("OpenCode and Antigravity sessions come from their own modules")
+            }
         };
         let (Some(time), Some(name)) = (record.time, name) else {
             return;

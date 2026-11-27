@@ -1040,7 +1040,7 @@ impl ExposureCollector {
                     parts.len() > 3 && parts[0] == "projects" && parts[2] == "memory"
                 }
                 Harness::Codex => parts.len() > 1 && matches!(parts[0], "memories" | "memories_v2"),
-                Harness::OpenCode => false,
+                Harness::OpenCode | Harness::Antigravity => false,
             }
         })
     }

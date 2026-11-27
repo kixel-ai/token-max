@@ -32,7 +32,7 @@ use crate::reader::{Reach, ScanOptions, scan};
 use crate::safe::{ScanError, iso, terminal_text};
 use crate::sessions::{self, export};
 use crate::vibes::Item;
-use crate::wire::{self, Answer, Header, Job, Limit, Outcome, Paid, Request, Stream};
+use crate::wire::{self, Answer, Header, Job, Limit, Outcome, Paid, Request, Reviewed, Stream};
 
 /// Reject a destination OpenSSH would read as an option or that cannot be printed whole.
 pub fn destination(value: &str) -> Result<(), ScanError> {
@@ -704,7 +704,7 @@ impl Connected {
                 (since, Reply::Sessions(sessions), None, false)
             }
             Ok(Outcome::Audit { since, audit }) => (since, Reply::Audit(audit), None, false),
-            Ok(Outcome::Profiles { .. } | Outcome::Reviewed { .. } | Outcome::Wrote { .. }) => {
+            Ok(Outcome::Profiles { .. } | Outcome::Reviewed(_) | Outcome::Wrote { .. }) => {
                 return Err(session.wrong_result(None));
             }
             Ok(Outcome::Error(error)) => return Err(session.remote_error(error)),
@@ -819,9 +819,9 @@ impl Remote {
         }
     }
 
-    /// The destination's preview of each file the walk's `events` would write, once it
-    /// checked them against its files; nothing is written there yet.
-    pub fn review(&mut self, events: &[Event]) -> Result<String, ScanError> {
+    /// The destination's preview of each file the walk's `events` would write, with its file
+    /// and change counts, once it checked them against its files; nothing is written there yet.
+    pub fn review(&mut self, events: &[Event]) -> Result<Reviewed, ScanError> {
         let answer = Answer::Review {
             events: events.to_vec(),
         };
@@ -830,7 +830,7 @@ impl Remote {
             false => "during the walk; no settings were changed there",
         };
         match self.exchange(&answer, Limit::PREVIEW, doing)? {
-            Outcome::Reviewed { preview } => Ok(preview),
+            Outcome::Reviewed(reviewed) => Ok(reviewed),
             _ => Err(self.session.wrong_result(None)),
         }
     }
@@ -1204,8 +1204,13 @@ fn walk_here(
                 // of the answers leaves to this host.
                 let reviewed = walked.owner.plan(&events)?;
                 let preview = preview(&reviewed, &walked.style);
+                let counts = (reviewed.file_count(), reviewed.change_count());
                 plan = Some(reviewed);
-                Ok(Some(Outcome::Reviewed { preview }))
+                Ok(Some(Outcome::Reviewed(Reviewed {
+                    preview,
+                    files: counts.0,
+                    changes: counts.1,
+                })))
             }
             Answer::Write => match plan.take() {
                 Some(plan) => write_plan(&plan).map(|written| {

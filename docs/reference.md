@@ -508,8 +508,9 @@ not read.
 
 Every transcript step that records token counts is one request: each
 `PLANNER_RESPONSE`, and each `CHECKPOINT`, which compacts the conversation and
-counts as compaction. Only each step's type, index, time, model and counts are
-read. Its model, such as `gemini-4-neon-high`, is split into the model,
+counts as compaction. Only each step's type, index, time, model and counts,
+its tool calls' names, and the `SKILL.md` a `read_file` call names are read.
+Its model, such as `gemini-4-neon-high`, is split into the model,
 `gemini-4-neon`, and the effort, `high`, and priced at Google's catalog entry
 (see [Prices](#prices)). A main conversation and each subagent it started are
 split as Claude Code's are, and a subagent model line names no setting, since
@@ -527,10 +528,12 @@ each enabled plugin's `skills` and each conversation's workspace's
 `.agents/skills`; a skill's uses are `read_file` calls on its `SKILL.md`. Rule
 files are `GEMINI.md` and `AGENTS.md` in `GEMINI_HOME`, in each enabled
 plugin's `rules`, and in each directory from a conversation's workspace up to
-its repository's root; a rule file's uses are the window's conversations it
-applied to. A plugin is enabled unless `plugins.<dir>.enabled` in
+its repository's root; a rule file's uses are the window's conversations whose
+workspace it applies to now, with no date, since the file's history is not kept. A plugin is enabled unless `plugins.<dir>.enabled` in
 `config/config.json` turns it off or, with no entry there, its `plugin.json`
-ships it `disabled`; `--defaults` reads no `config.json`. Its cache lifetime and compaction are not
+ships it `disabled`; `--defaults` reads no `config.json`. `GEMINI_HOME` here is
+the parent of the directory selected, before any symlink to it is resolved,
+and the `sessions` export reads none of these files. Its cache lifetime and compaction are not
 replayed, so its spend counts in the report's totals but gets no cache TTL,
 compaction, keepalive or effort line. See
 [Replay semantics](semantics.md#antigravity) for what each piece assumes.

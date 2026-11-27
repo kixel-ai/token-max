@@ -5910,7 +5910,7 @@ fn antigravity_row(f: &crate::antigravity::Feature, out: &Out<'_>) -> Row {
         ),
         _ => (
             format!(
-                "It applied to {} in the window{last}",
+                "It applies to the workspaces of {} in the window",
                 plural(f.uses, "conversation")
             ),
             "the file itself".into(),
@@ -10332,7 +10332,7 @@ pub(crate) mod tests {
                 "/work/repo/AGENTS.md",
                 &[],
                 2,
-                Some(NOV1),
+                None,
             ),
         ];
         let summary = text(&report, None, false);
@@ -10367,9 +10367,7 @@ pub(crate) mod tests {
         let rules = report_line(&details, "/work/repo/AGENTS.md");
         assert_eq!(
             rules.evidence,
-            format!(
-                "It applied to 2 conversations in the window, last on 2026-11-01. {unmeasured}"
-            )
+            format!("It applies to the workspaces of 2 conversations in the window. {unmeasured}")
         );
     }
 

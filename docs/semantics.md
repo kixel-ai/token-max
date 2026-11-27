@@ -1243,7 +1243,8 @@ measured lines.
 
 Antigravity keeps one JSONL transcript per conversation. Each line is parsed
 into the step's type, index, time, model and three counts, `input_tokens`,
-`cache_read_tokens` and `output_tokens`; its content, thinking and tool
+`cache_read_tokens` and `output_tokens`, and its tool calls' names with the
+`SKILL.md` a `read_file` call names; its content, thinking and other tool
 arguments are skipped unread. A step with any count is one request, and a
 `CHECKPOINT` step, which summarizes the conversation, is a compaction request.
 Antigravity ends every line it finishes with a newline. A last line without one

@@ -620,10 +620,24 @@ pub struct Feature {
     /// `SKILL.md` files. Empty for a server only the client that started Antigravity supplies,
     /// such as T3 Code's, and for a rule file, which is its own source.
     pub sources: Vec<String>,
-    /// Calls to a server's tools, reads of a skill's `SKILL.md`, or the conversations a rule
-    /// file applied to.
+    /// Calls to a server's tools, reads of a skill's `SKILL.md`, or the conversations whose
+    /// workspace the rule file applies to now.
     pub uses: u64,
     pub last_used: Option<Millis>,
+}
+
+/// Where an Antigravity root's features are read from, and for whom.
+#[derive(Clone, Copy)]
+pub(crate) struct Inventory<'a> {
+    /// The root, as its profiles read it.
+    pub root: &'a str,
+    /// `GEMINI_HOME`: the selected root's parent, before any symlink to the root is resolved.
+    pub home: &'a str,
+    pub profiles: &'a [String],
+    /// Count only uses from here on.
+    pub since: Option<Millis>,
+    /// `--defaults`, which reads no `config.json`.
+    pub defaults: bool,
 }
 
 /// The names Antigravity gives the rule files it loads.
@@ -783,8 +797,8 @@ fn server_of<'a>(
     }
 }
 
-/// Each MCP server, skill and rule file the profiles `profiles` reading `root` offer, with the
-/// uses `history` records from `since` on.
+/// Each MCP server, skill and rule file `at` names offers, with the uses `history` records
+/// from its `since` on.
 ///
 /// Servers are those the config's `mcp_config.json` and each enabled plugin's declare, and
 /// those whose tools Antigravity cached under the root's `mcp/`, as the server T3 Code supplies
@@ -792,14 +806,14 @@ fn server_of<'a>(
 /// each enabled plugin's, and each conversation's workspace's `.agents/skills`. Rule files are
 /// `GEMINI.md` and `AGENTS.md` in `GEMINI_HOME`, each enabled plugin's `rules`, and each
 /// directory from a conversation's workspace up to its repository's root.
-pub(crate) fn features(
-    root: &str,
-    profiles: &[String],
-    history: &History,
-    since: Option<Millis>,
-    defaults: bool,
-) -> Result<Vec<Feature>, ScanError> {
-    let home = crate::discovery::dirname(root);
+pub(crate) fn features(at: &Inventory<'_>, history: &History) -> Result<Vec<Feature>, ScanError> {
+    let Inventory {
+        root,
+        home,
+        profiles,
+        since,
+        defaults,
+    } = *at;
     let windowed = |time: Millis| since.is_none_or(|since| time >= since);
     let plugins = plugins(home, root, defaults)?;
 
@@ -876,12 +890,13 @@ pub(crate) fn features(
         skills.entry(name).or_default().insert(path);
     }
 
-    // The window's conversations, each with its latest request, and the rule files each loads.
-    let mut active: IndexMap<&str, Millis> = IndexMap::default();
-    for r in history.requests.iter().filter(|r| windowed(r.time)) {
-        let latest = active.entry(&*r.session).or_insert(r.time);
-        *latest = (*latest).max(r.time);
-    }
+    // The window's conversations, and the rule files each loads.
+    let active: IndexSet<&str> = history
+        .requests
+        .iter()
+        .filter(|r| windowed(r.time))
+        .map(|r| &*r.session)
+        .collect();
     let mut rules: IndexMap<String, IndexSet<&str>> = IndexMap::default();
     let mut global = vec![];
     for dir in std::iter::once(home.to_string()).chain(plugins.iter().map(|p| join(&[p, "rules"])))
@@ -897,7 +912,7 @@ pub(crate) fn features(
         rules
             .entry(file)
             .or_default()
-            .extend(active.keys().copied());
+            .extend(active.iter().copied());
     }
     let mut loaded: HashMap<&str, Vec<String>> = HashMap::default();
     for (session, _) in &history.sessions {
@@ -920,7 +935,7 @@ pub(crate) fn features(
         }
         for file in &loaded[cwd] {
             let sessions = rules.entry(file.clone()).or_default();
-            if active.contains_key(&*session.key) {
+            if active.contains(&*session.key) {
                 sessions.insert(&*session.key);
             }
         }
@@ -952,7 +967,8 @@ pub(crate) fn features(
         profiles: profiles.to_vec(),
         sources: vec![],
         uses: sessions.len() as u64,
-        last_used: sessions.iter().map(|s| active[*s]).max(),
+        // Only the file as it is now is known, not when it was added.
+        last_used: None,
     }));
     Ok(found)
 }
@@ -1281,7 +1297,14 @@ mod tests {
         let history = read(&root, &files, &ids).unwrap();
         assert!(!format!("{history:?}").contains("SYNTHETIC"));
         let found = |since, defaults| {
-            features(&root, &ids, &history, since, defaults)
+            let at = Inventory {
+                root: &root,
+                home: &home,
+                profiles: &ids,
+                since,
+                defaults,
+            };
+            features(&at, &history)
                 .unwrap()
                 .into_iter()
                 .map(|f| ((f.kind, f.name), (f.uses, f.sources)))
@@ -1356,7 +1379,14 @@ mod tests {
         let file = join(&[&home, "config", "mcp_config.json"]);
         std::fs::write(&file, "\n").unwrap();
         let history = History::default();
-        let servers: Vec<String> = features(&root, &[], &history, None, false)
+        let at = Inventory {
+            root: &root,
+            home: &home,
+            profiles: &[],
+            since: None,
+            defaults: false,
+        };
+        let servers: Vec<String> = features(&at, &history)
             .unwrap()
             .into_iter()
             .filter(|f| f.kind == ContextKind::McpServer)
@@ -1364,11 +1394,19 @@ mod tests {
             .collect();
         assert_eq!(servers, ["a_b", "t3-code"]);
         std::fs::write(&file, "{").unwrap();
-        let error = features(&root, &[], &history, None, false).unwrap_err();
+        let error = features(&at, &history).unwrap_err();
         assert!(
             error.to_string().contains("invalid Antigravity config"),
             "{error}"
         );
+        // A session export reads no settings, so the config can't stop it.
+        let export = crate::reader::ScanOptions {
+            reach: crate::reader::Reach::Window,
+            ..w.scan_options()
+        };
+        let scan = crate::reader::scan(&export).unwrap();
+        assert!(!scan.requests.is_empty());
+        assert!(scan.exposure.antigravity.is_empty());
     }
 
     #[test]

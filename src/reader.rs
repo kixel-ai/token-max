@@ -1346,30 +1346,43 @@ impl Reader {
         Ok(())
     }
 
-    /// Read every Antigravity root's transcripts once, as the profiles that read it. A T3
-    /// instance's root is its own, so its sessions need no join to T3's threads.
+    /// Read every Antigravity root's transcripts once, as the profiles that read it, and for a
+    /// report, given `--defaults`, the MCP servers, skills and rule files each root offers. A
+    /// T3 instance's root is its own, so its sessions need no join to T3's threads.
     fn antigravity(
         &mut self,
         profiles: &[Profile],
         snapshots: &mut Vec<Snapshot>,
-        defaults: bool,
+        report: Option<bool>,
     ) -> Result<(), ScanError> {
-        let mut roots: IndexMap<&str, (&[String], Vec<String>)> = IndexMap::default();
+        // Each root's transcripts, the GEMINI_HOME its first profile was selected under, and
+        // the profiles that read it.
+        let mut roots: IndexMap<&str, (&[String], &str, Vec<String>)> = IndexMap::default();
         for p in profiles
             .iter()
             .filter(|p| p.harness == Harness::Antigravity)
         {
+            let selected = p.aliases.first().unwrap_or(&p.root);
             roots
                 .entry(&p.root)
-                .or_insert_with(|| (&p.histories, vec![]))
-                .1
+                .or_insert_with(|| (&p.histories, crate::discovery::dirname(selected), vec![]))
+                .2
                 .push(p.id.clone());
         }
-        for (root, (files, ids)) in roots {
+        for (root, (files, home, ids)) in roots {
             let history = crate::antigravity::read(root, files, &ids)?;
-            self.antigravity.extend(crate::antigravity::features(
-                root, &ids, &history, self.since, defaults,
-            )?);
+            // Only a report lists the features; a session export reads no settings.
+            if let Some(defaults) = report {
+                let at = crate::antigravity::Inventory {
+                    root,
+                    home,
+                    profiles: &ids,
+                    since: self.since,
+                    defaults,
+                };
+                self.antigravity
+                    .extend(crate::antigravity::features(&at, &history)?);
+            }
             for (session, file) in &history.sessions {
                 self.sessions.recorded(session, file);
             }
@@ -2548,7 +2561,9 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         {
             reading.step(Some("Reading Antigravity's transcripts"));
         }
-        reader.antigravity(&profiles, &mut snapshots, options.discovery.defaults)?;
+        // A report reads every transcript; its features read `--defaults`.
+        let report = (options.reach == Reach::History).then_some(options.discovery.defaults);
+        reader.antigravity(&profiles, &mut snapshots, report)?;
     }
     if let Some(reading) = &options.reading {
         reading.step(None);

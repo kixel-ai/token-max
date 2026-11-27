@@ -209,8 +209,9 @@ pub(crate) fn servers(config: &Map<String, Value>) -> Vec<Server> {
     let native = members(mcp.get("servers"));
     let legacy = mcp
         .iter()
-        .filter(|(name, _)| !matches!(name.as_str(), "servers" | "timeout"))
-        .filter(|(name, _)| !native.contains_key(*name));
+        .filter(|(name, _)| name.as_str() != "servers" && !native.contains_key(*name))
+        // OpenCode 2's `mcp.timeout` settings, unless the entry is a server with a `type`.
+        .filter(|(name, server)| name.as_str() != "timeout" || server.get("type").is_some());
     native
         .iter()
         .map(|entry| (entry, true))
@@ -1589,6 +1590,9 @@ mod tests {
                 vec!["mcp", "old", "enabled"]
             ]
         );
+        // A flat server named `timeout` declares its `type`; OpenCode 2's timeouts don't.
+        let named = json!({"mcp": {"timeout": {"type": "local"}}});
+        assert_eq!(path(&named), [["mcp", "timeout", "enabled"]]);
         assert_eq!(
             switched_off(v2.as_object().unwrap()),
             [Control {

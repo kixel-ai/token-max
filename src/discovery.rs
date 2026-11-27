@@ -253,7 +253,7 @@ impl DiscoveryOptions {
                         ("servers", Value::Object(servers)) => {
                             servers.values_mut().for_each(switch_on)
                         }
-                        ("timeout", _) => {}
+                        // OpenCode 2's `mcp.timeout` has neither switch, so it passes unchanged.
                         (_, server) => switch_on(server),
                     }
                 }

@@ -666,6 +666,7 @@ pub(crate) fn discover(
                 // Only the variables that choose its home or its provider stay.
                 instance.environment.retain(|e| {
                     matches!(e.name.as_str(), "CLAUDE_CONFIG_DIR" | "CODEX_HOME")
+                        || OPENCODE_LOCATIONS.contains(&e.name.as_str())
                         || crate::controls::CLAUDE_PROVIDERS
                             .iter()
                             .any(|p| p.variable == e.name)
@@ -5132,24 +5133,30 @@ mod tests {
             json!({"providerInstances": {"opencode": {"driver": "opencode", "enabled": true,
                 "environment": [{"name": "OPENCODE_DB", "value": moved.to_str().unwrap()}]}}}),
         );
-        let scan = scan(&w.scan_options()).unwrap();
-        assert!(
-            !scan.t3[0]
-                .exclusions
+        // `--defaults` keeps where the instance's history is.
+        for defaults in [false, true] {
+            let mut options = w.scan_options();
+            options.discovery.defaults = defaults;
+            let scan = scan(&options).unwrap();
+            assert!(
+                !scan.t3[0]
+                    .exclusions
+                    .iter()
+                    .any(|e| e.starts_with("T3 instance opencode")),
+                "{:?}",
+                scan.t3[0].exclusions
+            );
+            let instance = scan
+                .profiles
                 .iter()
-                .any(|e| e.starts_with("T3 instance opencode")),
-            "{:?}",
-            scan.t3[0].exclusions
-        );
-        let instance = scan
-            .profiles
-            .iter()
-            .find(|p| p.t3.as_ref().is_some_and(|t| t.instance == "opencode"))
-            .unwrap();
-        assert!(
-            scan.requests
-                .iter()
-                .any(|r| r.profiles.contains(&instance.id))
-        );
+                .find(|p| p.t3.as_ref().is_some_and(|t| t.instance == "opencode"))
+                .unwrap();
+            assert!(
+                scan.requests
+                    .iter()
+                    .any(|r| r.profiles.contains(&instance.id)),
+                "defaults: {defaults}"
+            );
+        }
     }
 }

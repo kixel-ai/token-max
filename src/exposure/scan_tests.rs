@@ -2587,6 +2587,7 @@ fn claude_auto_memory_unused_is_turned_off_only_when_its_transcripts_prove_it() 
     let checks = crate::memory::memory_checks(&crate::memory::MemoryInput {
         scan: &unfinished.scan,
         context: &context,
+        calibration: &calibrate(&unfinished.scan.exposure, &unfinished.scan.requests),
         catalog: &prices(),
         since: None,
         now: NOW,
@@ -3003,6 +3004,7 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
         crate::memory::memory_checks(&crate::memory::MemoryInput {
             scan,
             context: &context,
+            calibration: &calibrate(&scan.exposure, &scan.requests),
             catalog: &prices(),
             since: None,
             now: NOW,

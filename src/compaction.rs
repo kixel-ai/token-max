@@ -387,6 +387,91 @@ impl<'a> WindowEvents<'a> {
     }
 }
 
+/// One line's recorded history, from before the selected window too, which its replays read.
+pub(crate) struct History<'a> {
+    /// Every request, in time order with ties by ID.
+    pub(crate) requests: Vec<&'a Request>,
+    /// Every compaction boundary and structural event, in recorded order, since a later
+    /// record of an event carries its final state.
+    pub(crate) events: Vec<&'a StructuralEvent>,
+}
+
+impl<'a> History<'a> {
+    /// The history of the profiles `line` covers.
+    pub(crate) fn new(scan: &'a Scan, line: &crate::rows::Group<'_>) -> Self {
+        let mut requests: Vec<&Request> = scan
+            .cache_context
+            .requests
+            .iter()
+            .chain(&scan.requests)
+            .filter(|r| line.covers(&r.profiles))
+            .collect();
+        requests.sort_by(|a, b| {
+            a.time
+                .cmp(&b.time)
+                .then_with(|| locale_compare(&a.id, &b.id))
+        });
+        let events = scan
+            .cache_context
+            .boundaries
+            .iter()
+            .chain(&scan.events)
+            .filter(|e| line.covers(&e.profiles))
+            .collect();
+        Self { requests, events }
+    }
+
+    /// What a lockstep comparison's candidates share over this history from `since`, with
+    /// `selected` its requests in the selected window.
+    pub(crate) fn lockstep_inputs(
+        &self,
+        selected: &[&Request],
+        since: Millis,
+        summaries: &[CompactionCharge],
+    ) -> LockstepInputs<'a> {
+        let summary_ids: HashSet<&Id> = self
+            .events
+            .iter()
+            .filter(|e| e.time >= since)
+            .map(|e| &e.id)
+            .collect();
+        let unmatched = add_costs(
+            summaries
+                .iter()
+                .filter(|s| summary_ids.contains(&s.event) && s.request.is_none())
+                .map(|s| &s.cost),
+        );
+        let mut fixed = Sum::new();
+        fixed.add(&unmatched);
+        for r in selected.iter().filter(|r| r.time >= since) {
+            fixed.add(&server_cost(r));
+        }
+        LockstepInputs {
+            last: self
+                .requests
+                .iter()
+                .enumerate()
+                .map(|(i, r)| (&*r.session, i))
+                .collect(),
+            unmatched,
+            fixed: fixed.cost(),
+            no_estimates: IndexMap::default(),
+        }
+    }
+}
+
+/// What every candidate of one lockstep comparison shares.
+pub(crate) struct LockstepInputs<'r> {
+    /// The position of each session's last request, after which its replay state is dropped.
+    pub(crate) last: HashMap<&'r str, usize>,
+    /// Summaries the transcripts record without a request.
+    pub(crate) unmatched: Cost,
+    /// Charges no candidate changes: `unmatched` and the selected requests' server tools.
+    pub(crate) fixed: Cost,
+    /// No usage estimates, for replays whose simulator has already applied them.
+    pub(crate) no_estimates: IndexMap<Text, UsageEstimate>,
+}
+
 /// Whether a part is a model message turn.
 pub(crate) fn is_message(p: &BillingPart) -> bool {
     p.kind == PartKind::Message
@@ -1597,11 +1682,9 @@ pub(crate) fn scenarios(values: &[i64], runs: [Vec<Run>; 3]) -> Vec<WindowScenar
 pub(crate) struct Lockstep<'a, 'r> {
     /// Every request in time order.
     pub(crate) requests: &'a [&'r Request],
-    /// The position of each session's last request.
-    pub(crate) last: &'a HashMap<&'r str, usize>,
+    /// What every candidate shares over `requests`.
+    pub(crate) inputs: &'a LockstepInputs<'r>,
     pub(crate) catalog: &'a Catalog,
-    /// Charges no candidate changes.
-    pub(crate) fixed: &'a Cost,
     /// Why the current control leaves every comparison unpriced, if it does.
     pub(crate) unknown: Option<&'a str>,
     /// Unreadable transcript lines, each of which could have been a request.
@@ -1626,12 +1709,12 @@ impl<'r> Lockstep<'_, 'r> {
         let current_value = current;
         let Lockstep {
             requests,
-            last,
+            inputs,
             catalog,
-            fixed,
             unknown,
             skipped,
         } = *self;
+        let LockstepInputs { last, fixed, .. } = inputs;
         let mut baseline_cost = None;
         // Each request a summary can be added to.
         let by_id: HashMap<&str, &Request> = requests.iter().map(|r| (&*r.id, *r)).collect();
@@ -1861,25 +1944,8 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
     for group in crate::rows::groups(replayed, crate::rows::compaction_owner) {
         let profile = group.lead;
         let in_profile = |profiles: &[String]| group.covers(profiles);
-        let mut requests: Vec<&Request> = scan
-            .cache_context
-            .requests
-            .iter()
-            .chain(&scan.requests)
-            .filter(|r| in_profile(&r.profiles))
-            .collect();
-        requests.sort_by(|a, b| {
-            a.time
-                .cmp(&b.time)
-                .then_with(|| locale_compare(&a.id, &b.id))
-        });
-        let events: Vec<&StructuralEvent> = scan
-            .cache_context
-            .boundaries
-            .iter()
-            .chain(&scan.events)
-            .filter(|e| in_profile(&e.profiles))
-            .collect();
+        let history = History::new(scan, &group);
+        let History { requests, events } = &history;
         // What each profile's next session runs, whichever model it last used.
         let versions = crate::version::latest(&group.members, requests.iter().copied());
         let selected: Vec<&Request> = requests
@@ -1971,28 +2037,11 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             .flat_map(|r| r.parts.iter().filter(|p| is_conversation(p)))
             .map(|p| p.model.clone())
             .collect();
-        let summary_ids: HashSet<&Id> = events
-            .iter()
-            .filter(|e| e.time >= since)
-            .map(|e| &e.id)
-            .collect();
-        let unmatched = add_costs(
-            options
-                .summaries
-                .iter()
-                .filter(|s| summary_ids.contains(&s.event) && s.request.is_none())
-                .map(|s| &s.cost),
-        );
-        let mut fixed = Sum::new();
-        fixed.add(&unmatched);
-        for r in selected.iter().filter(|r| r.time >= since) {
-            fixed.add(&server_cost(r));
-        }
-        let fixed = fixed.cost();
+        let inputs = history.lockstep_inputs(&selected, since, options.summaries);
         // Totals of totals: Usd sums are exact and first-seen reasons keep their order.
-        let recorded_cost = add_costs([&fixed, &baseline_totals.cost()]);
-        let observed_summary_cost = add_costs([&unmatched, &baseline_summaries.cost()]);
-        let calibration = compaction_samples(&requests, &events, options.summaries);
+        let recorded_cost = add_costs([&inputs.fixed, &baseline_totals.cost()]);
+        let observed_summary_cost = add_costs([&inputs.unmatched, &baseline_summaries.cost()]);
+        let calibration = compaction_samples(requests, events, options.summaries);
         // One effective key has one aggregate winner, including global/environment controls.
         let mut groups: IndexMap<String, (WindowControl, Vec<Option<Text>>)> = IndexMap::default();
         for model in observed.keys().cloned() {
@@ -2017,13 +2066,6 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             .flat_map(|e| &e.predecessors)
             .map(|p| &*p.request)
             .collect();
-        // Each session's replay and simulation state is dropped after its last request.
-        let last: HashMap<&str, usize> = requests
-            .iter()
-            .enumerate()
-            .map(|(i, r)| (&*r.session, i))
-            .collect();
-        let no_estimates = IndexMap::default();
         let window_options = WindowOptions {
             events: &index,
             estimates: options.estimates,
@@ -2130,10 +2172,9 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 .collect();
             let skipped = skipped_lines(scan, &group.ids);
             let lockstep = Lockstep {
-                requests: &requests,
-                last: &last,
+                requests,
+                inputs: &inputs,
                 catalog,
-                fixed: &fixed,
                 unknown: control.comparison_unknown.as_deref(),
                 skipped,
             };
@@ -2152,7 +2193,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                             },
                             &window_options,
                         ),
-                        PartReplay::new([&index.cache], &replayer.options(&no_estimates)),
+                        PartReplay::new([&index.cache], &replayer.options(&inputs.no_estimates)),
                     )
                 },
                 || PartReplay::new([&index.cache], &replayer.options(options.estimates)),

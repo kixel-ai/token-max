@@ -11,8 +11,8 @@ use serde_json::{Map, Number, Value};
 
 use crate::cache::{CacheBoundaries, ttl_milliseconds};
 use crate::compaction::{
-    CompactionSamples, Modeled, WindowEvents, WindowOptions, WindowSetting, compaction_samples,
-    is_conversation, is_message, replay_windows,
+    CompactionSamples, History, Modeled, WindowEvents, WindowOptions, WindowSetting,
+    compaction_samples, is_conversation, is_message, replay_windows,
 };
 use crate::controls::{Env, SettingsScope, idle_controls, window_control};
 use crate::discovery::locale_compare;
@@ -2040,18 +2040,10 @@ fn profile_checks<'a>(
     let scan = options.scan;
     let profile = group.lead;
     let in_profile = |profiles: &[String]| group.covers(profiles);
-    let mut requests: Vec<&Request> = scan
-        .cache_context
-        .requests
-        .iter()
-        .chain(&scan.requests)
-        .filter(|r| in_profile(&r.profiles))
-        .collect();
-    requests.sort_by(|a, b| {
-        a.time
-            .cmp(&b.time)
-            .then_with(|| locale_compare(&a.id, &b.id))
-    });
+    let History {
+        requests,
+        mut events,
+    } = History::new(scan, group);
     let main: Vec<&Request> = scan
         .requests
         .iter()
@@ -2062,13 +2054,6 @@ fn profile_checks<'a>(
     let Some(first) = main.iter().map(|r| r.time).min() else {
         return;
     };
-    let mut events: Vec<&StructuralEvent> = scan
-        .cache_context
-        .boundaries
-        .iter()
-        .chain(&scan.events)
-        .filter(|e| in_profile(&e.profiles))
-        .collect();
     events.sort_by_key(|e| e.time);
     let since = options.since.unwrap_or(first);
     let now = options.now;
@@ -2329,22 +2314,7 @@ pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleChec
             since: options.since.max(retained),
             ..*options
         };
-        let requests: Vec<&Request> = options
-            .scan
-            .cache_context
-            .requests
-            .iter()
-            .chain(&options.scan.requests)
-            .filter(|r| group.covers(&r.profiles))
-            .collect();
-        let events: Vec<&StructuralEvent> = options
-            .scan
-            .cache_context
-            .boundaries
-            .iter()
-            .chain(&options.scan.events)
-            .filter(|e| group.covers(&e.profiles))
-            .collect();
+        let History { requests, events } = History::new(options.scan, &group);
         let samples = compaction_samples(&requests, &events, options.summaries);
         let first = requests.iter().map(|r| r.time).min();
         let since = options.since.or(first);

@@ -9030,6 +9030,10 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
         }
         vibes.push(item);
     }
+    vibes.extend(crate::skill::item(
+        &report.scan.profiles,
+        out.home.as_deref(),
+    ));
     // Context with no switch: worth seeing, but not a setting to change.
     let fixed: Vec<&ContextCost> = report
         .context

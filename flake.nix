@@ -37,6 +37,7 @@
               ./Cargo.toml
               ./Cargo.lock
               ./src
+              ./skills/token-audit/SKILL.md
               ./tests/ssh_windows.rs
               ./tests/upgrade_windows.rs
             ];
@@ -61,6 +62,7 @@
             pkgs.rustfmt
             pkgs.rust-analyzer
             pkgs.just
+            pkgs.jq
             quest.packages.${system}.default
           ];
         };

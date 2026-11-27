@@ -104,7 +104,7 @@ pub struct After {
     pub item: Box<Item>,
 }
 
-/// The window the maintainer caps compaction at for `harness`, for output quality rather than
+/// The window Kixel caps compaction at for `harness`, for output quality rather than
 /// cost.
 pub fn window_cap(harness: Harness) -> i64 {
     match harness {

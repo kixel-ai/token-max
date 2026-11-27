@@ -1,4 +1,4 @@
-# token-audit: agent-run transcript efficiency audit
+# [S] token-audit: agent-run transcript efficiency audit
 
 ## Goal
 
@@ -64,6 +64,13 @@ without user approval.
   `--claude-dir`/`--codex-dir`), with `--project` for repo-local `.agents/skills`
   and `.claude/skills` (rejected: `~/.agents/skills` only; project-local by
   default).
+- Codex install path (2026-11-26, taken while the maintainer was away, in
+  [the skill PR](https://github.com/kixel-ai/token-max/pull/275)): ✅
+  `token-max skill install` writes Codex's copy to `~/.agents/skills`, which
+  Codex reads for every home, and takes no `--codex-dir`; this replaces the
+  `~/.codex/skills` and `--codex-dir` parts of the decision above (rejected:
+  also writing `$CODEX_HOME/skills`, which Codex keeps only as a deprecated
+  location and which would list the skill twice).
 
 ### Overlap and boundaries
 

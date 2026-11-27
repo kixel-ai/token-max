@@ -2,6 +2,7 @@
 
 mod support;
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -80,6 +81,13 @@ impl Workspace {
 
     fn settings(&self, text: &str) {
         std::fs::write(self.claude.join("settings.json"), text).unwrap();
+    }
+
+    /// The token-audit skill in `dir`'s skills, so its `vibes` card is quiet.
+    fn skill(&self, dir: &Path) {
+        let skill = dir.join("skills/token-audit");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "synthetic\n").unwrap();
     }
 }
 
@@ -411,7 +419,7 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     assert!(!report.contains("WARNINGS"), "{report}");
     assert!(
         report.ends_with(
-            "\n\n  token-max vibes has 3 pieces of advice the transcripts can't price. Run token-max vibes with the same profile, host, --since and price options to see them.\n"
+            "\n\n  token-max vibes has 4 pieces of advice the transcripts can't price. Run token-max vibes with the same profile, host, --since and price options to see them.\n"
         ),
         "{report}"
     );
@@ -420,20 +428,25 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     assert_eq!((status, stderr.as_str()), (0, ""), "{stdout}");
     let (cards, advisor) = stdout.split_at(
         stdout
-            .find("\n  [5/5] Advisor model  not measured\n")
+            .find("\n  [5/6] Advisor model  not measured\n")
+            .unwrap_or_else(|| panic!("{stdout}")),
+    );
+    let (advisor, skill) = advisor.split_at(
+        advisor
+            .find("\n  [6/6] Token audit skill  not measured\n")
             .unwrap_or_else(|| panic!("{stdout}")),
     );
     assert_eq!(
         cards,
         format!(
-            "token-max vibes: 3 pieces of advice the transcripts can't price.\n  None of it is measured, so none of it is a verdict. Each card names whose advice it is.\n\n  [1/5] Bash timeout cap  not measured\n        2h -> 4m\n        What    The longest Claude waits on a foreground Bash command before Claude Code moves it to the background.\n        Advice  A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess. A command past the cap is not killed: it keeps running in the background, where Claude checks on it in later turns. Some commands need longer in the foreground; keep the cap if yours do. Project and local settings, which override it, are not read.\n        Source  Kixel's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching\n        Change  \"env\": {{\"BASH_MAX_TIMEOUT_MS\": \"240000\"}} in ~{0}.claude{0}settings.json\n\n  [2/5] Auto memory  not measured\n        What    Auto memory lets Claude write notes for itself and loads them into every session.\n        Advice  0 of 1 main session (0%) in the window ran in a repository with a CLAUDE.md or AGENTS.md, counting as without 1 session whose transcript recorded loading none and whose directory is gone or unrecorded. Outside a repository, memory may be the only place a fact is kept, so turning it off is not advised. doctor's line could not price it over the window (never read back or written).\n        Source  Kixel's pick: a lasting fact about a project belongs in its repository. How memory works: https://code.claude.com/docs/en/memory#auto-memory (2026-11-11)\n\n  [3/5] Auto-compact window (claude-opus-5-5)  not measured\n        967k -> 400k\n        What    How large a conversation grows before it is automatically summarized and continued from the summary.\n        Advice  No setting names it, so Claude Code compacts this model near 967k, its window for the model. Kixel would cap it at 400k for better output, not a smaller bill: a smaller window compacts sooner, so the model works from a shorter context. Anthropic's docs say accuracy and recall degrade as a context grows. doctor's auto-compact window line keeps it on cost. Against the 967k window, its replay of a 400k window changes no recorded request, so it costs the same at API prices. The cap is advice beside that line, not its verdict.\n        Source  Kixel's pick, for output quality rather than cost. Anthropic's docs on context rot: https://platform.claude.com/docs/en/build-with-claude/context-windows\n        Change  \"modelSettings\": {{\"claude-opus-5-5\": {{\"autoCompactWindow\": 400000}}}} in ~{0}.claude{0}settings.json\n\n  [4/5] Main-session default  not measured\n        What    The model and reasoning effort a main session starts with.\n        Advice  Defaults to claude-opus-5-5 at medium, Kixel's pick. Ran claude-opus-5-5 at an unrecorded effort 2 times, $0.01.\n        Source  Kixel's pick of a default. Anthropic's guidance: https://claude.dev/blog/which-claude-model-should-you-build-with/ https://code.claude.com/docs/en/model-config#choose-an-effort-level\n",
+            "token-max vibes: 4 pieces of advice the transcripts can't price.\n  None of it is measured, so none of it is a verdict. Each card names whose advice it is.\n\n  [1/6] Bash timeout cap  not measured\n        2h -> 4m\n        What    The longest Claude waits on a foreground Bash command before Claude Code moves it to the background.\n        Advice  A foreground wait at or past the 5m cache TTL, the current main-agent cache TTL setting, lets the cache expire before Claude replies, and a 4m cap leaves room under it. No foreground Bash wait outlasted the cache. What a lower cap saves is not measured, and the 4m margin is a guess. A command past the cap is not killed: it keeps running in the background, where Claude checks on it in later turns. Some commands need longer in the foreground; keep the cap if yours do. Project and local settings, which override it, are not read.\n        Source  Kixel's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching\n        Change  \"env\": {{\"BASH_MAX_TIMEOUT_MS\": \"240000\"}} in ~{0}.claude{0}settings.json\n\n  [2/6] Auto memory  not measured\n        What    Auto memory lets Claude write notes for itself and loads them into every session.\n        Advice  0 of 1 main session (0%) in the window ran in a repository with a CLAUDE.md or AGENTS.md, counting as without 1 session whose transcript recorded loading none and whose directory is gone or unrecorded. Outside a repository, memory may be the only place a fact is kept, so turning it off is not advised. doctor's line could not price it over the window (never read back or written).\n        Source  Kixel's pick: a lasting fact about a project belongs in its repository. How memory works: https://code.claude.com/docs/en/memory#auto-memory (2026-11-11)\n\n  [3/6] Auto-compact window (claude-opus-5-5)  not measured\n        967k -> 400k\n        What    How large a conversation grows before it is automatically summarized and continued from the summary.\n        Advice  No setting names it, so Claude Code compacts this model near 967k, its window for the model. Kixel would cap it at 400k for better output, not a smaller bill: a smaller window compacts sooner, so the model works from a shorter context. Anthropic's docs say accuracy and recall degrade as a context grows. doctor's auto-compact window line keeps it on cost. Against the 967k window, its replay of a 400k window changes no recorded request, so it costs the same at API prices. The cap is advice beside that line, not its verdict.\n        Source  Kixel's pick, for output quality rather than cost. Anthropic's docs on context rot: https://platform.claude.com/docs/en/build-with-claude/context-windows\n        Change  \"modelSettings\": {{\"claude-opus-5-5\": {{\"autoCompactWindow\": 400000}}}} in ~{0}.claude{0}settings.json\n\n  [4/6] Main-session default  not measured\n        What    The model and reasoning effort a main session starts with.\n        Advice  Defaults to claude-opus-5-5 at medium, Kixel's pick. Ran claude-opus-5-5 at an unrecorded effort 2 times, $0.01.\n        Source  Kixel's pick of a default. Anthropic's guidance: https://claude.dev/blog/which-claude-model-should-you-build-with/ https://code.claude.com/docs/en/model-config#choose-an-effort-level\n",
             std::path::MAIN_SEPARATOR
         )
     );
     // The fixture's Opus main gets a Fable advisor, one rank up. No setting names that main
     // model, which a session ran on, so the card says another session may run another.
     assert!(
-        advisor.starts_with("\n  [5/5] Advisor model  not measured\n        none -> fable\n")
+        advisor.starts_with("\n  [5/6] Advisor model  not measured\n        none -> fable\n")
             && advisor.contains("Fable ranks one above claude-opus-5-5, the main-session default (the latest recorded main-session model).")
             && advisor.contains("No setting names the main model")
             && advisor.ends_with(&format!(
@@ -441,6 +454,14 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
                 std::path::MAIN_SEPARATOR
             )),
         "{advisor}"
+    );
+    // The token-audit skill isn't installed, so its card names the step by hand.
+    assert_eq!(
+        skill,
+        format!(
+            "\n  [6/6] Token audit skill  not measured\n        What    An agent skill for Claude Code and Codex that audits their transcripts for token waste beyond settings.\n        Advice  Not installed for Claude Code in {}. /token-audit has an agent run token-max audit and rank by dollars the waste no setting changes: commands that bust the prompt cache, bloated or repeated tool calls, always-loaded context the sessions never needed, and context they kept rediscovering. It offers each fix and makes it only after a yes. What it saves is not measured.\n        Source  Kixel's pick, token-max's own skill: https://github.com/kixel-ai/token-max/blob/main/docs/reference.md#token-audit-skill\n        Change  by hand, since doctor and vibes write only settings files, not skills: run `token-max skill install`, or `npx skills add kixel-ai/token-max --skill token-audit -g`, then start a new session. Where token-max isn't on the PATH, such as on a host reached with --ssh, run it as `npx @kixel/crabx token-max`.\n",
+            support::native_path("~/.claude")
+        )
     );
     assert_eq!(
         std::fs::read_to_string(w.claude.join("settings.json")).unwrap(),
@@ -454,6 +475,15 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     w.settings(
         r#"{"promptCacheTtl":"1h","autoCompactWindow":400000,"advisorModel":"fable","cleanupPeriodDays":365,"env":{"BASH_MAX_TIMEOUT_MS":"3300000"}}"#,
     );
+    // The missing skill is advice doctor names but no verdict: it leaves the exit code at 0.
+    let (status, report, _) = invoke("doctor", &[]);
+    assert_eq!(status, 0, "{report}");
+    assert!(
+        report.contains("token-max vibes has 1 piece of advice"),
+        "{report}"
+    );
+    // Installed, its card is quiet too, so doctor has nothing to name.
+    w.skill(&w.claude);
     let (status, report, _) = invoke("doctor", &[]);
     assert_eq!(status, 0, "{report}");
     assert!(!report.contains("token-max vibes"), "{report}");
@@ -461,13 +491,15 @@ fn vibes_prints_advice_with_no_verdict_or_exit_code_and_only_takes_its_options()
     assert_eq!(status, 0);
     // The heading counts advice as doctor does, so the card that advises nothing is not in it.
     assert!(
-        stdout.starts_with("token-max vibes: no advice for these settings.\n\n  [1/5] "),
+        stdout.starts_with("token-max vibes: no advice for these settings.\n\n  [1/6] "),
         "{stdout}"
     );
     assert!(
-        stdout.contains("\n  [1/5] Bash timeout cap  not measured\n        What    ")
-            && stdout.contains("\n  [3/5] Auto-compact window (claude-opus-5-5)  not measured\n        What    ")
-            && stdout.contains("\n  [5/5] Advisor model  not measured\n        What    ")
+        stdout.contains("\n  [1/6] Bash timeout cap  not measured\n        What    ")
+            && stdout.contains("\n  [3/6] Auto-compact window (claude-opus-5-5)  not measured\n        What    ")
+            && stdout.contains("\n  [5/6] Advisor model  not measured\n        What    ")
+            && stdout.contains("\n  [6/6] Token audit skill  not measured\n        What    ")
+            && stdout.contains("Installed for every Claude Code and Codex profile here")
             && stdout.contains("Set to 400k. That is at or under the 400k window Kixel caps it at, so there is nothing to change.")
             && stdout.contains("Capped at 55m, the margin suggested under the 1h cache, the current main-agent cache TTL setting.")
             && !stdout.contains("Change"),
@@ -512,6 +544,7 @@ fn vibes_advises_memory_off_when_most_sessions_ran_in_a_repository() {
     std::fs::create_dir_all(repo.join(".git")).unwrap();
     std::fs::create_dir_all(repo.join("src")).unwrap();
     std::fs::write(repo.join("AGENTS.md"), "synthetic\n").unwrap();
+    w.skill(&w.claude);
     // The fixture's session in `cwd`, after an attachment recording the files it loaded.
     let session = |cwd: &Path, loaded: &[&Path]| {
         let files: Vec<Value> = loaded
@@ -628,7 +661,7 @@ fn vibes_suggests_a_year_of_transcripts_unless_claude_already_keeps_one() {
     // Unset is Claude Code's 30 days; the card counts the disk the transcripts read take.
     let unset = cards("{}");
     assert!(
-        unset.contains("  [2/6] Transcript retention  not measured\n        30 days -> 365 days\n        What    How long Claude Code keeps session transcripts before its startup sweep deletes them.\n        Advice  Claude Code deletes eligible transcripts after 30 days, so token-max has less history to replay. The transcripts token-max read take "),
+        unset.contains("  [2/7] Transcript retention  not measured\n        30 days -> 365 days\n        What    How long Claude Code keeps session transcripts before its startup sweep deletes them.\n        Advice  Claude Code deletes eligible transcripts after 30 days, so token-max has less history to replay. The transcripts token-max read take "),
         "{unset}"
     );
     assert!(
@@ -1704,6 +1737,7 @@ mod unix {
         // A fixed window keeps the walk's dollar figures the same on any day.
         w.recent_fixture(15);
         w.settings(SETTINGS);
+        w.skill(&w.claude);
         // Prices ten thousand times the fixture's, so the TTL saves enough to be asked: the
         // walk leaves out a change saving under $1/mo.
         let mut prices: Value =
@@ -1828,8 +1862,8 @@ mod unix {
             "\n  token-max vibes has 3 pieces of advice the transcripts can't price. Show them?\n  [y]es, [n]o: ",
         );
         let advice = at("\ntoken-max vibes: 3 pieces of advice the transcripts can't price.\n");
-        let card = at("\n  [1/5] Bash timeout cap ");
-        let window = at("\n  [3/5] Auto-compact window (claude-opus-5-5) ");
+        let card = at("\n  [1/6] Bash timeout cap ");
+        let window = at("\n  [3/6] Auto-compact window (claude-opus-5-5) ");
         assert_eq!(
             words(&stdout[advice..card]),
             "token-max vibes: 3 pieces of advice the transcripts can't price. None of it is measured, so none of it is a verdict. Each card names whose advice it is. Nothing is written until you confirm the list at the end."
@@ -1845,28 +1879,30 @@ mod unix {
             .map(|at| card + at)
             .unwrap_or_else(|| panic!("{stdout}"));
         // The memory card that follows advises nothing here, so it asks nothing.
-        let memory = at("\n  [2/5] Auto memory ");
+        let memory = at("\n  [2/6] Auto memory ");
         assert!(card < memory && memory < window, "{stdout}");
         let entry = words(&stdout[card..memory]);
         // The card's cap was compared with the 5m TTL doctor just replaced, which the scan
         // can't replay, so it asks for a fresh run rather than offering a cap under 5m.
         assert_eq!(
             entry,
-            "[1/5] Bash timeout cap not measured What The longest Claude waits on a foreground Bash command before Claude Code moves it to the background. Advice doctor's walk just wrote a main-agent cache TTL change, which moves the TTL this cap is compared with. Run token-max vibes again to compare the cap with the settings as they are now. Source Kixel's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching"
+            "[1/6] Bash timeout cap not measured What The longest Claude waits on a foreground Bash command before Claude Code moves it to the background. Advice doctor's walk just wrote a main-agent cache TTL change, which moves the TTL this cap is compared with. Run token-max vibes again to compare the cap with the settings as they are now. Source Kixel's pick of a margin under the cache TTL. Claude Code's docs: https://code.claude.com/docs/en/env-vars https://code.claude.com/docs/en/tools-reference https://code.claude.com/docs/en/prompt-caching"
         );
         assert!(!entry.contains("Recommended") && !entry.contains("Worth considering"));
         // The window card names doctor's verdict beside its own cap, which is declined.
         // The card on the default advises nothing, so it asks nothing before the diff.
-        let next = at("\n  [4/5] Main-session default ");
-        let advisor = at("\n  [5/5] Advisor model ");
+        let next = at("\n  [4/6] Main-session default ");
+        let advisor = at("\n  [5/6] Advisor model ");
+        // The installed token-audit skill's card advises nothing either.
+        let skill = at("\n  [6/6] Token audit skill ");
         assert!(
-            window < next && next < advisor && advisor < again,
+            window < next && next < advisor && advisor < skill && skill < again,
             "{stdout}"
         );
         let entry = words(&stdout[window..next]);
         assert!(
             entry.starts_with(
-                "[3/5] Auto-compact window (claude-opus-5-5) not measured 967k -> 400k What "
+                "[3/6] Auto-compact window (claude-opus-5-5) not measured 967k -> 400k What "
             ),
             "{entry}"
         );
@@ -1877,7 +1913,7 @@ mod unix {
         );
         // The advisor card asks too, and its no writes nothing.
         assert!(
-            words(&stdout[advisor..again]).ends_with(r#"Change "advisorModel": "fable" in ~/.claude/settings.json Accept? [y]es, [n]o, [q]uit:"#),
+            words(&stdout[advisor..skill]).ends_with(r#"Change "advisorModel": "fable" in ~/.claude/settings.json Accept? [y]es, [n]o, [q]uit:"#),
             "{stdout}"
         );
         // The window's edit is checked against the file as doctor just wrote it, and
@@ -2879,4 +2915,299 @@ fn audit_covers_the_current_repository_and_prints_no_transcript_text() {
     assert!(status == 0 && help.starts_with("token-max audit:"));
     let (_, help, _) = run(&mut command(&w, &["--help"]));
     assert!(help.contains("\n  audit "), "{help}");
+}
+
+#[test]
+fn skill_audit_prints_the_instructions_and_a_filter_that_drops_transcript_text() {
+    let w = Workspace::new();
+    let (status, prompt, stderr) = run(&mut command(&w, &["skill", "audit"]));
+    assert_eq!((status, &*stderr), (0, ""));
+    assert!(prompt.starts_with("# Token audit\n"));
+    assert!(prompt.contains("f=$(token-max skill filter) && test -n \"$f\" && sed -n"));
+    let (status, filter, stderr) = run(&mut command(&w, &["skill", "filter"]));
+    assert_eq!((status, &*stderr), (0, ""));
+    for args in [
+        &["skill", "audit", "--all"][..],
+        &["skill", "filter", "--force"],
+        &["skill", "audit", "extra"],
+        &["skill"],
+        &["skill", "install", "--codex-dir", "."],
+    ] {
+        let (status, stdout, _) = run(&mut command(&w, args));
+        assert_eq!((status, &*stdout), (2, ""), "{args:?}");
+    }
+    let (_, help, _) = run(&mut command(&w, &["--help"]));
+    assert!(help.contains("\n  skill "), "{help}");
+
+    let codex = json!({"timestamp": "2026-11-02T00:00:00Z", "type": "response_item", "payload": {"type": "function_call", "name": "shell", "arguments": json!({"command": ["bash", "-lc", "SECRET=SYNTHETIC_PRIVATE_TOKEN cargo test --release --features=SYNTHETIC_PRIVATE_ARGS SYNTHETIC_PRIVATE_ARGS && git commit -m \"synthetic_private; prose words\" && claude synthetic-private-prompt && cat <<EOF\nsynthetic_private prose\nEOF"], "workdir": "/w"}).to_string()}});
+    let codex_output = json!({"type": "response_item", "payload": {"type": "function_call_output", "output": "SYNTHETIC_PRIVATE_OUTPUT"}});
+    // A tool's own input keeps only its paths and command shape, whatever its keys are named.
+    let mcp = json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "mcp__notes__save", "input": {"name": "SYNTHETIC_PRIVATE_NAME", "status": "SYNTHETIC_PRIVATE_STATUS", "file_path": "/notes.md", "tags": {"synthetic_private_tag": true}, "command": "echo synthetic-private-note A=1 B=2; NOTE=x\\ synthetic-private-word cat; RUST_LOG=debug \\\ncargo test --release; TOKEN=demo\\\nsynthetic-private-token rg -n"}}]}});
+    // An escaped separator is no program name.
+    let escaped = json!({"command": "api_key\\=synthetic-private-key; api_key\\=synthetic-private/git status; KEY=$(echo synthetic-private-sub x) cargo build; printf % 'literal $(' \"x); synthetic-private-word; y\""});
+    let answers = json!({"type": "user", "toolUseResult": {"answers": {"SYNTHETIC_PRIVATE_QUESTION text?": "SYNTHETIC_PRIVATE_ANSWER", "SYNTHETIC_PRIVATE_WORD": "yes"}}});
+    // A comment's apostrophe opens no quote, and a heredoc's body is data, even in `$(...)`,
+    // as are a PowerShell here-string's, even with spaces or tabs after its opener, and a block
+    // comment's.
+    let comment = json!({"command": "# don't\ngit commit -m 'fix; synthetic-private word'\n$t = @' \t\nit's synthetic-private\nsynthetic-private words\n'@"});
+    let heredoc = json!({"command": "v=$(cat <<'EOF'\n)\nsynthetic-private-word\nEOF\n)"});
+    // An arithmetic command's operands are no commands, neither a character class's `]]` nor
+    // one a word goes on past ends a conditional, and a short option's attached value is no flag.
+    let class = json!({"command": "(( x == 0 || synthetic_private == x )) && [[ $x =~ ^[[:digit:]]+$ || $x == ]]a || synthetic-private == $x ]] && git status -sb && mysql -psyntheticprivate -u"});
+    let inner = json!({"command": "KEY=$(# a key\nprintf x) cargo build; printf x release\\ #1 && cargo test\n<#\nsynthetic-private\n#>"});
+    // `$'...'` ends at an unescaped quote, and an array's or a process substitution's lines, or
+    // a conditional's operands, are no commands.
+    let ansi = json!({"command": "echo $'it\\'s; synthetic-private word'\nlist=(\n  synthetic-private\n)\ndiff <(\nsynthetic-private\n) b\n[[ $x == a || synthetic-private == $x ]] && cargo build"});
+    // A torn line hides none after it; a server's result keeps no text, even under a field
+    // the records use; a script's argument is no command, and a value keeps none of its lines.
+    let torn = r#"{"type": "user", "message": {"content": "synthetic-private"#;
+    let mcp_meta = json!({"type": "user", "mcpMeta": {"structuredContent": {"name": "SYNTHETIC_PRIVATE_NAME", "path": "/synthetic-private", "command": "synthetic-private-cmd x"}}});
+    let codex_mcp = json!({"type": "event_msg", "payload": {"type": "mcp_tool_call_end", "invocation": {"server": "notes", "tool": "save", "arguments": {"file_path": "/n.md"}}, "result": {"Ok": {"structuredContent": {"name": "SYNTHETIC_PRIVATE_NAME", "status": "SYNTHETIC_PRIVATE_STATUS"}}}}});
+    let script = json!({"type": "response_item", "payload": {"type": "function_call", "name": "shell", "arguments": json!({"command": ["bash", "run.sh", "synthetic-private-arg"], "cmd": ["KEY=x\nsynthetic-private", "upload", "--payload=x\nsynthetic-private"]}).to_string()}});
+    // `@"` opens a PowerShell here-string only at its line's end, and a PowerShell path's
+    // trailing backslash, read as an escape, leaves no here-string body exposed.
+    let powershell = json!({"command": "scp f user@\"$host\":d && git status\n$p = \"C:\\dir\\\"; $t = @\"\nit\"s synthetic-private\nsynthetic-private words\n\"@"});
+    let lines = format!(
+        "{}{codex}\n{codex_output}\n{mcp}\n{escaped}\n{answers}\n{comment}\n{heredoc}\n{inner}\n{ansi}\n{class}\n{torn}\n{mcp_meta}\n{codex_mcp}\n{script}\n{powershell}\n",
+        audited_session("s", &w.home)
+    );
+    let mut jq = Command::new("jq")
+        .args(["-cR", &filter])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("the filter test needs jq on PATH");
+    jq.stdin
+        .take()
+        .unwrap()
+        .write_all(lines.as_bytes())
+        .unwrap();
+    let out = jq.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let out = String::from_utf8(out.stdout).unwrap();
+    let lower = out.to_lowercase();
+    assert!(
+        !lower.contains("synthetic_private") && !lower.contains("synthetic-private"),
+        "{out}"
+    );
+    let records: Vec<Value> = out
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(records.len(), 19);
+    assert_eq!(
+        records[18],
+        json!({"command": [["scp"], ["git", "status"], ["?"]]})
+    );
+    assert_eq!(
+        records[12],
+        json!({"command": [["echo"], ["list="], ["diff"], ["?"]]})
+    );
+    assert_eq!(
+        records[13],
+        json!({"command": [["?"], ["?"], ["git", "status", "-sb"], ["mysql", "-p", "-u"]]})
+    );
+    assert_eq!(records[14], json!({"unparsed": 58}));
+    assert_eq!(
+        records[15]["mcpMeta"],
+        json!({"<17 chars, #0>": {"<4 chars, #0>": "<22 chars>", "<4 chars, #1>": "<18 chars>", "<7 chars, #2>": "<23 chars>"}})
+    );
+    assert_eq!(
+        records[16]["payload"]["invocation"],
+        json!({"server": "<5 chars>", "tool": "save", "arguments": {"file_path": "/n.md"}})
+    );
+    assert_eq!(
+        records[16]["payload"]["result"],
+        json!({"<2 chars, #0>": {"<17 chars, #0>": {"<4 chars, #0>": "<22 chars>", "<6 chars, #1>": "<24 chars>"}}})
+    );
+    assert_eq!(
+        records[17]["payload"]["arguments"],
+        json!({"command": ["bash"], "cmd": ["KEY=", "upload", "--payload="]})
+    );
+    assert_eq!(
+        records[11],
+        json!({"command": [["KEY=", "cargo", "build"], ["printf"], ["cargo", "test"], ["?"]]})
+    );
+    assert_eq!(
+        records[9],
+        json!({"command": [["git", "commit", "-m"], ["?"]]})
+    );
+    assert_eq!(records[10], json!({"command": [["v="]]}));
+    assert_eq!(
+        records[7],
+        json!({"command": [["?"], ["?"], ["KEY=", "cargo", "build"], ["printf"]]})
+    );
+    // AskUserQuestion keys its answers by the question's text.
+    assert_eq!(
+        records[8]["toolUseResult"],
+        json!({"<7 chars, #0>": {"<32 chars, #0>": "<24 chars>", "<22 chars, #1>": "<3 chars>"}})
+    );
+    // What the audit needs survives: models, tool names, commands' shape, sizes.
+    assert_eq!(records[1]["message"]["model"], "claude-opus-5-5");
+    assert_eq!(records[1]["message"]["content"][1]["name"], "Bash");
+    assert_eq!(
+        records[1]["message"]["content"][1]["input"]["command"],
+        json!([["?"]])
+    );
+    assert_eq!(records[0]["message"]["content"], "<24 chars>");
+    assert_eq!(
+        records[4]["payload"]["arguments"],
+        json!({"command": [["SECRET=", "cargo", "test", "--release", "--features="], ["git", "commit", "-m"], ["claude"], ["cat"]], "workdir": "/w"})
+    );
+    assert_eq!(records[5]["payload"]["output"], "<24 chars>");
+    assert_eq!(
+        records[6]["message"]["content"][0]["input"],
+        json!({"<4 chars, #0>": "<22 chars>", "<6 chars, #1>": "<24 chars>", "file_path": "/notes.md", "<4 chars, #3>": {"<21 chars, #0>": true}, "command": [["echo"], ["NOTE=", "cat"], ["RUST_LOG=", "cargo", "test", "--release"], ["TOKEN=", "rg", "-n"]]})
+    );
+}
+
+#[test]
+fn skill_install_writes_the_stub_once_per_directory_and_keeps_edits() {
+    let w = Workspace::new();
+    let stub = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/token-audit/SKILL.md"),
+    )
+    .unwrap();
+    let skill = |root: &Path| root.join("skills/token-audit/SKILL.md");
+    let install = |extra: &[&str]| {
+        let mut args = vec!["skill", "install"];
+        args.extend(extra);
+        run(&mut command(&w, &args))
+    };
+    let shown = |root: &Path| format!("{:?}", native_path(skill(root)));
+    let agents = w.home.join(".agents");
+
+    // Claude Code's home, and ~/.agents for Codex, never Codex's deprecated home skills.
+    let (status, stdout, stderr) = install(&[]);
+    assert_eq!((status, &*stderr), (0, ""));
+    assert_eq!(
+        stdout,
+        format!(
+            "installed: {}\ninstalled: {}\n",
+            shown(&w.claude),
+            shown(&agents)
+        )
+    );
+    assert_eq!(std::fs::read_to_string(skill(&w.claude)).unwrap(), stub);
+    assert_eq!(std::fs::read_to_string(skill(&agents)).unwrap(), stub);
+    assert!(!skill(&w.codex).exists());
+    let (status, stdout, _) = install(&[]);
+    assert_eq!(status, 0);
+    assert_eq!(stdout.matches("up to date: ").count(), 2, "{stdout}");
+
+    // An edited copy is kept, and so is every other file, until --force.
+    std::fs::write(skill(&agents), "edited").unwrap();
+    std::fs::remove_file(skill(&w.claude)).unwrap();
+    let (status, stdout, stderr) = install(&[]);
+    assert_eq!((status, &*stdout), (2, ""));
+    assert!(
+        stderr.contains(&shown(&agents)) && stderr.contains("--force"),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(skill(&agents)).unwrap(), "edited");
+    assert!(!skill(&w.claude).exists());
+    let (status, _, stderr) = install(&["--force"]);
+    assert_eq!((status, &*stderr), (0, ""));
+    assert_eq!(std::fs::read_to_string(skill(&agents)).unwrap(), stub);
+    assert_eq!(std::fs::read_to_string(skill(&w.claude)).unwrap(), stub);
+
+    // A directory flag installs into the named homes only, which must exist.
+    let other = w.home.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let (status, stdout, _) = install(&["--claude-dir", &native_path(&other)]);
+    assert_eq!(
+        (status, stdout),
+        (0, format!("installed: {}\n", shown(&other)))
+    );
+    let (status, _, stderr) = install(&["--claude-dir", &native_path(w.home.join("gone"))]);
+    assert_eq!(status, 2, "{stderr}");
+    assert!(stderr.contains("is not a directory"), "{stderr}");
+
+    // CLAUDE_CONFIG_DIR moves Claude Code's home.
+    let moved = w.home.join("moved");
+    std::fs::create_dir_all(&moved).unwrap();
+    let (status, stdout, _) =
+        run(command(&w, &["skill", "install"]).env("CLAUDE_CONFIG_DIR", &moved));
+    assert_eq!(status, 0);
+    assert!(
+        stdout.starts_with(&format!("installed: {}\n", shown(&moved))),
+        "{stdout}"
+    );
+
+    // --project writes the current directory's .agents, and .claude when it exists.
+    let project = w.home.join("project");
+    std::fs::create_dir_all(project.join(".claude")).unwrap();
+    let (status, stdout, stderr) =
+        run(command(&w, &["skill", "install", "--project"]).current_dir(&project));
+    assert_eq!((status, &*stderr), (0, ""));
+    assert_eq!(
+        stdout,
+        format!(
+            "installed: {}\ninstalled: {}\n",
+            shown(&project.join(".agents")),
+            shown(&project.join(".claude"))
+        )
+    );
+    let (status, _, _) = install(&["--project", "--claude-dir", &native_path(&other)]);
+    assert_eq!(status, 2);
+    let (status, _, _) = install(&["--all"]);
+    assert_eq!(status, 2);
+}
+
+/// A symlinked skills directory, as dotfiles share one, gets the stub once.
+#[cfg(unix)]
+#[test]
+fn skill_install_writes_a_shared_skills_directory_once() {
+    let w = Workspace::new();
+    let shared = w.home.join("dotfiles/skills");
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::create_dir_all(w.home.join(".agents")).unwrap();
+    std::os::unix::fs::symlink(&shared, w.claude.join("skills")).unwrap();
+    std::os::unix::fs::symlink(&shared, w.home.join(".agents/skills")).unwrap();
+    let (status, stdout, stderr) = run(&mut command(&w, &["skill", "install"]));
+    assert_eq!((status, &*stderr), (0, ""));
+    assert_eq!(
+        stdout,
+        format!(
+            "installed: {:?}\n",
+            native_path(w.claude.join("skills/token-audit/SKILL.md"))
+        )
+    );
+    assert!(shared.join("token-audit/SKILL.md").is_file());
+
+    // A write through a linked SKILL.md would replace any file it names, so even --force refuses.
+    let elsewhere = w.home.join("notes.md");
+    std::fs::write(&elsewhere, "mine").unwrap();
+    std::fs::remove_file(shared.join("token-audit/SKILL.md")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, shared.join("token-audit/SKILL.md")).unwrap();
+    for args in [&["skill", "install"][..], &["skill", "install", "--force"]] {
+        let (status, _, stderr) = run(&mut command(&w, args));
+        assert_eq!(status, 2);
+        assert!(stderr.contains("is a link to"), "{stderr}");
+    }
+    assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), "mine");
+    // A dangling link, such as one into a checkout that is away, stays a link.
+    std::fs::remove_file(&elsewhere).unwrap();
+    let (status, _, stderr) = run(&mut command(&w, &["skill", "install"]));
+    assert_eq!(status, 2);
+    assert!(stderr.contains("is a link to"), "{stderr}");
+    assert!(
+        std::fs::symlink_metadata(shared.join("token-audit/SKILL.md"))
+            .unwrap()
+            .is_symlink()
+    );
+
+    // A checkout's skills directory linked outside it gets nothing from --project.
+    let project = w.home.join("project");
+    std::fs::create_dir_all(project.join(".agents")).unwrap();
+    std::os::unix::fs::symlink(&shared, project.join(".agents/skills")).unwrap();
+    std::fs::remove_file(shared.join("token-audit/SKILL.md")).unwrap();
+    let (status, _, stderr) =
+        run(command(&w, &["skill", "install", "--project"]).current_dir(&project));
+    assert_eq!(status, 2);
+    assert!(
+        stderr.contains("links outside the current directory"),
+        "{stderr}"
+    );
+    assert!(!shared.join("token-audit/SKILL.md").exists());
 }

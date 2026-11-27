@@ -2891,6 +2891,7 @@ mod tests {
             memory: None,
             inbound: None,
             plugins: None,
+            skill: None,
             t3: None,
         };
         let mut first = at("sample-resume", "sample", 1000);

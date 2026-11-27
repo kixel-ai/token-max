@@ -972,7 +972,7 @@ fn listed(paths: &[String], home: &dyn Fn(&str) -> String) -> String {
 }
 
 /// `items` joined as prose: "a", "a and b", "a, b and c".
-fn list(items: &[String]) -> String {
+pub(crate) fn list(items: &[String]) -> String {
     match items {
         [] => String::new(),
         [one] => one.clone(),

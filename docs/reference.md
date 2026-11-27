@@ -1183,7 +1183,7 @@ The object holds:
   calls in a row to one tool). Each session names its tool calls and errors,
   compactions, cache hit ratio and largest prompt, points `at` its first request,
   and lists the lines of its first requests in that file (`earlyLines`), to
-  sample how it started.
+  sample how it started, and of its first failed tool results (`errorLines`).
 - `assumptions`: what the prices assume, which
   [the semantics](semantics.md#transcript-audit) explain.
 
@@ -1202,6 +1202,78 @@ the tools across hosts, ranks every host's findings together and names each
 pointer's host. Any failed host fails the whole run. Errors go to
 stderr as JSON. Exit 0: printed. Exit 2: scan, pricing, argument or
 cancellation failure.
+
+## Token audit skill
+
+The `token-audit` skill has an agent run `token-max audit`, read the transcript
+lines it points at, and report what wasted tokens, ranked by dollars: cache
+busts, bloated or repeated tool calls, always-loaded context the sessions never
+needed, and context they kept rediscovering. It offers each fix that edits a
+file, such as an `AGENTS.md` line, and applies it only after a yes. Settings are
+left to `doctor`.
+
+```sh
+token-max skill install          # this host's Claude Code and Codex homes
+npx skills add kixel-ai/token-max --skill token-audit -g
+```
+
+Then ask for `/token-audit` in Claude Code, `$token-audit` in Codex, or a
+transcript audit in any harness that reads Agent Skills.
+
+The installed `SKILL.md` only runs `token-max skill audit`, which prints the
+instructions from the installed `token-max`, so updating `token-max` updates
+the skill. When `token-max` is not on `PATH`, the skill runs it through
+`npx @kixel/crabx`. The agent needs `jq`.
+
+The agent reads every transcript line through the `jq` program
+`token-max skill filter` prints, locally or piped from `ssh` for a remote
+pointer, as `f=$(token-max skill filter) && test -n "$f" && sed -n '120,140p' 'FILE' | jq -cR "$f"`,
+which reads nothing unless the filter printed, or through `Get-Content` and
+`Select-Object` in PowerShell, with the program in a temporary file since
+PowerShell can strip its quotes; Claude Code asks before each
+such read, so the person sees what is read. Each line parses alone, so a torn
+line shows as `{"unparsed": N}` and the lines after it still read. The filter
+keeps a record's own fields by where they sit in Claude Code's and Codex's
+records: types, times, models, effort, tool names, statuses, exit codes and
+numbers. From a tool call's input it keeps file paths, each command's program, a
+known tool's subcommand such as `git commit`, and flags without their values.
+It replaces every other string with its length, and of a tool's result or
+anything else it doesn't know keeps only the numbers, each key shown as its
+length, so prompts, replies, tool input
+and tool output never reach the agent's context. A finding that needs the raw
+text, or a file whose name holds shell syntax, is left to the person, with its
+file and line.
+
+`token-max skill install` writes `token-audit/SKILL.md` into the `skills`
+directory of Claude Code's home (`CLAUDE_CONFIG_DIR` or `~/.claude`) when it
+exists, and of `~/.agents` when it or a Codex home (`CODEX_HOME` or `~/.codex`)
+exists. Codex reads user skills from `~/.agents/skills` whatever its home, and
+still reads its deprecated `$CODEX_HOME/skills`, so a copy there too would list
+the skill twice. `--claude-dir` names the Claude Code homes instead and installs
+nowhere else. `--project` writes the current directory's `.agents`, and
+its `.claude` when that exists. A directory two of them reach through a
+symlink is written once. A `SKILL.md` that already matches is left alone; one
+that differs, such as an edited copy, stops the install before anything is
+written, unless `--force` replaces it. Exit 0: printed or installed. Exit 2:
+argument, read or write failure.
+
+`token-max vibes` has a `Token audit skill` card for each host,
+Kixel's pick, since what the audit saves is not measured. It looks for
+`skills/token-audit/SKILL.md`, through any link and without reading it, in
+each Claude Code home, and for Codex in `~/.agents` or its home. A copy in a
+project's `.claude` or `.agents` serves only that project and doesn't count. A
+disabled T3 instance is left out. When every profile finds the skill, the card
+is quiet, so `doctor` doesn't offer `vibes` for it. Otherwise it names the
+profiles missing it and, as a step by hand, `token-max skill install`, with
+`--claude-dir` for each Claude Code home the shell doesn't select, a T3
+instance's included, quoted when its path needs it, or `npx skills add` when
+none needs it. When Codex is missing it and neither `~/.agents` nor the shell's
+Codex home (`CODEX_HOME` or `~/.codex`) exists, the step first creates
+`~/.agents`, which a bare install then writes.
+With `--ssh`, each host looks in its own homes; the step runs there, where
+token-max may be only the cached copy `--ssh` put there and not on the `PATH`,
+so the card also names `npx @kixel/crabx token-max` for a host without it. `doctor`
+has no line for it, and it sets no exit code.
 
 ## Cache TTL
 
@@ -1704,6 +1776,7 @@ an exit code.
 | [Advisor model](#advisor-model) | Every Claude settings file: with no `advisorModel`, the advisor one rank above the main-session default, citing Claude Code's [advisor page](https://code.claude.com/docs/en/advisor). |
 | [Auto memory](#auto-memory-in-vibes) | Every auto memory or Codex memories line: off is advised when most main sessions ran in a repository with a CLAUDE.md or AGENTS.md. |
 | [Code intelligence](#code-intelligence) | Claude sessions read or edited files of a typed language whose official language server plugin a new session wouldn't load: Anthropic's [costs page](https://code.claude.com/docs/en/costs#install-code-intelligence-plugins-for-typed-languages). |
+| [Token audit skill](#token-audit-skill) | Every Claude Code and Codex profile: the `token-audit` skill's install step for the profiles whose harness doesn't find it, and quiet when all do. |
 
 The effort, instruction-file, subagent, Fable and advisor lines stay in `doctor`, where
 their costs are measured; only the advice about them is here.

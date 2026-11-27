@@ -9054,6 +9054,13 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
         }
         vibes.push(item);
     }
+    for p in &report.scan.profiles {
+        if let Some(mut item) = crate::vibes::opencode_upgrade(p, &report.scan, out.arrow) {
+            let profile = tag(std::slice::from_ref(&p.id), &|_| String::new(), out);
+            item.name = tagged(item.name, &profile);
+            vibes.push(item);
+        }
+    }
     vibes.extend(crate::skill::item(
         &report.scan.profiles,
         out.home.as_deref(),

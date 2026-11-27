@@ -8,6 +8,6 @@ Run the `instructions` audit: `quest audit instructions` prints what it checks, 
 
 - instructions
 
-## Required
+## Scheduled
 
-- [m1](/quest/m1/README.md) - the audit runs after it
+- 2026-12-04 - m1 holds the recurring release check, so it never finishes; run on a date like the other m2 audits

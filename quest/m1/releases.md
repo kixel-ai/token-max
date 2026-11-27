@@ -73,9 +73,10 @@ Decided 2026-11-25 (maintainer, /quest-plan over three posts):
   changes it, and on the maintainer's host a spawn's first request writes a
   median 12K tokens, not the issue's 67K, so the cost depends on each
   user's start-up context.
-- ✅ Drop an advisor recommendation beyond the `Advisor model` card
-  and the doctor line its `advisor-accounting.md` quest plans, both in
-  [#217](https://github.com/kixel-ai/token-max/pull/217) (rejected: quoting the
+- ✅ Drop an advisor recommendation beyond the `Advisor model` card from
+  [#217](https://github.com/kixel-ai/token-max/pull/217) and doctor's
+  `Advisor model` line, which `advisor-accounting.md` planned there and
+  [#258](https://github.com/kixel-ai/token-max/pull/258) restored (rejected: quoting the
   advisor-strategy blog's BrowseComp figure on the card). The advisor page
   the card cites already says toggling it keeps the cache.
 - ✅ Drop a caveat for GPT-6.2's `configuration_update` effort changes

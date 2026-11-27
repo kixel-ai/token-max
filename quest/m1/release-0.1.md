@@ -9,7 +9,7 @@ the maintainer can promote the site.
 ## Plan
 
 Decided 2026-11-24 (maintainer, /quest-run): ✅ release 0.1.0 once the open
-m1 feature PRs below land (rejected: 0.1.0 from main now, leaving the vibes
+m1 feature PRs land, which they all have (rejected: 0.1.0 from main now, leaving the vibes
 cards for 0.1.1; 0.0.2 from main now). The only release, 0.0.1 from
 2026-11-18, predates `vibes`, the upgrade offer, the splash and the per-host
 payment questions, and main's `site/public/index.html` already demos flags
@@ -51,10 +51,12 @@ Decided 2026-11-24 (maintainer, /quest-run): ✅ release without the language
 servers card (rejected: hold 0.1.0 for it). Its PR,
 [kixel-ai/token-max#218](https://github.com/kixel-ai/token-max/pull/218), still
 had a malformed plugin registry aborting every command, so it ships in a later
-release, where the upgrade offer reaches 0.1.0's users.
+release, where the upgrade offer reaches 0.1.0's users. It merged on
+2026-11-25 after all, so 0.1.0 ships it.
 
 Decided 2026-11-25 (maintainer, /quest-run): ✅ 0.1.0 waits for
-`advisor-after-default.md` (rejected: ship 0.1.0 without it). With the
+`advisor-after-default.md`, which finished in
+[#257](https://github.com/kixel-ai/token-max/pull/257) and is in git history (rejected: ship 0.1.0 without it). With the
 `Main-session default` card landed, accepting it (Sonnet to Opus) and the
 advisor card (`opus`) in one walk would write an Opus advisor under an Opus
 main.

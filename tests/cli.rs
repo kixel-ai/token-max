@@ -1178,6 +1178,12 @@ fn sessions_exports_antigravity_conversations_the_directory_flag_selects() {
     // 1,000 input and 10 output tokens at the fixture's $3 and $15 per million.
     assert!((lines[0]["costUsd"].as_f64().unwrap() - 0.00315).abs() < 1e-12);
     assert_eq!(std::fs::read_to_string(&file).unwrap(), text);
+    // A step Antigravity is still writing leaves the cost a lower bound.
+    std::fs::write(&file, format!("{text}{{\"step_index\": 2")).unwrap();
+    let (status, stdout, stderr) = run(&mut command(&w, &args));
+    assert_eq!((status, &*stderr), (0, ""));
+    let line: Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(line["complete"], false);
 }
 
 /// `vibes` advises an OpenCode upgrade only when a plain version before 2.3.2 created the

@@ -563,7 +563,7 @@ fn kind_name(kind: EventKind) -> &'static str {
 }
 
 #[cfg(unix)]
-fn file_identity(file: &File) -> std::io::Result<(u64, u64)> {
+pub(crate) fn file_identity(file: &File) -> std::io::Result<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
     let info = file.metadata()?;
     Ok((info.dev(), info.ino()))
@@ -571,14 +571,14 @@ fn file_identity(file: &File) -> std::io::Result<(u64, u64)> {
 
 /// The volume serial number and file index, which discovery records for Windows snapshots.
 #[cfg(windows)]
-fn file_identity(file: &File) -> std::io::Result<(u64, u64)> {
+pub(crate) fn file_identity(file: &File) -> std::io::Result<(u64, u64)> {
     let info = winapi_util::file::information(file)?;
     Ok((info.volume_serial_number(), info.file_index()))
 }
 
 /// Discovery records no device or inode without them.
 #[cfg(not(any(unix, windows)))]
-fn file_identity(_file: &File) -> std::io::Result<(u64, u64)> {
+pub(crate) fn file_identity(_file: &File) -> std::io::Result<(u64, u64)> {
     Ok((0, 0))
 }
 
@@ -1346,7 +1346,11 @@ impl Reader {
 
     /// Read every Antigravity root's transcripts once, as the profiles that read it. A T3
     /// instance's root is its own, so its sessions need no join to T3's threads.
-    fn antigravity(&mut self, profiles: &[Profile]) -> Result<(), ScanError> {
+    fn antigravity(
+        &mut self,
+        profiles: &[Profile],
+        snapshots: &mut Vec<Snapshot>,
+    ) -> Result<(), ScanError> {
         let mut roots: IndexMap<&str, (&[String], Vec<String>)> = IndexMap::default();
         for p in profiles
             .iter()
@@ -1369,6 +1373,7 @@ impl Reader {
             for r in history.requests {
                 self.add(r);
             }
+            snapshots.extend(history.snapshots);
         }
         Ok(())
     }
@@ -2536,7 +2541,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         {
             reading.step(Some("Reading Antigravity's transcripts"));
         }
-        reader.antigravity(&profiles)?;
+        reader.antigravity(&profiles, &mut snapshots)?;
     }
     if let Some(reading) = &options.reading {
         reading.step(None);

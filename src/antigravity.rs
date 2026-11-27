@@ -21,7 +21,7 @@ use crate::controls::Env;
 use crate::discovery::{absent, error, join, resolve};
 use crate::model::{
     Agent, AgentControls, Api, BillingPart, CompactionControls, Few, Harness, Location, Millis,
-    PartKind, PerBucket, Profile, Request, RequestEvidence, RequestMeta, Subagent, Text,
+    PartKind, PerBucket, Profile, Request, RequestEvidence, RequestMeta, Snapshot, Subagent, Text,
     TtlControl, Usage, WindowControl,
 };
 use crate::safe::{ScanError, count, identity, label, parse_instant};
@@ -176,6 +176,8 @@ pub(crate) struct History {
     /// Each conversation, with its transcript.
     pub sessions: Vec<(Native, Text)>,
     pub subagents: Vec<Subagent>,
+    /// Each transcript as read, with the unfinished last line it left unread.
+    pub snapshots: Vec<Snapshot>,
 }
 
 /// What `conversation_summaries.db` says about one conversation.
@@ -379,7 +381,8 @@ pub(crate) fn read(
             requested_speed: None,
             issues: vec![STANDARD_TIER.into()],
         };
-        let created = read_transcript(file, &shared, &mut history.requests)?;
+        let (created, snapshot) = read_transcript(file, &shared, &mut history.requests)?;
+        history.snapshots.push(snapshot);
         if let Some(parent) = &parent {
             history.subagents.push(Subagent {
                 harness: Harness::Antigravity,
@@ -407,15 +410,30 @@ pub(crate) fn read(
 }
 
 /// Add one transcript's requests to `requests`, each sharing `shared` but for its model,
-/// effort and source, and return when the conversation began.
+/// effort and source, and return when the conversation began and what was read.
 fn read_transcript(
     file: &str,
     shared: &RequestMeta,
     requests: &mut Vec<Request>,
-) -> Result<Option<Millis>, ScanError> {
-    let reader = std::fs::File::open(file)
-        .map(std::io::BufReader::new)
+) -> Result<(Option<Millis>, Snapshot), ScanError> {
+    let handle = std::fs::File::open(file)
         .map_err(|_| error("cannot read Antigravity transcript", file, 0))?;
+    let unreadable = |_| error("cannot read Antigravity transcript", file, 0);
+    let (device, inode) = crate::reader::file_identity(&handle).map_err(unreadable)?;
+    let bytes = handle.metadata().map_err(unreadable)?.len();
+    let reader = std::io::BufReader::new(handle);
+    let mut snapshot = Snapshot {
+        file: file.into(),
+        harness: Harness::Antigravity,
+        profiles: shared.profiles.iter().map(|p| p.to_string()).collect(),
+        bytes,
+        device,
+        inode,
+        deferred_bytes: 0,
+        skipped_lines: 0,
+        unreadable: Default::default(),
+        lines: 0,
+    };
     let location_file: Text = file.into();
     let mut created: Option<Millis> = None;
     // The one model every recorded request so far ran, or None once two differ.
@@ -425,13 +443,20 @@ fn read_transcript(
         let line_number = index as u64 + 1;
         let line =
             line.map_err(|_| error("cannot read Antigravity transcript", file, line_number))?;
+        let last = lines.peek().is_none();
+        snapshot.lines += 1;
         if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
         let step: Step = match serde_json::from_slice(&line) {
             Ok(step) => step,
-            // Antigravity may be writing the last line as it is read.
-            Err(_) if lines.peek().is_none() => break,
+            // Antigravity may be writing the last line as it is read: it is left for a
+            // later read, and leaves the conversation's export incomplete.
+            Err(_) if last => {
+                snapshot.lines -= 1;
+                snapshot.deferred_bytes = line.len() as u64;
+                break;
+            }
             Err(_) => {
                 return Err(error(
                     "invalid Antigravity transcript line",
@@ -474,7 +499,11 @@ fn read_transcript(
                     meta.issues.push(CACHED_MODEL.into());
                     Some(model.clone())
                 }
-                _ => None,
+                // A request on an unknown model could have filled the cache a later one reads.
+                _ => {
+                    only = Some(None);
+                    None
+                }
             },
         };
         meta.model = model.map(Text::from);
@@ -511,7 +540,7 @@ fn read_transcript(
             meta: Arc::new(meta),
         });
     }
-    Ok(created)
+    Ok((created, snapshot))
 }
 
 #[cfg(test)]
@@ -663,17 +692,26 @@ mod tests {
             step(None, 100),
         ]
         .join("\n");
-        for (id, text) in [("cold", cold), ("mixed", mixed)] {
+        // A request on an unknown model could have filled the cache the next one reads.
+        let gap = [
+            step(Some("gemini-4-neon-high"), 0),
+            step(None, 0),
+            step(None, 100),
+        ]
+        .join("\n");
+        let ids = ["cold", "mixed", "gap"];
+        for (id, text) in ids.into_iter().zip([cold, mixed, gap]) {
             std::fs::create_dir_all(crate::discovery::dirname(&file(id))).unwrap();
             std::fs::write(file(id), text).unwrap();
         }
-        let history = read(&root, &[file("cold"), file("mixed")], &["p".into()]).unwrap();
+        let files: Vec<String> = ids.into_iter().map(file).collect();
+        let history = read(&root, &files, &["p".into()]).unwrap();
         let unknown: Vec<&Request> = history
             .requests
             .iter()
             .filter(|r| r.model.is_none())
             .collect();
-        assert_eq!(unknown.len(), 2);
+        assert_eq!(unknown.len(), 4);
         let catalog = crate::test_support::prices();
         for r in unknown {
             assert_eq!(crate::prices::price_request(&catalog, r).total_usd, None);
@@ -708,11 +746,15 @@ mod tests {
             w.home.join("absent").to_string_lossy().into_owned(),
         );
         assert!(antigravity(&options).is_empty());
-        // The audit reads no Antigravity history.
-        options.unreplayed = false;
+        // `--defaults` still finds the history the moved home holds.
         options
             .env
             .insert("GEMINI_HOME".into(), moved.to_string_lossy().into_owned());
+        let mut defaults = options.clone();
+        defaults.pretend_defaults();
+        assert_eq!(antigravity(&defaults), antigravity(&options));
+        // The audit reads no Antigravity history.
+        options.unreplayed = false;
         assert!(antigravity(&options).is_empty());
     }
 
@@ -732,6 +774,12 @@ mod tests {
         std::fs::write(&file, format!("{text}{{\"type\":\"PLANNER_RES")).unwrap();
         let history = read(&root, std::slice::from_ref(&file), &["p".into()]).unwrap();
         assert_eq!(history.requests.len(), 3);
+        // Left for a later read, it leaves the conversation's export incomplete.
+        let deferred = "{\"type\":\"PLANNER_RES".len() as u64;
+        assert_eq!(history.snapshots[0].deferred_bytes, deferred);
+        std::fs::write(&file, &text).unwrap();
+        let finished = read(&root, std::slice::from_ref(&file), &["p".into()]).unwrap();
+        assert_eq!(finished.snapshots[0].deferred_bytes, 0);
         std::fs::write(&file, format!("{{\"type\":\n{text}")).unwrap();
         let error = read(&root, std::slice::from_ref(&file), &["p".into()]).unwrap_err();
         assert_eq!(error.message, "invalid Antigravity transcript line");

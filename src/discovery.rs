@@ -96,6 +96,7 @@ impl DiscoveryOptions {
                     | "XDG_DATA_HOME"
                     | "XDG_CONFIG_HOME"
                     | "OPENCODE_DB"
+                    | "GEMINI_HOME"
             ) || CLAUDE_PROVIDERS.iter().any(|p| p.variable == k)
         });
     }

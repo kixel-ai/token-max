@@ -17,6 +17,13 @@ concurrency:
   group: check-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# A fresh runner reuses no incremental state, and no one attaches a debugger to
+# a CI test. Full debug info made the test binaries 3.6 times larger, which the
+# build writes and links and each `--ssh` test copies and hashes.
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+
 jobs:
   # Read the draft state when the run starts, not from the event payload: a run
   # created out of order can still carry draft: true after the PR is ready, and
@@ -73,6 +80,9 @@ jobs:
         if: needs.state.outputs.build == 'false'
         run: nix run .#quest -- check
 
+  # macOS runs here only for a release; on main it runs after each merge
+  # (macos.yml), since it never failed where Linux passed and its shared
+  # runners held the gate up to an hour.
   platform:
     name: Tests (${{ matrix.os }})
     needs: state
@@ -82,7 +92,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, windows-2025]
+        # A called workflow sees its caller's event, so a release reads as neither.
+        os: ${{ fromJSON((github.event_name == 'pull_request' || github.event_name == 'merge_group') && '["windows-2025"]' || '["windows-2025", "macos-15"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

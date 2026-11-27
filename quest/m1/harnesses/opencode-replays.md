@@ -15,6 +15,13 @@ already landed with the first half of this quest.
 
 ## Plan
 
+Decided 2026-11-27 (maintainer, on
+[kixel-ai/token-max#295](https://github.com/kixel-ai/token-max/pull/295)): ✅
+land the Anthropic TTL line and the compaction-message spend fix, and park
+warming and compaction until a host records OpenCode compactions or Anthropic
+requests (rejected: keep the rest a ready quest; hold the PR until both are
+built).
+
 Settled decisions (from [the epic](/quest/m1/harnesses/README.md)):
 
 - Cover every measurable replay check OpenCode's transcripts and settings
@@ -75,3 +82,7 @@ Recommendations:
   replay this quest adds lifts that exclusion for its own check.
 - Document replay assumptions and limits in `docs/reference.md` and
   `docs/semantics.md`.
+
+## Parked
+
+- until a host records an OpenCode compaction or a request sent straight to Anthropic - both replays would otherwise rest on synthetic fixtures alone; resume when `sqlite3 ~/.local/share/opencode/opencode.db "SELECT count(*) FROM session_message WHERE type = 'compaction' OR json_extract(data, '$.model.providerID') = 'anthropic'"` prints more than 0 on a maintainer host (`every-host` runs it on each)

@@ -1058,7 +1058,7 @@ fn ends_or_hyphen(text: &str) -> bool {
 }
 
 /// Whether `model` is one of `names`, optionally followed by a `-YYYY-MM-DD` snapshot date.
-fn dated(model: &str, names: &[&str]) -> bool {
+pub(crate) fn dated(model: &str, names: &[&str]) -> bool {
     names.iter().any(|name| {
         let Some(rest) = model.strip_prefix(name) else {
             return false;

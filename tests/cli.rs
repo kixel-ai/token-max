@@ -1132,6 +1132,96 @@ fn sessions_exports_an_opencode_database_the_directory_flag_selects() {
     assert_eq!(std::fs::read(&file).unwrap(), before);
 }
 
+/// `vibes` advises an OpenCode upgrade only when the profile's latest session ran a plain
+/// version before 2.3.2 and sent a request to gpt-6.2, citing the issue and pricing nothing.
+#[test]
+fn vibes_advises_an_opencode_upgrade_when_its_latest_session_ran_gpt_6_2_before_2_3_2() {
+    // Each session: its ID, version, start and model; the latest session decides.
+    type Session = (&'static str, &'static str, i64, &'static str);
+    let cases: [(&[Session], bool); 6] = [
+        (&[("ses_old", "2.3.1", 0, "gpt-6.2-sol")], true),
+        // An older session on gpt-6.2 is not the latest, which ran another model.
+        (
+            &[
+                ("ses_a", "2.2.0", 0, "gpt-6.2-astra-2026-10-01"),
+                ("ses_b", "2.2.0", 10_000, "zen-flash"),
+            ],
+            false,
+        ),
+        // The latest session ran 2.3.2, though an earlier one ran 2.2.0.
+        (
+            &[
+                ("ses_a", "2.2.0", 0, "gpt-6.2-sol"),
+                ("ses_b", "2.3.2", 10_000, "gpt-6.2-sol"),
+            ],
+            false,
+        ),
+        (&[("ses_new", "3.0.0", 0, "gpt-6.2-sol")], false),
+        // A version that isn't plain digits may already send the prompt where it caches.
+        (&[("ses_dev", "0.0.0-dev", 0, "gpt-6.2-sol")], false),
+        (&[("ses_other", "2.2.0", 0, "gpt-6.1-sol")], false),
+    ];
+    for (sessions, advised) in cases {
+        let w = Workspace::new();
+        let dir = w.home.join("opencode-data");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = rusqlite::Connection::open(dir.join("opencode.db")).unwrap();
+        db.execute_batch(
+            "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, parent_id TEXT, directory TEXT NOT NULL,
+               version TEXT NOT NULL, time_created INTEGER NOT NULL);
+             CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+               type TEXT NOT NULL, seq INTEGER NOT NULL, time_created INTEGER NOT NULL,
+               data TEXT NOT NULL);",
+        )
+        .unwrap();
+        for &(id, version, offset, model) in sessions {
+            let start = 1767225600000_i64 + offset;
+            db.execute(
+                "INSERT INTO session_v2 VALUES (?1, NULL, '/work', ?2, ?3)",
+                rusqlite::params![id, version, start],
+            )
+            .unwrap();
+            let step = json!({
+                "model": {"id": model, "providerID": "openai"},
+                "time": {"created": start + 1000, "completed": start + 2000},
+                "tokens": {"input": 1000, "output": 10, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+            });
+            db.execute(
+                "INSERT INTO session_message VALUES (?1, ?2, 'assistant', 1, 1, ?3)",
+                rusqlite::params![format!("msg_{id}"), id, step.to_string()],
+            )
+            .unwrap();
+        }
+        drop(db);
+        let prices = native_path(fixture("prices.json"));
+        let dir = native_path(&dir);
+        let args = ["vibes", "--opencode-dir", &dir, "--prices-file", &prices];
+        let (status, stdout, stderr) = run(&mut command(&w, &args));
+        assert_eq!((status, &*stderr), (0, ""), "{stdout}");
+        assert_eq!(
+            stdout.contains("OpenCode upgrade"),
+            advised,
+            "{sessions:?}\n{stdout}"
+        );
+        if advised {
+            assert!(
+                stdout.contains("        2.3.1 -> 2.3.2\n        Advice  gpt-6.2-sol and gpt-6.2-astra never cache"),
+                "{stdout}"
+            );
+            assert!(
+                stdout.contains("Caching it on gpt-6.2-sol needs OpenCode 2.3.2 or later, but its latest session ran 2.3.1: upgrade OpenCode. What the uncached prompt cost is not measured"),
+                "{stdout}"
+            );
+            assert!(
+                stdout.contains(
+                    "Source  OpenAI's open issue: https://github.com/openai/codex/issues/62312\n"
+                ),
+                "{stdout}"
+            );
+        }
+    }
+}
+
 /// Floats print in shortest form: integers without a fraction, no `1.0`.
 #[test]
 fn session_numbers_print_like_javascript() {

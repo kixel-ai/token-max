@@ -13,9 +13,10 @@ use crate::doctor::{
     Answer, Card, Change, Event, Fix, How, Joint, Kind, Offers, Owner, Section, Selection,
     Standing, Style, Total,
 };
-use crate::model::Harness;
+use crate::model::{Harness, Profile, Request};
 use crate::report::Origin;
 use crate::terminal::BOLD;
+use crate::version::Needs;
 
 /// One piece of advice, as its card shows it. Its text is ready to print: paths already
 /// read from the home directory of the host it is about.
@@ -112,6 +113,46 @@ pub fn window_cap(harness: Harness) -> i64 {
         Harness::Codex => 240_000,
         Harness::OpenCode => unreachable!("OpenCode's compaction is not replayed"),
     }
+}
+
+/// The OpenCode release that, by a user's report, sends its system prompt as a leading
+/// developer message, which gpt-6.2 caches, rather than as top-level instructions.
+const OPENCODE_PROMPT_CACHE: Needs = Needs::opencode(3, 2);
+
+/// The open OpenAI issue on gpt-6.2 never caching a Responses request's instructions.
+const GPT_6_2_INSTRUCTIONS: &str = "https://github.com/openai/codex/issues/62312";
+
+/// A card advising an OpenCode upgrade when `profile`'s latest session ran a release before
+/// 2.3.2 and sent any request to gpt-6.2-sol or gpt-6.2-astra. None for any other profile,
+/// and for a version that is unrecorded or not plain digits, which may already send the
+/// prompt where it caches. `arrow` joins the version ran and the one advised.
+pub fn opencode_upgrade(profile: &Profile, requests: &[Request], arrow: &str) -> Option<Item> {
+    if profile.harness != Harness::OpenCode || profile.t3.as_ref().is_some_and(|t| !t.enabled) {
+        return None;
+    }
+    let mine = || requests.iter().filter(|r| r.profiles.contains(&profile.id));
+    let latest = mine().max_by_key(|r| r.time)?;
+    let upgrade = OPENCODE_PROMPT_CACHE.upgrade([(profile, latest.version.as_deref())])?;
+    let model = mine()
+        .filter(|r| r.session == latest.session)
+        .filter_map(|r| r.model.as_deref())
+        .find(|m| crate::prices::dated(m, &["gpt-6.2-sol", "gpt-6.2-astra"]))?;
+    let ran = upgrade.ran.as_deref()?;
+    Some(Item {
+        name: "OpenCode upgrade".into(),
+        value: format!("{ran} {arrow} {}", OPENCODE_PROMPT_CACHE.number()),
+        what: String::new(),
+        text: format!(
+            "gpt-6.2-sol and gpt-6.2-astra never cache a Responses request's top-level instructions, but they do cache the same text sent as a leading developer message, so a session that sends OpenCode's system prompt as instructions pays full input price for it on every request. A user's report says OpenCode 2.3.2 moved the prompt into that message. {}: {}. What the uncached prompt cost is not measured.",
+            upgrade.why(&format!("Caching it on {model}")),
+            upgrade.step()
+        ),
+        sources: vec![format!("OpenAI's open issue: {GPT_6_2_INSTRUCTIONS}")],
+        how: None,
+        quiet: false,
+        after: vec![],
+        defers: None,
+    })
 }
 
 /// `items` as they read once `doctor`'s walk has written the changes of the lines `written`.

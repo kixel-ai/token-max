@@ -19,8 +19,10 @@ Notes for a README or site section, if the maintainer wants one:
 
 - What it finds that `doctor` can't: cache busts from commands, bloated and
   repeated tool output, always-loaded context never used, context rediscovered.
-- The privacy line: `token-max` prints only pointers, and the agent reads
-  lines through a filter that drops prompt, reply and tool text.
+- The privacy line: `token-max audit` prints only metadata (tool names,
+  counts, times, prices, session IDs and directories) and
+  `(host, file, line)` pointers, and the agent reads those lines through a
+  filter that drops prompt, reply and tool text.
 - How to get it: `token-max skill install` or `npx skills add`.
 - Whether a run on the maintainer's hosts gives a figure worth quoting, such
   as the cache-miss dollars by cause.

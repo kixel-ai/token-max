@@ -621,7 +621,7 @@ impl Turn<'_> {
                     false => reusable - reusable % CODEX_CACHE_STEP,
                 })
             }
-            Harness::OpenCode => unreachable!("audits skip OpenCode"),
+            Harness::OpenCode | Harness::Antigravity => unreachable!("audits skip OpenCode and Antigravity"),
         }
     }
 
@@ -1033,7 +1033,7 @@ fn misses(
                     .unwrap_or(Ttl::FiveMinutes),
             ),
             Harness::Codex => codex_ttl,
-            Harness::OpenCode => unreachable!("audits skip OpenCode"),
+            Harness::OpenCode | Harness::Antigravity => unreachable!("audits skip OpenCode and Antigravity"),
         };
         let began = prev.request.time;
         let gap = r.time - began;
@@ -1049,7 +1049,7 @@ fn misses(
                     .map_or(Millis::MIN, |j| turns[j].request.time);
                 events.started(before + 1, began + 1)
             }
-            Harness::OpenCode => unreachable!("audits skip OpenCode"),
+            Harness::OpenCode | Harness::Antigravity => unreachable!("audits skip OpenCode and Antigravity"),
         };
         let waited = calls.iter().any(|start| {
             let end = start
@@ -1288,7 +1288,7 @@ fn shape(
     let finished = match harness {
         Harness::Claude => &events.ends,
         Harness::Codex => &events.done,
-        Harness::OpenCode => unreachable!("audits skip OpenCode"),
+        Harness::OpenCode | Harness::Antigravity => unreachable!("audits skip OpenCode and Antigravity"),
     };
     let finished: Vec<&StructuralEvent> = finished
         .iter()

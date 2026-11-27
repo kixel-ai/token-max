@@ -413,7 +413,7 @@ fn prefix(harness: Harness, u: &Usage) -> Option<i64> {
     match harness {
         Harness::Codex => u.input,
         Harness::Claude => u.cached_prefix(),
-        Harness::OpenCode => unreachable!("OpenCode's compaction is not replayed"),
+        Harness::OpenCode | Harness::Antigravity => unreachable!("OpenCode's and Antigravity's compaction is not replayed"),
     }
 }
 
@@ -1103,7 +1103,7 @@ impl<'r, 'o> Simulator<'r, 'o> {
                 let lifetime = match req.harness {
                     Harness::Claude => ttl.map(ttl_milliseconds),
                     Harness::Codex => billed_writes.then_some(CODEX_CACHE_MILLISECONDS),
-                    Harness::OpenCode => unreachable!("OpenCode's compaction is not replayed"),
+                    Harness::OpenCode | Harness::Antigravity => unreachable!("OpenCode's and Antigravity's compaction is not replayed"),
                 };
                 // A newly generated prefix cannot inherit the old transcript's external warming.
                 let warm = added.is_none()
@@ -1991,7 +1991,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 match profile.harness {
                     Harness::Codex => None,
                     Harness::Claude => model.as_deref(),
-                    Harness::OpenCode => unreachable!("OpenCode's compaction is not replayed"),
+                    Harness::OpenCode | Harness::Antigravity => unreachable!("OpenCode's and Antigravity's compaction is not replayed"),
                 },
             );
             groups
@@ -5530,7 +5530,8 @@ mod tests {
                     claude_dirs: vec![],
                     codex_dirs: vec![],
                     opencode_dirs: vec![],
-                    opencode: true,
+                    antigravity_dirs: vec![],
+                    unreplayed: true,
                     t3_dirs: vec![],
                     managed_settings_file: text(&w.managed_settings_file()),
                     codex_system_config_file: text(&w.home.join("system.toml")),

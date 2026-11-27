@@ -692,7 +692,7 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
                 && ((match r.harness {
                     Harness::Claude => r.agent == Agent::Main,
                     Harness::Codex => r.agent != Agent::Subagent,
-                    Harness::OpenCode => unreachable!("OpenCode's cache is not replayed"),
+                    Harness::OpenCode | Harness::Antigravity => unreachable!("OpenCode's and Antigravity's cache is not replayed"),
                 }) || r.parts.iter().any(|p| p.kind == PartKind::Compaction))
         })
         .collect();
@@ -711,7 +711,7 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
             cache: Cache::Codex,
             reason: "documented 30m minimum cache lifetime, refreshed by reads".into(),
         }),
-        Harness::OpenCode => unreachable!("OpenCode's cache is not replayed"),
+        Harness::OpenCode | Harness::Antigravity => unreachable!("OpenCode's and Antigravity's cache is not replayed"),
     };
     let interval = lifetime.as_ref().map(|l| l.ms / 6 * 5);
     let new_tokens = ping_input(&requests, options.scan);
@@ -1075,7 +1075,7 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
             owner: match profile.harness {
                 Harness::Claude => "no setting: a /loop task pings on a fixed schedule with no idle cap, and stops only when cancelled or after seven days",
                 Harness::Codex => "no setting: Codex has no way to schedule pings",
-                Harness::OpenCode => unreachable!("OpenCode's cache is not replayed"),
+                Harness::OpenCode | Harness::Antigravity => unreachable!("OpenCode's and Antigravity's cache is not replayed"),
             }.into(),
             since: Some(since), until: Some(options.now),
             window_basis: if options.since.is_some() {"explicit --since window"} else {"available transcript window"}.into(),
@@ -1122,7 +1122,7 @@ mod tests {
                 let cache = match source.harness {
                     Harness::Claude => Cache::Claude(Ttl::OneHour),
                     Harness::Codex => Cache::Codex,
-                    Harness::OpenCode => unreachable!("tests replay no OpenCode request"),
+                    Harness::OpenCode | Harness::Antigravity => unreachable!("tests replay no OpenCode or Antigravity request"),
                 };
                 before.parts = vec![BillingPart {
                     usage: cache.usage(19_000, 1000, 0, 500),

@@ -1095,14 +1095,16 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         let share = sources.insert_full(source).0;
         let view = &exposure.view;
         let codex = r.harness == Harness::Codex;
-        // Codex and OpenCode record no request's shape, so nothing is known to lead it.
+        // Codex, OpenCode and Antigravity record no request's shape, so nothing is known to
+        // lead it.
         let chronological = match r.harness {
             Harness::Claude => false,
-            Harness::Codex | Harness::OpenCode => true,
+            Harness::Codex | Harness::OpenCode | Harness::Antigravity => true,
         };
         // Claude's recorded request shapes are exact. Codex records each change to
         // the context it sends, so its chronological state is what the model saw.
         // OpenCode keeps each session's latest context, taken as every request's.
+        // Antigravity records no context, so its requests show none.
         // Any other request still prices its tool output, but cannot say what else it sent.
         let (shown, shaped): (Vec<&Text>, bool) = match (r.harness, view.linkage) {
             (Harness::Claude, Linkage::Wire) => (view.components.iter().collect(), true),
@@ -1121,7 +1123,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         // a session starts, after its own system prompt, so they lead its messages.
         let leading = match r.harness {
             Harness::Claude => view.prefix,
-            Harness::Codex => 0,
+            Harness::Codex | Harness::Antigravity => 0,
             Harness::OpenCode => shown.len(),
         };
         // The MCP servers each of this request's own Codex profiles declares.
@@ -1178,6 +1180,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     Harness::OpenCode => {
                         opencode_pieces(component, &servers, rules, &components, &mut interned)
                     }
+                    Harness::Antigravity => unreachable!("Antigravity records no context"),
                     Harness::Claude => pieces(component, &components, &mut interned)
                         .into_iter()
                         .map(|(key, characters)| (key, Some(characters)))

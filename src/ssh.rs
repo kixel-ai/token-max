@@ -1039,7 +1039,7 @@ pub fn serve(since: Option<Millis>, scope: Scope) -> u8 {
             discovery.pretend_defaults();
         }
         // The transcript audit reads Claude Code and Codex alone.
-        discovery.opencode = scope != Scope::Audit;
+        discovery.unreplayed = scope != Scope::Audit;
         let home = std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned());
         if matches!(scope, Scope::Report { .. }) {
             let roots = discover(&discovery)?.billing_roots();

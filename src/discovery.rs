@@ -34,8 +34,11 @@ pub struct DiscoveryOptions {
     pub codex_dirs: Vec<String>,
     /// Explicit OpenCode data directories, each holding an `opencode.db`.
     pub opencode_dirs: Vec<String>,
-    /// Whether to discover OpenCode profiles at all; the transcript audit reads none.
-    pub opencode: bool,
+    /// Explicit Antigravity directories, such as `~/.gemini/antigravity-cli`.
+    pub antigravity_dirs: Vec<String>,
+    /// Whether to discover the harnesses whose history is not replayed, OpenCode and
+    /// Antigravity, at all; the transcript audit reads neither.
+    pub unreplayed: bool,
     /// Explicit T3 state directories: settings.json, and statev2.sqlite when it exists.
     pub t3_dirs: Vec<String>,
     /// The system managed Claude settings file; overridable for host adapters and synthetic tests.
@@ -69,7 +72,8 @@ impl DiscoveryOptions {
             claude_dirs: vec![],
             codex_dirs: vec![],
             opencode_dirs: vec![],
-            opencode: true,
+            antigravity_dirs: vec![],
+            unreplayed: true,
             t3_dirs: vec![],
             managed_settings_file: managed_settings_path(std::env::consts::OS).into(),
             codex_system_config_file: "/etc/codex/config.toml".into(),
@@ -123,8 +127,8 @@ impl DiscoveryOptions {
                 off.extend(allowlists(&system));
                 (&self.codex_system_config_file, off)
             }
-            // token-max reads no OpenCode policy file.
-            Harness::OpenCode => return Ok(vec![]),
+            // token-max reads no OpenCode or Antigravity policy file.
+            Harness::OpenCode | Harness::Antigravity => return Ok(vec![]),
         };
         Ok(off.into_iter().map(|k| (file.clone(), k)).collect())
     }
@@ -149,6 +153,7 @@ impl DiscoveryOptions {
                 found
             }
             Harness::OpenCode => crate::opencode::switched_off(&config),
+            Harness::Antigravity => vec![],
         };
         self.pretend_switches_on(harness, on, file, found)
     }
@@ -221,6 +226,7 @@ impl DiscoveryOptions {
         !self.claude_dirs.is_empty()
             || !self.codex_dirs.is_empty()
             || !self.opencode_dirs.is_empty()
+            || !self.antigravity_dirs.is_empty()
             || !self.t3_dirs.is_empty()
     }
 
@@ -577,6 +583,7 @@ pub(crate) fn settings(file: &str, harness: Harness) -> Result<Map<String, Value
             .ok()
             .and_then(|table| toml_json(toml::Value::Table(table))),
         Harness::OpenCode => crate::opencode::parse_config(&text),
+        Harness::Antigravity => serde_json::from_str::<Value>(&text).ok(),
     };
     match value {
         Some(Value::Object(map)) => Ok(map),
@@ -2271,6 +2278,8 @@ fn pretend_t3_projects_on(
                     .into_iter()
                     .map(|layer| layer.file)
                     .collect(),
+                // Antigravity has no switch token-max offers.
+                Harness::Antigravity => vec![],
             };
             for file in &files {
                 options.pretend_on(harness, &mut profile.pretended_on, file)?;
@@ -3092,13 +3101,27 @@ pub fn discover(options: &DiscoveryOptions) -> Result<Discovery, ScanError> {
         );
     }
     let empty = Env::default();
-    if options.opencode {
+    if options.unreplayed {
         add(
             &mut candidates,
             Harness::OpenCode,
             &crate::opencode::data_dir(home, &empty),
             RootOrigin::Default,
         );
+        add(
+            &mut candidates,
+            Harness::Antigravity,
+            &crate::antigravity::cli_root(home, &empty),
+            RootOrigin::Default,
+        );
+        if env.get("GEMINI_HOME").is_some_and(|d| !d.is_empty()) {
+            add(
+                &mut candidates,
+                Harness::Antigravity,
+                &crate::antigravity::cli_root(home, env),
+                RootOrigin::Environment,
+            );
+        }
     }
     for (harness, variable) in [
         (Harness::Claude, "CLAUDE_CONFIG_DIR"),
@@ -3110,7 +3133,7 @@ pub fn discover(options: &DiscoveryOptions) -> Result<Discovery, ScanError> {
     }
     // `XDG_DATA_HOME` is set for every XDG program, not to select OpenCode, so the data
     // directory it implies is a default one: missing, it is skipped.
-    if options.opencode && env.get("XDG_DATA_HOME").is_some_and(|d| !d.is_empty()) {
+    if options.unreplayed && env.get("XDG_DATA_HOME").is_some_and(|d| !d.is_empty()) {
         let dir = crate::opencode::data_dir(home, env);
         add(
             &mut candidates,
@@ -3169,6 +3192,14 @@ pub fn discover(options: &DiscoveryOptions) -> Result<Discovery, ScanError> {
             RootOrigin::Explicit,
         );
     }
+    for path in &options.antigravity_dirs {
+        add(
+            &mut candidates,
+            Harness::Antigravity,
+            path,
+            RootOrigin::Explicit,
+        );
+    }
     let mut roots: Vec<RootStatus> = candidates.into_values().collect();
     roots.sort_by(|a, b| locale_compare(&a.path, &b.path));
     let mut profiles: IndexMap<String, Profile> = IndexMap::default();
@@ -3217,15 +3248,18 @@ pub fn discover(options: &DiscoveryOptions) -> Result<Discovery, ScanError> {
             Harness::OpenCode => {
                 crate::opencode::profile(options, canonical, root.path.clone(), &key)?
             }
+            Harness::Antigravity => {
+                crate::antigravity::profile(canonical, root.path.clone(), &key)?
+            }
         };
         profiles.insert(key, profile);
     }
     let mut profiles: Vec<Profile> = profiles.into_values().collect();
     let t3 = crate::t3::discover(options, &mut profiles)?;
     let mut walk = Walk::default();
-    // OpenCode's history is its database, which the reader opens itself.
+    // OpenCode's database and Antigravity's transcripts are read by their own modules.
     for (index, profile) in profiles.iter().enumerate() {
-        if profile.harness == Harness::OpenCode {
+        if profile.harness.own_reader() {
             continue;
         }
         for history in &profile.histories {
@@ -3391,7 +3425,8 @@ mod tests {
             claude_dirs: vec![],
             codex_dirs: vec![],
             opencode_dirs: vec![],
-            opencode: true,
+            antigravity_dirs: vec![],
+            unreplayed: true,
             t3_dirs: vec![],
             managed_settings_file: native_path(w.managed_settings_file()),
             codex_system_config_file: native_path(w.home.join("system.toml")),

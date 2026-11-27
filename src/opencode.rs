@@ -24,6 +24,7 @@ use crate::model::{
     RequestEvidence, RequestMeta, Subagent, Text, TtlControl, Usage, WindowControl,
 };
 use crate::safe::{ScanError, identity, label};
+use crate::sessions::Native as Session;
 
 /// The database every OpenCode session is kept in, in its data directory.
 pub(crate) const DATABASE: &str = "opencode.db";
@@ -749,19 +750,6 @@ pub(crate) fn profile(
         pretended_on,
         policy_off: vec![],
     })
-}
-
-/// A native OpenCode session: its own ID, the session that spawned it, where it ran and the
-/// OpenCode version that created it.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Session {
-    /// The reader's key, an identity of `id`.
-    pub key: Text,
-    pub id: String,
-    pub parent: Option<String>,
-    pub cwd: Option<Text>,
-    pub version: Option<Text>,
-    pub created: Millis,
 }
 
 /// What one tool call in a request was, by name only, never its input or output.

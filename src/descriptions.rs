@@ -94,7 +94,7 @@ pub fn check(result: &CheckResult) -> &'static str {
             Harness::Codex => {
                 "Codex memories save what Codex learns in a session and load it into later ones."
             }
-            Harness::OpenCode => unreachable!("OpenCode has no memory check"),
+            Harness::OpenCode | Harness::Antigravity => unreachable!("OpenCode and Antigravity have no memory check"),
         },
         CheckResult::Effort(_) => {
             "How much the main session's model reasons before it answers: a higher effort can do better on hard tasks and writes more output tokens."
@@ -252,6 +252,9 @@ pub fn subagent(c: &SubagentCost) -> &'static str {
         }
         (Harness::OpenCode, _) => {
             "An OpenCode agent run as a subagent, defined under agent in opencode.json or by an agent file."
+        }
+        (Harness::Antigravity, _) => {
+            "An Antigravity agent another conversation started as a subagent, named in its conversation summary."
         }
     }
 }

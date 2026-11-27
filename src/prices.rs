@@ -1412,7 +1412,7 @@ pub fn prefix_spans(catalog: &Catalog, r: &Request, p: &BillingPart) -> Option<V
             spans.push((u.write1h? as f64, input * 2.0));
             spans.push((u.write5m? as f64, rates.write? / 1e6));
         }
-    } else if r.harness == Harness::OpenCode {
+    } else if matches!(r.harness, Harness::OpenCode | Harness::Antigravity) {
         let written = u.write?;
         if written > 0 {
             spans.push((written as f64, rates.write? / 1e6));
@@ -1547,7 +1547,7 @@ pub fn price_components(catalog: &Catalog, r: &Request, p: &BillingPart) -> Comp
                     .to_string(),
             );
         }
-    } else if r.harness == Harness::OpenCode {
+    } else if matches!(r.harness, Harness::OpenCode | Harness::Antigravity) {
         // OpenCode records one write count for any provider, which its catalog prices at
         // the cache-write rate; a provider without that rate records none.
         let ordinary = match (u.input, u.read, u.write) {

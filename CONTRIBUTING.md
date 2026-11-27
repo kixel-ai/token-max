@@ -19,7 +19,7 @@ the reviewed head.
 Never bypass the queue or use `--direct`.
 
 Workflows use read-only credentials and GitHub-hosted runners; the
-exceptions are the report jobs of the `Check` workflow in the merge queue and
-of the `macOS` workflow after a push to `main`, which run no repository code
-and may write issues. Publication credentials belong
+exceptions are the `Queue report` workflow after a failed merge-queue `Check`
+and the `macOS` workflow's report job after a push to `main`, which run no
+repository code and may write issues. Publication credentials belong
 only to the separate protected release path.

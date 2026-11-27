@@ -15,9 +15,9 @@ run a release makes. A change only to `quest/` and the agent docs
 `Check` job aggregates them. A failed, cancelled, or skipped job fails it,
 apart from the platform tests a quest-only change skips. The `main` ruleset
 requires no check until Kixel Quest's merge queue takes token-max, so the
-queue lands without waiting on Check; a failed queue run opens or updates a
-"Check fails in the merge queue" issue. Check has no publication credentials
-or OIDC permission; only its report job may write issues.
+queue lands without waiting on Check; a failed queue run makes the separate
+`Queue report` workflow open or update a "Check fails in the merge queue"
+issue. Check has no publication credentials or OIDC permission.
 
 ## Binaries
 

@@ -686,6 +686,7 @@ fn shell_env(options: &crate::discovery::DiscoveryOptions, root: &str) -> Env {
 
 /// The layers a data directory's shell reads for the Anthropic prompt cache, around whichever
 /// project's files a session's directory adds.
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct CacheStack {
     files: Vec<Layer>,
     /// `OPENCODE_CONFIG_CONTENT`'s layer, read after every file; None when it is not a JSONC
@@ -695,16 +696,7 @@ pub(crate) struct CacheStack {
 }
 
 impl CacheStack {
-    /// The stack of the data directory at `root`, whose user settings are `settings_file`.
-    pub(crate) fn new(
-        options: &crate::discovery::DiscoveryOptions,
-        root: &str,
-        settings_file: &str,
-    ) -> Result<Self, ScanError> {
-        let env = shell_env(options, root);
-        Ok(Self::of(layers(options, &env)?, &env, settings_file))
-    }
-
+    /// The stack `files` and `env`'s inline config make, with user settings in `settings_file`.
     fn of(files: Vec<Layer>, env: &Env, settings_file: &str) -> Self {
         let content = env.get("OPENCODE_CONFIG_CONTENT").filter(|c| !c.is_empty());
         let inline = match content.map(|c| parse_config(c)) {
@@ -949,6 +941,7 @@ pub(crate) fn profile(
         switched_off: switched_off(&user),
         pretended_on,
         policy_off: vec![],
+        cache_stack: Some(cache),
     })
 }
 

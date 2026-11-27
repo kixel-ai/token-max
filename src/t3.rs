@@ -5162,4 +5162,56 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn a_t3_opencode_instance_s_warming_comes_from_its_own_config() {
+        use crate::test_support::{OPENCODE_START, opencode_database};
+        let w = Workspace::new();
+        let native = opencode_database(&w.home);
+        let moved = w.home.join("moved.db");
+        std::fs::copy(&native, &moved).unwrap();
+        std::fs::remove_file(&native).unwrap();
+        let db = rusqlite::Connection::open(&moved).unwrap();
+        db.execute(
+            "INSERT INTO session_v2 VALUES ('ses_anthropic', NULL, '/work/repo', '2.4.1', ?1)",
+            params![OPENCODE_START],
+        )
+        .unwrap();
+        let step = json!({"model": {"id": "claude-opus-5-5", "providerID": "anthropic"},
+            "agent": "build", "time": {"created": OPENCODE_START, "completed": OPENCODE_START + 1_000},
+            "tokens": {"input": 100, "output": 50, "reasoning": 0,
+                "cache": {"read": 0, "write": 10_000}}});
+        db.execute(
+            "INSERT INTO session_message VALUES ('msg_a', 'ses_anthropic', 'assistant', 0, ?1, ?2)",
+            params![OPENCODE_START, step.to_string()],
+        )
+        .unwrap();
+        drop(db);
+        // Only the instance's config, which the host's shell never reads, turns warming on.
+        let config = w.home.join("instance-config");
+        std::fs::create_dir_all(config.join("opencode")).unwrap();
+        std::fs::write(
+            config.join("opencode/opencode.json"),
+            r#"{"warming": {"duration": "30 minutes"}}"#,
+        )
+        .unwrap();
+        state(
+            &w,
+            json!({"providerInstances": {"opencode": {"driver": "opencode", "enabled": true,
+                "environment": [{"name": "OPENCODE_DB", "value": moved.to_str().unwrap()},
+                    {"name": "XDG_CONFIG_HOME", "value": config.to_str().unwrap()}]}}}),
+        );
+        let scan = scan(&w.scan_options()).unwrap();
+        let instance = scan
+            .profiles
+            .iter()
+            .find(|p| p.t3.as_ref().is_some_and(|t| t.instance == "opencode"))
+            .unwrap();
+        assert!(
+            scan.requests
+                .iter()
+                .any(|r| r.profiles.contains(&instance.id))
+        );
+        assert!(instance.settings.contains_key(crate::opencode::WARMING));
+    }
 }

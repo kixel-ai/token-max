@@ -1324,19 +1324,25 @@ impl Reader {
                 // A project that changes the Anthropic cache lifetime, or the file that sets
                 // it, runs at its own, which no global edit reaches; warming left on where a
                 // session ran pings it at times no replay prices. An unreadable project may
-                // do either.
-                let cache = crate::opencode::CacheStack::new(options, &p.root, &p.settings_file)?;
+                // do either. The profile's own stack carries the environment it runs with,
+                // such as a T3 instance's.
                 let stacks = || {
                     anthropic_dirs.iter().map(|cwd| match cwd {
                         Some(cwd) => project_files.get(cwd).map(Vec::as_slice),
                         None => Some(&[][..]),
                     })
                 };
-                if stacks().any(|l| l.is_none_or(|l| cache.ttl_varies(l))) {
+                let (varies, warms) = p.cache_stack.as_ref().map_or((false, false), |cache| {
+                    (
+                        stacks().any(|l| l.is_none_or(|l| cache.ttl_varies(l))),
+                        stacks().any(|l| l.is_none_or(|l| cache.warms(l))),
+                    )
+                });
+                if varies {
                     p.ttl.main.varies = true;
                     p.ttl.subagent.varies = true;
                 }
-                if stacks().any(|l| l.is_none_or(|l| cache.warms(l))) {
+                if warms {
                     p.settings.insert(
                         crate::opencode::WARMING.into(),
                         crate::model::Scalar::Bool(true),

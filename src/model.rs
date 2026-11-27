@@ -1183,6 +1183,9 @@ pub struct Profile {
     /// Under `doctor --defaults`, the switches policy turns off, with the policy file, which
     /// keep a feature off whatever `pretended_on` restores; empty otherwise.
     pub policy_off: Vec<(String, Control)>,
+    /// An OpenCode profile's config layers for the Anthropic prompt cache, read with its own
+    /// environment, which each project's files join; None for other harnesses.
+    pub(crate) cache_stack: Option<crate::opencode::CacheStack>,
 }
 
 impl Profile {
